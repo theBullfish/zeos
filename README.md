@@ -1,8 +1,8 @@
-# TRISA OS
+# Z-OS
 
 **The first operating system with proprioception.**
 
-TRISA OS is a purpose-built operating system designed from scratch with zero POSIX legacy. It replaces 50 years of assumptions with a unified architecture where security, memory, scheduling, I/O, and hardware awareness are structural properties — not bolted-on layers.
+Z-OS is a purpose-built operating system designed from scratch with zero POSIX legacy. It replaces 50 years of assumptions with a unified architecture where security, memory, scheduling, I/O, and hardware awareness are structural properties — not bolted-on layers.
 
 Built by [Codex Labs LLC](https://zindexstudio.com) — Minneapolis, MN.
 
@@ -38,14 +38,14 @@ An operating system that:
 │              POSIX Compat Layer                  │
 │      (lightweight Linux guest runtime)          │
 ├─────────────────────────────────────────────────┤
-│              TRISA-Native API                   │
+│              Z-OS Native API                     │
 │    (direct signal chain access for opt-in)      │
 ├──────────┬──────────┬───────────┬───────────────┤
 │   MDE    │  VAULT   │   MasQ    │    Barca      │
 │ Runtime  │ Storage  │ Temporal  │  Buffer Mgmt  │
 │          │          │ Wayfinder │               │
 ├──────────┴──────────┴───────────┴───────────────┤
-│              TRISA Kernel                        │
+│              Z-OS Kernel                         │
 │  Signal Chain Scheduler │ CFA Memory Model      │
 │  Device Signal Graph    │ Zero-Copy I/O         │
 ├─────────────────────────────────────────────────┤
@@ -63,7 +63,7 @@ An operating system that:
 
 | Component | Role | Status |
 |-----------|------|--------|
-| **TRISA Kernel** | Signal-chain-native kernel. No POSIX. No syscalls. No VFS. | Architecture defined |
+| **Z-OS Kernel** | Signal-chain-native kernel. No POSIX. No syscalls. No VFS. | Architecture defined |
 | **MDE Runtime** | Modular Decision Engine — heterogeneous compute orchestration | 928 tests passing |
 | **VAULT** | 3-tier sovereign storage with temporal state | 85/85 tests passing |
 | **MasQ** | Temporal wayfinding — image-based provenance for all state | Spec phase |
@@ -77,7 +77,7 @@ An operating system that:
 
 ## The Thirteen Problems
 
-Every existing operating system carries these as structural debt. TRISA OS never creates them.
+Every existing operating system carries these as structural debt. Z-OS never creates them.
 
 1. **Security is bolted on** → CFA makes addressing itself secure
 2. **Memory management is a lie** → Temporal windows, not pages
@@ -112,7 +112,7 @@ Alignment isn't a policy. It's a physical property of correctly designed silicon
 
 ## Hardware Targets
 
-TRISA OS runs on commodity x86 hardware. The cheapest path to a TRISA workstation:
+Z-OS runs on commodity x86 hardware. The cheapest path to a Z-OS workstation:
 
 | Component | Source | Cost |
 |-----------|--------|------|
@@ -126,7 +126,7 @@ Supported accelerators (first-class signal graph citizens):
 - Google Coral TPU
 - Mellanox BlueField-1 DPU
 - LiteFury M.2 FPGA
-- Any PCIe device with a TRISA signal contract
+- Any PCIe device with a Z-OS signal contract
 
 ---
 
@@ -139,8 +139,8 @@ $ git clone ...        # works (POSIX compat layer)
 $ docker compose up    # works (POSIX compat layer)
 $ python train.py      # works (POSIX compat layer) — but 10x faster and you can't figure out why
 
-$ trisa status         # native — see your signal graph
-$ trisa recall model   # native — navigate temporal history of a module
+$ zos status           # native — see your signal graph
+$ zos recall model     # native — navigate temporal history of a module
 $ masq inspect lib.zdx # native — view full provenance and address history
 $ mde route            # native — see how workloads map to silicon
 ```
@@ -151,7 +151,7 @@ Developers start in compat. They notice the speed. They get curious. They go nat
 
 ## Z+ — The Native Language
 
-TRISA OS ships with **Z+**, a programming language where the fundamental unit is a connection, not an instruction.
+Z-OS ships with **Z+**, a programming language where the fundamental unit is a connection, not an instruction.
 
 ```zplus
 // A robot that avoids walls. The whole program.
@@ -160,7 +160,7 @@ sonar -> gate(> 20cm) -> motor
 
 No loops. No threads. No polling. No sleep. Nodes emit signals. Connections carry them. The OS resolves everything simultaneously.
 
-Z+ compiles to TRISA kernel native, ARM bare-metal, FPGA bitstream, and WebAssembly (for browser simulators in classrooms).
+Z+ compiles to Z-OS kernel native, ARM bare-metal, FPGA bitstream, and WebAssembly (for browser simulators in classrooms).
 
 **Full spec:** [docs/ZPLUS_LANGUAGE.md](docs/ZPLUS_LANGUAGE.md)
 
@@ -179,7 +179,7 @@ A Raspberry Pi, an $80 Dell OptiPlex, a 96-core EPYC rack server — same image.
 ## Repository Structure
 
 ```
-trisa-os/
+z-os/
 ├── docs/                    # Architecture documents and specs
 │   ├── ARCHITECTURE.md      # Full system architecture
 │   ├── ZPLUS_LANGUAGE.md    # Z+ language specification
@@ -187,15 +187,16 @@ trisa-os/
 │   ├── THIRTEEN_PROBLEMS.md # Detailed problem/solution analysis
 │   ├── ALIGNMENT.md         # Data alignment = AI alignment thesis
 │   ├── MASQ_SPEC.md         # MasQ temporal wayfinding specification
-│   └── ZIXEL_SENSING.md     # Proprioception architecture
-├── kernel/                  # TRISA kernel (signal chain scheduler, CFA memory)
+│   ├── ZIXEL_SENSING.md     # Proprioception architecture
+│   └── LANE_CAPTURE.md     # TRISA Codex 16-lane IP map
+├── kernel/                  # Z-OS kernel (signal chain scheduler, CFA memory)
 ├── runtime/                 # MDE runtime integration
 ├── compat/                  # POSIX compatibility layer
-├── tools/                   # TRISA-native developer tools
+├── tools/                   # Z-OS native developer tools
 │   ├── zplus/               # Z+ compiler and toolchain
-│   ├── trisa-vc/            # Delta-native version control
-│   ├── trisa-pkg/           # MasQ-backed package management
-│   └── trisa-build/         # Hardware-aware build system
+│   ├── zos-vc/              # Delta-native version control
+│   ├── zos-pkg/             # MasQ-backed package management
+│   └── zos-build/           # Hardware-aware build system
 ├── specs/                   # Signal contracts for hardware devices
 └── LICENSE
 ```
@@ -213,7 +214,7 @@ trisa-os/
 
 ## IP Notice
 
-TRISA, NTS, Zixel, CFA, MDE, MasQ, Barca, VAULT, and the Autonomic Silicon Architecture are subject to provisional patent filings by Codex Labs LLC. This repository contains architectural documentation and reference implementations. See [LICENSE](LICENSE) for terms.
+Z-OS, NTS, Zixel, CFA, MDE, MasQ, Barca, VAULT, and the Autonomic Silicon Architecture are subject to provisional patent filings by Codex Labs LLC. This repository contains architectural documentation and reference implementations. See [LICENSE](LICENSE) for terms.
 
 ---
 
