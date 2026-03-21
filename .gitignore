@@ -1,0 +1,13 @@
+node_modules/
+*.o
+*.ko
+*.elf
+*.bin
+build/
+dist/
+.env
+*.img
+*.iso
+__pycache__/
+.vscode/
+.idea/
