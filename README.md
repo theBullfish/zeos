@@ -166,13 +166,13 @@ Z+ compiles to TRISA kernel native, ARM bare-metal, FPGA bitstream, and WebAssem
 
 ---
 
-## Pi Edition
+## One Image. Every Machine.
 
-TRISA OS runs bare-metal on Raspberry Pi. Every GPIO pin, I2C bus, SPI device, and camera module is a first-class node in the signal graph. Kids wire robots with Z+ instead of writing Python loops.
+There are no editions. No Pi build. No server build. No desktop build. One OS image boots on any supported hardware — ARM or x86 — and discovers what it is through Zixel.
 
-The visual editor and the Z+ code are bidirectional — drag-and-drop nodes or type connections. Same program. Always in sync.
+A Raspberry Pi, an $80 Dell OptiPlex, a 96-core EPYC rack server — same image. The OS measures the actual silicon, discovers every device on every bus, builds a live capability profile, and runs at the best parameters YOUR specific hardware can sustain. Every machine is custom-tuned automatically because the OS can feel itself.
 
-**Full spec:** [pi-edition/README.md](pi-edition/README.md)
+**Full spec:** [docs/HARDWARE_DISCOVERY.md](docs/HARDWARE_DISCOVERY.md)
 
 ---
 
@@ -183,6 +183,7 @@ trisa-os/
 ├── docs/                    # Architecture documents and specs
 │   ├── ARCHITECTURE.md      # Full system architecture
 │   ├── ZPLUS_LANGUAGE.md    # Z+ language specification
+│   ├── HARDWARE_DISCOVERY.md # Self-discovery and optimization
 │   ├── THIRTEEN_PROBLEMS.md # Detailed problem/solution analysis
 │   ├── ALIGNMENT.md         # Data alignment = AI alignment thesis
 │   ├── MASQ_SPEC.md         # MasQ temporal wayfinding specification
@@ -190,7 +191,6 @@ trisa-os/
 ├── kernel/                  # TRISA kernel (signal chain scheduler, CFA memory)
 ├── runtime/                 # MDE runtime integration
 ├── compat/                  # POSIX compatibility layer
-├── pi-edition/              # Raspberry Pi bare-metal image and tools
 ├── tools/                   # TRISA-native developer tools
 │   ├── zplus/               # Z+ compiler and toolchain
 │   ├── trisa-vc/            # Delta-native version control
