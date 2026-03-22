@@ -13,6 +13,7 @@
 #include "fb.h"
 #include "keyboard.h"
 #include "pci.h"
+#include "pmm.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -36,6 +37,8 @@ static void cmd_help(void)
 {
     fb_puts("  help     show this message\n");
     fb_puts("  info     system information\n");
+    fb_puts("  mem      memory stats\n");
+    fb_puts("  alloc    allocate a page (test)\n");
     fb_puts("  lspci    list PCI/PCIe devices\n");
     fb_puts("  tsc      read TSC (Zixel timing)\n");
     fb_puts("  delta    measure TSC delta (two reads)\n");
@@ -124,6 +127,37 @@ static void fb_put_hex16(uint16_t val)
 {
     fb_put_hex8((val >> 8) & 0xff);
     fb_put_hex8(val & 0xff);
+}
+
+static void cmd_mem(void)
+{
+    fb_puts("Physical pages: ");
+    fb_put_dec(pmm_total_pages());
+    fb_puts(" total, ");
+    fb_put_dec(pmm_free_pages());
+    fb_puts(" free, ");
+    fb_put_dec(pmm_used_pages());
+    fb_puts(" used\n");
+
+    fb_puts("Memory:         ");
+    fb_put_dec(pmm_free_pages() * 4 / 1024);
+    fb_puts(" MB free / ");
+    fb_put_dec(pmm_total_pages() * 4 / 1024);
+    fb_puts(" MB total\n");
+}
+
+static void cmd_alloc(void)
+{
+    uint64_t page = pmm_alloc();
+    if (page) {
+        fb_puts("Allocated page at 0x");
+        fb_put_hex(page);
+        fb_puts(" (");
+        fb_put_dec(pmm_free_pages());
+        fb_puts(" pages remaining)\n");
+    } else {
+        fb_puts("Out of memory!\n");
+    }
 }
 
 static void cmd_lspci(void)
@@ -230,6 +264,10 @@ void shell_run(struct zeos_boot_info *boot)
             cmd_help();
         else if (streq(cmd, "info"))
             cmd_info();
+        else if (streq(cmd, "mem"))
+            cmd_mem();
+        else if (streq(cmd, "alloc"))
+            cmd_alloc();
         else if (streq(cmd, "lspci"))
             cmd_lspci();
         else if (streq(cmd, "tsc"))

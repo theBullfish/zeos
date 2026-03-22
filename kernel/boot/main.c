@@ -24,6 +24,7 @@
 #include "idt.h"
 #include "keyboard.h"
 #include "pci.h"
+#include "pmm.h"
 #include "shell.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -256,6 +257,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     fb_puts("             Zixel embryo — first timing delta on bare metal.\n\n");
 
     fb_puts("Zeos is alive.\n\n");
+
+    /* Initialize physical memory manager */
+    fb_puts("Initializing PMM... ");
+    pmm_init(&boot_info.mmap, &boot_info.fb);
+    fb_put_dec(pmm_free_pages() * 4 / 1024);
+    fb_puts(" MB free / ");
+    fb_put_dec(pmm_total_pages() * 4 / 1024);
+    fb_puts(" MB total.\n");
 
     /* Initialize interrupts first — needed before any I/O that might trigger IRQs */
     fb_puts("Setting up IDT... ");
