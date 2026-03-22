@@ -14,6 +14,9 @@
 #include "keyboard.h"
 #include "pci.h"
 #include "pmm.h"
+#include "heap.h"
+#include "timer.h"
+#include "signal.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -38,10 +41,11 @@ static void cmd_help(void)
     fb_puts("  help     show this message\n");
     fb_puts("  info     system information\n");
     fb_puts("  mem      memory stats\n");
-    fb_puts("  alloc    allocate a page (test)\n");
+    fb_puts("  heap     heap stats\n");
     fb_puts("  lspci    list PCI/PCIe devices\n");
     fb_puts("  tsc      read TSC (Zixel timing)\n");
     fb_puts("  delta    measure TSC delta (two reads)\n");
+    fb_puts("  signal   run signal chain demo\n");
     fb_puts("  clear    clear screen\n");
     fb_puts("  zeos     about\n");
 }
@@ -212,6 +216,121 @@ static void cmd_lspci(void)
     fb_puts(" devices total.\n");
 }
 
+static void cmd_heap(void)
+{
+    fb_puts("Heap: ");
+    fb_put_dec(heap_used_bytes());
+    fb_puts(" used / ");
+    fb_put_dec(heap_total_bytes());
+    fb_puts(" total (");
+    fb_put_dec(heap_free_bytes());
+    fb_puts(" free)\n");
+}
+
+/*
+ * Signal chain demo: three-node pipeline
+ *   [Source] → [Double] → [Display]
+ *
+ * Source produces a number. Double multiplies by 2. Display shows it.
+ * This is TRISA's pattern: detect → transform → output.
+ */
+static int demo_source(struct sig_node *node, struct sig_data *in,
+                        struct sig_data *out)
+{
+    (void)node;
+    (void)in;
+    /* Produce the number 42 */
+    uint32_t val = 42;
+    out->data[0] = val & 0xFF;
+    out->data[1] = (val >> 8) & 0xFF;
+    out->data[2] = (val >> 16) & 0xFF;
+    out->data[3] = (val >> 24) & 0xFF;
+    out->size = 4;
+    out->type = 1;  /* uint32 */
+    return 0;
+}
+
+static int demo_double(struct sig_node *node, struct sig_data *in,
+                        struct sig_data *out)
+{
+    (void)node;
+    uint32_t val = in->data[0] | (in->data[1] << 8) |
+                   (in->data[2] << 16) | (in->data[3] << 24);
+    val *= 2;
+    out->data[0] = val & 0xFF;
+    out->data[1] = (val >> 8) & 0xFF;
+    out->data[2] = (val >> 16) & 0xFF;
+    out->data[3] = (val >> 24) & 0xFF;
+    out->size = 4;
+    out->type = 1;
+    return 0;
+}
+
+static int demo_display(struct sig_node *node, struct sig_data *in,
+                         struct sig_data *out)
+{
+    (void)node;
+    (void)out;
+    uint32_t val = in->data[0] | (in->data[1] << 8) |
+                   (in->data[2] << 16) | (in->data[3] << 24);
+    fb_puts("  [Display] received: ");
+    fb_put_dec(val);
+    fb_puts("\n");
+    return 0;
+}
+
+static void cmd_signal(void)
+{
+    fb_puts("Signal chain demo: [Source:42] -> [Double] -> [Display]\n\n");
+
+    /* Create chain */
+    int chain = sig_chain_create("demo");
+    if (chain < 0) {
+        fb_puts("Failed to create chain!\n");
+        return;
+    }
+
+    /* Add nodes */
+    int src = sig_node_add(chain, "Source", demo_source, 0);
+    int dbl = sig_node_add(chain, "Double", demo_double, 0);
+    int dsp = sig_node_add(chain, "Display", demo_display, 0);
+
+    /* Connect: Source → Double → Display */
+    sig_edge_add(chain, src, dbl);
+    sig_edge_add(chain, dbl, dsp);
+
+    /* Inject empty data to trigger Source */
+    struct sig_data trigger = {.size = 0, .type = 0};
+    sig_inject(chain, src, &trigger);
+
+    /* Resolve the chain */
+    fb_puts("  Resolving...\n");
+    int fired = sig_resolve(chain);
+
+    fb_puts("  ");
+    fb_put_dec(fired);
+    fb_puts(" nodes fired.\n\n");
+
+    /* Print timing for each node */
+    struct sig_chain *c = sig_get_chain(chain);
+    if (c) {
+        fb_puts("  Node timing (TSC cycles):\n");
+        for (int i = 0; i < c->node_count; i++) {
+            struct sig_node *n = &c->nodes[i];
+            fb_puts("    ");
+            fb_puts(n->name);
+            fb_puts(": ");
+            fb_put_dec(n->tsc_end - n->tsc_start);
+            fb_puts(" cycles\n");
+        }
+        fb_puts("\n  Chain total: ");
+        fb_put_dec(c->tsc_end - c->tsc_start);
+        fb_puts(" cycles (");
+        fb_put_dec(c->resolve_count);
+        fb_puts(" resolutions)\n");
+    }
+}
+
 static void cmd_zeos(void)
 {
     fb_puts("\n");
@@ -266,14 +385,16 @@ void shell_run(struct zeos_boot_info *boot)
             cmd_info();
         else if (streq(cmd, "mem"))
             cmd_mem();
-        else if (streq(cmd, "alloc"))
-            cmd_alloc();
+        else if (streq(cmd, "heap"))
+            cmd_heap();
         else if (streq(cmd, "lspci"))
             cmd_lspci();
         else if (streq(cmd, "tsc"))
             cmd_tsc();
         else if (streq(cmd, "delta"))
             cmd_delta();
+        else if (streq(cmd, "signal"))
+            cmd_signal();
         else if (streq(cmd, "clear"))
             fb_clear(0x001A1A1A);
         else if (streq(cmd, "zeos"))

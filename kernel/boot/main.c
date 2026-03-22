@@ -25,6 +25,10 @@
 #include "keyboard.h"
 #include "pci.h"
 #include "pmm.h"
+#include "vmm.h"
+#include "heap.h"
+#include "timer.h"
+#include "signal.h"
 #include "shell.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -266,7 +270,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     fb_put_dec(pmm_total_pages() * 4 / 1024);
     fb_puts(" MB total.\n");
 
-    /* Initialize interrupts first — needed before any I/O that might trigger IRQs */
+    /* Initialize virtual memory */
+    fb_puts("Setting up VMM... ");
+    vmm_init();
+    fb_puts("done (4GB identity + higher-half).\n");
+
+    /* Initialize kernel heap */
+    fb_puts("Initializing heap... ");
+    heap_init(64);  /* 64 pages = 256KB initial heap */
+    fb_put_dec(heap_total_bytes() / 1024);
+    fb_puts(" KB.\n");
+
+    /* Initialize interrupts */
     fb_puts("Setting up IDT... ");
     idt_init();
     fb_puts("done.\n");
@@ -276,7 +291,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     pci_init(boot_info.rsdp);
     int pci_count = pci_enumerate();
     fb_put_dec(pci_count);
-    fb_puts(" devices found (legacy I/O).\n");
+    fb_puts(" devices found.\n");
 
     /* Initialize keyboard */
     fb_puts("Initializing keyboard... ");
@@ -285,7 +300,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Enable interrupts */
     __asm__ volatile("sti");
-    fb_puts("Interrupts enabled.\n\n");
+
+    /* Initialize timer (1000 Hz PIT + TSC calibration) */
+    fb_puts("Calibrating timer... ");
+    timer_init(1000);
+    fb_puts("TSC freq: ");
+    fb_put_dec(timer_tsc_freq() / 1000000);
+    fb_puts(" MHz.\n");
+
+    /* Initialize signal chain engine */
+    fb_puts("Signal chain engine... ");
+    sig_init();
+    fb_puts("ready.\n\n");
 
     /* Enter shell — never returns */
     shell_run(&boot_info);
