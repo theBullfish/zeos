@@ -12,6 +12,7 @@
 #include "shell.h"
 #include "fb.h"
 #include "keyboard.h"
+#include "pci.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -35,6 +36,7 @@ static void cmd_help(void)
 {
     fb_puts("  help     show this message\n");
     fb_puts("  info     system information\n");
+    fb_puts("  lspci    list PCI/PCIe devices\n");
     fb_puts("  tsc      read TSC (Zixel timing)\n");
     fb_puts("  delta    measure TSC delta (two reads)\n");
     fb_puts("  clear    clear screen\n");
@@ -111,6 +113,71 @@ static void cmd_delta(void)
     fb_puts(" TSC ticks\n");
 }
 
+static void fb_put_hex8(uint8_t val)
+{
+    static const char hex[] = "0123456789abcdef";
+    fb_putc(hex[(val >> 4) & 0xf]);
+    fb_putc(hex[val & 0xf]);
+}
+
+static void fb_put_hex16(uint16_t val)
+{
+    fb_put_hex8((val >> 8) & 0xff);
+    fb_put_hex8(val & 0xff);
+}
+
+static void cmd_lspci(void)
+{
+    int count = pci_device_count();
+    if (count == 0) {
+        fb_puts("No PCI devices found.\n");
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        struct pci_device *d = pci_get_device(i);
+        if (!d) continue;
+
+        /* Bus:Dev.Func */
+        fb_put_hex8(d->bus);
+        fb_puts(":");
+        fb_put_hex8(d->dev);
+        fb_puts(".");
+        fb_putc('0' + d->func);
+        fb_puts("  ");
+
+        /* Vendor:Device */
+        fb_put_hex16(d->vendor_id);
+        fb_puts(":");
+        fb_put_hex16(d->device_id);
+        fb_puts("  ");
+
+        /* Class name */
+        fb_puts(pci_class_name(d->class_code, d->subclass));
+
+        /* Flag known devices */
+        if (d->vendor_id == 0x1da3 && d->device_id == 0x0001)
+            fb_puts("  ** GOYA HL-1000 **");
+        else if (d->vendor_id == 0x1002)
+            fb_puts("  [AMD/ATI]");
+        else if (d->vendor_id == 0x8086)
+            fb_puts("  [Intel]");
+        else if (d->vendor_id == 0x10ee)
+            fb_puts("  [Xilinx]");
+        else if (d->vendor_id == 0x15b3)
+            fb_puts("  [Mellanox]");
+        else if (d->vendor_id == 0x10de)
+            fb_puts("  [NVIDIA]");
+        else if (d->vendor_id == 0x1022)
+            fb_puts("  [AMD]");
+
+        fb_puts("\n");
+    }
+
+    fb_put_dec(count);
+    fb_puts(" devices total.\n");
+}
+
 static void cmd_zeos(void)
 {
     fb_puts("\n");
@@ -163,6 +230,8 @@ void shell_run(struct zeos_boot_info *boot)
             cmd_help();
         else if (streq(cmd, "info"))
             cmd_info();
+        else if (streq(cmd, "lspci"))
+            cmd_lspci();
         else if (streq(cmd, "tsc"))
             cmd_tsc();
         else if (streq(cmd, "delta"))

@@ -23,6 +23,7 @@
 #include "zeos_boot.h"
 #include "idt.h"
 #include "keyboard.h"
+#include "pci.h"
 #include "shell.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -256,10 +257,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     fb_puts("Zeos is alive.\n\n");
 
-    /* Initialize interrupts */
+    /* Initialize interrupts first — needed before any I/O that might trigger IRQs */
     fb_puts("Setting up IDT... ");
     idt_init();
     fb_puts("done.\n");
+
+    /* Initialize PCI (uses I/O ports, safe after IDT is up) */
+    fb_puts("Scanning PCI bus... ");
+    pci_init(boot_info.rsdp);
+    int pci_count = pci_enumerate();
+    fb_put_dec(pci_count);
+    fb_puts(" devices found (legacy I/O).\n");
 
     /* Initialize keyboard */
     fb_puts("Initializing keyboard... ");
