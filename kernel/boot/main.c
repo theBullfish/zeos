@@ -21,6 +21,9 @@
 
 #include "fb.h"
 #include "zeos_boot.h"
+#include "idt.h"
+#include "keyboard.h"
+#include "shell.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
@@ -251,11 +254,24 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     fb_puts("\n");
     fb_puts("             Zixel embryo — first timing delta on bare metal.\n\n");
 
-    fb_puts("Zeos is alive.\n");
+    fb_puts("Zeos is alive.\n\n");
 
-    /* Halt */
-    for (;;)
-        __asm__ volatile("hlt");
+    /* Initialize interrupts */
+    fb_puts("Setting up IDT... ");
+    idt_init();
+    fb_puts("done.\n");
+
+    /* Initialize keyboard */
+    fb_puts("Initializing keyboard... ");
+    keyboard_init();
+    fb_puts("done.\n");
+
+    /* Enable interrupts */
+    __asm__ volatile("sti");
+    fb_puts("Interrupts enabled.\n\n");
+
+    /* Enter shell — never returns */
+    shell_run(&boot_info);
 
     return EFI_SUCCESS;
 }
