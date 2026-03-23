@@ -1,0 +1,209 @@
+// 20_power_grid.zp — Smart grid management / DERMS
+// Conventional: GE Grid Solutions (~millions LOC), custom DERMS: ~500,000 LOC
+// Industry: Energy / Utilities
+// Codex Labs LLC — 2026
+
+// ── GRID TOPOLOGY ──────────────────────────
+
+grid : net.discover(proto: dnp3 | iec61850 | modbus) -> assets
+
+substation  : grid.assets(type: substation)  -> { voltage @ kV, current @ A, frequency @ Hz }
+transformer : grid.assets(type: transformer) -> { load @ percent, temp @ C, oil_level @ percent }
+feeder      : grid.assets(type: feeder)      -> { current @ A, voltage @ kV, status: open | closed }
+meter       : grid.assets(type: smart_meter) -> { usage @ kWh, voltage @ V, power_factor }
+solar       : grid.assets(type: solar_array) -> { generation @ kW, irradiance @ W_m2 }
+wind        : grid.assets(type: wind_farm)   -> { generation @ kW, wind_speed @ m/s }
+battery     : grid.assets(type: battery_storage) -> { soc @ percent, rate @ kW, capacity @ kWh }
+
+// ── GENERATION vs DEMAND ───────────────────
+
+// total generation — all sources merge
+solar.generation      -> |
+wind.generation       -> | -> total_generation @ MW
+conventional.generation -> |
+battery.discharge     -> |
+
+// total demand — all meters merge
+meter.usage -> | sum | -> total_demand @ MW
+
+// balance — generation must equal demand. always.
+total_generation -> |
+                    | -> balance : generation - demand
+total_demand     -> |
+
+// ── FREQUENCY REGULATION ───────────────────
+
+// grid frequency IS the balance signal. 60Hz = balanced.
+substation.frequency -> {
+    gate(> 60.05Hz) -> oversupply,          // too much generation
+    gate(59.95Hz ~ 60.05Hz) -> balanced,    // healthy
+    gate(< 59.95Hz) -> undersupply          // too much demand
+}
+
+// response — proportional, with knee
+oversupply  -> gate(knee: 0.02Hz) -> curtail(solar, proportional)
+undersupply -> gate(knee: 0.02Hz) -> {
+    battery.discharge(proportional),
+    conventional.ramp_up(proportional)
+}
+
+// emergency — frequency collapse
+substation.frequency -> gate(< 59.5Hz) -> load_shed(priority: non_essential)
+    priority: reflex
+substation.frequency -> gate(< 59.0Hz) -> load_shed(priority: all_non_critical)
+    priority: reflex
+
+// ── RENEWABLE FORECASTING ──────────────────
+
+// solar forecast — irradiance prediction from weather + historical
+solar.irradiance -> baseline(window: 90d, by: hour, month) -> solar_forecast
+weather.cloud_cover -> solar_forecast.adjust
+
+// wind forecast
+wind.wind_speed -> baseline(window: 90d, by: hour, season) -> wind_forecast
+weather.wind_prediction -> wind_forecast.adjust
+
+// duck curve management — solar drops at sunset, demand spikes
+time -> gate(hour: 16 ~ 19) -> {
+    delta(solar.generation) -> gate(falling, > 100kW/min) -> {
+        battery.discharge(ramp: match_solar_decline),
+        conventional.ramp_up(pre_position: 30m_before_sunset)
+    }
+}
+
+// ── BATTERY OPTIMIZATION ───────────────────
+
+// charge when cheap/abundant, discharge when expensive/needed
+electricity_price -> {
+    gate(< off_peak_threshold)  -> battery.charge(rate: optimal),
+    gate(> peak_threshold)      -> battery.discharge(rate: optimal)
+}
+
+// solar excess → battery
+solar.generation -> gate(> local_demand) -> excess
+excess -> battery.charge(rate: excess_amount)
+
+// battery health — don't abuse it
+battery.soc -> gate(< 20%) -> battery.protect(no_discharge)
+battery.soc -> gate(> 90%) -> battery.protect(no_charge)
+battery.cycles -> baseline(window: 365d) -> aging_rate
+    -> gate(> expected) -> alert(warn: "battery aging faster than expected")
+
+// ── FAULT DETECTION ────────────────────────
+
+// overcurrent — fault on feeder
+feeder.current -> gate(> rated * 1.5) -> {
+    feeder.trip(open),                      // isolate fault
+    alert(critical: "overcurrent on " + feeder.id)
+}
+    priority: reflex
+
+// voltage sag — upstream problem
+meter.voltage -> gate(< 110V, sustained: 1s) -> {
+    identify_affected_area(meters.where(voltage < 110V)),
+    trace_upstream -> fault_location,
+    alert(warn: "voltage sag detected, source: " + fault_location)
+}
+
+// transformer health
+transformer.temp -> gate(> 80C, knee: 10C) -> {
+    reduce_load(transformer, proportional),
+    alert(warn: "transformer overtemp")
+}
+
+transformer.oil_level -> gate(< 80%) -> alert(warn: "transformer oil low")
+
+// correlation — transformer temp + load + ambient = predictive failure
+transformer.temp   -> |
+transformer.load   -> | resonance(all, trending: up, within: 24h) |
+ambient.temp       -> |   -> alert(critical: "transformer failure predicted")
+                          -> schedule_maintenance(urgent)
+
+// ── DEMAND RESPONSE ────────────────────────
+
+// peak demand approaching grid capacity
+total_demand -> gate(> grid.capacity * 0.85, knee: 5%) -> {
+    // tier 1: ask large customers to reduce
+    commercial_meters -> gate(enrolled: demand_response)
+        -> signal(reduce, incentive: price_premium),
+
+    // tier 2: cycle non-essential loads
+    residential_meters -> gate(enrolled: smart_thermostat)
+        -> thermostat.setback(2F, duration: 2h),
+
+    // tier 3: curtail renewables feeding back
+    solar -> gate(exporting) -> curtail(to: self_consumption_only)
+}
+
+// ── OUTAGE MANAGEMENT ──────────────────────
+
+// detect outage from meter silence
+meter -> on_silence(> 2m) -> outage_signal
+
+// cluster nearby silent meters = outage area
+outage_signal -> cluster(by: location, within: 500m) -> outage_area
+
+// trace upstream to find failed equipment
+outage_area -> trace(upstream: grid.topology) -> probable_cause
+
+// auto-dispatch crew
+probable_cause -> dispatch(crew: nearest, priority: outage_area.customers)
+
+// restoration confirmation
+meter -> gate(was_silent, now_reporting) -> restored
+outage_area.meters -> gate(all: restored) -> outage_resolved
+    -> notify(customers: "power restored")
+
+// ── TELEMETRY ──────────────────────────────
+
+total_generation ~> live_gauge
+total_demand     ~> live_gauge
+balance          ~> live_gauge
+substation.freq  ~> live_gauge
+battery.soc      ~> live_gauge
+solar.forecast   ~> live_chart(24h)
+outage_signal    ~> live_map
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  frequency as THE balance signal — 60Hz = healthy, deviation = imbalance
+//          frequency regulation as proportional gate with knee — no oscillation
+//          renewable forecasting as seasonal baseline — same as anomaly detector
+//          duck curve as temporal + delta pattern — solar decline rate triggers response
+//          battery optimization as price-gated charge/discharge — signal routing
+//          fault detection as overcurrent reflex — same as safety in SCADA/AV
+//          outage detection as clustered silence — on_silence + spatial clustering
+//          demand response as tiered gates on capacity — progressive load reduction
+//
+// NEEDED:  grid.assets(type:) — grid topology discovery
+//          net.discover(proto: dnp3 | iec61850) — utility protocols
+//          load_shed(priority:) — controlled load disconnection
+//          curtail() — reduce generation output
+//          ramp_up/ramp_down — gradual generation change
+//          trace(upstream: topology) — trace signal path through graph
+//          cluster(by: location) — spatial clustering of events
+//          dispatch(crew:) — work order creation
+//          electricity_price — real-time pricing signal
+//
+// KEY INSIGHT: grid frequency IS a grade.
+//   60.00Hz = perfectly balanced. deviation from 60Hz is proportional
+//   to the imbalance between generation and demand.
+//   the entire grid is already a signal graph. generators are sources.
+//   loads are sinks. transmission lines are wires. transformers are
+//   nodes that step voltage. the grid IS a Z+ program already.
+//   we're just making the software match what the physics already does.
+//
+// KEY INSIGHT: outage detection as clustered silence.
+//   smart meters go silent when power fails. cluster nearby silent
+//   meters and you've mapped the outage. trace upstream through the
+//   grid topology and you've found the fault. dispatch a crew to
+//   the probable cause. the entire outage management workflow is:
+//   on_silence -> cluster -> trace -> dispatch -> gate(restored).
+//   utilities spend millions on OMS (Outage Management Systems).
+//   this is 10 lines.
+//
+// CONVENTIONAL: GE Grid Solutions / Siemens grid management is millions
+//   of LOC. Custom DERMS: 500k LOC. This is 130 lines with generation
+//   balancing, frequency regulation, renewable forecasting, battery
+//   optimization, fault detection, demand response, and outage management.

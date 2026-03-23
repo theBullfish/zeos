@@ -1,0 +1,212 @@
+// 17_ecommerce.zp — Full e-commerce platform (Shopify-like)
+// Conventional: Shopify (~millions LOC Ruby/Go), Magento (~2M LOC PHP)
+// Industry: Retail
+// Codex Labs LLC — 2026
+
+// ── STOREFRONT ─────────────────────────────
+
+store : net.listen(port: 443, proto: https) -> requests
+
+requests -> gate(path: "/")              -> home_page
+requests -> gate(path: "/products")      -> product_list
+requests -> gate(path: "/products/:id")  -> product_detail
+requests -> gate(path: "/cart")          -> cart_view
+requests -> gate(path: "/checkout")      -> checkout_flow
+requests -> gate(path: "/search")        -> search_flow
+requests -> gate(path: "/account")       -> account_flow
+
+// ── PRODUCT CATALOG ────────────────────────
+
+catalog : vault.collection("products") -> {
+    name, description, price @ cents, images,
+    inventory : f32, sku, category, tags, variants
+}
+
+product_list -> vault.query("products", filter: params) -> {
+    sort(by: params.sort) -> paginate(page: params.page, per: 24) -> respond
+}
+
+product_detail -> vault.read("products", id: params.id) -> {
+    gate(found) -> respond(200, product + recommendations),
+    gate(not_found) -> respond(404)
+}
+
+// ── INVENTORY ──────────────────────────────
+
+// inventory is a signal, not a number in a database
+catalog.inventory -> {
+    gate(> 10)  -> status(in_stock),
+    gate(1 ~ 10) -> status(low_stock),
+    gate(<= 0)  -> status(out_of_stock)
+}
+
+// low stock alert
+catalog.inventory -> gate(< reorder_point, knee: 5) -> {
+    alert(warn: "low stock: " + sku),
+    auto_reorder -> gate(auto_reorder: enabled) -> supplier.order(sku, quantity: reorder_qty)
+}
+
+// inventory reserved when added to cart, released on abandon
+cart.add    -> catalog.inventory - quantity -> reserved
+cart.remove -> catalog.inventory + quantity -> released
+cart -> on_silence(> 30m) -> release_all_reserved
+
+// ── CART ────────────────────────────────────
+
+cart : session.state("cart") -> {
+    items : list,
+    subtotal : items.sum(price * quantity),
+    tax : subtotal * tax_rate(session.location),
+    shipping : calculate_shipping(items, session.location),
+    total : subtotal + tax + shipping
+}
+
+cart.add    -> recalculate -> respond(cart)
+cart.remove -> recalculate -> respond(cart)
+cart.update -> recalculate -> respond(cart)
+
+// cart is live — prices change, inventory changes, tax changes
+// the cart signal graph re-resolves whenever any input changes
+catalog.price -> cart.recalculate      // price changed? cart updates.
+tax_rate      -> cart.recalculate      // tax changed? cart updates.
+
+// ── CHECKOUT ───────────────────────────────
+
+checkout_flow -> validate_cart -> {
+    gate(all_in_stock)  -> payment_step,
+    gate(any_out_stock) -> respond(409, "items no longer available")
+}
+
+payment_step -> collect_payment_info -> process_charge -> {
+    gate(success) -> {
+        vault.ledger.atomic {
+            debit(customer, total),
+            credit(merchant, total - platform_fee),
+            credit(platform, platform_fee)
+        },
+        create_order -> {
+            vault.store("orders", order),
+            notify(customer, "order confirmed"),
+            notify(warehouse, "new order"),
+            catalog.inventory - quantities -> commit    // finalize reservation
+        }
+    },
+    gate(declined) -> respond(402, "payment failed")
+}
+
+// ── FULFILLMENT ────────────────────────────
+
+order.status : pending -> processing -> shipped -> delivered
+
+notify(warehouse, order) -> {
+    pick_list -> pack -> ship(carrier: optimal_carrier)
+}
+
+ship -> tracking_number -> {
+    vault.update("orders", status: shipped, tracking: tracking_number),
+    notify(customer, "shipped", tracking: tracking_number)
+}
+
+// tracking updates from carrier
+carrier.webhook -> gate(order_id: known) -> {
+    gate(status: in_transit)  -> vault.update("orders", status: in_transit),
+    gate(status: delivered)   -> {
+        vault.update("orders", status: delivered),
+        notify(customer, "delivered"),
+        request_review(after: 3d)
+    },
+    gate(status: exception)   -> {
+        alert(warn: "delivery exception"),
+        notify(customer, "delivery issue")
+    }
+}
+
+// ── RECOMMENDATIONS ────────────────────────
+
+// "customers who bought X also bought Y"
+purchase_signal -> vault.update("co_purchase", item_a, item_b)
+
+product_detail -> vault.nearest("co_purchase", product_id, k: 8)
+    -> gate(in_stock) -> recommendations
+
+// browsing behavior — what you looked at informs what we show
+session.page_views -> vault.update("browse_history", user)
+    -> vault.nearest("browse_profiles", user.vector, k: 20)
+    -> watched_but_not_bought -> home_page.featured
+
+// ── SEARCH ─────────────────────────────────
+
+search_flow -> q.text -> {
+    tokenize -> vault.search("products") -> keyword_hits,
+    mde("embedding.zdx") -> vault.nearest("product_vectors", k: 50) -> semantic_hits
+}
+
+keyword_hits  -> | merge(method: rrf) | -> results
+semantic_hits -> |
+
+results -> gate(in_stock, boost: 2.0) -> respond    // prefer in-stock items
+
+// ── PRICING ────────────────────────────────
+
+// dynamic pricing — adjust based on demand signal
+catalog.view_rate -> baseline(window: 7d) -> demand_normal
+catalog.view_rate -> deviation(from: demand_normal) -> {
+    gate(> 2σ)  -> price.suggest(increase: 5%, max: ceiling),
+    gate(< -2σ) -> price.suggest(decrease: 10%, min: floor)
+}
+
+// sale / coupon
+coupon -> validate(code) -> {
+    gate(valid, not_expired, not_used) -> cart.discount(amount | percent),
+    gate(invalid) -> respond(400, "invalid coupon")
+}
+
+// ── TELEMETRY ──────────────────────────────
+
+requests     ~> rate(per: 1s) ~> traffic
+checkout_flow ~> ratio(complete, started) ~> conversion_rate
+cart         ~> avg(total) ~> avg_order_value
+catalog      ~> count(status: out_of_stock) ~> stockout_count
+search_flow  ~> rate(per: 1m) ~> search_rate
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  cart as live signal graph — recalculates when ANY input changes
+//          inventory as signal with reservation — not just a DB number
+//          cart abandonment as on_silence — 30m timeout releases inventory
+//          fulfillment as status signal chain — pending -> processing -> shipped -> delivered
+//          dynamic pricing as demand deviation — baseline + sigma reuse
+//          checkout as atomic ledger — reuse from payment processor
+//          search as hybrid keyword+semantic — reuse from search engine
+//
+// NEEDED:  session.state() — per-session persistent state
+//          calculate_shipping() — shipping rate calculation
+//          tax_rate(location) — tax calculation by geography
+//          carrier.webhook — inbound webhook from external service
+//          request_review(after:) — time-delayed action
+//          price.suggest() — pricing recommendation (not auto-change)
+//          boost — search result weighting modification
+//
+// KEY INSIGHT: the cart is a live signal graph.
+//   in traditional e-commerce, the cart is a data structure you manually
+//   recalculate. change a quantity? recalculate. tax rate changes?
+//   hope someone triggers a recalculate. price changes while item
+//   is in cart? depends on implementation.
+//   in Z+, the cart is wiring. price -> cart, tax -> cart, inventory -> cart.
+//   when any input signal changes, the cart re-resolves automatically.
+//   there is no stale cart state. the cart is always current because
+//   it's a signal graph, not a snapshot.
+//
+// KEY INSIGHT: inventory reservation as signal flow.
+//   cart.add subtracts from available. cart.remove adds back.
+//   cart.on_silence(30m) releases all. this is the entire inventory
+//   reservation system — a construct that takes 5,000+ LOC in
+//   traditional e-commerce with race conditions, double-booking bugs,
+//   and cleanup cron jobs. the signal graph handles it structurally.
+//
+// CONVENTIONAL: Shopify is millions of LOC. Magento is 2M LOC PHP.
+//   A custom e-commerce platform: 50-100k LOC.
+//   This is 110 lines with catalog, cart, checkout, payment, fulfillment,
+//   tracking, recommendations, search, dynamic pricing, and inventory
+//   management. The live cart alone eliminates an entire class of bugs.

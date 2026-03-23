@@ -1,0 +1,140 @@
+// 14_video_streaming.zp — Netflix-like video streaming platform
+// Conventional: Netflix backend (~10M+ LOC across hundreds of microservices)
+// Industry: Media / Entertainment
+// Codex Labs LLC — 2026
+
+// ── INGEST ─────────────────────────────────
+
+upload : net.listen(port: 443, path: "/upload") -> raw_video
+
+// transcode to multiple quality levels — parallel fork
+raw_video -> transcode {
+    -> encode(profile: 4k,   bitrate: 15Mbps)  -> vault.store("media/4k"),
+    -> encode(profile: 1080p, bitrate: 5Mbps)  -> vault.store("media/1080p"),
+    -> encode(profile: 720p,  bitrate: 2.5Mbps) -> vault.store("media/720p"),
+    -> encode(profile: 480p,  bitrate: 1Mbps)  -> vault.store("media/480p"),
+    -> encode(profile: audio, bitrate: 128kbps) -> vault.store("media/audio")
+}
+
+// extract metadata while transcoding
+raw_video -> {
+    mde("scene-detect.zdx") -> scenes -> vault.store("metadata/scenes"),
+    mde("subtitle-gen.zdx") -> subtitles -> vault.store("metadata/subs"),
+    mde("thumbnail-gen.zdx") -> thumbnails -> vault.store("metadata/thumbs")
+}
+
+// ── CATALOGUE ──────────────────────────────
+
+content : vault.collection("catalogue") -> {
+    title, genre, tags, rating, release_date,
+    profiles: [4k, 1080p, 720p, 480p],
+    scenes, subtitles, thumbnails
+}
+
+// ── PLAYER SESSION ─────────────────────────
+
+player : net.listen(port: 443, path: "/stream") -> session
+
+session -> auth.verify -> vault.read("catalogue", content_id) -> stream_start
+
+// ── ADAPTIVE BITRATE ───────────────────────
+
+// measure client bandwidth continuously
+session.bandwidth -> {
+    gate(> 12Mbps)          -> serve(profile: 4k),
+    gate(5Mbps ~ 12Mbps)   -> serve(profile: 1080p),
+    gate(2Mbps ~ 5Mbps)    -> serve(profile: 720p),
+    gate(< 2Mbps)           -> serve(profile: 480p)
+}
+
+// smooth transitions — don't snap between qualities
+session.bandwidth -> gate(crossing_threshold, knee: 1Mbps) -> quality_change
+    debounce(5s)    // don't flicker between qualities
+
+// buffer health
+session.buffer_level -> {
+    gate(< 2s)  -> serve(profile: lowest_available),    // emergency
+    gate(< 5s)  -> serve(profile: down_one),             // cautious
+    gate(> 15s) -> serve(profile: up_one)                // can afford better
+}
+    priority: reflex    // buffer emergency overrides bandwidth estimation
+
+// ── CDN / EDGE ─────────────────────────────
+
+// serve from nearest edge node
+session -> edge.nearest(session.location) -> {
+    gate(cached)  -> serve(from: edge),
+    gate(missing) -> vault.read("media") -> edge.cache -> serve(from: edge)
+}
+
+// pre-warm edge caches for popular content
+content.popularity -> gate(> trending_threshold) -> edge.warm(all_regions)
+
+// ── RECOMMENDATIONS ────────────────────────
+
+// what you watched = signal. what you finished = stronger signal.
+session -> on_complete -> watch_signal(user, content, finished: true)
+session -> on_abandon(at: position) -> watch_signal(user, content, finished: false, drop_point: position)
+
+// collaborative filtering — users who watched X also watched Y
+watch_signal -> vault.update("user_profile", user) -> {
+    similar_users : vault.nearest("user_profiles", user.vector, k: 50),
+    similar_users.watched -> gate(not_in: user.watched) -> recommendations
+}
+
+// content-based — similar genres, tags, directors
+content.vector -> vault.nearest("content_vectors", k: 20)
+    -> gate(not_in: user.watched) -> recommendations
+
+// blend both
+collaborative -> |
+                  | merge(method: weighted, collab: 0.6, content: 0.4) | -> final_recs
+content_based -> |
+
+// ── CONTINUE WATCHING ──────────────────────
+
+// resume position — temporal state per user per content
+session.position -> vault.store("progress", user + content, position)
+session.start -> vault.read("progress", user + content) -> seek(to: position)
+
+// ── ENGAGEMENT ─────────────────────────────
+
+// drop-off analysis — where do people stop watching?
+watch_signal -> gate(finished: false) -> drop_point
+    -> group(by: content) -> distribution -> content.drop_heatmap
+
+// binge detection — watching 3+ episodes in a row
+watch_signal -> gate(series) -> rate(per: user, within: 4h)
+    -> gate(> 3) -> suggest("still watching?")
+
+// ── TELEMETRY ──────────────────────────────
+
+session         ~> count(active) ~> concurrent_viewers
+session         ~> avg(bitrate) ~> avg_quality
+session.buffer  ~> gate(< 2s) ~> rebuffer_rate
+content         ~> sort(by: views, period: 24h) ~> trending
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  adaptive bitrate as bandwidth gates — perfect fit
+//          knee on quality transitions — no flickering between profiles
+//          buffer health as reflex priority — emergency overrides estimation
+//          CDN caching as gate(cached/missing) — natural
+//          recommendations as vector nearest + merge — signal fusion
+//          drop-off analysis as signal grouping — temporal analytics
+//          resume position as temporal state per-user — vault stores position
+//
+// NEEDED:  encode(profile:, bitrate:) — media transcoding
+//          edge.nearest() — geographic routing
+//          edge.cache / edge.warm — CDN cache management
+//          seek(to:) — media position control
+//          on_complete / on_abandon — session lifecycle events
+//          distribution — statistical distribution of signal values
+//
+// KEY INSIGHT: adaptive bitrate streaming IS a gate with a knee.
+//   Netflix's ABR algorithm (years of research, thousands of LOC) is:
+//   "measure bandwidth, pick the best quality that fits, transition smoothly."
+//   that's: bandwidth -> gate(threshold, knee) -> profile.
+//   the knee prevents flickering. the reflex on buffer prevents stalls.
+//   Netflix's entire ABR paper compressed to 10 lines of Z+.

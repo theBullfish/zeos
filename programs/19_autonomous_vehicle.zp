@@ -1,0 +1,213 @@
+// 19_autonomous_vehicle.zp — Self-driving vehicle perception + control
+// Conventional: Waymo/Tesla stack (~millions LOC C++/Python)
+// Industry: Automotive / Autonomous Systems
+// Codex Labs LLC — 2026
+
+// ── SENSORS ────────────────────────────────
+
+lidar      : device("velodyne_128")    -> point_cloud
+cameras    : device("cam_array_8x")   -> frames
+radar      : device("front_radar")     -> returns
+imu        : device("imu_9axis")      -> { accel @ m/s2, gyro @ deg/s, mag @ uT }
+gps        : device("gnss_rtk")       -> position @ m
+wheel      : device("wheel_encoders") -> speed @ m/s
+steering   : device("steering_angle") -> angle @ deg
+
+// ── PERCEPTION ─────────────────────────────
+
+// each sensor → its own detection pipeline, then fuse
+lidar  -> mde("lidar-detect.zdx") @ goya(0) -> lidar_objects
+cameras -> mde("vision-detect.zdx") @ goya(1) -> camera_objects
+radar  -> mde("radar-track.zdx") @ npu -> radar_objects
+
+// sensor fusion — same object seen by multiple sensors = confident
+lidar_objects  -> |
+camera_objects -> | fuse(by: position, within: 0.5m, within_t: 50ms) | -> objects
+radar_objects  -> |
+
+// confidence from resonance — seen by more sensors = more real
+objects.confidence : {
+    gate(sensors: 3) -> 0.99,    // all three see it — it's real
+    gate(sensors: 2) -> 0.85,    // two see it — probably real
+    gate(sensors: 1) -> 0.50     // one sees it — maybe
+}
+
+// ── OBJECT TRACKING ────────────────────────
+
+// track objects across frames — temporal identity
+objects -> track(by: position + velocity, window: 2s) -> tracked
+
+// predict where objects will be
+tracked.velocity -> extrapolate(horizon: 3s) -> predicted_positions
+
+// classify behavior
+tracked -> delta(velocity) -> {
+    gate(accelerating)  -> behavior(approaching),
+    gate(decelerating)  -> behavior(stopping),
+    gate(lateral_shift) -> behavior(lane_change),
+    gate(stable)        -> behavior(cruising)
+}
+
+// ── LOCALIZATION ───────────────────────────
+
+// fuse GPS + IMU + wheel odometry + lidar matching
+gps    -> |
+imu    -> | fuse(method: kalman) | -> ego_position
+wheel  -> |
+lidar  -> map_match(hd_map)  -> |
+
+// lane position
+ego_position -> hd_map.query(lanes) -> {
+    current_lane,
+    lane_boundaries,
+    distance_to_center,
+    upcoming_turns,
+    speed_limit
+}
+
+// ── PATH PLANNING ──────────────────────────
+
+// inputs: where I am, where I'm going, what's around me
+ego_position       -> |
+destination        -> | -> planner -> path
+tracked            -> |
+predicted_positions -> |
+hd_map             -> |
+
+// planner generates trajectory — smooth curve through safe space
+planner -> trajectory : list<waypoint @ m, speed @ m/s, time @ s>
+
+// replan when world changes
+tracked -> on_change(significant) -> planner.replan
+    debounce(100ms)    // don't replan every frame, but often
+
+// ── CONTROL ────────────────────────────────
+
+// follow the trajectory — PID is three Z+ constructs
+trajectory.target_speed -> |
+                            | -> throttle_cmd
+wheel.speed             -> |
+
+// P: error proportional response (knee)
+speed_error : trajectory.target_speed - wheel.speed
+speed_error -> gate(> 0, knee: 2 m/s) -> throttle(proportional)
+speed_error -> gate(< 0, knee: 2 m/s) -> brake(proportional)
+
+// D: rate of change dampening
+delta(speed_error) -> gate(> 0.5 m/s2) -> throttle.dampen
+
+// steering — follow trajectory lateral offset
+trajectory.target_heading -> |
+                              | -> steer_cmd
+steering.angle            -> |
+
+heading_error : trajectory.target_heading - ego_heading
+heading_error -> gate(knee: 2deg) -> steering(proportional)
+
+// ── SAFETY — REFLEX LAYER ──────────────────
+
+// emergency brake — ALWAYS runs, overrides everything
+objects -> gate(distance < 3m, closing_speed > 0) -> emergency_brake
+    priority: reflex
+
+// objects in path within braking distance
+objects -> gate(in_path, distance < braking_distance(speed)) -> {
+    gate(distance < hard_brake_distance) -> emergency_brake,
+    gate(distance < soft_brake_distance) -> brake(proportional, knee: 1s)
+}
+    priority: reflex
+
+// lane departure — wheels crossing boundary
+distance_to_center -> gate(> lane_width * 0.4) -> {
+    steering.correct(toward: center),
+    alert(warn: "lane departure")
+}
+    priority: reflex
+
+// ── BEHAVIOR DECISIONS ─────────────────────
+
+// should I change lanes?
+tracked -> gate(in_lane: current, speed < ego_speed * 0.7, sustained: 5s)
+    -> desire(lane_change)
+
+desire(lane_change) -> gate(adjacent_lane: clear, for: 3s) -> {
+    signal(indicator, side: target_lane),
+    wait(1s),    // signal before moving
+    trajectory.plan(lane_change, to: target_lane) -> planner
+}
+
+// intersection handling
+hd_map.upcoming(intersection, within: 100m) -> {
+    gate(light: green)  -> proceed,
+    gate(light: yellow) -> gate(can_stop_safely) -> { brake | proceed },
+    gate(light: red)    -> stop(at: stop_line)
+}
+
+// pedestrian yielding
+objects -> gate(class: pedestrian, in_crosswalk) -> stop(until: crosswalk_clear)
+    priority: reflex
+
+// ── DEGRADED MODE ──────────────────────────
+
+// sensor failure → graceful degradation, not crash
+lidar  -> on_silence(> 200ms) -> degrade(perception: -30%, max_speed: 25mph)
+cameras -> on_silence(> 200ms) -> degrade(perception: -40%, max_speed: 20mph)
+radar  -> on_silence(> 200ms) -> degrade(perception: -20%, max_speed: 30mph)
+
+// multiple sensor failures → pull over
+degrade -> count(active_sensors) -> gate(< 2) -> {
+    plan(pull_over: nearest_safe_location),
+    alert(critical: "multiple sensor failure — pulling over")
+}
+
+// ── TELEMETRY ──────────────────────────────
+
+ego_position ~> live_map
+objects      ~> live_3d_view
+trajectory   ~> live_path
+speed        ~> live_gauge
+degrade      ~> system_health
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  sensor fusion as merge with spatial+temporal tolerance — natural
+//          confidence from sensor count — resonance for perception
+//          object tracking as temporal identity — t, t-1, t-2 across frames
+//          behavior classification as delta(velocity) gates — clean
+//          PID control composed from knee + delta — reuse from SCADA
+//          emergency brake as reflex — spinal, overrides everything
+//          graceful degradation with on_silence per sensor — smooth
+//          lane change as desire -> check -> signal -> act — readable behavior
+//
+// NEEDED:  fuse(by: position, within:) — spatial-temporal fusion
+//          fuse(method: kalman) — Kalman filter fusion
+//          track(by:, window:) — multi-frame object tracking
+//          extrapolate(horizon:) — predict future positions
+//          map_match() — match sensor data to HD map
+//          hd_map.query — map database queries
+//          planner — path planning (could be MDE model)
+//          trajectory — series of timed waypoints
+//          braking_distance(speed) — physics calculation
+//          signal(indicator) — vehicle turn signal
+//          degrade() — explicit capability reduction
+//
+// KEY INSIGHT: autonomous driving is sensor signals → fused perception
+//   → decision gates → control outputs. it's TRISA applied to
+//   physical space. lidar/camera/radar are three signal sources
+//   that get fused (merged), scored (confidence from sensor count),
+//   filtered (gates on distance, behavior, path), and routed
+//   to actuators (throttle, brake, steering). same pattern. again.
+//
+// KEY INSIGHT: graceful degradation for AV is on_silence per sensor.
+//   when a sensor dies, the system doesn't crash. it reduces capability.
+//   this is the same construct as a Goya card going silent in the fleet
+//   orchestrator. the graph adapts. fewer sensors = lower confidence
+//   = slower speed = eventually pull over. structural degradation.
+//
+// CONVENTIONAL: Waymo's stack is millions of LOC across perception,
+//   planning, control, and simulation. Tesla's FSD is similar.
+//   This is 120 lines. Obviously the MDE models inside (.zdx files)
+//   are the complex part. but the ORCHESTRATION of those models —
+//   the fusion, the decision making, the safety layer, the degradation —
+//   that's what costs millions of LOC, and it's 120 lines of wiring.

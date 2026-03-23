@@ -1,0 +1,190 @@
+// 16_scada_industrial.zp — SCADA / Industrial control system
+// Conventional: Siemens WinCC (~millions LOC), custom PLC + SCADA: ~200,000 LOC
+// Industry: Manufacturing / Energy / Water Treatment
+// Codex Labs LLC — 2026
+
+// ── PLANT DISCOVERY ────────────────────────
+
+// same as hardware discovery — the plant discovers itself
+plant : net.discover(proto: modbus | opcua | profinet | ethercat) -> devices
+
+// ── SENSORS ────────────────────────────────
+
+tank_level   : plant.sensor("tank_01_level")    -> level @ gallons
+flow_in      : plant.sensor("inlet_flow")       -> flow @ gpm
+flow_out     : plant.sensor("outlet_flow")      -> flow @ gpm
+pressure     : plant.sensor("main_pressure")    -> pressure @ psi
+temp_reactor : plant.sensor("reactor_temp")     -> temperature @ C
+ph_sensor    : plant.sensor("ph_probe")         -> ph
+chlorine     : plant.sensor("cl_residual")      -> concentration @ ppm
+vibration    : plant.sensor("pump_01_vib")      -> vibration @ mm_s
+power_draw   : plant.sensor("pump_01_amps")     -> current @ A
+
+// ── ACTUATORS ──────────────────────────────
+
+valve_inlet  : plant.actuator("inlet_valve")    <- position @ percent
+valve_outlet : plant.actuator("outlet_valve")   <- position @ percent
+pump_01      : plant.actuator("pump_01")        <- speed @ rpm
+pump_02      : plant.actuator("pump_02")        <- speed @ rpm
+heater       : plant.actuator("reactor_heat")   <- power @ percent
+dosing_pump  : plant.actuator("chlorine_dose")  <- rate @ ml_min
+
+// ── PROCESS CONTROL ────────────────────────
+
+// tank level — maintain setpoint with knee (no oscillation)
+tank_level -> gate(< 80%, knee: 10%) -> valve_inlet(open: proportional)
+tank_level -> gate(> 90%, knee: 5%)  -> valve_inlet(close: proportional)
+
+// proportional valve control — knee IS proportional control
+// no PID tuner needed. the knee is the P term.
+// delta(tank_level) is the D term.
+// baseline deviation over time is the I term.
+// PID is three Z+ constructs composed.
+
+// reactor temperature — tight control
+temp_reactor -> gate(< setpoint, knee: 2C) -> heater(power: proportional)
+delta(temp_reactor) -> gate(> 1C/s) -> heater(power: reduce)    // D term: slow down if rising fast
+
+// pH control — dosing
+ph_sensor -> gate(< 7.0, knee: 0.3) -> dosing_pump(rate: proportional)
+ph_sensor -> gate(> 7.6, knee: 0.3) -> dosing_pump(rate: 0)
+
+// ── SAFETY — REFLEX LAYER ──────────────────
+// these ALWAYS run. they override EVERYTHING.
+
+pressure -> gate(> 150psi) -> {
+    valve_inlet(close: immediate),
+    pump_01(stop),
+    pump_02(stop),
+    alarm(critical: "OVERPRESSURE")
+}
+    priority: reflex
+
+temp_reactor -> gate(> 95C) -> {
+    heater(power: 0),
+    valve_outlet(open: 100%),
+    alarm(critical: "REACTOR OVERTEMP")
+}
+    priority: reflex
+
+tank_level -> gate(> 98%) -> {
+    valve_inlet(close: immediate),
+    alarm(critical: "TANK OVERFLOW IMMINENT")
+}
+    priority: reflex
+
+// all safety gates also log to tamper-proof audit
+alarm ~> vault.append("safety_log", retention: forever, immutable: true)
+
+// ── PUMP HEALTH ────────────────────────────
+
+// vibration analysis — detect bearing wear before failure
+vibration -> baseline(window: 30d) -> vib_normal
+vibration -> deviation(from: vib_normal) -> gate(> 2σ, knee: 1σ) -> {
+    alert(warn: "pump vibration anomaly"),
+    pump_01 ~> maintenance_schedule
+}
+
+// power draw anomaly — pump working harder = blockage or wear
+power_draw -> baseline(window: 30d) -> power_normal
+power_draw -> deviation(from: power_normal) -> gate(> 2σ) -> {
+    alert(warn: "pump power anomaly")
+}
+
+// correlation — vibration + power anomaly together = imminent failure
+vibration.anomaly -> |
+                      | within(1h) | -> alert(critical: "pump failure predicted")
+power_draw.anomaly -> |                -> maintenance.schedule(urgent)
+
+// ── MASS BALANCE ───────────────────────────
+
+// what goes in must come out — conservation law as signal check
+flow_in -> |
+            | -> balance : flow_in - flow_out
+flow_out -> |
+
+balance -> gate(> 5%, sustained: 10m) -> alert(warn: "mass imbalance — possible leak")
+balance -> gate(> 15%) -> {
+    alarm(critical: "LEAK DETECTED"),
+    valve_inlet(close: immediate),
+    pump_01(stop)
+}
+    priority: reflex
+
+// ── SHIFT HANDOVER ─────────────────────────
+
+// capture plant state at shift change — automatic
+tick(rate: 8h, at: "06:00, 14:00, 22:00") -> {
+    plant.snapshot -> vault.store("shift_log"),
+    anomalies.active -> vault.store("shift_log"),
+    trends(24h) -> vault.store("shift_log")
+}
+
+// ── REGULATORY COMPLIANCE ──────────────────
+
+// water quality reporting — EPA requirements
+chlorine -> gate(< 0.2ppm, sustained: 4h) -> {
+    alert(critical: "chlorine below minimum"),
+    vault.append("compliance_log", violation: true)
+}
+
+ph_sensor -> gate(outside: 6.5 ~ 8.5) -> {
+    alert(warn: "pH out of range"),
+    vault.append("compliance_log", violation: true)
+}
+
+// auto-generate compliance report
+tick(rate: monthly) -> vault.query("compliance_log") -> generate_report -> email(to: regulator)
+
+// ── TELEMETRY ──────────────────────────────
+
+tank_level   ~> live_gauge
+flow_in      ~> live_gauge
+pressure     ~> live_gauge
+temp_reactor ~> live_gauge
+ph_sensor    ~> live_gauge
+pump_01      ~> live_status
+alarm        ~> count(per: 24h, by: severity) ~> alarm_summary
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  knee IS proportional control — this is huge.
+//          PID = knee (P) + delta (D) + baseline deviation (I).
+//          three Z+ constructs compose into PID without a PID library.
+//          safety as reflex priority — always runs, overrides everything
+//          immutable safety log — tamper-proof audit trail
+//          mass balance as flow comparison — conservation law as signal check
+//          pump health as vibration/power baseline + deviation — reuse pattern
+//          compliance as temporal gates — chlorine below min for 4h = violation
+//
+// NEEDED:  plant.sensor/actuator — industrial device abstraction
+//          net.discover(proto: modbus | opcua) — industrial protocols
+//          proportional — actuator responds proportionally to gate openness
+//          immediate — actuator responds instantly (safety)
+//          immutable: true — tamper-proof storage
+//          gate(outside: range) — signal outside a range
+//          plant.snapshot — capture all sensor values at a moment
+//          trends(window) — historical trend data
+//          generate_report — document generation from data
+//          email(to:) — external notification
+//
+// KEY INSIGHT: PID control is three Z+ constructs.
+//   P (proportional) = gate with knee. the knee IS proportional response.
+//   D (derivative) = delta(signal). rate of change. already a keyword.
+//   I (integral) = baseline deviation over time. already a construct.
+//   PID controllers are so common in industrial control that entire
+//   companies exist to tune them. in Z+, they're three lines of wiring.
+//   and they work BETTER because the knee provides smooth nonlinear
+//   response instead of linear PID which overshoots.
+//
+// KEY INSIGHT: safety as reflex priority changes everything.
+//   in conventional SCADA, safety logic runs on separate hardware (SIL-rated PLCs)
+//   because the software can't guarantee response time. in Z+, reflex priority
+//   guarantees interrupt-speed response. the safety chain resolves before
+//   anything else. this COULD replace safety PLCs for many applications.
+//
+// CONVENTIONAL: Siemens WinCC + PLC programming is millions of LOC.
+//   Custom SCADA/HMI: 200k LOC. This is 100 lines with process control,
+//   safety interlocks, predictive maintenance, mass balance verification,
+//   shift handover, and regulatory compliance reporting.

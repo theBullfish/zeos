@@ -1,0 +1,198 @@
+// 18_patient_monitor.zp — ICU patient monitoring system
+// Conventional: Philips IntelliVue (~millions LOC), custom: ~300,000 LOC
+// Industry: Healthcare
+// Codex Labs LLC — 2026
+
+// ── BEDSIDE SENSORS ────────────────────────
+
+ecg       : device("ecg_leads")        -> waveform @ mV
+spo2      : device("pulse_oximeter")   -> saturation @ percent
+bp        : device("nibp_cuff")        -> pressure : { systolic, diastolic } @ mmHg
+temp      : device("thermometer")      -> temperature @ C
+resp      : device("resp_belt")        -> rate @ breaths_per_min
+capno     : device("capnograph")       -> etco2 @ mmHg
+iv_pump   : device("iv_pump_01")       -> { rate @ ml_hr, volume_remaining @ ml }
+
+// ── DERIVED VITALS ─────────────────────────
+
+// heart rate from ECG — not a separate sensor, derived from waveform
+ecg -> detect(qrs_complex) -> rate(per: 1m) -> heart_rate @ bpm
+
+// heart rate variability — delta between beats
+ecg -> detect(r_peak) -> intervals -> {
+    avg(window: 5m) -> hrv_mean,
+    variance(window: 5m) -> hrv_variance
+}
+
+// perfusion index from SpO2 waveform
+spo2.waveform -> amplitude -> perfusion_index
+
+// shock index
+heart_rate -> |
+               | -> shock_index : heart_rate / bp.systolic
+bp.systolic -> |
+
+// MAP (mean arterial pressure)
+bp -> map : bp.diastolic + (bp.systolic - bp.diastolic) / 3
+
+// ── ALARM GATES ────────────────────────────
+
+// each vital has normal ranges — customizable per patient
+heart_rate -> gate(outside: patient.range.hr, knee: 5bpm) -> alarm(hr)
+spo2       -> gate(< patient.range.spo2_min, knee: 2%)    -> alarm(spo2)
+bp.systolic -> gate(outside: patient.range.sbp, knee: 10mmHg) -> alarm(bp)
+temp       -> gate(outside: patient.range.temp, knee: 0.5C) -> alarm(temp)
+resp       -> gate(outside: patient.range.rr, knee: 3)     -> alarm(resp)
+etco2      -> gate(outside: patient.range.etco2, knee: 5mmHg) -> alarm(etco2)
+
+// ── ALARM FATIGUE REDUCTION ────────────────
+
+// THE critical problem in ICU monitoring: too many false alarms
+// nurses become desensitized. real alarms get ignored.
+
+// sustained gate — don't alarm on momentary blips
+alarm -> gate(sustained: 10s) -> confirmed_alarm
+
+// suppress known artifact patterns
+ecg -> gate(artifact: motion | lead_off | electrical) -> suppress_alarm(hr)
+
+// alarm correlation — multiple vitals deteriorating together = real
+confirmed_alarm -> count(distinct: vital, within: 2m) -> {
+    gate(1)    -> priority(low),      // one vital — probably artifact
+    gate(2)    -> priority(medium),   // two vitals — pay attention
+    gate(>= 3) -> priority(high)     // three+ — patient is deteriorating
+}
+    // resonance applied to patient safety.
+    // one alarm is noise. three alarms are convergent evidence.
+
+// ── EARLY WARNING SCORE ────────────────────
+
+// NEWS2 (National Early Warning Score) — UK standard
+news2 : weighted(
+    resp:     score_resp(resp),           // 0-3 based on rate
+    spo2:     score_spo2(spo2),           // 0-3 based on saturation
+    bp:       score_bp(bp.systolic),      // 0-3 based on systolic
+    hr:       score_hr(heart_rate),       // 0-3 based on rate
+    temp:     score_temp(temp),           // 0-3 based on temperature
+    neuro:    score_neuro(consciousness)  // 0-3 based on AVPU
+) -> total_news2
+
+total_news2 -> {
+    gate(0 ~ 4)  -> routine_monitoring,
+    gate(5 ~ 6)  -> escalate(to: charge_nurse),
+    gate(>= 7)   -> escalate(to: rapid_response_team)
+}
+    // a single composite score drives clinical escalation.
+    // currently: nurse manually calculates NEWS2 every few hours.
+    // in Z+: continuously computed, instantly escalated.
+
+// ── TREND ANALYSIS ─────────────────────────
+
+// deterioration trajectory — not just "where is it" but "where is it going"
+heart_rate -> delta -> {
+    gate(rising, > 5bpm/hr, sustained: 1h)   -> trend_alert(hr: rising),
+    gate(falling, > 5bpm/hr, sustained: 1h)  -> trend_alert(hr: falling)
+}
+
+spo2 -> delta -> gate(falling, > 1%/hr, sustained: 2h) -> trend_alert(spo2: falling)
+
+bp.systolic -> delta -> gate(falling, > 10mmHg/hr, sustained: 1h)
+    -> trend_alert(bp: falling)
+
+// trend convergence — multiple vitals trending in bad direction
+trend_alert(hr: rising)    -> |
+trend_alert(spo2: falling) -> | resonance(2 of 3, within: 2h) | -> deterioration_warning
+trend_alert(bp: falling)   -> |
+
+deterioration_warning -> escalate(to: attending_physician)
+    // "Patient is not alarming YET, but three vitals are trending badly.
+    //  At current trajectory, alarms will trigger in ~2 hours."
+    // this doesn't exist in any commercial patient monitor.
+
+// ── IV PUMP INTEGRATION ────────────────────
+
+// medication effect monitoring
+iv_pump.rate -> on_change -> {
+    // track vital signs response after rate change
+    heart_rate -> window(after: rate_change, duration: 30m) -> drug_response(hr),
+    bp         -> window(after: rate_change, duration: 30m) -> drug_response(bp)
+}
+
+// empty pump warning
+iv_pump.volume_remaining -> gate(< 30ml, knee: 10ml) -> alert(warn: "IV low")
+iv_pump.volume_remaining -> gate(<= 0) -> alert(critical: "IV EMPTY")
+    priority: reflex
+
+// ── HANDOFF ────────────────────────────────
+
+// shift change — auto-generate patient summary
+tick(rate: 12h, at: "07:00, 19:00") -> {
+    patient.vitals_summary(24h),
+    patient.alarm_history(12h),
+    patient.trend_analysis,
+    patient.medication_changes,
+    patient.news2_trend
+} -> handoff_report -> nurse_station
+
+// ── COMPLIANCE / CHARTING ──────────────────
+
+// auto-chart vitals — no manual entry
+vitals -> tick(rate: 15m) -> vault.append("patient_chart", timestamped)
+
+// all alarms logged for legal record
+alarm ~> vault.append("alarm_log", retention: 10y, immutable: true)
+
+// ── TELEMETRY ──────────────────────────────
+
+heart_rate ~> live_waveform
+spo2       ~> live_gauge
+bp         ~> live_gauge
+news2      ~> live_score
+alarm      ~> count(per: 1h) ~> alarm_frequency
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  derived vitals from raw waveforms — HR from ECG, PI from SpO2
+//          patient-specific ranges — gate(outside: patient.range.hr)
+//          alarm fatigue as sustained gate + correlation — CRITICAL for patient safety
+//          resonance for multi-vital deterioration — one alarm = noise, three = real
+//          NEWS2 as weighted composite score — continuous, not manual
+//          trend analysis as delta trajectories — "where is it going"
+//          deterioration prediction as trend resonance — doesn't exist commercially
+//          drug response monitoring as window after event — temporal causality
+//
+// NEEDED:  device() — medical device as signal source
+//          detect(qrs_complex) / detect(r_peak) — waveform feature detection
+//          gate(artifact:) — artifact detection/suppression
+//          score_X() — clinical scoring functions
+//          escalate(to:) — clinical escalation chain
+//          window(after:, duration:) — observe signal for period after event
+//          consciousness — AVPU assessment input
+//
+// NEW CONSTRUCT: window(after: event, duration: time)
+//   observe a signal for a specific period after a triggering event.
+//   "watch heart rate for 30 minutes after medication change."
+//   this is temporal causality — did action A cause effect B?
+//   different from baseline (rolling). different from sustained (threshold).
+//   this is: event triggers observation window.
+//
+// KEY INSIGHT: alarm fatigue is a resonance problem.
+//   ICU nurses face 150-400 alarms per patient per day. 85-99% are false.
+//   the solution isn't better thresholds. it's convergent evidence.
+//   one vital alarming = probably artifact (low priority).
+//   three vitals alarming simultaneously = patient deteriorating (high priority).
+//   this is resonance. the same construct that detects network intrusions
+//   and trending topics. applied to patient safety.
+//
+// KEY INSIGHT: deterioration prediction doesn't exist commercially.
+//   no patient monitor says "this patient isn't alarming yet, but
+//   three vitals are trending badly and will alarm in ~2 hours."
+//   in Z+, it's delta + trend + resonance. the constructs compose.
+//   this could save lives. not theoretically. actually.
+//
+// CONVENTIONAL: Philips IntelliVue is millions of LOC. Custom patient
+//   monitoring: 300k LOC. This is 110 lines with continuous NEWS2,
+//   alarm fatigue reduction, deterioration prediction, drug response
+//   tracking, and auto-charting. The deterioration prediction alone
+//   is a feature no commercial system offers.

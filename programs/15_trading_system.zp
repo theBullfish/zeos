@@ -1,0 +1,178 @@
+// 15_trading_system.zp — Electronic trading / order matching engine
+// Conventional: NYSE matching engine (~millions LOC C++), or custom: ~100,000 LOC
+// Industry: Finance / Capital Markets
+// Codex Labs LLC — 2026
+
+// ── MARKET DATA ────────────────────────────
+
+feed : net.connect(exchange: "nasdaq", proto: fix) -> quotes
+    priority: reflex    // market data is microsecond-sensitive
+
+quotes -> {
+    gate(type: trade) -> trades,
+    gate(type: bid)   -> bids,
+    gate(type: ask)   -> asks
+}
+
+// ── ORDER BOOK ─────────────────────────────
+
+// the order book IS a merge of all bids and asks, sorted
+bids -> | merge(sort: price descending, then: time ascending) | -> bid_book
+asks -> | merge(sort: price ascending, then: time ascending)  | -> ask_book
+
+// best bid/ask — the top of each book
+bid_book -> take(1) -> best_bid
+ask_book -> take(1) -> best_ask
+
+// spread
+best_bid -> |
+             | -> spread : best_ask - best_bid
+best_ask -> |
+
+// ── ORDER INTAKE ───────────────────────────
+
+orders : net.listen(port: 4001, proto: fix) -> incoming
+    priority: reflex
+
+incoming -> validate(schema: order_schema) -> {
+    gate(valid)   -> risk_check,
+    gate(invalid) -> reject(reason: validation_errors)
+}
+
+order_schema : {
+    symbol:   string, required,
+    side:     buy | sell, required,
+    quantity: f64, required, gate(> 0),
+    price:    f64 @ cents, optional,       // absent = market order
+    type:     limit | market | stop, required
+}
+
+// ── RISK CHECK ─────────────────────────────
+
+risk_check -> {
+    // position limit — can't exceed max exposure
+    account.position(symbol) + order.quantity
+        -> gate(< account.max_position) -> pass,
+
+    // fat finger — order too large for this symbol's normal volume
+    order.quantity -> deviation(from: symbol.avg_volume)
+        -> gate(< 5σ) -> pass,
+
+    // price sanity — limit price too far from market
+    order.price -> deviation(from: best_bid)
+        -> gate(< 10%) -> pass
+}
+
+pass -> | all | -> matching_engine
+pass -> gate(any_fail) -> reject(reason: risk_reasons)
+
+// ── MATCHING ENGINE ────────────────────────
+
+matching_engine -> {
+    gate(type: market, side: buy)  -> match_against(ask_book),
+    gate(type: market, side: sell) -> match_against(bid_book),
+    gate(type: limit, side: buy)   -> {
+        gate(price >= best_ask) -> match_against(ask_book),  // crosses spread
+        gate(price < best_ask)  -> bid_book.insert(order)    // rests on book
+    },
+    gate(type: limit, side: sell) -> {
+        gate(price <= best_bid) -> match_against(bid_book),
+        gate(price > best_bid)  -> ask_book.insert(order)
+    },
+    gate(type: stop) -> stop_book.insert(order)
+}
+
+// match = price/time priority
+match_against(book) -> {
+    gate(fill: complete) -> execution(full),
+    gate(fill: partial)  -> { execution(partial), book.insert(remainder) },
+    gate(fill: none)     -> book.insert(order)    // no match, rest on book
+}
+
+// ── EXECUTION ──────────────────────────────
+
+execution -> vault.ledger.atomic {
+    debit(buyer.cash, amount),
+    credit(buyer.position, quantity),
+    debit(seller.position, quantity),
+    credit(seller.cash, amount)
+}
+
+execution -> {
+    notify(buyer, fill_report),
+    notify(seller, fill_report),
+    broadcast(trade_report),         // public trade tape
+    vault.append("trade_log")        // permanent record
+}
+
+// ── STOP ORDERS ────────────────────────────
+
+// stop triggers when market price crosses stop price
+trades.price -> stop_book.check -> {
+    gate(triggered: buy_stop)  -> matching_engine(as: market_buy),
+    gate(triggered: sell_stop) -> matching_engine(as: market_sell)
+}
+
+// ── MARKET SURVEILLANCE ────────────────────
+
+// wash trading — same entity on both sides
+execution -> gate(buyer.entity == seller.entity) -> flag(wash_trade)
+
+// spoofing — large orders placed and cancelled quickly
+orders -> on_cancel(within: 100ms, size: > 1000) -> flag(spoof)
+
+// momentum ignition — rapid orders moving the price
+orders -> rate(per: account, within: 1s) -> gate(> 50)
+    -> delta(best_bid) -> gate(> 0.5%) -> flag(momentum_ignition)
+
+// circuit breaker — price moved too far too fast
+delta(trades.price, within: 5m) -> gate(> 10%) -> {
+    halt(symbol, duration: 5m),
+    alert(critical: "circuit breaker triggered")
+}
+    priority: reflex
+
+// ── TELEMETRY ──────────────────────────────
+
+matching_engine ~> avg(latency) ~> match_latency    // must be < 1μs
+orders          ~> rate(per: 1s) ~> order_rate
+execution       ~> rate(per: 1s) ~> trade_rate
+spread          ~> avg(per: 1s) ~> avg_spread
+bid_book        ~> depth(levels: 10) ~> book_depth
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  order book as sorted merge — bids and asks merging with priority
+//          matching as gate routing — market/limit/stop dispatch naturally
+//          risk check as chord (all must pass) — clean
+//          fat finger as deviation + sigma — reuse from anomaly detector
+//          circuit breaker as delta gate with reflex — critical safety
+//          surveillance as temporal pattern detection — reuse from everywhere
+//          execution as atomic ledger — reuse from payment processor
+//
+// NEEDED:  net.connect(proto: fix) — FIX protocol for market data
+//          merge(sort: price, then: time) — priority-sorted merge
+//          book.insert / book.check — order book operations
+//          halt(duration:) — temporary system pause
+//          match_against(book) — order matching primitive
+//          fill states — complete, partial, none
+//
+// NEW CONSTRUCT: halt(duration:)
+//   temporarily freeze a signal chain. different from gate(closed).
+//   a gate blocks individual signals. halt freezes the ENTIRE chain.
+//   everything queues until the halt lifts. then it all flows.
+//   use cases: circuit breakers, maintenance windows, emergency stops.
+//
+// KEY INSIGHT: an order book is a priority-sorted merge point.
+//   bids merge sorted by price descending, then time ascending.
+//   that's merge() with a sort policy. the same construct as a
+//   chat room (merge by time) or a leaderboard (merge by score).
+//   the merge operator needs configurable sort policies.
+//
+// CONVENTIONAL: NYSE Arca matching engine is millions of LOC C++.
+//   A custom matching engine with risk checks: 100k LOC.
+//   This is 90 lines with order matching, risk management,
+//   stop orders, market surveillance, and circuit breakers.
+//   The circuit breaker alone is a safety-critical feature that
+//   took exchanges years to implement correctly.
