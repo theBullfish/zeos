@@ -1,0 +1,117 @@
+// 05_firewall.zp — Packet filter / firewall
+// Conventional: iptables (~20,000 LOC kernel module) + config management
+// Codex Labs LLC — 2026
+
+// ── INTAKE ─────────────────────────────────
+
+wire : net.interface("eth0") -> packets
+    priority: reflex    // packet filtering is spinal. no deliberation.
+
+// ── LAYER 3 GATES ──────────────────────────
+
+// known bad — drop immediately, no further processing
+packets -> gate(source: blacklist) -> drop
+packets -> gate(dest: blacklist)   -> drop
+
+// known good — pass immediately
+packets -> gate(source: whitelist) -> accept
+
+// ── STATEFUL ───────────────────────────────
+
+// established connections pass — the wire remembers the handshake
+packets -> gate(state: established) -> accept
+packets -> gate(state: related)     -> accept
+
+// new connections go through rules
+packets -> gate(state: new) -> rules
+
+// ── RULES ──────────────────────────────────
+
+// inbound
+rules -> gate(direction: in) -> {
+    gate(proto: tcp, port: 22)   -> accept,     // SSH
+    gate(proto: tcp, port: 80)   -> accept,     // HTTP
+    gate(proto: tcp, port: 443)  -> accept,     // HTTPS
+    gate(proto: icmp)            -> accept,     // ping
+    gate(otherwise)              -> drop         // default deny
+}
+
+// outbound — permissive but logged
+rules -> gate(direction: out) -> accept
+rules -> gate(direction: out) ~> log_outbound   // tap, don't block
+
+// ── RATE LIMITING ──────────────────────────
+
+// SYN flood protection — per-source rate gate
+packets -> gate(proto: tcp, flags: SYN)
+        -> rate(per: source, limit: 20/s, knee: 5/s)
+        -> on_block -> drop
+
+// ── PORT SCAN DETECTION ────────────────────
+
+// same source hitting many ports in short window = scanning
+packets -> gate(state: new) -> group(by: source)
+        -> count(distinct: port, within: 10s)
+        -> gate(> 15) -> {
+            blacklist.add(source, ttl: 1h),
+            alert(warn: "port scan from " + source)
+        }
+
+// ── GEO BLOCKING ──────────────────────────
+
+packets -> gate(source.geo: blocked_countries) -> drop
+
+// ── DEEP INSPECTION (optional) ─────────────
+
+// route suspicious packets through MDE for payload analysis
+packets -> gate(state: new, port: 80 | 443)
+        -> safety @ mde("payload-inspect.zdx")
+        -> gate(threat < 0.3) -> accept
+        -> gate(threat >= 0.3) -> {
+            drop,
+            alert(critical: "malicious payload blocked")
+        }
+
+// ── TELEMETRY ──────────────────────────────
+
+packets ~> rate(per: 1s) ~> pps
+drop    ~> rate(per: 1m) ~> drops_per_minute
+drop    ~> count(by: source, per: 1h) ~> top_blocked
+accept  ~> count(by: port, per: 1m) ~> port_heatmap
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  priority: reflex — packet filtering MUST be interrupt-speed
+//          stateful tracking as gate(state:) — the wire remembers
+//          default deny as gate(otherwise) -> drop — clean
+//          SYN flood as rate gate with knee — smooth limiting
+//          port scan as count(distinct:, within:) — confluence thinking
+//          MDE for deep packet inspection — AI in the firewall path
+//
+// NEEDED:  net.interface() — raw network interface as signal source
+//          drop / accept — terminal actions for packet flow
+//          gate(state: established/related/new) — stateful tracking
+//          gate(flags: SYN) — TCP flag inspection
+//          group(by:) — signal grouping by property
+//          count(distinct:, within:) — cardinality counting in time window
+//          blacklist.add(ttl:) — dynamic list management
+//          source.geo — geographic lookup on IP
+//
+// NEW CONSTRUCT: "drop" and "accept" as terminal nodes.
+//   in most Z+ programs, signals flow onward. in a firewall,
+//   some signals must be explicitly terminated. "drop" means
+//   the signal ceases to exist. "accept" means it passes out
+//   the other side of the interface.
+//   need: terminal nodes — endpoints where signals end, not just flow.
+//
+// NEW INSIGHT: priority: reflex on the entire program.
+//   a firewall runs at wire speed. every gate in this graph
+//   must resolve in microseconds. this isn't one reflex chain —
+//   it's a program where EVERYTHING is reflex priority.
+//   need: program-level priority, not just per-chain.
+//
+// CONVENTIONAL: iptables is 20k LOC in kernel. plus nftables, firewalld,
+//   fail2ban for scan detection, GeoIP databases, separate IDS for
+//   deep inspection. This is 55 lines that does all of it, including
+//   AI-powered payload inspection that iptables can't do at all.

@@ -1,0 +1,161 @@
+// 09_anomaly_detector.zp — Multi-source anomaly detection
+// Conventional: custom ML pipeline + feature engineering (~10,000 LOC Python)
+//   or: Datadog/Splunk anomaly detection (SaaS, proprietary)
+// Codex Labs LLC — 2026
+
+// ── SOURCES ────────────────────────────────
+
+cpu       : zixel.cores -> utilization
+memory    : zixel.memory -> usage
+disk      : zixel.storage -> io_rate
+network   : zixel.network -> traffic
+app       : net.listen(port: 9100) -> metrics
+errors    : fs("/var/log/app/*.log") -> gate(level: error) -> error_stream
+
+// ── BASELINE ───────────────────────────────
+
+// learn what "normal" looks like — rolling window
+cpu      -> baseline(window: 7d) -> cpu_normal
+memory   -> baseline(window: 7d) -> memory_normal
+disk     -> baseline(window: 7d) -> disk_normal
+network  -> baseline(window: 7d) -> network_normal
+errors   -> rate(per: 1m) -> baseline(window: 7d) -> error_normal
+
+// ── DEVIATION ──────────────────────────────
+
+// anomaly = signal deviating from its own baseline
+// not a fixed threshold — relative to learned normal
+
+cpu     -> deviation(from: cpu_normal)     -> cpu_dev
+memory  -> deviation(from: memory_normal)  -> memory_dev
+disk    -> deviation(from: disk_normal)    -> disk_dev
+network -> deviation(from: network_normal) -> network_dev
+errors  -> rate(per: 1m) -> deviation(from: error_normal) -> error_dev
+
+// ── ANOMALY GATES ──────────────────────────
+
+// single-signal anomaly — something is weird
+cpu_dev     -> gate(> 2σ, knee: 1σ) -> anomaly(source: cpu)
+memory_dev  -> gate(> 2σ, knee: 1σ) -> anomaly(source: memory)
+disk_dev    -> gate(> 2σ, knee: 1σ) -> anomaly(source: disk)
+network_dev -> gate(> 2σ, knee: 1σ) -> anomaly(source: network)
+error_dev   -> gate(> 2σ, knee: 1σ) -> anomaly(source: errors)
+
+// ── CORRELATION ────────────────────────────
+
+// multi-signal anomaly — things are weird TOGETHER
+// resonance: independent signals converging on "something is wrong"
+
+anomaly(source: cpu)     -> |
+anomaly(source: memory)  -> | resonance(2 of 5, within: 5m) | -> incident(severity: warn)
+anomaly(source: disk)    -> |
+anomaly(source: network) -> |
+anomaly(source: errors)  -> |
+
+anomaly(source: cpu)     -> |
+anomaly(source: memory)  -> | resonance(3 of 5, within: 5m) | -> incident(severity: high)
+anomaly(source: disk)    -> |
+anomaly(source: network) -> |
+anomaly(source: errors)  -> |
+
+anomaly(source: cpu)     -> |
+anomaly(source: memory)  -> | resonance(4 of 5, within: 2m) | -> incident(severity: critical)
+anomaly(source: disk)    -> |
+anomaly(source: network) -> |
+anomaly(source: errors)  -> |
+
+// ── PATTERN RECOGNITION ────────────────────
+
+// known failure signatures — temporal patterns
+cpu_dev -> spike then memory_dev -> spike within(30s)
+    -> pattern(memory_leak)
+
+disk_dev -> sustained(> 2σ, for: 10m) then error_dev -> spike
+    -> pattern(disk_exhaustion)
+
+network_dev -> spike then all_dev -> spike within(5s)
+    -> pattern(ddos)
+
+// ── SEASONAL AWARENESS ─────────────────────
+
+// monday morning is different from saturday night
+// the baseline adjusts by time-of-week
+cpu -> baseline(window: 7d, by: day_of_week, hour) -> seasonal_normal
+
+// "CPU is high" on Monday at 9am is normal.
+// "CPU is high" on Sunday at 3am is an anomaly.
+// Same value. Different context. Different decision.
+
+// ── RESPONSE ───────────────────────────────
+
+incident(severity: warn)     -> alert(channel: slack)
+incident(severity: high)     -> alert(channel: slack + pager)
+incident(severity: critical) -> {
+    alert(channel: slack + pager + phone),
+    auto_remediate
+}
+
+// auto-remediation for known patterns
+pattern(memory_leak)     -> exec("systemctl restart app")
+pattern(disk_exhaustion) -> exec("cleanup-old-logs.sh")
+pattern(ddos)            -> firewall.activate(ddos_rules)
+
+// ── TELEMETRY ──────────────────────────────
+
+anomaly   ~> count(per: 1h, by: source) ~> anomaly_heatmap
+incident  ~> count(per: 1d, by: severity) ~> incident_trend
+baseline  ~> drift(per: 1w) ~> baseline_evolution
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  baseline as rolling learned normal — temporal thinking
+//          deviation from baseline — delta, not threshold
+//          σ (sigma) in gates — statistical gates feel native
+//          resonance for multi-signal correlation — this is the killer feature
+//          severity scaling by resonance count — 2/5 = warn, 3/5 = high, 4/5 = critical
+//          seasonal baseline — same value, different context = different decision
+//          known patterns as temporal sequences — spike then spike
+//          auto-remediation wired directly to patterns — response IS the wiring
+//
+// NEEDED:  baseline(window:) — rolling statistical learning
+//          deviation(from:) — distance from baseline
+//          σ as a unit — standard deviation as measurement unit
+//          sustained(for:) — signal holds deviation for duration
+//          pattern() — named temporal sequence detection
+//          "then" operator — A then B within window (ordered confluence)
+//          seasonal baseline — baseline segmented by calendar features
+//          auto_remediate — response actions triggered by patterns
+//
+// NEW CONSTRUCT: σ (sigma) as a gate unit.
+//   gate(> 2σ) means "more than 2 standard deviations from normal."
+//   this is statistical gating — the threshold is relative, not absolute.
+//   pairs perfectly with baseline learning.
+//   no ML pipeline needed. just signal + baseline + sigma gate.
+//
+// NEW CONSTRUCT: "then" as ordered temporal operator.
+//   confluence (within) says "these happened close together."
+//   "then" says "this happened BEFORE that, close together."
+//   A then B is different from B then A.
+//   already hinted at in SIGNAL_LOGIC.md confluence patterns.
+//   needs formal definition in the spec.
+//
+// KEY INSIGHT: anomaly detection in the old world requires:
+//   - data collection agents
+//   - time series database
+//   - feature engineering
+//   - ML model training
+//   - threshold tuning
+//   - correlation engine
+//   - alert routing
+//   each a separate system with separate code.
+//   in Z+: baseline -> deviation -> gate -> resonance -> alert.
+//   one signal chain. the "ML" is just the baseline learning.
+//   the "correlation engine" is just resonance.
+//   the "alert routing" is just gates on severity.
+//
+// CONVENTIONAL: Datadog anomaly detection is SaaS (proprietary).
+//   Building it yourself: 10k+ LOC Python + ML pipeline + infrastructure.
+//   This is 65 lines with learned baselines, statistical gating,
+//   multi-signal correlation, seasonal awareness, pattern recognition,
+//   and auto-remediation. None of which exist together in one tool.

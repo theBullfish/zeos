@@ -1,0 +1,127 @@
+// 06_message_queue.zp — Distributed message queue (Kafka-like)
+// Conventional: Apache Kafka (~500,000 LOC Java) or RabbitMQ (~100,000 LOC Erlang)
+// Codex Labs LLC — 2026
+
+// ── THE INSIGHT ────────────────────────────
+//
+// A message queue is a wire with memory.
+// Z+ wires already flow signals. Vault already stores.
+// Kafka is 500,000 lines of Java to simulate a wire with memory.
+
+// ── TOPICS ─────────────────────────────────
+
+// a topic is a named wire
+topic("orders")    : wire -> orders
+topic("payments")  : wire -> payments
+topic("logs")      : wire -> logs
+
+// ── PRODUCE ────────────────────────────────
+
+// producing = emitting a signal onto a named wire
+producer : net.listen(port: 9092, proto: tcp) -> incoming
+
+incoming -> gate(topic: "orders")   -> orders
+incoming -> gate(topic: "payments") -> payments
+incoming -> gate(topic: "logs")     -> logs
+
+// ── CONSUME ────────────────────────────────
+
+// consuming = tapping a wire from a named position
+// each consumer group tracks its own position (offset)
+
+orders -> consumer_group("order-service") -> {
+    deliver(to: subscriber),
+    ack -> advance(offset)
+}
+
+orders -> consumer_group("analytics") -> {
+    deliver(to: subscriber),
+    ack -> advance(offset)
+}
+
+// two groups on the same wire. each reads independently.
+// that's just... two taps on the same signal.
+
+// ── PERSISTENCE ────────────────────────────
+
+// every topic is stored — the wire has memory
+orders   -> vault.append("orders", retention: 7d)
+payments -> vault.append("payments", retention: 30d)
+logs     -> vault.append("logs", retention: 3d)
+
+// replay = reading from vault instead of live wire
+vault.replay("orders", from: offset) -> consumer_group("late-joiner")
+
+// ── PARTITIONING ───────────────────────────
+
+// partition = fork by key, for ordered parallel processing
+orders -> partition(by: order_id, count: 8) -> {
+    partition(0) -> consumer(0),
+    partition(1) -> consumer(1),
+    // ...
+    partition(7) -> consumer(7)
+}
+
+// order guaranteed within partition.
+// signals with the same key always flow to the same partition.
+// that's just deterministic routing through a fork.
+
+// ── BACKPRESSURE ───────────────────────────
+
+// consumer too slow? signals accumulate. that's a signal too.
+consumer_group("order-service").lag -> gate(> 1000, knee: 500) -> {
+    alert(warn: "consumer lagging"),
+    producer.throttle(0.8)              // tell producers to ease off
+}
+
+// lag is just: current offset - consumer offset.
+// it's a delta. Z+ already thinks in deltas.
+
+// ── DEAD LETTER ────────────────────────────
+
+// message failed 3 times → dead letter wire
+consumer_group -> on_fail(retries: 3) -> dead_letter
+dead_letter -> vault.store("dead_letters") ~> alert(error: "dead letter")
+
+// ── TELEMETRY ──────────────────────────────
+
+orders   ~> rate(per: 1s) ~> orders_throughput
+payments ~> rate(per: 1s) ~> payments_throughput
+consumer_group("order-service").lag ~> consumer_lag
+vault    ~> disk_usage(by: topic) ~> storage
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  topic as named wire — this is literally what a topic is
+//          consumer groups as taps with position tracking — natural
+//          persistence as vault.append with retention — temporal storage
+//          backpressure as lag signal through a gate — delta thinking
+//          dead letter as on_fail with retry count — graceful degradation
+//          partitioning as deterministic fork — already in the language
+//
+// NEEDED:  topic() — named wire declaration
+//          consumer_group() — stateful tap with offset tracking
+//          ack / advance(offset) — acknowledgment + position advancement
+//          vault.append — append-only storage (different from vault.store)
+//          vault.replay — read from storage as signal stream
+//          partition(by:, count:) — deterministic signal distribution
+//          on_fail(retries:) — retry with count before giving up
+//          producer.throttle() — backpressure signal to source
+//
+// KEY INSIGHT: A message queue is a wire with memory and position tracking.
+//   Kafka is half a million lines because Java doesn't have wires.
+//   Z+ has wires. Adding memory (vault) and position (offset) to a wire
+//   gives you Kafka. The entire concept of a message queue is an
+//   artifact of languages that can't express signal flow.
+//
+// NEW CONSTRUCT: "ack" — acknowledgment signal flowing BACKWARD.
+//   consumer receives message, processes it, sends ack back.
+//   the ack flows upstream to advance the offset.
+//   this is the second case (after HTTP) of bidirectional flow.
+//   Z+ needs a formal concept of return signals / upstream flow.
+//
+// CONVENTIONAL: Kafka is 500k LOC Java. RabbitMQ is 100k LOC Erlang.
+//   This is 55 lines. With persistence, partitioning, consumer groups,
+//   backpressure, dead letters, and replay. Kafka doesn't have
+//   knee-based backpressure — it hard-blocks or hard-drops.

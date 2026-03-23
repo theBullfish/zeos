@@ -1,0 +1,118 @@
+// 03_http_server.zp — HTTP server with routing
+// Conventional: Express.js (~200 LOC) or Flask (~150 LOC) for basic server
+//   with middleware, error handling, logging: ~1,500 LOC
+// Codex Labs LLC — 2026
+
+// ── LISTEN ─────────────────────────────────
+
+server : net.listen(port: 8080, proto: http) -> requests
+
+// ── ROUTE ──────────────────────────────────
+
+// routing IS gate filtering on path + method
+requests -> gate(method: GET, path: "/")           -> home
+requests -> gate(method: GET, path: "/api/users")  -> list_users
+requests -> gate(method: GET, path: "/api/users/:id") -> get_user
+requests -> gate(method: POST, path: "/api/users") -> create_user
+requests -> gate(method: DELETE, path: "/api/users/:id") -> delete_user
+
+// unmatched requests
+requests -> gate(unmatched) -> respond(404, "not found")
+
+// ── MIDDLEWARE (it's just gates before the route) ──
+
+// v2: middleware as signal chain before routing
+server : net.listen(port: 8080, proto: http)
+    -> log_request
+    -> rate_limit
+    -> auth_check
+    -> requests
+
+// logging tap — observe without affecting flow
+requests ~> log(method, path, timestamp)
+
+// rate limiting — per-source gate
+rate_limit : gate(source.rate < 100/m, knee: 20/m)
+    on_block -> respond(429, "slow down")
+
+// auth — gate that checks token
+auth_check : gate(
+    path ~ "/api/*",                    // only API routes need auth
+    header("Authorization") -> verify   // signal flows through verification
+)
+    on_block -> respond(401, "unauthorized")
+
+// ── HANDLERS ───────────────────────────────
+
+home -> respond(200, static("/index.html"))
+
+list_users -> vault.query("users") -> respond(200)
+
+get_user -> vault.query("users", id: params.id) -> {
+    gate(found)     -> respond(200),
+    gate(not_found) -> respond(404, "user not found")
+}
+
+create_user -> validate(body, schema: user_schema) -> {
+    gate(valid)   -> vault.store("users", body) -> respond(201),
+    gate(invalid) -> respond(400, errors)
+}
+
+delete_user -> vault.delete("users", id: params.id) -> respond(204)
+
+// ── SCHEMA ─────────────────────────────────
+
+user_schema : {
+    name:  string, required,
+    email: string, required, format: email,
+    age:   f32 @ years, optional
+}
+
+// ── STATIC FILES ───────────────────────────
+
+requests -> gate(path ~ "/static/*") -> fs.serve("/var/www/static")
+
+// ── TELEMETRY ──────────────────────────────
+
+requests  ~> rate(per: 1s) ~> rps
+requests  ~> avg(response_time) ~> latency
+requests  ~> count(by: status_code, per: 1m) ~> status_breakdown
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  routing as gate(method:, path:) — perfect. routing IS filtering.
+//          middleware as signal chain — log -> rate_limit -> auth -> route
+//          this is exactly what Express middleware does, but as wires
+//          tap (~>) for logging — doesn't affect the request flow
+//          schema validation as gate(valid/invalid) fork
+//
+// NEEDED:  net.listen() — network listener as signal source
+//          respond() — emit HTTP response back through the wire
+//          params — path parameter extraction (:id)
+//          body — request body access
+//          header() — request header access
+//          validate() — schema validation node
+//          static file serving — fs.serve() convenience
+//          on_block — what happens when a gate blocks (different from on_silence)
+//
+// NEW CONSTRUCT: "on_block" — when a gate actively blocks a signal.
+//   on_silence = nothing arrived
+//   on_block = something arrived but was rejected
+//   these are different. a rate limiter doesn't go silent. it blocks.
+//   the blocked signal needs somewhere to go (429 response).
+//
+// NEW INSIGHT: request/response is a ROUND TRIP through a wire.
+//   signal goes in (request), flows through gates, comes back (response).
+//   this is different from one-way signal flow.
+//   Z+ needs a concept of bidirectional wires or return paths.
+//   maybe: request -> handler -> respond (respond sends back through same wire)
+//   or: request <-> handler (bidirectional operator)
+//
+// AMBIGUOUS: how does respond() know which request to respond to?
+//   in a signal graph, the response must flow back to the correct source.
+//   need: request carries an identity, respond routes back to it.
+//   this might be implicit (the wire remembers its source) or explicit.
+//
+// CONVENTIONAL: Express.js basic is 200 LOC. With middleware, auth,
+//   validation, rate limiting, logging: 1,500+. This is ~50 lines.

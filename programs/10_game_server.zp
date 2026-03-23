@@ -1,0 +1,182 @@
+// 10_game_server.zp — Multiplayer game server (state sync, tick rate, physics)
+// Conventional: custom engine (~50,000+ LOC C++/Rust) or Photon/Mirror (~10,000 LOC)
+// Codex Labs LLC — 2026
+
+// ── WORLD ──────────────────────────────────
+
+// the game world is a signal graph. entities are nodes. physics is flow.
+world : tick(rate: 60Hz) -> frame
+
+// every frame, the world resolves. not a loop. a clock signal.
+
+// ── CONNECTIONS ─────────────────────────────
+
+server : net.listen(port: 7777, proto: udp) -> players
+
+players -> auth.verify -> {
+    gate(valid)   -> spawn(entity) -> world.add,
+    gate(invalid) -> disconnect("bad auth")
+}
+
+players -> on_disconnect -> world.remove(entity) -> broadcast(despawn)
+
+// ── INPUT ──────────────────────────────────
+
+// player input is a signal. 60 times per second.
+player.connection -> input : {
+    movement : vec2,
+    aim      : vec2,
+    actions  : fire | jump | use | reload
+}
+
+// ── PHYSICS ────────────────────────────────
+
+// every entity has position, velocity, state
+entity : {
+    pos     : vec3 @ m,
+    vel     : vec3 @ m/s,
+    hp      : f32,
+    state   : alive | dead | spectating
+}
+
+// physics is delta applied to position
+frame -> entity.pos + (entity.vel * frame.dt) -> entity.pos
+
+// collision = two entities overlapping
+entity_a.pos -> |
+                 | gate(distance < hitbox) | -> collision(a, b)
+entity_b.pos -> |
+
+// gravity
+entity.vel + (gravity * frame.dt) -> entity.vel
+    gate(entity.grounded: false)    // only if airborne
+
+// ── ACTIONS ────────────────────────────────
+
+input.actions -> gate(fire) -> {
+    raycast(from: entity.pos, dir: entity.aim) -> hit_check,
+    spawn(projectile, pos: entity.pos, dir: entity.aim) -> world.add
+}
+
+hit_check -> gate(hit: entity) -> {
+    target.hp - damage -> target.hp,
+    target.hp -> gate(<= 0) -> kill(target) -> {
+        target.state = dead,
+        broadcast(kill_event),
+        respawn(target, delay: 3s)
+    }
+}
+
+input.actions -> gate(jump) -> gate(entity.grounded) -> entity.vel.y + jump_force
+
+// ── STATE SYNC ─────────────────────────────
+
+// only send what changed — delta compression native to Z+
+frame -> world.entities -> delta(t, t-1) -> {
+    gate(changed) -> broadcast(delta_update),
+    gate(unchanged) -> /dev/null              // don't send what didn't change
+}
+
+// this IS TRISA preprocessing on game state.
+// Fortnite sends 2MB/s of state. with delta: maybe 200KB/s.
+
+// ── INTERPOLATION ──────────────────────────
+
+// client is always behind. smooth it.
+incoming_state -> interpolate(from: t-2, to: t-1, at: render_time)
+
+// server reconciliation — client predicted wrong
+client_prediction -> |
+                      | gate(diverged) | -> correct(snap: false, blend: 100ms)
+server_state      -> |
+
+// smooth correction, not rubber-banding. knee logic.
+
+// ── LAG COMPENSATION ───────────────────────
+
+// player fired 80ms ago — rewind world to their perspective
+input(fire) -> rewind(world, by: player.latency) -> raycast -> hit_check
+
+// temporal access is native. t-1, t-2, t-N.
+// "rewind the world 80ms" is just reading from the temporal window.
+// every other game engine builds a custom snapshot buffer for this.
+// Z+ just... remembers.
+
+// ── ANTI-CHEAT ─────────────────────────────
+
+// speed hack detection — player moving faster than physics allows
+delta(entity.pos) -> gate(> max_speed * 1.1, sustained: 500ms) -> flag(speedhack)
+
+// aim bot detection — inhuman aim consistency
+entity.aim -> delta -> variance(window: 5s)
+    -> gate(< human_min_variance, sustained: 10s) -> flag(aimbot)
+
+// teleport detection — position jumped impossibly
+delta(entity.pos) -> gate(> teleport_threshold) -> flag(teleport)
+
+// flagged players
+flag -> resonance(2 of 3, within: 1m) -> kick(reason: "cheat detected")
+
+// ── MATCHMAKING ────────────────────────────
+
+// players emit skill signal. match by proximity.
+player.skill -> |
+                 | gate(distance < skill_range) | -> match_group
+player.skill -> |
+
+match_group -> gate(count >= 10) -> spawn_game(players: match_group)
+
+// ── TELEMETRY ──────────────────────────────
+
+frame      ~> duration ~> frame_time
+players    ~> count ~> player_count
+world      ~> entity_count ~> entities
+network    ~> bandwidth(per: player) ~> bandwidth_per_player
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  tick(rate: 60Hz) as clock signal — the heartbeat of the world
+//          physics as delta applied per frame — native temporal math
+//          state sync as delta(t, t-1) — TRISA preprocessing on game state
+//          lag compensation as temporal rewind — t-N is a keyword, not a buffer
+//          anti-cheat as delta + variance + resonance — signal analysis
+//          matchmaking as skill proximity gate — signals find each other
+//          collision as gate(distance <) on position chord — spatial chord
+//
+// NEEDED:  tick(rate:) — clock signal source at fixed frequency
+//          vec2, vec3 — vector types (position, direction)
+//          @ m, @ m/s — spatial units (already in spec concept)
+//          raycast() — spatial query
+//          spawn() / despawn() — entity lifecycle
+//          broadcast() — send to all connected players
+//          interpolate() — smooth between temporal states
+//          rewind(by:) — read world state at t-N
+//          variance(window:) — statistical variance over time window
+//          distance — spatial distance between entities
+//
+// KEY INSIGHT: lag compensation is trivial in Z+.
+//   every other game engine builds a custom circular buffer of world
+//   snapshots to implement "rewind." it's 1000s of lines of careful
+//   memory management. in Z+, the OS already maintains the temporal
+//   window. t, t-1, t-2, t-N. "rewind 80ms" is just... reading history.
+//   this is temporal access solving a problem that costs game studios
+//   months of engineering.
+//
+// KEY INSIGHT: delta state sync IS TRISA.
+//   game servers send full state 60 times per second.
+//   most of that state didn't change. massive waste.
+//   delta(t, t-1) -> gate(changed) collapses it.
+//   TRISA preprocessing on game state. same algorithm.
+//   every multiplayer game would benefit from this natively.
+//
+// NEW CONSTRUCT: tick(rate:) — discrete clock signal.
+//   most Z+ signals are continuous/event-driven.
+//   games need a fixed tick rate. this is a clock source.
+//   also useful for: simulation, control loops, sampling.
+//
+// CONVENTIONAL: Unreal/Unity netcode is 50k+ LOC C++.
+//   A custom game server with physics, netcode, lag compensation,
+//   anti-cheat, and matchmaking: 20-50k LOC easily.
+//   This is 80 lines. Lag compensation alone saves thousands of LOC
+//   because temporal access is free.

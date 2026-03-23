@@ -1,0 +1,181 @@
+// 11_home_automation.zp — Smart home controller
+// Conventional: Home Assistant (~800,000 LOC Python) or custom (~5,000 LOC)
+// Codex Labs LLC — 2026
+
+// ── DISCOVERY ──────────────────────────────
+
+// same as hardware discovery — the house discovers itself
+devices : net.discover(proto: zigbee | zwave | wifi | ble) -> house
+
+// ── SENSORS ────────────────────────────────
+
+motion_front   : house.sensor("front_door_motion")   -> motion
+motion_back    : house.sensor("back_door_motion")     -> motion
+temp_living    : house.sensor("living_room_temp")     -> temperature @ F
+temp_bedroom   : house.sensor("bedroom_temp")         -> temperature @ F
+humidity       : house.sensor("bathroom_humidity")    -> humidity @ percent
+door_front     : house.sensor("front_door_contact")   -> open | closed
+door_garage    : house.sensor("garage_door_contact")  -> open | closed
+light_outside  : house.sensor("outdoor_lux")          -> brightness @ lux
+smoke          : house.sensor("smoke_detector")       -> clear | alarm
+co             : house.sensor("co_detector")          -> clear | alarm
+leak_kitchen   : house.sensor("kitchen_leak")         -> dry | wet
+leak_basement  : house.sensor("basement_leak")        -> dry | wet
+
+// ── ACTUATORS ──────────────────────────────
+
+lights_living  : house.light("living_room")    <- brightness, color_temp
+lights_bedroom : house.light("bedroom")        <- brightness, color_temp
+lights_porch   : house.light("front_porch")    <- on | off
+thermostat     : house.hvac("main")            <- target_temp @ F, mode
+fan_bathroom   : house.fan("bathroom_exhaust") <- on | off
+lock_front     : house.lock("front_door")      <- locked | unlocked
+garage_door    : house.actuator("garage_door") <- open | close
+
+// ── CLIMATE ────────────────────────────────
+
+// comfort zone with knee — no bang-bang thermostat
+temp_living -> gate(< 70F, knee: 3F) -> thermostat(heat)
+temp_living -> gate(> 76F, knee: 3F) -> thermostat(cool)
+
+// bedroom cooler at night
+time -> gate(hour: 22 ~ 6) -> thermostat.bedroom(target: 66F, knee: 2F)
+
+// bathroom humidity — auto exhaust
+humidity -> gate(> 60%, knee: 10%) -> fan_bathroom(on)
+humidity -> gate(< 50%) -> fan_bathroom(off)
+
+// ── LIGHTING ───────────────────────────────
+
+// lights follow the sun — circadian
+time -> {
+    gate(hour: 6 ~ 9)   -> lights(brightness: 60%, color_temp: 4000K),
+    gate(hour: 9 ~ 17)  -> lights(brightness: 100%, color_temp: 5000K),
+    gate(hour: 17 ~ 21) -> lights(brightness: 70%, color_temp: 3000K),
+    gate(hour: 21 ~ 23) -> lights(brightness: 30%, color_temp: 2200K)
+}
+
+// motion-activated
+motion_front -> lights_porch(on)
+motion_front -> on_silence(> 5m) -> lights_porch(off)
+
+// all lights off when everyone leaves
+house.occupancy -> gate(empty, sustained: 10m) -> house.all_lights(off)
+
+// ── SECURITY ───────────────────────────────
+
+// mode: home, away, sleep
+house.mode -> {
+    gate(away) -> {
+        lock_front(locked),
+        motion_front -> alert(warn: "motion while away"),
+        door_front -> gate(open) -> alert(critical: "door opened while away"),
+        // simulate presence — random lights
+        lights_living -> random(on_off, interval: 30m ~ 2h)
+    },
+    gate(sleep) -> {
+        lock_front(locked),
+        door_front -> gate(open) -> alert(critical: "door opened at night"),
+        garage_door -> gate(open) -> alert(warn: "garage open at bedtime")
+    }
+}
+
+// ── SAFETY ─────────────────────────────────
+
+// smoke/CO — reflex priority, always active
+smoke -> gate(alarm) -> {
+    alert(critical: "SMOKE DETECTED"),
+    house.all_lights(on, brightness: 100%),
+    lock_front(unlocked)                        // unlock for escape
+}
+    priority: reflex
+
+co -> gate(alarm) -> {
+    alert(critical: "CO DETECTED"),
+    house.all_lights(on, brightness: 100%),
+    thermostat(off),                            // stop circulating air
+    lock_front(unlocked)
+}
+    priority: reflex
+
+// water leak
+leak_kitchen  -> gate(wet) -> { alert(critical: "kitchen leak"), house.water_main(off) }
+leak_basement -> gate(wet) -> { alert(critical: "basement leak"), house.water_main(off) }
+
+// ── PATTERNS ───────────────────────────────
+
+// learn when you wake up — adjust over time
+motion -> gate(hour: 5 ~ 9, after_silence: > 6h) -> morning_routine
+morning_routine -> baseline(window: 14d) -> wake_time_prediction
+
+// pre-warm the house 30 minutes before predicted wake
+wake_time_prediction - 30m -> thermostat(target: 72F)
+
+// learn when you leave — garage door + no motion
+garage_door -> gate(open then closed) -> |
+                                          | within(5m) | -> departure
+motion -> on_silence(> 5m)            -> |
+
+departure -> house.mode(away)
+
+// ── ENERGY ─────────────────────────────────
+
+house.power_meter -> usage @ kW
+usage -> baseline(window: 30d) -> normal_usage
+usage -> deviation(from: normal_usage) -> gate(> 2σ) -> alert(warn: "unusual power draw")
+
+// time-of-use optimization
+usage -> gate(peak_hours) -> {
+    thermostat.pre_condition(before: peak),     // cool/heat before expensive hours
+    defer(non_essential, until: off_peak)        // defer heavy loads
+}
+
+// ── TELEMETRY ──────────────────────────────
+
+temp_living ~> live_temp
+usage       ~> live_power
+house.mode  ~> current_mode
+devices     ~> count(online) ~> device_health
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  device discovery — same pattern as hardware discovery. house = computer.
+//          thermostat with knee — THIS is why knee exists. bang-bang thermostats are awful.
+//          circadian lighting — time-gated brightness/color is clean
+//          motion -> on_silence -> off — presence as signal with timeout
+//          security modes as gate(mode) -> different wiring — mode changes the graph
+//          smoke/CO as reflex — life safety is spinal, always
+//          learned patterns — baseline wake time, departure detection
+//          energy TOU optimization — defer loads based on pricing signal
+//
+// NEEDED:  net.discover(proto:) — multi-protocol device discovery
+//          house.sensor/light/hvac/lock — device type abstractions
+//          house.mode — system-wide state that changes graph behavior
+//          house.occupancy — derived presence signal
+//          random(interval:) — randomized signal for presence simulation
+//          baseline prediction — extrapolate from learned pattern
+//          time arithmetic — wake_time_prediction - 30m
+//          defer(until:) — postpone action to future condition
+//          peak_hours / off_peak — time-of-use energy awareness
+//
+// KEY INSIGHT: the house IS a computer.
+//   sensors = inputs. actuators = outputs. automation = signal graph.
+//   Home Assistant is 800k LOC because it treats each device as a
+//   separate integration with its own driver, its own state machine,
+//   its own event model. in Z+, everything is a signal source or sink.
+//   the wiring between them IS the automation.
+//
+// KEY INSIGHT: knee eliminates bang-bang control entirely.
+//   every thermostat in the world oscillates because it uses if/else.
+//   gate with knee creates smooth proportional control.
+//   this one language feature replaces PID controllers, hysteresis
+//   bands, and deadband logic. the house is more comfortable AND
+//   uses less energy because it doesn't overshoot.
+//
+// CONVENTIONAL: Home Assistant is 800k LOC Python with 2000+ integrations.
+//   A custom home automation setup: 5-10k LOC.
+//   This is 90 lines. With climate control, circadian lighting, security
+//   modes, safety systems, learned patterns, and energy optimization.
+//   The knee-based thermostat alone is better than any smart thermostat
+//   on the market.

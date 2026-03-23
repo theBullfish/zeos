@@ -1,0 +1,96 @@
+// 02_log_monitor.zp — Tail logs, filter, alert on patterns
+// Conventional: ELK stack (~50,000 LOC across Elasticsearch, Logstash, Kibana)
+//   or: tail -f | grep | custom alerting (~800 LOC)
+// Codex Labs LLC — 2026
+
+// ── SOURCES ────────────────────────────────
+
+syslog    : fs("/var/log/syslog")    -> lines
+app_log   : fs("/var/log/app/*.log") -> lines
+kern_log  : fs("/var/log/kern.log")  -> lines
+
+// all logs merge into one stream
+syslog   -> |
+app_log  -> | -> all_lines
+kern_log -> |
+
+// ── PARSE ──────────────────────────────────
+
+all_lines -> parse(
+    timestamp,
+    level : error | warn | info | debug,
+    source,
+    message
+) -> entries
+
+// ── SEVERITY GATES ─────────────────────────
+
+entries -> gate(level: error) -> errors
+entries -> gate(level: warn)  -> warnings
+entries -> gate(level: info)  -> info
+
+// ── PATTERN DETECTION ──────────────────────
+
+// known bad patterns — signal-match, not regex
+errors -> gate(message ~ "out of memory")    -> oom_alert
+errors -> gate(message ~ "connection refused") -> conn_alert
+errors -> gate(message ~ "permission denied")  -> perm_alert
+
+// ── ERROR RATE ─────────────────────────────
+
+// sudden spike in errors = something broke
+errors -> rate(per: 1m) -> error_rate
+delta(error_rate) -> gate(> 5x, knee: 2x) -> spike_alert
+
+// sustained errors = ongoing problem
+error_rate -> gate(> 10, sustained: 5m) -> sustained_alert
+
+// ── CORRELATION ────────────────────────────
+
+// OOM + connection refused within 30s = service crashed and couldn't restart
+oom_alert  -> |
+               | within(30s) | -> crash_pattern -> alert(critical: "service crash loop")
+conn_alert -> |
+
+// ── SILENCE DETECTION ──────────────────────
+
+// a log that goes quiet is scarier than a log full of errors
+app_log -> on_silence(> 5m) -> alert(warn: "app log went silent")
+
+// ── RETENTION ──────────────────────────────
+
+entries -> vault.store(ttl: 30d)
+errors  -> vault.store(ttl: 90d)    // keep errors longer
+
+// ── DASHBOARD ──────────────────────────────
+
+error_rate ~> live_rate_view
+entries    ~> count(by: source, per: 1m) ~> source_heatmap
+errors     ~> last(20) ~> recent_errors
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  multiple fs() sources merging into one stream — natural
+//          gate(level:) for severity — reads perfectly
+//          rate() + delta() for spike detection — core strength
+//          confluence (within) for correlation — pattern from SIGNAL_LOGIC
+//          on_silence for quiet detection — this is where Z+ shines
+//
+// NEEDED:  parse() — structured extraction from text, not in spec
+//          gate(message ~ "pattern") — fuzzy/substring match operator
+//          gate(sustained: 5m) — signal must hold above threshold for duration
+//          vault.store(ttl:) — time-to-live for storage, not defined
+//
+// NEW CONSTRUCT: "sustained" gate — different from instantaneous gate.
+//   gate(> 10) fires the instant value exceeds 10
+//   gate(> 10, sustained: 5m) fires only if value stays above 10 for 5 minutes
+//   this is a temporal gate — combines threshold with duration
+//   feels like it belongs in the language
+//
+// AMBIGUOUS: parse() — is this a node? a built-in? how extensible?
+//            need: named parse formats, or structural pattern matching
+//
+// CONVENTIONAL: ELK stack is 50k+ LOC. Even a basic tail+grep+alert is 800.
+//               this is 45 lines and handles correlation + silence detection
+//               which ELK doesn't do natively.

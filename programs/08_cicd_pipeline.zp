@@ -1,0 +1,143 @@
+// 08_cicd_pipeline.zp — CI/CD pipeline
+// Conventional: Jenkins (~500k LOC Java) or GitHub Actions (YAML + runners)
+// Codex Labs LLC — 2026
+
+// ── TRIGGER ────────────────────────────────
+
+repo : git.watch("/home/z13/projects/app") -> commits
+
+// push to main = deploy pipeline
+commits -> gate(branch: "main") -> deploy_pipeline
+
+// push to any other branch = test pipeline
+commits -> gate(branch: not "main") -> test_pipeline
+
+// ── TEST PIPELINE ──────────────────────────
+
+test_pipeline
+    -> checkout(commit)
+    -> lint
+    -> test
+    -> report
+
+lint : exec("make lint") -> {
+    gate(pass) -> continue,
+    gate(fail) -> report(fail: "lint")
+}
+
+test : exec("make test") -> {
+    gate(pass) -> continue,
+    gate(fail) -> report(fail: "test")
+}
+
+report -> gate(all_pass) -> notify(success: "tests passed on " + branch)
+report -> gate(any_fail) -> notify(fail: "pipeline failed on " + branch)
+
+// ── DEPLOY PIPELINE ────────────────────────
+
+deploy_pipeline
+    -> checkout(commit)
+    -> lint
+    -> test
+    -> build
+    -> stage
+    -> canary
+    -> promote
+
+build : exec("make build") -> {
+    gate(pass) -> artifact,
+    gate(fail) -> abort("build failed")
+}
+
+// ── STAGING ────────────────────────────────
+
+stage : deploy(artifact, to: "staging") -> staged
+
+// smoke test staging
+staged -> health_check(url: "https://staging.app", expect: 200)
+       -> gate(healthy, sustained: 30s) -> canary_ready
+       -> gate(unhealthy) -> rollback(to: "staging") -> abort("staging unhealthy")
+
+// ── CANARY ─────────────────────────────────
+
+canary : deploy(artifact, to: "production", weight: 5%) -> canary_live
+
+// watch canary health — error rate, latency, CPU
+canary_live -> {
+    error_rate  : gate(< 1%, sustained: 5m, knee: 0.5%),
+    latency     : gate(p99 < 200ms, sustained: 5m),
+    cpu         : gate(< 80%, sustained: 5m)
+}
+
+// all three must hold — chord logic
+error_rate  -> |
+latency     -> | all | -> canary_healthy
+cpu         -> |
+
+canary_healthy -> promote
+canary_live -> gate(any_unhealthy) -> rollback(to: "production") -> abort("canary failed")
+
+// ── PROMOTE ────────────────────────────────
+
+// gradually increase traffic — knee, not cliff
+promote : deploy(artifact, to: "production", weight: 5% ~ 100%, ramp: 10m)
+
+// weight ramps from 5% to 100% over 10 minutes
+// if anything goes wrong during ramp, rollback fires
+
+promote -> gate(complete) -> notify(success: "deployed " + commit.short)
+
+// ── ROLLBACK ───────────────────────────────
+
+// rollback is instant — restore previous artifact
+rollback : deploy(previous_artifact, to: target, weight: 100%)
+    priority: reflex    // rollback is spinal
+
+// ── TELEMETRY ──────────────────────────────
+
+deploy_pipeline ~> duration ~> deploy_time
+test_pipeline   ~> { gate(pass) ~> pass_rate, gate(fail) ~> fail_rate }
+canary_live     ~> error_rate ~> canary_errors
+promote         ~> progress ~> deploy_progress
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  git.watch as signal source — commits are signals
+//          pipeline as linear chain — checkout -> lint -> test -> build
+//          canary as chord logic — all health signals must hold
+//          sustained gate for canary — must be healthy for 5 minutes, not just one check
+//          ramp as knee on deploy weight — 5% to 100% over time, smooth
+//          rollback as reflex priority — instant, no deliberation
+//
+// NEEDED:  git.watch() — git repository as signal source
+//          exec() — shell command execution (again, second time needed)
+//          checkout() — git checkout as a node
+//          deploy(to:, weight:) — deployment with traffic weighting
+//          rollback(to:) — restore previous state
+//          health_check(url:, expect:) — HTTP health probe
+//          abort() — terminate pipeline with message
+//          artifact — build output that flows through the pipeline
+//          previous_artifact — automatic tracking of last good deploy
+//
+// NEW CONSTRUCT: weight ramp as knee over time.
+//   deploy(weight: 5% ~ 100%, ramp: 10m)
+//   the ~ operator (range) combined with ramp (duration)
+//   means the weight slides from 5% to 100% over 10 minutes.
+//   this IS a knee applied to deployment traffic.
+//   canary deploys in the old world: manual percentage bumps.
+//   in Z+: a smooth ramp. same concept as thermal knee.
+//
+// NEW INSIGHT: abort() is a new terminal.
+//   drop (firewall) terminates a signal silently.
+//   abort terminates a CHAIN with a reason.
+//   different from gate blocking (signal rejected).
+//   different from on_silence (signal absent).
+//   abort = the chain decides to stop itself.
+//   need: abort as a chain-terminating signal with metadata.
+//
+// CONVENTIONAL: Jenkins is 500k LOC. GitHub Actions is YAML + complex runners.
+//   A production CI/CD with canary deploys, gradual rollout, auto-rollback,
+//   and health monitoring is typically 5-10k LOC of pipeline config + custom
+//   tooling. This is 65 lines. The canary deploy with knee-based ramp
+//   and chord health checking is better than anything in existing CI/CD.

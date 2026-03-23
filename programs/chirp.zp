@@ -1,0 +1,169 @@
+// chirp.zp — Twitter clone in Tier 3 Z+
+// If the language works here, it works anywhere.
+//
+// Codex Labs LLC — 2026
+
+// ── USERS ──────────────────────────────────
+
+user : auth.identity -> {
+    profile,            // who they are
+    voice,              // what they say
+    ears,               // who they follow
+    pulse               // their activity signal
+}
+
+// ── POSTING ────────────────────────────────
+
+// A post is a signal emission. That's it.
+voice -> post : {text, media, reply_to, timestamp: t}
+
+// Post goes three places simultaneously
+post -> {
+    vault.store,                            // permanent record
+    ears.followers ~> timeline,             // flows to everyone following
+    content.index                           // searchable
+}
+
+// ── FOLLOWING ──────────────────────────────
+
+// Follow is a wire. Unfollow cuts it.
+user_a.voice -> user_b.ears                 // a follows b
+user_a.voice -x> user_b.ears               // a unfollows b
+
+// The timeline IS the follow graph.
+// No algorithm assembles it. The wires deliver it.
+
+// ── TIMELINE ───────────────────────────────
+
+// Every person you follow is a signal source.
+// Your timeline is a merge of all those sources.
+ears -> | merge(by: timestamp) | -> timeline
+
+// Chronological by default. Because the wires just deliver.
+
+// ── INTERACTIONS ───────────────────────────
+
+// Like = a tap that amplifies
+post ~> like(user) -> post.heat↑
+
+// Repost = fork the signal into your voice
+post -> repost(user) -> user.voice -> ears.followers ~> timeline
+
+// Reply = a new post wired to the original
+voice -> reply(to: post) -> {
+    post.thread,                            // appears under original
+    ears.followers ~> timeline              // also flows to your followers
+}
+
+// ── HEAT (engagement) ──────────────────────
+
+// Heat is not an algorithm. It's a grade.
+post.heat : weighted(
+    likes:    0.3,
+    reposts:  0.3,
+    replies:  0.2,
+    recency:  0.2
+)
+
+// Heat decays with time — delta works in reverse too
+post.heat -> decay(half_life: 6h)
+
+// ── TRENDING ───────────────────────────────
+
+// Trending = resonance across unconnected users
+// Many people independently posting about the same thing
+
+content.index -> extract(topics) -> topic_stream
+
+topic_stream -> resonance(threshold: 1000, within: 1h) -> trending
+
+// Not "what the algorithm wants you to see."
+// What thousands of independent signals converged on simultaneously.
+
+// ── NOTIFICATIONS ──────────────────────────
+
+// Notifications are taps on interactions involving you
+post.where(author: me) -> {
+    likes     ~> notify(type: like),
+    reposts   ~> notify(type: repost),
+    replies   ~> notify(type: reply)
+}
+
+// New follower
+me.ears.new_connection ~> notify(type: follow)
+
+// Mentions
+content.index -> gate(mentions: me) ~> notify(type: mention)
+
+// ── SEARCH ─────────────────────────────────
+
+query -> content.index -> gate(matches: query) -> results
+results -> sort(by: heat) -> ranked_results
+
+// ── MODERATION ─────────────────────────────
+
+// Every post flows through a safety gate before delivery
+post -> safety : gate {
+    toxicity @ mde("toxic-detect.zdx") -> gate(< 0.8) -> pass,
+    spam @ mde("spam-detect.zdx")      -> gate(< 0.6) -> pass,
+    otherwise                           -> hold ~> review_queue
+}
+
+// Moderation is structural. Not a team reviewing a backlog.
+// The signal doesn't flow until it passes the gate.
+// Toxic content doesn't get "taken down." It never arrives.
+
+// ── BLOCK / MUTE ───────────────────────────
+
+// Block = hard gate. Their signals cannot reach you.
+blocked_user.voice -> gate(closed) -x> me.ears
+
+// Mute = gate with silence. Signals arrive but don't surface.
+muted_user.voice -> me.ears -> gate(muted) -> on_silence -> /dev/null
+
+// The difference: block severs the wire. Mute closes a gate.
+// Blocked users can't see you. Muted users don't know.
+
+// ── DMs ────────────────────────────────────
+
+// DM = private wire. Encrypted. No taps allowed.
+user_a.voice -> private(to: user_b, encrypt: vault.key) -> user_b.inbox
+    no_tap: true    // telemetry cannot observe this chain
+
+// ── FEED MODES ─────────────────────────────
+
+// User chooses how their timeline resolves
+timeline -> {
+    mode(chronological): sort(by: timestamp),       // just the wires
+    mode(heated):        sort(by: heat, knee: 0.3), // engagement-weighted, soft
+    mode(quiet):         gate(heat < 0.5)           // only calm posts
+}
+
+// "Quiet mode" — a gate that only passes low-engagement posts.
+// The inverse of every algorithm on earth.
+// Sometimes you want the posts nobody liked.
+
+// ── TELEMETRY ──────────────────────────────
+
+post         ~> rate(per: minute) ~> posts_per_minute
+interactions ~> rate(per: minute) ~> engagement_rate
+users.pulse  ~> count(active, within: 5m) ~> active_users
+trending     ~> top(10) ~> trending_board
+
+// ── THAT'S IT ──────────────────────────────
+
+// No recommendation engine. The follow graph IS the recommendation.
+// No engagement optimization. Heat is a measurement, not a goal.
+// No shadow banning. Gates are visible. You know if you're blocked.
+// No algorithmic feed by default. Chronological. Wires deliver.
+//
+// The entire backend of Twitter — thousands of microservices,
+// millions of lines of Java and Scala, Kafka clusters,
+// recommendation ML pipelines, content delivery networks —
+// is 120 lines of signal flow.
+//
+// Because most of that infrastructure exists to simulate
+// what a signal graph does natively:
+// deliver messages from sources to subscribers.
+//
+// That's just wires.

@@ -1,0 +1,145 @@
+// 12_search_engine.zp — Index, query, rank (mini search engine)
+// Conventional: Elasticsearch (~1,500,000 LOC Java) or Solr (~500,000 LOC)
+// Codex Labs LLC — 2026
+
+// ── INGEST ─────────────────────────────────
+
+// documents arrive as signals
+source : net.listen(port: 9200, proto: http) -> documents
+crawler : net.crawl(seeds: seed_urls, depth: 3) -> documents
+
+documents -> {
+    extract(title, body, url, timestamp),
+    tokenize(body) -> tokens,
+    mde("embedding.zdx") @ npu -> vector    // semantic embedding
+}
+
+// ── INDEX ──────────────────────────────────
+
+// two indexes — keyword and semantic
+tokens -> vault.index("text", doc_id, tokens)         // inverted index
+vector -> vault.index("vectors", doc_id, vector)       // vector store
+
+// index is live — new documents flow in continuously
+// no batch reindexing. the signal graph is the indexer.
+
+// ── QUERY ──────────────────────────────────
+
+query : net.listen(port: 9200, path: "/search") -> q
+
+q -> {
+    // keyword search
+    tokenize(q.text) -> vault.search("text") -> keyword_hits,
+
+    // semantic search
+    mde("embedding.zdx") @ npu -> vault.nearest("vectors", k: 50) -> semantic_hits
+}
+
+// ── FUSION ─────────────────────────────────
+
+// combine keyword and semantic results
+keyword_hits  -> | merge(by: doc_id, method: rrf) | -> fused
+semantic_hits -> |
+
+// RRF: reciprocal rank fusion — simple, effective, no tuning
+// each result's score = sum of 1/(rank + 60) across both lists
+
+// ── RANKING ────────────────────────────────
+
+fused -> rank : weighted(
+    relevance: 0.4,         // fusion score
+    freshness: 0.2,         // recency decay
+    quality:   0.2,         // document quality signal
+    click:     0.2          // learned from user behavior
+)
+
+// freshness decays
+rank.freshness -> decay(half_life: 7d)
+
+// quality is pre-computed
+documents -> quality : {
+    word_count -> gate(> 100) -> base_quality,
+    link_count -> normalize -> link_quality,
+    readability -> score -> read_quality
+} -> weighted(base: 0.3, link: 0.4, read: 0.3) -> vault.store(doc_id, quality)
+
+// ── CLICK LEARNING ─────────────────────────
+
+// user clicks teach relevance — but with decay
+search_result -> on_click -> click_signal(query, doc_id)
+
+click_signal -> vault.update(doc_id, click_score: +1)
+click_signal -> decay(half_life: 30d)    // old clicks matter less
+
+// position bias correction — clicks on rank 1 are worth less
+click_signal -> weight(1 / log(position + 1)) -> adjusted_click
+
+// ── AUTOCOMPLETE ───────────────────────────
+
+// prefix matching as signal flow
+keystroke -> debounce(100ms) -> vault.prefix("queries", text) -> suggestions
+suggestions -> sort(by: frequency) -> take(5) -> respond
+
+// ── SPELL CORRECTION ───────────────────────
+
+q.text -> gate(vault.search("text").empty) -> {
+    fuzzy_match(q.text, vault.vocabulary, distance: 2) -> correction,
+    correction -> respond("did you mean: " + correction)
+}
+
+// ── FACETS ─────────────────────────────────
+
+fused -> group(by: category) -> facet_counts
+fused -> group(by: date, bucket: month) -> date_histogram
+
+facet_counts    -> respond(facets)
+date_histogram  -> respond(timeline)
+
+// ── TELEMETRY ──────────────────────────────
+
+q           ~> rate(per: 1s) ~> qps
+q           ~> avg(response_time) ~> latency
+click_signal ~> ratio(clicked, shown) ~> click_through_rate
+vault        ~> count("text") ~> total_documents
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  ingest as continuous signal flow — no batch reindex
+//          dual search (keyword + semantic) as forked query — natural
+//          RRF fusion as merge with method — clean
+//          click learning with decay — temporal signal
+//          autocomplete as debounced prefix search — native
+//          position bias correction — weighting within the signal
+//
+// NEEDED:  tokenize() — text tokenization
+//          vault.index — inverted index / vector index storage
+//          vault.search — keyword lookup returning scored results
+//          vault.nearest — vector similarity search (KNN)
+//          vault.prefix — prefix matching for autocomplete
+//          vault.vocabulary — dictionary of indexed terms
+//          merge(method: rrf) — reciprocal rank fusion
+//          normalize — scale signal to 0-1 range
+//          fuzzy_match(distance:) — edit distance matching
+//          group(by:, bucket:) — aggregation / faceting
+//
+// KEY INSIGHT: search is TRISA again.
+//   documents arrive as signals → preprocessed (tokenized, embedded)
+//   → scored (relevance, freshness, quality) → ranked → delivered.
+//   that's: signal in → filter → score → route → signal out.
+//   Elasticsearch is 1.5M lines of Java to do what a signal graph
+//   does structurally.
+//
+// KEY INSIGHT: the index IS the vault.
+//   vault already stores signals with temporal awareness.
+//   adding inverted index and vector index to vault gives you
+//   a search engine. vault isn't just storage. it's a signal-aware
+//   data surface that can be queried in multiple ways.
+//   text search, vector search, prefix search, faceted search —
+//   all different query types on the same vault.
+//
+// CONVENTIONAL: Elasticsearch is 1.5M LOC Java. Solr is 500k LOC.
+//   A simple search with indexing, ranking, autocomplete: 10k LOC.
+//   This is 70 lines with hybrid search (keyword + semantic),
+//   learned ranking, click-through learning, autocomplete,
+//   spell correction, faceted search, and position bias correction.

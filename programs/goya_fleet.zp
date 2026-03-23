@@ -1,0 +1,228 @@
+// goya_fleet.zp — Goya Fleet Orchestrator
+// The 20-card Codex tensor fleet, wired as one organism.
+//
+// Codex Labs LLC — 2026
+
+// ─────────────────────────────────────────────
+// HARDWARE DISCOVERY
+// The OS already found them. We just name them.
+// ─────────────────────────────────────────────
+
+node fleet : pcie.discover(vendor: habana, model: hl1000) -> cards : list<device>
+
+// Each card is 8 TPC + 1 MME + 8GB DRAM.
+// 20 cards = 160 TPCs, 20 MMEs, 160GB.
+// The fleet isn't 20 devices. It's one instrument with 160 voices.
+
+// ─────────────────────────────────────────────
+// HEALTH — every card feels itself
+// ─────────────────────────────────────────────
+
+node vitals {
+    in: cards
+    out: health : list<card_health>
+
+    per card in cards {
+        card.zixel.thermal       -> thermal
+        card.zixel.tpc_timing    -> timing
+        card.zixel.dram_bandwidth -> bandwidth
+        card.zixel.aging_trend   -> aging
+        card.masq.error_history  -> errors
+
+        resolve: {
+            thermal:   thermal,
+            timing:    timing,
+            bandwidth: bandwidth,
+            aging:     aging,
+            errors:    errors,
+            grade:     score(thermal, timing, bandwidth, aging, errors)
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// TRIAGE — sort cards by what they're good at
+// ─────────────────────────────────────────────
+
+node triage {
+    in: health
+    out: tiers
+
+    resolve:
+        // Cards self-sort based on measured capability
+        tier_prime:   health.where(grade > 0.9)    // Best silicon, coolest slots
+        tier_general: health.where(grade > 0.6)    // Solid workers
+        tier_light:   health.where(grade > 0.3)    // Aging or hot — light duty
+        tier_rest:    health.where(grade <= 0.3)   // Benched. Healing. Watched.
+}
+
+// ─────────────────────────────────────────────
+// SIGNAL INTAKE — work arrives
+// ─────────────────────────────────────────────
+
+node intake {
+    in: stream : delta_stream
+    out: batches : list<batch>
+
+    // TRISA preprocessing already happened upstream.
+    // What arrives here is clean: entropy-scored, delta-compressed,
+    // redundancy collapsed. Only meaningful signal.
+
+    resolve:
+        stream -> segment(by: entropy_score) -> batches
+}
+
+// ─────────────────────────────────────────────
+// ROUTING — MDE sends work where it belongs
+// ─────────────────────────────────────────────
+
+node route {
+    in: batches, tiers
+    out: assignments : list<assignment>
+
+    resolve:
+        // High-entropy batches (hard problems) → prime cards
+        batches.where(entropy > 0.8)  -> tiers.tier_prime
+
+        // Normal batches → general pool
+        batches.where(entropy > 0.4)  -> tiers.tier_general
+
+        // Low-entropy batches (easy, repetitive) → light-duty cards
+        // Give the tired ones the easy work.
+        batches.where(entropy <= 0.4) -> tiers.tier_light
+
+        // Nothing goes to resting cards. They heal.
+}
+
+// ─────────────────────────────────────────────
+// EXECUTION — cards do the work
+// ─────────────────────────────────────────────
+
+node execute {
+    in: assignments
+    out: results : list<inference_result>
+
+    per assignment in assignments {
+        assignment.batch -> assignment.card @ mde.infer -> result
+
+        // Every result carries its lineage:
+        // which card, which TPC, what thermal state, how long,
+        // what the input entropy was, what confidence came out.
+        // MasQ records all of it. The fleet learns from every inference.
+    }
+}
+
+// ─────────────────────────────────────────────
+// SELF-HEALING — the fleet protects itself
+// ─────────────────────────────────────────────
+
+node watchdog {
+    in: health
+    out: actions
+
+    per card in health {
+        // Thermal creep — don't wait for throttle, slide early
+        card.thermal -> gate(> 72C) -> {
+            route.migrate(from: card, bias: -0.2),    // Reduce load smoothly
+            card ~> thermal_log                         // Tap for the record
+        }
+
+        // Timing drift — a card aging in real time
+        delta(card.timing) -> gate(> drift_threshold) -> {
+            route.migrate(from: card, to: tiers.next_best),
+            alert("Card " + card.id + " timing drift: " + delta(card.timing))
+        }
+
+        // Silence — a card stopped responding
+        card -> on_silence(> 100ms) -> {
+            route.evacuate(card),                       // Move everything off, now
+            card.reset,                                 // Try to bring it back
+            card -> on_silence(> 5s) -> {
+                triage.bench(card),                     // It's gone. Bench it.
+                alert("Card " + card.id + " unresponsive — benched")
+            }
+        }
+
+        // Recovery — a benched card comes back
+        card.grade -> gate(rising, > 0.3) -> {
+            triage.promote(card, to: tier_light),       // Start with easy work
+            alert("Card " + card.id + " recovered — light duty")
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// TELEMETRY — the fleet observes itself
+// ─────────────────────────────────────────────
+
+node dashboard {
+    in: health, tiers, results
+
+    // Taps — read-only observation, never disturbs the signal chain
+    health  ~> live_health_view
+    tiers   ~> tier_distribution_view
+    results ~> throughput_view
+
+    // Fleet-wide aggregates
+    node fleet_pulse {
+        in: health
+        out: pulse
+
+        resolve: {
+            active_cards:    health.count(grade > 0.3),
+            total_tpc:       health.sum(card.tpc_count).where(grade > 0.3),
+            fleet_thermal:   health.avg(thermal),
+            fleet_grade:     health.avg(grade),
+            throughput:      results.count / t.interval,
+            oldest_card:     health.max(aging),
+            hottest_card:    health.max(thermal)
+        }
+    }
+
+    fleet_pulse ~> status_line    // One line. The fleet's heartbeat.
+}
+
+// ─────────────────────────────────────────────
+// THE WIRING — this IS the program
+// ─────────────────────────────────────────────
+
+//                    ┌──────────┐
+//    pcie.discover ──│  fleet   │
+//                    └────┬─────┘
+//                         │
+//                    ┌────▼─────┐
+//                    │  vitals  │──────────────────────┐
+//                    └────┬─────┘                      │
+//                         │                            │
+//                    ┌────▼─────┐                 ┌────▼─────┐
+//                    │  triage  │                 │ watchdog │
+//                    └────┬─────┘                 └────┬─────┘
+//                         │                            │
+//    delta_stream ── intake ──┐                        │
+//                             │                   (self-heal)
+//                        ┌────▼─────┐
+//                        │  route   │
+//                        └────┬─────┘
+//                             │
+//                        ┌────▼─────┐
+//                        │ execute  │
+//                        └────┬─────┘
+//                             │
+//                        ┌────▼──────┐
+//                        │ dashboard │
+//                        └───────────┘
+
+fleet -> vitals -> triage -> |
+                              | -> route -> execute -> dashboard
+intake ────────────────────> |
+
+vitals -> watchdog -> route    // Health feeds the watchdog, watchdog adjusts routing
+
+// That's it.
+// 20 cards. 160 TPCs. 160GB DRAM.
+// Self-discovering. Self-sorting. Self-healing. Self-learning.
+// No driver configuration. No load balancer. No health check daemon.
+// No cron job. No Kubernetes. No YAML.
+//
+// Just signal chains that never stop resolving.
+// The fleet breathes.

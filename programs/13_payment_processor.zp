@@ -1,0 +1,175 @@
+// 13_payment_processor.zp — Stripe-like payment processing
+// Conventional: Stripe core (~millions LOC), or custom: ~50,000 LOC
+// Industry: Fintech
+// Codex Labs LLC — 2026
+
+// ── INTAKE ─────────────────────────────────
+
+api : net.listen(port: 443, proto: https) -> requests
+
+requests -> gate(path: "/v1/charges")     -> charge_flow
+requests -> gate(path: "/v1/refunds")     -> refund_flow
+requests -> gate(path: "/v1/subscriptions") -> subscription_flow
+
+// ── CHARGE ─────────────────────────────────
+
+charge_flow -> validate(schema: charge_schema) -> {
+    gate(valid)   -> process_charge,
+    gate(invalid) -> respond(400, errors)
+}
+
+charge_schema : {
+    amount:   f64 @ cents, required, gate(> 0),
+    currency: string, required, gate(any("usd", "eur", "gbp")),
+    source:   token, required,
+    metadata: map, optional
+}
+
+// idempotency — same request twice = same result
+process_charge -> gate(idempotency_key: seen) -> respond(200, cached_result)
+process_charge -> gate(idempotency_key: new) -> continue
+
+// ── FRAUD CHECK ────────────────────────────
+
+continue -> fraud_check : {
+    // velocity — too many charges from same card
+    source -> rate(per: card, within: 1h) -> gate(> 10) -> flag(velocity),
+
+    // amount anomaly — unusual for this card's baseline
+    amount -> deviation(from: card.baseline) -> gate(> 3σ) -> flag(amount),
+
+    // geo mismatch — card country != IP country
+    source.country -> |
+                       | gate(mismatch) | -> flag(geo),
+    request.ip.country -> |
+
+    // device fingerprint — new device for this customer
+    request.fingerprint -> gate(not_in: customer.known_devices) -> flag(device),
+
+    // ML model
+    charge -> risk @ mde("fraud-detect.zdx") -> gate(> 0.7) -> flag(ml)
+}
+
+// 0 flags = clean. 1 = review. 2+ = block.
+flag -> count(within: charge) -> {
+    gate(0)    -> authorize,
+    gate(1)    -> hold ~> review_queue,
+    gate(>= 2) -> decline(reason: "fraud_suspected")
+}
+
+// ── AUTHORIZATION ──────────────────────────
+
+authorize -> network.route(card.issuer) -> auth_request -> {
+    gate(approved)  -> capture,
+    gate(declined)  -> respond(402, "card_declined"),
+    on_silence(> 5s) -> retry(max: 2) -> on_fail -> respond(502, "issuer_timeout")
+}
+
+// ── CAPTURE (double-entry) ─────────────────
+
+capture -> vault.ledger.atomic {
+    debit(from: customer, amount, currency),
+    credit(to: merchant, amount - fee, currency),
+    credit(to: platform, fee, currency)
+}
+
+// atomic = all three entries succeed or none do.
+// this is the double-entry bookkeeping. every dollar is accounted for.
+
+capture -> {
+    respond(200, charge_receipt),
+    notify(merchant, "payment_received"),
+    vault.store("charges", charge_receipt)
+}
+
+// ── REFUND ─────────────────────────────────
+
+refund_flow -> validate -> vault.read("charges", charge_id) -> {
+    gate(found, status: captured) -> process_refund,
+    gate(not_found)               -> respond(404),
+    gate(status: refunded)        -> respond(400, "already_refunded")
+}
+
+process_refund -> vault.ledger.atomic {
+    debit(from: merchant, amount, currency),
+    credit(to: customer, amount, currency)
+    // platform keeps the fee — standard
+}
+
+// ── SUBSCRIPTIONS ──────────────────────────
+
+subscription_flow -> create_sub : {
+    customer,
+    plan : { amount, currency, interval: monthly | yearly },
+    start: now | future_date
+}
+
+// subscription is a time-triggered signal chain
+create_sub -> tick(rate: plan.interval) -> {
+    charge_flow(amount: plan.amount, source: customer.default_source),
+    gate(declined) -> retry(schedule: [1d, 3d, 7d]) -> on_fail -> cancel_sub
+}
+
+// dunning — escalating retry with notifications
+retry -> {
+    attempt(1) -> notify(customer, "payment failed, retrying"),
+    attempt(2) -> notify(customer, "second attempt failed"),
+    attempt(3) -> notify(customer, "final attempt — update payment method")
+}
+
+// ── SETTLEMENT ─────────────────────────────
+
+// batch settle to merchants daily
+tick(rate: daily, at: "00:00 UTC") -> vault.ledger.pending(by: merchant)
+    -> batch_settle -> network.payout(merchant.bank) -> {
+        gate(success) -> vault.ledger.mark_settled,
+        gate(fail)    -> retry(next_day) ~> alert(warn: "settlement failed")
+    }
+
+// ── COMPLIANCE ─────────────────────────────
+
+// PCI: card numbers never stored, only tokens
+// every charge flows through audit log
+charge_flow ~> vault.append("audit_log", retention: 7y)    // 7 year retention
+refund_flow ~> vault.append("audit_log", retention: 7y)
+
+// suspicious activity report
+flag -> gate(>= 2, amount > 10000) -> vault.append("sar_queue")
+    ~> compliance_team
+
+// ── TELEMETRY ──────────────────────────────
+
+charge_flow  ~> rate(per: 1s) ~> tps
+charge_flow  ~> avg(response_time) ~> latency
+fraud_check  ~> ratio(flagged, total) ~> fraud_rate
+authorize    ~> ratio(approved, total) ~> auth_rate
+vault.ledger ~> sum(by: currency) ~> volume
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// NEEDED:  vault.ledger.atomic {} — atomic multi-entry transaction
+//          debit() / credit() — double-entry primitives
+//          idempotency detection — seen/new on a key
+//          network.route() — route to external network (card issuer)
+//          retry(schedule:) — escalating retry with specific intervals
+//          attempt(N) — which retry attempt, for branching behavior
+//          tick(rate: daily, at:) — scheduled daily with specific time
+//          batch operations — process accumulated items at once
+//
+// NEW CONSTRUCT: vault.ledger.atomic {}
+//   group of operations that ALL succeed or ALL fail.
+//   this is a transaction. not a database transaction — a LEDGER transaction.
+//   in financial systems, atomicity isn't optional. money can't vanish.
+//   the atomic block is a chord that must fully resolve.
+//
+// NEW CONSTRUCT: retry(schedule: [1d, 3d, 7d])
+//   escalating retry with specific intervals.
+//   different from simple retry(max: 3).
+//   each attempt has a different delay AND can trigger different actions.
+//   the schedule is a temporal pattern.
+//
+// KEY INSIGHT: fraud detection is anomaly detection (program 09) applied to finance.
+//   velocity check = rate gate. amount anomaly = baseline + deviation + sigma.
+//   geo mismatch = confluence (two signals disagree). device check = gate(not_in:).
+//   the fraud model is exactly the same constructs.

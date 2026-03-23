@@ -1,0 +1,114 @@
+// 04_key_value_store.zp — In-memory key-value store with persistence
+// Conventional: Redis (~100,000 LOC C) or simple impl (~2,000 LOC)
+// Codex Labs LLC — 2026
+
+// ── INTERFACE ──────────────────────────────
+
+store : net.listen(port: 6380, proto: tcp) -> commands
+
+commands -> parse(command, key, value, ttl) -> ops
+
+// ── OPERATIONS ─────────────────────────────
+
+ops -> gate(command: "set") -> set_op
+ops -> gate(command: "get") -> get_op
+ops -> gate(command: "del") -> del_op
+ops -> gate(command: "keys") -> keys_op
+ops -> gate(command: "ttl") -> ttl_op
+
+// SET — store a value
+set_op -> vault.store(key, value, ttl: ttl) -> respond("OK")
+
+// GET — retrieve a value
+get_op -> vault.read(key) -> {
+    gate(found)   -> respond(value),
+    gate(expired) -> vault.delete(key) -> respond(nil),
+    gate(missing) -> respond(nil)
+}
+
+// DEL — remove a key
+del_op -> vault.delete(key) -> respond(1)
+
+// KEYS — list matching keys
+keys_op -> vault.scan(pattern: key) -> respond(matches)
+
+// TTL — check remaining time
+ttl_op -> vault.ttl(key) -> respond(remaining)
+
+// ── EXPIRY ─────────────────────────────────
+
+// TTL is a temporal gate. the value exists until time runs out.
+// this is native. every signal has temporal awareness.
+// no background thread scanning for expired keys.
+
+vault.entries -> gate(ttl: expired) -> vault.delete(key)
+
+// ── PERSISTENCE ────────────────────────────
+
+// snapshot to disk on change, debounced
+vault.entries -> on_change -> debounce(1s) -> vault.snapshot("/var/data/store.db")
+
+// append-only log for crash recovery
+ops -> gate(command: "set" | "del") -> vault.append_log("/var/data/store.aol")
+
+// ── REPLICATION ────────────────────────────
+
+// replica = a tap on all write operations
+ops -> gate(command: "set" | "del") ~> replica : net.connect(peer: replica_host, port: 6380)
+
+// incoming replication
+replica.incoming -> gate(source: trusted) -> vault.apply
+
+// ── MEMORY MANAGEMENT ──────────────────────
+
+// eviction when memory pressure rises — LRU via access time
+vault.memory_usage -> gate(> 80%, knee: 10%) -> {
+    vault.entries -> sort(by: last_access, ascending) -> take(10%) -> vault.delete
+}
+
+// knee: eviction starts gently at 70%, full pressure at 80%
+
+// ── TELEMETRY ──────────────────────────────
+
+ops      ~> rate(per: 1s) ~> ops_per_sec
+ops      ~> count(by: command) ~> command_breakdown
+vault    ~> count(entries) ~> total_keys
+vault    ~> memory_usage ~> mem_used
+get_op   ~> { gate(found) ~> hit, gate(missing) ~> miss }
+hit      ~> ratio(hit, hit + miss) ~> cache_hit_rate
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  operations as gate(command:) routing — identical pattern to HTTP
+//          TTL as temporal gate — this is profoundly natural in Z+
+//          expiry doesn't need a background scanner — the gate knows time
+//          replication as a tap (~>) on writes — elegant
+//          LRU eviction via memory pressure gate with knee — smooth eviction
+//
+// NEEDED:  vault.store/read/delete/scan — vault as a built-in data layer
+//          vault.snapshot — point-in-time persistence
+//          vault.append_log — WAL/AOF equivalent
+//          vault.memory_usage — memory pressure signal
+//          vault.entries — iterable signal over all stored data
+//          sort(by:) — ordering construct, not yet defined
+//          take(N%) — subset selection
+//          ratio() — derived metric
+//
+// NEW INSIGHT: Vault is emerging as a first-class subsystem, not just storage.
+//   It needs to be a signal-aware data layer that:
+//   - emits on_change signals
+//   - tracks TTL temporally (not via scanning)
+//   - reports memory pressure as a continuous signal
+//   - supports scan/query operations that return signal streams
+//   Vault isn't a database. It's a signal-emitting data surface.
+//
+// NEW CONSTRUCT: gate(command: "set" | "del") — OR within a gate.
+//   the | operator is merge elsewhere. inside a gate it's OR.
+//   potential confusion. maybe: gate(command: any("set", "del"))
+//
+// CONVENTIONAL: Redis is 100k LOC C. A simple KV store is 2k LOC.
+//   This is 50 lines with TTL, persistence, replication, LRU eviction,
+//   and memory-pressure-aware garbage collection. Redis doesn't have
+//   smooth eviction — it hard-evicts when maxmemory is hit.
+//   The knee makes this better than Redis's eviction model.

@@ -1,0 +1,73 @@
+// goya_fleet_t3.zp — Tier 3 Z+
+// Codex Labs LLC — 2026
+
+// ── DISCOVERY ──────────────────────────────
+
+fleet : pcie(vendor: habana, model: hl1000) -> cards
+
+// ── HEALTH ─────────────────────────────────
+
+cards -> {
+    zixel.thermal,
+    zixel.tpc_timing,
+    zixel.dram_bandwidth,
+    zixel.aging_trend,
+    masq.error_history
+} -> grade : weighted(thermal: 0.3, timing: 0.25, bandwidth: 0.25, aging: 0.1, errors: 0.1)
+
+// ── TRIAGE ─────────────────────────────────
+
+grade -> gate(> 0.9) -> tier_prime
+grade -> gate(0.6 ~ 0.9) -> tier_general
+grade -> gate(0.3 ~ 0.6) -> tier_light
+grade -> gate(<= 0.3) -> tier_rest
+
+// ── INTAKE ─────────────────────────────────
+
+stream : delta_stream -> segment(by: entropy) -> batches
+
+// ── ROUTING ────────────────────────────────
+
+batches -> gate(entropy > 0.8)  -> tier_prime
+batches -> gate(entropy 0.4 ~ 0.8) -> tier_general
+batches -> gate(entropy <= 0.4) -> tier_light
+
+// tier_rest gets nothing. It heals.
+
+// ── EXECUTE ────────────────────────────────
+
+tier_prime   -> cards @ mde.infer -> results
+tier_general -> cards @ mde.infer -> results
+tier_light   -> cards @ mde.infer -> results
+
+results ~> masq    // every result recorded. fleet learns.
+
+// ── WATCHDOG ───────────────────────────────
+
+// thermal creep — slide before throttle
+cards.thermal -> gate(> 72C, knee: 5C) -> route.bias(card, -0.2)
+
+// timing drift — aging in real time
+delta(cards.timing) -> gate(> drift_threshold) -> route.migrate(card -> next_best)
+
+// silence — card stopped talking
+cards -> on_silence(> 100ms) -> route.evacuate(card)
+      -> on_silence(> 5s)    -> triage.bench(card)
+
+// recovery — benched card wakes up
+cards.grade -> gate(rising, > 0.3) -> triage.promote(card -> tier_light)
+
+// ── TELEMETRY ──────────────────────────────
+
+grade    ~> live_health
+results  ~> throughput
+cards    ~> fleet_pulse : {
+    active:   count(grade > 0.3),
+    tpc:      sum(tpc_count) @ active,
+    thermal:  avg(thermal),
+    grade:    avg(grade),
+    oldest:   max(aging),
+    hottest:  max(thermal)
+}
+
+fleet_pulse ~> status_line

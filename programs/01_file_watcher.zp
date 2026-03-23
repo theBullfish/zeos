@@ -1,0 +1,65 @@
+// 01_file_watcher.zp — Watch files, react to changes
+// Conventional: inotify + callbacks + event loop (~500 LOC Python)
+// Codex Labs LLC — 2026
+
+// ── WATCH ──────────────────────────────────
+
+path : fs("/home/z13/projects") -> events
+
+// events are signals. file changes are signals.
+// there is no polling. the filesystem emits.
+
+// ── CLASSIFY ───────────────────────────────
+
+events -> {
+    gate(type: created)  -> created,
+    gate(type: modified) -> modified,
+    gate(type: deleted)  -> deleted,
+    gate(type: renamed)  -> renamed
+}
+
+// ── FILTER ─────────────────────────────────
+
+// ignore noise — build artifacts, temp files, dotfiles
+created  -> gate(not: "*.pyc", "*.tmp", ".git/*") -> clean_created
+modified -> gate(not: "*.pyc", "*.tmp", ".git/*") -> clean_modified
+
+// ── REACT ──────────────────────────────────
+
+// source files changed → rebuild
+clean_modified -> gate(ext: ".py", ".rs", ".zp") -> rebuild_trigger
+rebuild_trigger -> debounce(500ms) -> exec("make build")
+
+// new files → index
+clean_created -> content.index
+
+// deleted → alert if important
+deleted -> gate(ext: ".py", ".rs", ".zp") -> alert("deleted: " + path)
+
+// ── BURST DETECTION ────────────────────────
+
+// many changes at once = probably a git pull, not manual editing
+events -> rate(per: 1s) -> gate(> 20) -> burst_mode
+burst_mode -> rebuild_trigger.debounce(5s)    // wait for the storm to pass
+
+// ── TELEMETRY ──────────────────────────────
+
+events   ~> rate(per: minute) ~> changes_per_minute
+modified ~> count(by: ext) ~> hottest_file_types
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  gate(type:), gate(not:), gate(ext:) — natural filtering
+//          debounce() — felt native, already a reserved keyword
+//          rate detection for burst mode — delta thinking
+//
+// NEEDED:  fs() as a signal source — not in spec, needs addition
+//          exec() for shell commands — not in spec, needed for interop
+//          gate(not:) — negation pattern, not formally defined
+//          string concat still here in alert — needs signal-native form
+//
+// AMBIGUOUS: does debounce() restart on new signal or ignore during window?
+//            need to define: debounce(500ms, restart: true/false)
+//
+// CONVENTIONAL: ~500 LOC Python (watchdog library + handlers + filtering)

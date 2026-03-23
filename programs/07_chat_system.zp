@@ -1,0 +1,154 @@
+// 07_chat_system.zp — Chat with rooms, DMs, presence, typing indicators
+// Conventional: Slack backend (~2M+ LOC estimated) or Matrix/Synapse (~200k LOC Python)
+// Codex Labs LLC — 2026
+
+// ── USERS ──────────────────────────────────
+
+user : auth.identity -> {
+    voice,          // outgoing messages
+    ears,           // incoming messages
+    presence,       // online / away / offline
+    typing          // typing indicator signal
+}
+
+// ── PRESENCE ───────────────────────────────
+
+// presence is a signal, not a status flag
+user.activity -> {
+    gate(recent, within: 5m)              -> presence(online),
+    gate(recent, within: 30m)             -> presence(away),
+    on_silence(> 30m)                     -> presence(offline)
+}
+
+// presence is visible to anyone in your rooms
+user.presence ~> rooms.where(member: user) ~> members.ears
+
+// ── ROOMS ──────────────────────────────────
+
+// a room is a merge point — everyone's voice converges
+room("general") : {
+    members -> | merge | -> room_stream
+}
+
+// posting to a room = emitting into the merge
+user.voice -> gate(dest: room) -> room.merge
+
+// receiving = tapping the room stream
+room_stream -> members.ears
+
+// you hear everyone except yourself
+room_stream -> gate(author: not self) -> user.ears
+
+// ── MESSAGES ───────────────────────────────
+
+// a message is a signal with structure
+voice -> message : {
+    author,
+    content : text | image | file | reply,
+    dest : room | user,
+    timestamp: t
+}
+
+// store everything
+message -> vault.store(room, retention: forever)
+
+// ── THREADS ────────────────────────────────
+
+// a thread is a sub-wire branching from a message
+message -> reply(to: parent_message) -> parent_message.thread
+
+// thread signals flow to thread subscribers, not the whole room
+parent_message.thread -> thread_subscribers.ears
+
+// ── TYPING INDICATORS ──────────────────────
+
+// user is typing = a signal that decays
+user.keystrokes -> debounce(300ms) -> typing(active)
+user.keystrokes -> on_silence(> 2s) -> typing(stopped)
+
+typing -> room.where(dest) -> members.ears
+    gate(author: not self)    // don't echo your own typing
+
+// ── DMs ────────────────────────────────────
+
+// DM = private wire, same as chirp.zp
+user_a.voice -> gate(dest: user_b) -> private(encrypt: vault.key) -> user_b.ears
+    no_tap: true
+
+// ── SEARCH ─────────────────────────────────
+
+query -> vault.search(rooms: accessible, content ~ query) -> results
+results -> sort(by: relevance, then: timestamp) -> ranked
+
+// ── REACTIONS ──────────────────────────────
+
+// a reaction is a micro-signal attached to a message
+user -> react(emoji, to: message) -> message.reactions
+message.reactions ~> room_stream    // reactions flow to the room
+
+// ── NOTIFICATIONS ──────────────────────────
+
+// mention = your name in a message
+room_stream -> gate(content ~ "@" + user.name) -> notify(mention)
+
+// DM always notifies
+private.incoming -> notify(dm)
+
+// thread reply notifies thread participants
+thread.incoming -> notify(thread)
+
+// but respect quiet hours
+notify -> gate(user.quiet_hours: false) -> deliver
+notify -> gate(user.quiet_hours: true)  -> queue(until: quiet_end)
+
+// ── MODERATION ─────────────────────────────
+
+// same pattern as chirp.zp — structural, pre-delivery
+message -> safety @ mde("toxic-detect.zdx") -> {
+    gate(safe)   -> deliver,
+    gate(unsafe) -> hold ~> mod_queue
+}
+
+// ── TELEMETRY ──────────────────────────────
+
+room_stream    ~> rate(per: 1m) ~> messages_per_minute
+user.presence  ~> count(online) ~> active_users
+vault          ~> size(by: room) ~> storage_per_room
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  room as merge point — exactly right. room IS where voices converge.
+//          presence as temporal signal — not a flag, a signal with decay
+//          typing indicator as keystroke debounce + silence detection — native
+//          threads as sub-wires from messages — natural branching
+//          reactions as micro-signals — signal-native
+//          quiet hours as gate on notifications — time-aware gating
+//          DM encryption reused from chirp.zp — pattern holds
+//
+// NEEDED:  room() — named merge point with membership
+//          reply(to:) — signal referencing another signal (threading)
+//          react(emoji, to:) — micro-signal attachment
+//          queue(until:) — time-delayed delivery
+//          vault.search — full-text search over stored signals
+//          private(encrypt:) — encrypted wire (reuse from chirp)
+//
+// NEW CONSTRUCT: "queue(until:)" — deferred delivery.
+//   signal is held and released at a future time.
+//   different from debounce (which collapses rapid signals).
+//   different from throttle (which limits rate).
+//   this is: "hold this signal and deliver it later."
+//   use cases: quiet hours, scheduled messages, retry delays.
+//
+// NEW INSIGHT: rooms, topics (message queue), and timelines (twitter)
+//   are ALL the same construct: a named merge point.
+//   - room: voices merge, members tap
+//   - topic: producers merge, consumers tap
+//   - timeline: follows merge, user taps
+//   these should probably be the same primitive.
+//   maybe: channel — a named wire with merge + tap + storage.
+//
+// CONVENTIONAL: Slack is millions of LOC. Matrix/Synapse is 200k Python.
+//   Even a basic chat server is 5-10k LOC. This is 70 lines with
+//   presence, typing indicators, threads, reactions, search,
+//   moderation, encrypted DMs, quiet hours, and notification routing.
