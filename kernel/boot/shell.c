@@ -26,6 +26,10 @@
 #include "zplus.h"
 #include "sigviz.h"
 #include "vault.h"
+#include "net.h"
+#include "net_ip.h"
+#include "net_dns.h"
+#include "net_http.h"
 #include "timer.h"
 #include "signal.h"
 
@@ -102,6 +106,12 @@ static void cmd_write_file(const char *args);
 static void cmd_mkdir(const char *args);
 static void cmd_df(const char *args);
 
+/* Networking */
+static void cmd_ping(const char *args);
+static void cmd_dns_cmd(const char *args);
+static void cmd_fetch(const char *args);
+static void cmd_netinfo(const char *args);
+
 /* ── Command table ──────────────────────────────── */
 
 static const struct shell_cmd commands[] = {
@@ -136,6 +146,12 @@ static const struct shell_cmd commands[] = {
     {"run",     "run a Z+ program",               cmd_run,     VIS_DEREZ},
     {"programs","list built-in Z+ programs",       cmd_programs,VIS_DEREZ},
     {"viz",     "visualize signal chain (graphical)", cmd_viz,  VIS_DEREZ},
+
+    /* Networking */
+    {"ping",    "ping an IP address",              cmd_ping,    VIS_ALWAYS},
+    {"dns",     "resolve a hostname",              cmd_dns_cmd, VIS_DEREZ},
+    {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
+    {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
     {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
@@ -992,6 +1008,177 @@ static void cmd_viz(const char *args)
     fb_set_cursor(save_col, save_row);
 }
 
+/* ── Networking commands ────────────────────────── */
+
+static void cmd_netinfo(const char *args)
+{
+    (void)args;
+    if (!g_net.up) {
+        kputs("  Network not available.\n");
+        return;
+    }
+    kputs("\n  Network Configuration:\n\n");
+    kputs("  MAC:     ");
+    for (int i = 0; i < 6; i++) {
+        if (i > 0) kputs(":");
+        static const char hex[] = "0123456789abcdef";
+        kputc(hex[(g_net.mac.b[i] >> 4) & 0xf]);
+        kputc(hex[g_net.mac.b[i] & 0xf]);
+    }
+    kputs("\n  IP:      ");
+    kput_dec(g_net.ip.b[0]); kputs(".");
+    kput_dec(g_net.ip.b[1]); kputs(".");
+    kput_dec(g_net.ip.b[2]); kputs(".");
+    kput_dec(g_net.ip.b[3]);
+    kputs("\n  Gateway: ");
+    kput_dec(g_net.gateway.b[0]); kputs(".");
+    kput_dec(g_net.gateway.b[1]); kputs(".");
+    kput_dec(g_net.gateway.b[2]); kputs(".");
+    kput_dec(g_net.gateway.b[3]);
+    kputs("\n  DNS:     ");
+    kput_dec(g_net.dns.b[0]); kputs(".");
+    kput_dec(g_net.dns.b[1]); kputs(".");
+    kput_dec(g_net.dns.b[2]); kputs(".");
+    kput_dec(g_net.dns.b[3]);
+    kputs("\n\n");
+}
+
+static int parse_ip(const char *s, struct ipv4_addr *out)
+{
+    int octet = 0, val = 0;
+    while (*s) {
+        if (*s >= '0' && *s <= '9') {
+            val = val * 10 + (*s - '0');
+        } else if (*s == '.') {
+            if (octet >= 4 || val > 255) return -1;
+            out->b[octet++] = (uint8_t)val;
+            val = 0;
+        } else {
+            break;
+        }
+        s++;
+    }
+    if (octet != 3 || val > 255) return -1;
+    out->b[3] = (uint8_t)val;
+    return 0;
+}
+
+static void cmd_ping(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: ping <ip>\n");
+        kputs("  Example: ping 10.0.2.2\n");
+        return;
+    }
+
+    struct ipv4_addr target;
+    if (parse_ip(args, &target) < 0) {
+        kputs("  Invalid IP address.\n");
+        return;
+    }
+
+    kputs("  Pinging ");
+    kput_dec(target.b[0]); kputs(".");
+    kput_dec(target.b[1]); kputs(".");
+    kput_dec(target.b[2]); kputs(".");
+    kput_dec(target.b[3]); kputs("...\n");
+
+    uint64_t rtt = icmp_ping(target);
+    if (rtt > 0) {
+        kputs("  Reply: ");
+        kput_dec(rtt);
+        kputs(" TSC cycles\n");
+    } else {
+        kputs("  Timeout.\n");
+    }
+}
+
+static void cmd_dns_cmd(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: dns <hostname>\n");
+        kputs("  Example: dns example.com\n");
+        return;
+    }
+
+    struct ipv4_addr result;
+    kputs("  Resolving ");
+    kputs(args);
+    kputs("...\n");
+
+    if (dns_resolve(args, &result) == 0) {
+        kputs("  ");
+        kputs(args);
+        kputs(" = ");
+        kput_dec(result.b[0]); kputs(".");
+        kput_dec(result.b[1]); kputs(".");
+        kput_dec(result.b[2]); kputs(".");
+        kput_dec(result.b[3]); kputs("\n");
+    } else {
+        kputs("  Failed to resolve.\n");
+    }
+}
+
+static void cmd_fetch(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: fetch <host> [path]\n");
+        kputs("  Example: fetch example.com /\n");
+        return;
+    }
+
+    /* Parse host and path */
+    char host[128];
+    const char *path = "/";
+    int hi = 0;
+    const char *p = args;
+
+    /* Skip http:// if present */
+    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p' &&
+        p[4] == ':' && p[5] == '/' && p[6] == '/')
+        p += 7;
+
+    while (*p && *p != ' ' && *p != '/' && hi < 127)
+        host[hi++] = *p++;
+    host[hi] = '\0';
+
+    if (*p == '/') path = p;
+    else if (*p == ' ') {
+        p++;
+        if (*p) path = p;
+    }
+
+    kputs("\n  Fetching http://");
+    kputs(host);
+    kputs(path);
+    kputs("\n\n");
+
+    struct http_response resp;
+    if (http_get(host, path, &resp) == 0) {
+        kputs("\n  Status: ");
+        kput_dec(resp.status_code);
+        kputs("\n  Type:   ");
+        kputs(resp.content_type);
+        kputs("\n  Body:   ");
+        kput_dec(resp.body_len);
+        kputs(" bytes\n\n");
+
+        /* Display body (truncate to terminal) */
+        if (resp.body_len > 0) {
+            int limit = resp.body_len > 2048 ? 2048 : resp.body_len;
+            for (int i = 0; i < limit; i++)
+                kputc(resp.body[i]);
+            if (resp.body[limit - 1] != '\n')
+                kputs("\n");
+            if (resp.body_len > 2048)
+                kputs("\n  ... (truncated)\n");
+        }
+    } else {
+        kputs("  Fetch failed.\n");
+    }
+    kputs("\n");
+}
+
 /* ── VAULT filesystem commands ──────────────────── */
 
 /* RAM disk for VAULT — 2MB */
@@ -1214,6 +1401,9 @@ void shell_run(struct zeos_boot_info *boot)
         kput_dec(NUM_BUILTINS);
         kputs(" programs loaded.\n");
     }
+
+    /* Initialize networking */
+    net_init();
 
     kputs("Type 'help' for commands.\n");
     kputs("Switch modes: 'zeros' (robotics) | 'derez' (dev) | 'raise' (full)\n\n");

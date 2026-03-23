@@ -42,7 +42,7 @@ LDFLAGS  = -nostdlib \
 LIBS     = -lefi -lgnuefi
 
 # Source files
-SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/idt.c boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c boot/shell.c
+SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/idt.c boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c boot/net.c boot/net_virtio.c boot/net_arp.c boot/net_ip.c boot/net_udp.c boot/net_tcp.c boot/net_dns.c boot/net_http.c boot/shell.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output
@@ -84,7 +84,8 @@ run: $(BUILDDIR)/$(TARGET)
 		-drive if=pflash,format=raw,file=$(BUILDDIR)/OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:$(ESP) \
 		-m 256M \
-		-net none \
+		-device virtio-net-pci,netdev=n0 \
+		-netdev user,id=n0 \
 		-serial stdio \
 		-display gtk \
 		2>&1
