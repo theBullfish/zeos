@@ -1,0 +1,170 @@
+// zpm.zp — Z+ Package Manager
+// The terminal client for zeos-os.com/registry
+// Codex Labs LLC — 2026
+
+// ── CONFIG ─────────────────────────────────
+
+registry : "https://zeos-os.com/registry/api/v1"
+local    : vault.collection("packages")
+
+// ── AUTH ───────────────────────────────────
+
+// login stores ZAuth token locally
+command -> gate(cmd: "login") -> {
+    prompt("email") -> zauth.login(registry) -> {
+        gate(success) -> vault.store("auth", token) -> print("logged in"),
+        gate(fail)    -> print("login failed")
+    }
+}
+
+// ── SEARCH ─────────────────────────────────
+
+command -> gate(cmd: "search") -> {
+    query -> net.get(registry + "/search?q=" + query) -> results
+    results -> format_table(name, type, version, desc) -> print
+}
+
+// ── INFO ───────────────────────────────────
+
+command -> gate(cmd: "info") -> {
+    package_name -> net.get(registry + "/package/" + package_name) -> info
+    info -> {
+        print(info.name + " v" + info.version),
+        print(info.desc),
+        print("type: " + info.type),
+        print("contract: " + info.contract),
+        print("requires: " + info.requires),
+        print("emits: " + info.emits)
+    }
+}
+
+// ── INSTALL ────────────────────────────────
+
+command -> gate(cmd: "install") -> install_flow
+
+install_flow -> {
+    // fetch package metadata
+    package_name -> net.get(registry + "/package/" + package_name) -> meta,
+
+    // check signal contract compatibility BEFORE downloading
+    meta.contract -> compatibility_check -> {
+        gate(compatible) -> proceed_install,
+        gate(missing_signals) -> {
+            print("incompatible: your system doesn't provide:"),
+            missing_signals -> print,
+            print("install anyway? (the missing signals will be silent)"),
+            prompt(y_n) -> gate("y") -> proceed_install
+        }
+    }
+}
+
+proceed_install -> {
+    // download
+    net.get(registry + "/package/" + package_name + "/download")
+        -> artifact,
+
+    // verify integrity
+    artifact -> hash(sha256) -> gate(== meta.hash) -> {
+        gate(match) -> store,
+        gate(mismatch) -> print("integrity check failed") -> abort
+    }
+}
+
+store -> {
+    // store in local vault
+    artifact -> vault.store("packages/" + meta.name, artifact),
+
+    // if it's a .zp program, extend the signal graph
+    artifact -> gate(type: "zp") -> graph.extend(artifact),
+
+    // if it's a .zdx model, register with AI routing
+    artifact -> gate(type: "zdx") -> ai.register(artifact),
+
+    // if it's a .zsc contract, add to contract registry
+    artifact -> gate(type: "zsc") -> contracts.register(artifact),
+
+    print(meta.name + " v" + meta.version + " installed")
+}
+
+// ── UNINSTALL ──────────────────────────────
+
+command -> gate(cmd: "uninstall") -> {
+    package_name -> vault.read("packages/" + package_name) -> {
+        gate(found) -> {
+            // retract from signal graph
+            graph.retract(package_name),
+            vault.delete("packages/" + package_name),
+            print(package_name + " removed")
+        },
+        gate(not_found) -> print("not installed: " + package_name)
+    }
+}
+
+// ── UPDATE ─────────────────────────────────
+
+command -> gate(cmd: "update") -> {
+    // check all installed packages for newer versions
+    vault.scan("packages/*") -> installed,
+    installed -> per_package {
+        net.get(registry + "/package/" + name + "/versions") -> latest,
+        gate(latest.version > installed.version) -> {
+            print(name + ": " + installed.version + " → " + latest.version),
+            pending_updates
+        }
+    },
+    pending_updates -> gate(count > 0) -> {
+        print(count + " updates available"),
+        prompt("install all? (y/n)") -> gate("y") -> {
+            pending_updates -> install_flow    // reuse install
+        }
+    }
+}
+
+// ── LIST ───────────────────────────────────
+
+command -> gate(cmd: "list") -> {
+    vault.scan("packages/*") -> installed,
+    installed -> format_table(name, type, version) -> print
+}
+
+// ── PUBLISH ────────────────────────────────
+
+command -> gate(cmd: "publish") -> {
+    // must be logged in
+    vault.read("auth") -> gate(not_found) -> print("run: zpm login") -> abort,
+
+    file_path -> fs.read -> artifact,
+
+    // extract or prompt for metadata
+    artifact -> parse_metadata -> meta,
+    meta.contract -> validate -> gate(valid) -> {
+        // upload
+        net.post(registry + "/publish", {
+            artifact,
+            meta,
+            auth: vault.read("auth").token
+        }) -> {
+            gate(success) -> print("published: " + meta.name + " v" + meta.version),
+            gate(fail)    -> print("publish failed: " + error)
+        }
+    }
+}
+
+// ── TELEMETRY ──────────────────────────────
+
+install_flow ~> count(per: session) ~> installs_this_session
+command      ~> vault.append("zpm_history")    // local command history
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// zpm is a Z+ program that manages Z+ programs.
+// installing a package = extending the signal graph.
+// uninstalling = retracting wires.
+// signal contracts enforce compatibility before download.
+// no dependency trees. no node_modules. no virtual environments.
+// a package either connects or it doesn't.
+//
+// the registry is the website. the terminal is the client.
+// ZAuth ties them together. vault stores everything locally.
+// the graph extends. that's what install means.
