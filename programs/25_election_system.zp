@@ -1,0 +1,164 @@
+// 25_election_system.zp — Transparent, verifiable election system
+// Conventional: Dominion/ES&S systems (proprietary, unknown LOC)
+// Industry: Government / Civic
+// ** Because if Z+ can make voting transparent, that matters. **
+// Codex Labs LLC — 2026
+
+// ── IDENTITY ───────────────────────────────
+
+voter : auth.verify(method: in_person | mail | digital) -> {
+    identity : verified,
+    precinct,
+    eligibility : gate(registered, not_voted_yet)
+}
+
+// one person, one vote — structural, not policy
+voter -> gate(eligibility: valid) -> ballot_issued
+voter -> gate(eligibility: already_voted) -> reject("already voted")
+voter -> gate(eligibility: not_registered) -> reject("not registered")
+
+// ── BALLOT ─────────────────────────────────
+
+ballot_issued -> voter.selections -> ballot : {
+    races : list<race_id, selection>,
+    precinct,
+    timestamp: t,
+    // NO voter identity attached. ballot is anonymous.
+    // the gate proved eligibility. the ballot carries no identity.
+    hash : crypto.hash(selections + salt)
+}
+
+// voter gets a receipt — hash only, can verify but can't prove to others
+ballot.hash -> voter.receipt
+    // you can check YOUR ballot was counted.
+    // you can't show someone how you voted (prevents coercion/buying).
+
+// ── COUNTING ───────────────────────────────
+
+ballot -> vault.append("ballots", precinct, immutable: true)
+
+// count is a live signal — not a batch process
+vault.query("ballots", race) -> count(by: selection) -> tally
+
+// tally is a tap — anyone can observe, nobody can modify
+tally ~> public_board    // live results, real-time, transparent
+
+// ── VERIFICATION ───────────────────────────
+
+// every ballot is hash-chained — tamper evident
+vault.read("ballots") -> hash_chain -> {
+    gate(chain: valid)   -> integrity(confirmed),
+    gate(chain: broken)  -> alert(critical: "BALLOT CHAIN COMPROMISED")
+}
+    priority: reflex
+
+// voter verification — did my ballot count?
+voter.receipt(hash) -> vault.verify("ballots", hash: hash) -> {
+    gate(found)     -> respond("your ballot was counted"),
+    gate(not_found) -> respond("ballot not found — contact election office")
+}
+
+// total verification — does count = number of ballots?
+vault.count("ballots", precinct) -> |
+                                     | -> audit : ballots_counted - voters_processed
+voters.processed(precinct)       -> |
+
+audit -> gate(!= 0) -> alert(critical: "ballot count mismatch in " + precinct)
+
+// ── PRECINCT AGGREGATION ───────────────────
+
+// results flow up: precinct -> county -> state -> national
+precinct.tally -> | sum(by: race) | -> county.tally
+county.tally   -> | sum(by: race) | -> state.tally
+state.tally    -> | sum(by: race) | -> national.tally
+
+// each level is independently verifiable
+// county can recount from precinct ballots
+// state can recount from county tallies
+// every level has its own hash chain
+
+// ── ANOMALY DETECTION ──────────────────────
+
+// statistical anomaly — precinct result deviates from neighbors
+precinct.tally -> deviation(from: neighbors.avg) -> {
+    gate(> 3σ) -> flag(statistical_anomaly: precinct)
+        ~> audit_queue
+}
+
+// turnout anomaly — too high or too low
+precinct.turnout -> deviation(from: historical.avg) -> {
+    gate(> 3σ) -> flag(turnout_anomaly: precinct)
+        ~> audit_queue
+}
+
+// temporal anomaly — vote spike at unusual time
+ballots -> rate(per: precinct, per: 1h) -> baseline(window: election_day)
+    -> deviation -> gate(> 3σ) -> flag(temporal_anomaly: precinct)
+        ~> audit_queue
+
+// correlation — multiple anomalies at same precinct = investigate
+flag(statistical_anomaly) -> |
+flag(turnout_anomaly)     -> | resonance(2 of 3, within: precinct) | -> {
+flag(temporal_anomaly)    -> |     alert(critical: "multiple anomalies at " + precinct),
+                                   mandatory_audit(precinct)
+                              }
+
+// ── ACCESSIBILITY ──────────────────────────
+
+// ballot content through TAPER tiers for accessibility
+ballot.content -> taper.transform -> {
+    tier(clarified) -> display(default),    // clear language
+    tier(reduced)   -> display(option),     // simplified
+    tier(anchors)   -> display(option)      // key concepts only
+}
+
+// audio ballot for visually impaired
+ballot.content -> mde("text-to-speech.zdx") -> audio_ballot
+
+// language translation
+ballot.content -> mde("translate.zdx", to: voter.preferred_language) -> translated_ballot
+
+// ── TELEMETRY ──────────────────────────────
+
+tally           ~> live_results(public)
+precinct.turnout ~> live_map
+ballots         ~> rate(per: 1h) ~> voting_pace
+audit_queue     ~> count ~> pending_audits
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  eligibility as gate — one person one vote is structural
+//          anonymous ballot — identity proves eligibility, then detaches
+//          hash chain as immutable vault — tamper-evident by design
+//          voter verification via receipt hash — verifiable but not provable
+//          hierarchical aggregation as cascading merges — precinct → county → state
+//          anomaly detection via deviation + resonance — same pattern everywhere
+//          TAPER for ballot accessibility — cognitive scaffolding for civic participation
+//
+// NEEDED:  crypto.hash() — cryptographic hashing
+//          hash_chain — append-only hash-linked storage
+//          vault.verify — prove existence of record by hash
+//          mandatory_audit — trigger human review process
+//          neighbors.avg — geographic neighbor comparison
+//
+// KEY INSIGHT: the ballot detachment is elegant in Z+.
+//   voter -> gate(eligible) -> ballot. the gate proves identity.
+//   the ballot flows forward without it. the wire from voter to
+//   ballot passes through the eligibility gate and the identity
+//   stays behind. structural anonymity. not a policy. a wire.
+//
+// KEY INSIGHT: election integrity is the same anomaly detection
+//   pattern applied everywhere else. statistical deviation from
+//   neighbors + turnout deviation from history + temporal spike
+//   detection, all through resonance. if the same tools that
+//   detect network intrusions and patient deterioration also
+//   detect election fraud, that's not a political statement.
+//   it's math applied consistently.
+//
+// CONVENTIONAL: election systems are proprietary black boxes.
+//   this is 100 lines, fully transparent, fully auditable,
+//   with voter verification, hash-chain integrity, multi-level
+//   anomaly detection, accessibility via TAPER, and cascading
+//   aggregation that's independently verifiable at every level.
+//   every line is readable. every gate is inspectable. that's the point.

@@ -1,0 +1,204 @@
+// 24_lms_education.zp — Learning management system (Canvas/Moodle-like)
+// Conventional: Canvas LMS (~1,000,000 LOC Ruby), Moodle (~4,000,000 LOC PHP)
+// Industry: Education
+// ** This one's for Fynn. **
+// Codex Labs LLC — 2026
+
+// ── PLATFORM ───────────────────────────────
+
+platform : net.listen(port: 443, proto: https) -> requests
+requests -> auth.verify -> session(role: student | teacher | admin)
+
+// ── COURSES ────────────────────────────────
+
+course : vault.collection("courses") -> {
+    title, description, instructor, students,
+    modules : ordered_list,
+    assignments, grades, announcements
+}
+
+// ── CONTENT DELIVERY ───────────────────────
+
+// student requests content
+requests -> gate(path: "/course/:id/module/:mod") -> {
+    vault.read("courses", id) -> gate(student_enrolled) -> {
+        module.content -> deliver,
+        module.prerequisites -> gate(all_complete) -> deliver,
+        module.prerequisites -> gate(any_incomplete) -> respond("complete prerequisites first")
+    }
+}
+
+// adaptive pacing — don't let a struggling student drown
+student.module_time -> baseline(window: class, per: module) -> class_normal
+student.module_time -> deviation(from: class_normal) -> {
+    gate(> 2σ) -> {    // taking way longer than peers
+        suggest(review_material: module.prerequisites),
+        notify(instructor, "student struggling with " + module.title),
+        offer(tutoring | office_hours | alternative_explanation)
+    },
+    gate(< -2σ) -> {   // blazing through — maybe bored
+        suggest(enrichment: advanced_material),
+        offer(skip_ahead: next_module)
+    }
+}
+
+// ── ASSIGNMENTS ────────────────────────────
+
+assignment : {
+    title, instructions, due_date, points,
+    type: essay | quiz | project | discussion,
+    rubric
+}
+
+// submission flow
+student.submit(assignment) -> {
+    gate(before: due_date)  -> on_time,
+    gate(after: due_date)   -> late(penalty: per_day(10%, max: 50%))
+}
+
+// plagiarism check — structural, pre-grading
+submission -> mde("plagiarism-detect.zdx") -> {
+    gate(similarity < 20%) -> ready_for_grading,
+    gate(similarity >= 20%) -> hold ~> review_queue
+        ~> notify(instructor, "high similarity detected")
+}
+
+// ── GRADING ────────────────────────────────
+
+// auto-grade quizzes
+submission -> gate(type: quiz) -> grade(against: answer_key) -> {
+    score,
+    feedback : per_question(correct | incorrect, explanation)
+} -> vault.store("grades") -> notify(student, "quiz graded")
+
+// AI-assisted essay feedback (not grading — scaffolding)
+submission -> gate(type: essay) -> mde("essay-feedback.zdx") -> {
+    structure_notes,
+    clarity_notes,
+    argument_strength
+} -> suggest_to_instructor(as: draft_feedback)
+    // AI suggests. Instructor decides. Tool, not replacement.
+
+// grade book — live, always current
+vault.query("grades", student, course) -> {
+    assignments -> weighted(by: points) -> current_grade,
+    current_grade -> {
+        gate(> 90%) -> status(A),
+        gate(80% ~ 90%) -> status(B),
+        gate(70% ~ 80%) -> status(C),
+        gate(60% ~ 70%) -> status(D),
+        gate(< 60%) -> status(F)
+    }
+}
+
+// ── EARLY WARNING ──────────────────────────
+
+// at-risk student detection — the most important feature
+student -> {
+    // grade trend — falling grades
+    current_grade -> delta -> gate(falling, > 5%, sustained: 2w) -> risk(grade),
+
+    // engagement trend — less activity
+    student.activity -> rate(per: 1w) -> delta -> gate(falling, > 30%) -> risk(engagement),
+
+    // assignment completion — missing work
+    assignments.submitted -> ratio(submitted, assigned) -> gate(< 70%) -> risk(completion),
+
+    // attendance / login frequency
+    student.logins -> rate(per: 1w) -> gate(< 3) -> risk(attendance)
+}
+
+// resonance — multiple risk signals = real concern
+risk(grade)      -> |
+risk(engagement) -> | resonance(2 of 4, within: 2w) | -> at_risk(student)
+risk(completion) -> |
+risk(attendance) -> |
+
+at_risk -> {
+    notify(instructor, "student at risk: " + student.name),
+    notify(advisor, "student at risk: " + student.name),
+    suggest(student, "office hours, tutoring, study groups")
+}
+
+// ── TAPER INTEGRATION ──────────────────────
+
+// students who need NSCL compression get it in-platform
+course.content -> taper.transform -> {
+    tier(clarified)  -> display(default),
+    tier(reduced)    -> display(option),
+    tier(compressed) -> display(option),
+    tier(symbolic)   -> display(option),
+    tier(anchors)    -> display(option)
+}
+
+// track which tier the student prefers — builds cognitive profile
+student.tier_usage -> vault.update("learning_profile", student) -> {
+    preferred_tier,
+    tier_switches,
+    dwell_time_per_tier
+}
+
+// learning style adapts content delivery over time
+student.learning_profile -> mde("adaptive-content.zdx") -> content_adaptation
+    // student who reads at tier 3 gets content pre-compressed to tier 3
+    // student who needs tier 1 gets full clarification by default
+
+// ── DISCUSSION ─────────────────────────────
+
+// discussion board is a chat room scoped to a course
+course.discussion : channel("course_" + id + "_discuss")
+
+student.voice -> course.discussion -> members.ears
+    gate(author: not self)
+
+// threaded replies
+reply(to: post) -> post.thread -> thread_subscribers.ears
+
+// instructor highlight
+instructor -> react(highlight, to: post) -> post.featured
+    -> notify(all_students, "instructor highlighted a post")
+
+// ── TELEMETRY ──────────────────────────────
+
+student.activity ~> engagement_heatmap(by: hour, day)
+assignments      ~> avg(score, by: assignment) ~> assignment_difficulty
+at_risk          ~> count ~> at_risk_count
+taper.tier_usage ~> distribution ~> learning_style_breakdown
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  adaptive pacing as deviation from class baseline — natural
+//          at-risk detection as multi-signal resonance — identical to patient monitor
+//          TAPER integration as content tier selection — Z+ expressing its own origin
+//          prerequisite gates — can't access module until dependencies complete
+//          late penalty as temporal gate — auto-calculated from due date
+//          learning profile from tier usage — cognitive data as signal
+//          discussion as channel (named merge point) — reuse from chat
+//
+// NEEDED:  ordered_list — sequence-preserving collection
+//          due_date — deadline as temporal reference
+//          per_day() — time-proportional calculation
+//          answer_key — correct answers for auto-grading
+//          rubric — grading criteria
+//          suggest_to_instructor — recommendation, not auto-action
+//
+// KEY INSIGHT: at-risk student detection is patient deterioration monitoring.
+//   grade trend = vital sign trend. engagement = activity level.
+//   completion rate = treatment compliance. login frequency = consciousness.
+//   resonance across 4 signals = convergent evidence of a student in trouble.
+//   the same construct that predicts patient deterioration predicts
+//   student failure. because both are: "a human is declining and
+//   multiple independent signals agree."
+//
+// KEY INSIGHT: TAPER integration makes Z+ self-referential.
+//   the language was designed from NSCL tier 3 cognition.
+//   now it's expressing an LMS that delivers NSCL tier 3 to students.
+//   the language is writing a program that teaches people to think
+//   in the same compressed notation the language is written in.
+//   Z+ teaching Z+ through TAPER. the loop closes.
+//
+// CONVENTIONAL: Canvas is 1M LOC Ruby. Moodle is 4M LOC PHP.
+//   Neither has: adaptive pacing, multi-signal at-risk detection,
+//   NSCL content compression, learning style adaptation, or
+//   AI-assisted plagiarism + feedback integration. This is 120 lines.

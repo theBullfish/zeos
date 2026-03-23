@@ -1,0 +1,194 @@
+// 23_supply_chain.zp — Supply chain visibility + optimization
+// Conventional: SAP SCM (~millions LOC), Oracle SCM Cloud, custom: ~300,000 LOC
+// Industry: Logistics / Manufacturing / Retail
+// Codex Labs LLC — 2026
+
+// ── SOURCES ────────────────────────────────
+
+suppliers    : net.connect("supplier_api_*")       -> supply_signals
+warehouses   : net.connect("wms_*")                -> inventory_signals
+factories    : net.connect("mes_*")                -> production_signals
+carriers     : net.connect("carrier_api_*")        -> transport_signals
+stores       : net.connect("pos_*")                -> demand_signals
+weather      : net.connect("weather_api")          -> weather_signals
+ports        : net.connect("port_api_*")           -> port_signals
+
+// ── DEMAND SENSING ─────────────────────────
+
+// real-time demand from POS
+demand_signals -> rate(by: sku, per: 1h) -> current_demand
+
+// demand forecast — seasonal baseline + trend
+current_demand -> baseline(window: 365d, by: day_of_week, month) -> demand_forecast
+
+// demand anomaly — unusual spike or drop
+current_demand -> deviation(from: demand_forecast) -> {
+    gate(> 2σ) -> demand_spike(sku) -> alert(info: "demand surge: " + sku),
+    gate(< -2σ) -> demand_drop(sku) -> alert(info: "demand slump: " + sku)
+}
+
+// ── INVENTORY VISIBILITY ───────────────────
+
+// every unit, everywhere, right now
+inventory_signals -> vault.update("inventory", {
+    sku, location, quantity, lot, expiry
+})
+
+// inventory position = on_hand + in_transit + on_order - committed
+vault.query("inventory", sku) -> on_hand
+transport_signals -> gate(sku, status: in_transit) -> in_transit
+suppliers -> gate(sku, status: confirmed) -> on_order
+demand_signals -> gate(sku, status: committed) -> committed
+
+on_hand + in_transit + on_order - committed -> available_to_promise(sku)
+
+// ── REORDER ────────────────────────────────
+
+// reorder point = demand_forecast * lead_time + safety_stock
+demand_forecast * lead_time(supplier, sku) + safety_stock(sku) -> reorder_point
+
+available_to_promise -> gate(< reorder_point, knee: safety_stock * 0.5) -> {
+    reorder_quantity : economic_order_quantity(demand_forecast, holding_cost, order_cost),
+    create_po(supplier, sku, quantity: reorder_quantity) -> supplier.submit
+}
+
+// ── SUPPLIER HEALTH ────────────────────────
+
+suppliers -> per_supplier {
+    // on-time delivery rate
+    deliveries -> gate(on_time) -> ratio(on_time, total) -> otd_rate,
+
+    // quality — defect rate
+    receipts -> gate(defective) -> ratio(defective, total) -> defect_rate,
+
+    // lead time consistency
+    deliveries -> avg(actual_lead_time) -> lead_time_avg,
+    deliveries -> variance(actual_lead_time) -> lead_time_var,
+
+    // overall grade
+    grade : weighted(otd: 0.4, quality: 0.3, lead_time: 0.2, cost: 0.1)
+}
+
+// supplier risk — grade dropping = trouble
+supplier.grade -> delta -> gate(falling, > 10%, sustained: 30d) -> {
+    alert(warn: "supplier " + supplier.id + " quality declining"),
+    suggest(alternative_suppliers(sku))
+}
+
+// ── SHIPMENT TRACKING ──────────────────────
+
+transport_signals -> shipment : {
+    origin, destination, carrier, sku, quantity,
+    status: ordered | picked_up | in_transit | customs | delivered,
+    eta, current_location
+}
+
+// ETA accuracy — compare predicted vs actual
+shipment.eta -> |
+                 | -> eta_error : actual_arrival - predicted_eta
+shipment.actual_arrival -> |
+
+carrier.eta_error -> baseline(window: 90d) -> carrier_reliability
+
+// delay detection
+shipment.eta -> gate(delayed: > 24h) -> {
+    alert(warn: "shipment delayed: " + shipment.id),
+    downstream_impact(shipment) -> notify_affected_customers
+}
+
+// ── DISRUPTION DETECTION ───────────────────
+
+// weather disruption
+weather_signals -> gate(severe: hurricane | flood | snow) -> {
+    affected_routes(weather.area) -> shipments.reroute,
+    affected_suppliers(weather.area) -> risk_assessment,
+    affected_warehouses(weather.area) -> inventory.redistribute
+}
+
+// port congestion
+port_signals -> gate(wait_time > 5d, sustained: 3d) -> {
+    alert(warn: "port congestion: " + port.id),
+    shipments.reroute(away_from: port),
+    buffer_stock.increase(affected_skus)
+}
+
+// supplier failure — silence is the scariest signal
+supplier -> on_silence(> 48h) -> {
+    alert(critical: "supplier unresponsive"),
+    activate(backup_suppliers),
+    buffer_stock.increase(supplier.skus)
+}
+
+// ── WAREHOUSE OPTIMIZATION ─────────────────
+
+// pick path optimization — minimize travel time
+orders -> batch(by: zone, within: 15m) -> pick_wave
+pick_wave -> optimize(path: shortest) -> pick_list
+
+// slotting — fast movers near packing stations
+demand_rate(sku) -> sort(descending) -> {
+    take(20%) -> slot(zone: prime),     // hot items close
+    take(60%) -> slot(zone: general),   // regular items
+    take(20%) -> slot(zone: reserve)    // slow movers far
+}
+
+// expiry management — FEFO (first expiry, first out)
+vault.query("inventory", sku) -> sort(by: expiry, ascending) -> pick_priority
+inventory -> gate(expiry < 30d) -> alert(warn: "expiring stock: " + sku)
+inventory -> gate(expiry < 7d)  -> markdown(sku, discount: 30%)
+
+// ── CARBON TRACKING ────────────────────────
+
+// emissions per shipment
+shipment -> carbon : distance * carrier.emission_factor(mode) -> emissions @ kg_co2
+emissions -> vault.append("carbon_log")
+emissions -> sum(per: month) ~> monthly_carbon
+
+// optimize for carbon — route by lowest emissions when cost-neutral
+shipments -> route(optimize: carbon, constraint: cost < budget) -> green_route
+
+// ── TELEMETRY ──────────────────────────────
+
+available_to_promise ~> stockout_risk(by: sku)
+suppliers            ~> grade ~> supplier_scorecard
+shipments            ~> count(by: status) ~> pipeline_view
+demand_forecast      ~> accuracy(vs: actual) ~> forecast_accuracy
+monthly_carbon       ~> live_gauge
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  demand sensing as rate + baseline + deviation — same pattern again
+//          inventory position as signal arithmetic — on_hand + in_transit - committed
+//          supplier health as grade — identical to fleet card health
+//          supplier silence as risk signal — on_silence applied to business
+//          disruption as weather gate affecting routes/suppliers — spatial + temporal
+//          expiry as temporal gate — countdown to waste
+//          carbon as derived signal per shipment — measurement IS accountability
+//
+// NEEDED:  economic_order_quantity() — EOQ calculation
+//          lead_time(supplier, sku) — supplier-specific lead time
+//          safety_stock(sku) — buffer calculation
+//          create_po() — purchase order generation
+//          downstream_impact() — trace forward through supply chain
+//          batch(by:, within:) — accumulate then process (pick waves)
+//          optimize(path:) — route optimization
+//          slot(zone:) — warehouse location assignment
+//          markdown() — pricing action
+//          emission_factor(mode) — carbon calculation by transport mode
+//
+// KEY INSIGHT: supply chain visibility is the same as fleet telemetry.
+//   suppliers are cards. grade them. shipments are signals. track them.
+//   inventory is a signal that flows through the chain. disruptions
+//   are silence or anomalies. reorder is a gate on available quantity.
+//   the entire supply chain is a signal graph where materials flow
+//   from sources (suppliers) through nodes (warehouses, factories)
+//   to sinks (stores, customers). Z+ models this natively because
+//   that's literally what Z+ does — signal flow through a graph.
+//
+// CONVENTIONAL: SAP SCM is millions of LOC. Oracle SCM Cloud similar.
+//   Custom supply chain: 300k LOC. This is 130 lines with demand sensing,
+//   inventory visibility, automatic reorder, supplier scoring, shipment
+//   tracking, disruption detection, warehouse optimization, expiry
+//   management, and carbon tracking. The supplier silence detection
+//   alone is a feature most SCM systems don't have.

@@ -1,0 +1,169 @@
+// 22_precision_agriculture.zp — Smart farming / precision agriculture
+// Conventional: John Deere Operations Center (~millions LOC), custom: ~100,000 LOC
+// Industry: Agriculture
+// Codex Labs LLC — 2026
+
+// ── FIELD SENSORS ──────────────────────────
+
+soil_moisture : mesh.sensors("soil_moisture_*")   -> moisture @ percent
+soil_temp     : mesh.sensors("soil_temp_*")       -> temperature @ C
+soil_ph       : mesh.sensors("soil_ph_*")         -> ph
+soil_npk      : mesh.sensors("soil_npk_*")        -> { nitrogen, phosphorus, potassium } @ ppm
+weather       : net.connect("weather_station")     -> { temp, humidity, wind, rain, solar }
+drone         : device("survey_drone")             -> { multispectral, rgb, thermal } @ frame
+ndvi          : drone.multispectral -> mde("ndvi-calc.zdx") -> vegetation_index
+
+// ── ZONE MAPPING ───────────────────────────
+
+// field isn't uniform — different areas need different treatment
+soil_moisture -> zone(by: location, cluster: similar) -> moisture_zones
+soil_ph       -> zone(by: location, cluster: similar) -> ph_zones
+ndvi          -> zone(by: location, cluster: similar) -> vigor_zones
+
+// composite management zone
+moisture_zones -> |
+ph_zones       -> | fuse(by: location) | -> management_zones
+vigor_zones    -> |
+
+// each zone gets individual prescriptions. not whole-field averages.
+
+// ── IRRIGATION ─────────────────────────────
+
+// per-zone irrigation — only water what needs water
+management_zones -> per_zone {
+    zone.moisture -> gate(< field_capacity * 0.6, knee: 10%) -> irrigate(zone, rate: proportional),
+    zone.moisture -> gate(> field_capacity * 0.9) -> irrigate(zone, rate: 0)
+}
+
+// weather-adjusted — don't irrigate before rain
+weather.rain_forecast(24h) -> gate(> 10mm) -> irrigate.defer(all_zones, until: after_rain)
+
+// ET (evapotranspiration) model — how fast is water leaving?
+weather.temp     -> |
+weather.humidity -> |
+weather.wind     -> | -> et_rate @ mm_day
+weather.solar    -> |
+
+// irrigation need = ET - rain - soil reserve
+et_rate - weather.rain - soil_moisture.reserve -> irrigation_deficit
+irrigation_deficit -> gate(> 0) -> irrigate(rate: deficit)
+
+// ── FERTILIZATION ──────────────────────────
+
+// variable rate application — each zone gets what IT needs
+management_zones -> per_zone {
+    zone.nitrogen   -> gate(< optimal_n, knee: 10ppm) -> prescribe(nitrogen, rate: deficit),
+    zone.phosphorus -> gate(< optimal_p, knee: 5ppm)  -> prescribe(phosphorus, rate: deficit),
+    zone.potassium  -> gate(< optimal_k, knee: 10ppm) -> prescribe(potassium, rate: deficit)
+}
+
+// don't fertilize before heavy rain — runoff waste
+weather.rain_forecast(48h) -> gate(> 25mm) -> prescribe.defer(until: dry_window)
+
+// ── PEST & DISEASE ─────────────────────────
+
+// drone survey → AI detection
+drone.rgb -> mde("pest-detect.zdx") -> pest_detections
+drone.multispectral -> mde("disease-detect.zdx") -> disease_detections
+
+// early detection — spot problems before they spread
+pest_detections -> gate(confidence > 0.7) -> {
+    map(location, type, severity),
+    alert(warn: "pest detected: " + type + " at " + location),
+    prescribe(treatment: targeted, zone: affected_only)
+}
+
+// disease pressure model — weather conditions favorable for disease
+weather.humidity -> gate(> 85%, sustained: 48h) -> |
+weather.temp     -> gate(18C ~ 25C, sustained: 48h) -> | -> disease_risk(high)
+
+disease_risk(high) -> alert(warn: "conditions favor fungal disease — consider preventive spray")
+
+// ── CROP MONITORING ────────────────────────
+
+// growth stage tracking from NDVI trend
+ndvi -> baseline(window: season) -> growth_curve
+ndvi -> deviation(from: growth_curve) -> {
+    gate(< -2σ) -> alert(warn: "growth behind expected — investigate"),
+    gate(> 2σ)  -> note("growth ahead of expected")
+}
+
+// harvest readiness
+ndvi -> delta -> gate(falling, sustained: 7d) -> {
+    soil_moisture -> gate(< 20%) -> alert(info: "harvest conditions favorable")
+}
+
+// yield prediction
+ndvi.peak -> |
+soil_npk   -> | -> mde("yield-predict.zdx") -> predicted_yield @ bushels_acre
+weather    -> |
+
+// ── EQUIPMENT ──────────────────────────────
+
+// tractor/sprayer as signal-controlled actuator
+tractor : device("tractor_gps") -> position @ m
+sprayer : device("variable_rate_sprayer") <- rate @ gal_acre
+
+// variable rate spraying — prescription map → sprayer rate
+tractor.position -> management_zones.lookup(position) -> zone
+zone.prescription -> sprayer(rate: prescription.rate)
+
+// equipment health
+tractor.engine -> {
+    vibration -> baseline(window: 90d) -> deviation -> gate(> 2σ) -> alert(maintenance),
+    fuel_rate -> baseline(window: 30d) -> deviation -> gate(> 2σ) -> alert(efficiency)
+}
+
+// ── ECONOMICS ──────────────────────────────
+
+// input cost tracking
+irrigation.usage ~> cost(rate: water_price)   ~> water_cost
+fertilizer.usage ~> cost(rate: fert_price)    ~> fert_cost
+pesticide.usage  ~> cost(rate: pest_price)    ~> pest_cost
+
+// ROI per zone — which zones are worth the investment?
+management_zones -> per_zone {
+    zone.yield * crop_price - zone.total_input_cost -> zone.profit
+}
+
+zone.profit -> gate(< 0, sustained: 2_seasons) -> alert(warn: "zone unprofitable — consider fallowing")
+
+// ── TELEMETRY ──────────────────────────────
+
+soil_moisture ~> live_map(zones)
+ndvi          ~> live_map(vigor)
+irrigation    ~> usage(per: zone, per: day)
+predicted_yield ~> season_projection
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  zone-based management as spatial signal clustering — natural
+//          variable rate irrigation/fertilization as per-zone gates — clean
+//          weather-adjusted decisions as forecast gates — defer irrigating before rain
+//          ET model as multi-signal merge — same as sensor fusion
+//          pest detection as MDE + spatial mapping — AI in the signal chain
+//          disease pressure as temporal confluence — humidity + temp sustained = risk
+//          growth tracking as NDVI baseline + deviation — same as anomaly detector
+//          equipment health as vibration baseline — same as pump health in SCADA
+//          economic tracking as zone-level profit signal — ROI as wiring
+//
+// NEEDED:  mesh.sensors() — mesh network of distributed sensors
+//          zone(by: location, cluster:) — spatial clustering into zones
+//          per_zone {} — zone-level iteration (variant of fork)
+//          prescribe() — generate application prescription
+//          weather.rain_forecast(horizon) — weather prediction signal
+//          field_capacity — soil property constant
+//          season — seasonal time reference
+//          crop_price — market price signal
+//
+// KEY INSIGHT: precision agriculture is anomaly detection + SCADA + spatial.
+//   soil sensors = SCADA sensors. irrigation = actuators. zone management
+//   = spatial triage (same as fleet triage). pest detection = anomaly
+//   detection with spatial clustering. growth tracking = baseline + deviation.
+//   every construct already existed. agriculture just adds location.
+//
+// CONVENTIONAL: John Deere Operations Center + precision ag stack: millions LOC.
+//   Custom: 100k LOC. This is 110 lines with zone mapping, variable rate
+//   irrigation, fertilization, pest/disease detection, growth monitoring,
+//   yield prediction, equipment health, and economic analysis per zone.

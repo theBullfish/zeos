@@ -1,0 +1,119 @@
+// 21_load_balancer.zp — L4/L7 load balancer (HAProxy/NGINX-like)
+// Conventional: HAProxy (~300,000 LOC C), NGINX (~200,000 LOC C)
+// Industry: Infrastructure
+// Codex Labs LLC — 2026
+
+// ── FRONTEND ───────────────────────────────
+
+frontend : net.listen(port: 443, proto: https) -> connections
+    priority: reflex    // load balancing is wire-speed
+
+// ── BACKENDS ───────────────────────────────
+
+backends : {
+    app_01 : net.peer("10.0.1.1:8080"),
+    app_02 : net.peer("10.0.1.2:8080"),
+    app_03 : net.peer("10.0.1.3:8080"),
+    app_04 : net.peer("10.0.1.4:8080")
+}
+
+// health check — continuous, not polled
+backends -> {
+    health_check(interval: 5s, path: "/health", expect: 200) -> health,
+    latency ~> response_time,
+    connections.active ~> active_conns
+} -> grade : weighted(health: 0.5, latency: 0.3, active: 0.2)
+
+// ── ROUTING STRATEGIES ─────────────────────
+
+// weighted by grade — healthiest servers get more traffic
+connections -> route(method: weighted_grade) -> {
+    backends.where(grade > 0.3) -> proportional(by: grade)
+}
+
+// alternatively: least connections
+connections -> route(method: least_conn) -> {
+    backends -> sort(by: active_conns, ascending) -> take(1)
+}
+
+// alternatively: consistent hashing (sticky sessions)
+connections -> route(method: hash, key: source.ip) -> {
+    backends -> hash_ring(key) -> target
+}
+
+// ── L7 ROUTING ─────────────────────────────
+
+// route by path — different backends for different services
+connections -> gate(path: "/api/*")    -> api_backends
+connections -> gate(path: "/static/*") -> cdn_backends
+connections -> gate(path: "/ws/*")     -> websocket_backends
+
+// route by header
+connections -> gate(header: "X-Canary: true") -> canary_backends
+
+// ── CIRCUIT BREAKER ────────────────────────
+
+// backend failing → stop sending traffic, let it recover
+backend.error_rate -> gate(> 50%, sustained: 30s) -> {
+    circuit(open: backend),             // stop sending traffic
+    alert(warn: "circuit open for " + backend.id)
+}
+
+// half-open: try one request every 10s to see if it recovered
+circuit(open) -> tick(rate: 10s) -> probe(backend) -> {
+    gate(success) -> circuit(close: backend),    // recovered
+    gate(fail)    -> circuit(remain_open)         // still broken
+}
+
+// ── RATE LIMITING ──────────────────────────
+
+connections -> rate(per: source.ip, limit: 1000/m, knee: 200/m) -> {
+    gate(pass)  -> continue,
+    gate(block) -> respond(429)
+}
+
+// global rate limit
+connections -> rate(total, limit: 50000/s) -> {
+    gate(pass)  -> continue,
+    gate(block) -> respond(503, "service overloaded")
+}
+
+// ── SSL TERMINATION ────────────────────────
+
+connections -> tls.terminate(cert: vault.read("certs", domain)) -> plaintext
+plaintext -> backends    // backend sees plain HTTP
+
+// cert renewal
+vault.read("certs") -> gate(expiry < 30d) -> acme.renew -> vault.store("certs")
+
+// ── TELEMETRY ──────────────────────────────
+
+connections  ~> rate(per: 1s) ~> rps
+backends     ~> avg(latency) ~> backend_latency
+backends     ~> grade ~> live_health
+connections  ~> count(by: status_code, per: 1m) ~> status_distribution
+
+
+// ── FINDINGS ───────────────────────────────
+//
+// WORKED:  backend health as grade — weighted health/latency/connections
+//          grade-proportional routing — same as Goya fleet triage
+//          circuit breaker as state gate — open/half-open/closed
+//          rate limiting with knee — smooth, no hard cutoff
+//          L7 routing as path/header gates — same as HTTP server
+//          SSL cert expiry as temporal gate — proactive renewal
+//
+// NEEDED:  net.peer() — define upstream backend
+//          health_check(interval:, path:, expect:) — active health probe
+//          route(method:) — routing strategy selector
+//          hash_ring() — consistent hashing
+//          circuit(open/close) — circuit breaker state
+//          probe() — single test request
+//          tls.terminate — SSL/TLS termination
+//          acme.renew — automated cert renewal
+//
+// KEY INSIGHT: a load balancer is the fleet orchestrator for web servers.
+//   backends are cards. health checks are vitals. grade is grade.
+//   route by grade = triage. circuit breaker = bench a failing card.
+//   literally the same program as goya_fleet.zp applied to HTTP servers.
+//   this pattern appears everywhere: score resources, route by score.
