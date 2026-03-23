@@ -1,0 +1,142 @@
+// chat_room.zp — Networked chat with rooms and presence
+// DereZ Template — Level 2 (Extend)
+//
+// Messages are signals. Rooms are chains. Users are nodes.
+// Networking IS signal routing over a wire instead of a bus.
+//
+// Codex Labs LLC — 2026
+
+// ── IDENTITY ─────────────────────────────────
+
+me : auth.identity -> {name, color}
+
+// ── NETWORK ──────────────────────────────────
+
+server : network(port: 4210, protocol: tcp)
+
+// ── ROOMS ────────────────────────────────────
+// A room is a signal chain. Joining = wiring yourself in.
+
+lobby   : room("lobby", auto_join: true)
+general : room("general")
+random  : room("random")
+
+// Join a room
+keyboard -> gate(cmd: "/join") -> extract_name -> join_room
+keyboard -> gate(cmd: "/leave") -> extract_name -> leave_room
+
+join_room(name) -> {
+    server.subscribe(room: name),
+    rooms.add(name),
+    display.notify("Joined #{name}")
+}
+
+// ── MESSAGING ────────────────────────────────
+
+// Type a message → broadcast to current room
+keyboard -> gate(not_cmd) -> message : {
+    text: input,
+    author: me.name,
+    color: me.color,
+    room: current_room,
+    timestamp: now
+}
+
+message -> server.emit(room: current_room)
+
+// Receive messages from the room
+server.receive -> gate(room: current_room) -> incoming
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(layout: split_horizontal, ratio: 80/20)
+
+chat_view : screen.top -> scroll_view(
+    background: #1A1A1A,
+    font: monospace,
+    line_height: 20
+)
+
+input_bar : screen.bottom -> text_input(
+    prompt: "{current_room}> ",
+    color: white,
+    background: #222222
+)
+
+// Render incoming messages
+incoming -> chat_view.append(
+    "[{timestamp|HH:mm}] ",
+    color(author.color, "{author}: "),
+    "{text}\n"
+)
+
+// My own messages — show immediately (don't wait for echo)
+message -> chat_view.append(
+    "[{timestamp|HH:mm}] ",
+    color(me.color, "{me.name}: "),
+    "{text}\n"
+)
+
+// ── PRESENCE ─────────────────────────────────
+// Who's online? Heartbeat every 5 seconds.
+
+tick(every: 5s) -> server.emit(type: "heartbeat", user: me.name)
+
+server.receive -> gate(type: "heartbeat") -> heartbeats
+heartbeats -> window(duration: 15s, key: user) -> online_users
+
+// Show online users in sidebar
+sidebar : screen.right_overlay(width: 150, background: #222222)
+online_users -> sidebar.list(
+    title: "Online",
+    color: green
+)
+
+// ── COMMANDS ─────────────────────────────────
+
+keyboard -> {
+    gate(cmd: "/rooms")  -> rooms.list -> chat_view.append,
+    gate(cmd: "/who")    -> online_users -> chat_view.append,
+    gate(cmd: "/nick")   -> extract_name -> me.name.set,
+    gate(cmd: "/color")  -> extract_color -> me.color.set,
+    gate(cmd: "/clear")  -> chat_view.clear,
+    gate(cmd: "/help")   -> show_help
+}
+
+show_help -> chat_view.append(
+    "  /join <room>   — join a room\n"
+    "  /leave <room>  — leave a room\n"
+    "  /rooms         — list rooms\n"
+    "  /who           — who's online\n"
+    "  /nick <name>   — change name\n"
+    "  /color <hex>   — change color\n"
+    "  /clear         — clear screen\n",
+    color: gray
+)
+
+// ── TELEMETRY ────────────────────────────────
+
+incoming      ~> rate(per: 1m) ~> messages_per_minute
+online_users  ~> count ~> users_online
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Open two terminals. Join the same room. Chat.
+//
+// 2. Create a private room: /join secret-base
+//    Only people who know the name can join.
+//
+// 3. Add a /whisper command — send a message to ONE person.
+//    Hint: server.emit(to: user_name, private: true)
+//
+// 4. Add emoji reactions. When someone types :thumbsup:
+//    on a message, it shows a count next to it.
+//
+// 5. Add a bot. A signal chain that lives in a room
+//    and responds to messages. Start with an echo bot.
+//    Then make it answer questions.
+//
+// 6. ROBOT MODE: wire robot sensor data into a room.
+//    The Zeros squad can watch sensor values in chat.
+//    /join rover-telemetry shows live data.

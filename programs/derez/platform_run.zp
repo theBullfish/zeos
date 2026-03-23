@@ -1,0 +1,197 @@
+// platform_run.zp — 2D platformer (Mario/Celeste-like)
+// DereZ Template — Level 2 (Extend)
+//
+// Physics. Collision. Level design. The fundamentals.
+// Same physics that drive a PID-controlled robot.
+//
+// Codex Labs LLC — 2026
+
+// ── WORLD ────────────────────────────────────
+
+world : physics(gravity: 800, friction: 0.85)
+
+// Load level from tile map
+level : tilemap("levels/level_01.tmx") -> world
+
+// ── PLAYER ───────────────────────────────────
+
+player : entity(
+    sprite: "sprites/player_idle.png",
+    x: 64, y: 200,
+    width: 16, height: 24,
+    collider: box
+)
+
+world -> add(player)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+move_speed   : 160        // pixels per second
+jump_force   : -350       // negative = up
+max_fall     : 400        // terminal velocity
+coyote_time  : 80         // ms after leaving edge you can still jump
+jump_buffer  : 100        // ms before landing you can press jump early
+
+// ── INPUT ────────────────────────────────────
+
+keyboard : sense(key_state)    // continuous, not events
+
+keyboard -> {
+    gate(key: left)  -> input_left,
+    gate(key: right) -> input_right,
+    gate(key: up)    -> input_jump,     // or space
+    gate(key: space) -> input_jump
+}
+
+// ── MOVEMENT ─────────────────────────────────
+
+// Horizontal: accelerate toward move_speed, decelerate with friction
+input_left  -> player.velocity.x.approach(-move_speed, acceleration: 800)
+input_right -> player.velocity.x.approach(move_speed, acceleration: 800)
+
+// No input: friction slows you down
+gate(!input_left, !input_right) -> player.velocity.x.approach(0, deceleration: 600)
+
+// ── JUMPING ──────────────────────────────────
+
+// Track if we're on the ground
+player.collider.bottom -> on_ground
+on_ground -> timer_since -> air_time
+
+// Coyote time: can jump for a few ms after walking off an edge
+can_jump : air_time < coyote_time
+
+// Jump buffer: pressed jump just before landing? Jump on landing.
+input_jump -> timestamp -> last_jump_press
+on_ground -> gate(now - last_jump_press < jump_buffer) -> do_jump
+
+// Normal jump
+input_jump -> gate(can_jump) -> do_jump
+
+do_jump -> {
+    player.velocity.y.set(jump_force),
+    play("sfx/jump.wav")
+}
+
+// Variable jump height: release early = lower jump
+input_jump.released -> gate(player.velocity.y < 0) -> {
+    player.velocity.y -> * 0.4 -> player.velocity.y     // cut upward velocity
+}
+
+// Cap fall speed
+player.velocity.y -> clamp(-9999, max_fall) -> player.velocity.y
+
+// ── ANIMATION ────────────────────────────────
+
+// Pick sprite based on state
+player -> {
+    gate(on_ground, abs(velocity.x) > 10) -> anim("run", fps: 10),
+    gate(on_ground, abs(velocity.x) <= 10) -> anim("idle", fps: 4),
+    gate(!on_ground, velocity.y < 0) -> anim("jump"),
+    gate(!on_ground, velocity.y > 0) -> anim("fall")
+}
+
+// Flip sprite based on direction
+player.velocity.x -> gate(> 0) -> player.flip(false)
+player.velocity.x -> gate(< 0) -> player.flip(true)
+
+// ── CAMERA ───────────────────────────────────
+
+camera : follow(player,
+    lookahead: 40,           // look ahead in movement direction
+    smoothing: 8,            // lower = more responsive
+    bounds: level.bounds     // don't show outside the map
+)
+
+// ── COLLECTIBLES ─────────────────────────────
+
+coins : level.objects(type: "coin") -> each(coin) {
+    coin -> entity(sprite: "sprites/coin.png", collider: circle)
+    world -> add(coin)
+
+    player.collider -> gate(touching: coin) -> {
+        coin.destroy,
+        score -> + 1,
+        play("sfx/coin.wav"),
+        particles.burst(at: coin.position, color: yellow, count: 8)
+    }
+}
+
+score : 0
+
+// ── HAZARDS ──────────────────────────────────
+
+spikes : level.objects(type: "spike") -> each(spike) {
+    player.collider -> gate(touching: spike) -> die
+}
+
+// Falling off the map
+player.position.y -> gate(> level.height + 32) -> die
+
+die -> {
+    play("sfx/hit.wav"),
+    particles.burst(at: player.position, color: red, count: 16),
+    delay(500ms),
+    respawn(at: checkpoint ? checkpoint : level.spawn)
+}
+
+// ── CHECKPOINTS ──────────────────────────────
+
+checkpoints : level.objects(type: "checkpoint") -> each(cp) {
+    player.collider -> gate(touching: cp) -> {
+        checkpoint.set(cp.position),
+        cp.anim("activated"),
+        play("sfx/checkpoint.wav")
+    }
+}
+
+checkpoint : null
+
+// ── HUD ──────────────────────────────────────
+
+hud : overlay(fixed: true)
+
+hud.text(x: 8, y: 8, "{score} coins", color: white, shadow: true)
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(
+    width: 320, height: 240,    // pixel-perfect low res
+    scale: fit,                  // scale to window, keep aspect
+    background: #1A1A2E
+)
+
+// ── TELEMETRY ────────────────────────────────
+
+player.velocity   ~> dashboard("velocity")
+player.position   ~> dashboard("position")
+on_ground         ~> dashboard("grounded")
+score             ~> dashboard("score")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change jump_force to -200. Floaty. Change to -500. Snappy.
+//    How does Mario FEEL different from Celeste? It's these numbers.
+//
+// 2. Change gravity to 400. Moon physics.
+//    Change to 1600. Heavy. Which is more fun?
+//
+// 3. Remove coyote_time (set to 0). Try jumping at edges.
+//    Feels unfair? That's why every good platformer has it.
+//
+// 4. Add a double jump:
+//      jumps_left : 2
+//      do_jump -> jumps_left -> - 1
+//      on_ground -> jumps_left.set(2)
+//      input_jump -> gate(jumps_left > 0) -> do_jump
+//
+// 5. Add a wall slide: when touching a wall and falling,
+//    slow the fall. Wall jump = jump away from the wall.
+//
+// 6. Design a level. Use the pixel_art.zp editor to make tiles.
+//    Save as .tmx (Tiled format).
+//
+// 7. ROBOT BRIDGE: the physics here (velocity, acceleration,
+//    friction, gravity) are the same math as PID control.
+//    player.velocity.x.approach() IS a P-controller.

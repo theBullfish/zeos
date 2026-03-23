@@ -1,0 +1,242 @@
+// battle_arena.zp — Robot combat with live broadcast
+// Multimodal Template — Level 4 (Create)
+//
+// Physical robots fight. Screen shows the broadcast:
+// overhead view, health bars, instant replay, analysis.
+// Competition + spectacle + engineering.
+//
+// Codex Labs LLC — 2026
+
+// ── ROBOTS ───────────────────────────────────
+// Each robot broadcasts its state. This is the BROADCAST system.
+
+robot_a : connect("robot-a.local:4200")
+robot_b : connect("robot-b.local:4200")
+
+// ── INCOMING TELEMETRY ───────────────────────
+
+robot_a.sensors -> {
+    gate(name: "position")    -> a_position,
+    gate(name: "heading")     -> a_heading,
+    gate(name: "speed")       -> a_speed,
+    gate(name: "weapon")      -> a_weapon_state,
+    gate(name: "hits_taken")  -> a_hits,
+    gate(name: "battery")     -> a_battery,
+    gate(name: "accel")       -> a_impact          // spike = got hit
+}
+
+robot_b.sensors -> {
+    gate(name: "position")    -> b_position,
+    gate(name: "heading")     -> b_heading,
+    gate(name: "speed")       -> b_speed,
+    gate(name: "weapon")      -> b_weapon_state,
+    gate(name: "hits_taken")  -> b_hits,
+    gate(name: "battery")     -> b_battery,
+    gate(name: "accel")       -> b_impact
+}
+
+// ── MATCH STATE ──────────────────────────────
+
+match : state_machine {
+    waiting   -> gate(both_connected) -> countdown,
+    countdown -> gate(timer: 3s) -> fighting,
+    fighting  -> gate(timer: 180s | ko | out_of_bounds) -> results,
+    results   -> gate(timer: 10s) -> waiting
+}
+
+// Health system (based on hits and battery)
+a_health : 100
+b_health : 100
+
+a_impact -> gate(magnitude > 10) -> {
+    a_health -> - impact_to_damage(a_impact),
+    play("sfx/hit.wav"),
+    screen.flash_region(a_region, red, 100ms),
+    replay_buffer.mark("Hit on A!")
+}
+
+b_impact -> gate(magnitude > 10) -> {
+    b_health -> - impact_to_damage(b_impact),
+    play("sfx/hit.wav"),
+    screen.flash_region(b_region, red, 100ms),
+    replay_buffer.mark("Hit on B!")
+}
+
+// KO
+a_health -> gate(<= 0) -> match.trigger("ko", winner: "B")
+b_health -> gate(<= 0) -> match.trigger("ko", winner: "A")
+
+// ── BROADCAST DISPLAY ────────────────────────
+
+screen : display(width: 640, height: 480, scale: fit, background: #0A0A0A)
+
+// Main arena view (top-down)
+arena : screen.region(x: 0, y: 40, w: 640, h: 360)
+arena.background("textures/arena_floor.png")
+
+// Draw arena boundary
+arena.circle(center: {320, 180}, radius: 160, color: #333333, width: 2)
+
+// Robot A (red team)
+a_position -> arena.sprite(
+    sprite: "sprites/robot_top_red.png",
+    rotation: a_heading,
+    scale: 2,
+    glow: a_weapon_state == "active" ? red : none
+)
+
+// Robot B (blue team)
+b_position -> arena.sprite(
+    sprite: "sprites/robot_top_blue.png",
+    rotation: b_heading,
+    scale: 2,
+    glow: b_weapon_state == "active" ? blue : none
+)
+
+// Trail lines (where they've been)
+a_position -> trail(max_points: 200, color: rgba(255, 50, 50, 0.3), width: 1)
+b_position -> trail(max_points: 200, color: rgba(50, 50, 255, 0.3), width: 1)
+
+// ── SCOREBOARD (top bar) ─────────────────────
+
+scoreboard : screen.region(x: 0, y: 0, w: 640, h: 40, background: #111111)
+
+// Robot A info (left)
+scoreboard.text(x: 10, y: 12, "ROBOT A", color: red, size: 16, bold: true)
+scoreboard.bar(x: 100, y: 8, w: 150, h: 24,
+    value: a_health, max: 100,
+    color: lerp(red, green, a_health / 100),
+    background: #333333
+)
+
+// Timer (center)
+match.timer -> scoreboard.text(
+    x: 310, y: 8,
+    format: "mm:ss",
+    color: white, size: 20, bold: true,
+    align: center
+)
+
+// Robot B info (right)
+scoreboard.text(x: 530, y: 12, "ROBOT B", color: blue, size: 16, bold: true)
+scoreboard.bar(x: 380, y: 8, w: 150, h: 24,
+    value: b_health, max: 100,
+    color: lerp(red, green, b_health / 100),
+    background: #333333,
+    direction: right_to_left
+)
+
+// ── STATS PANEL (bottom bar) ─────────────────
+
+stats : screen.region(x: 0, y: 400, w: 640, h: 80, background: #111111)
+
+// Speed comparison
+stats.dual_bar(x: 10, y: 10, w: 200, h: 20,
+    label: "Speed",
+    a: {value: a_speed, color: red},
+    b: {value: b_speed, color: blue}
+)
+
+// Battery comparison
+stats.dual_bar(x: 10, y: 40, w: 200, h: 20,
+    label: "Battery",
+    a: {value: a_battery, color: red},
+    b: {value: b_battery, color: blue}
+)
+
+// Hit counter
+stats.text(x: 250, y: 10, "Hits:", color: gray)
+stats.text(x: 290, y: 10, "{a_hits.count}", color: red, size: 20)
+stats.text(x: 320, y: 10, "vs", color: gray)
+stats.text(x: 345, y: 10, "{b_hits.count}", color: blue, size: 20)
+
+// Distance between robots
+{a_position, b_position} -> distance -> stats.text(
+    x: 250, y: 40, "Distance: {value}mm", color: white
+)
+
+// ── INSTANT REPLAY ───────────────────────────
+
+// Buffer last 10 seconds continuously
+replay_buffer : ring_buffer(duration: 10s, sources: {
+    a_position, a_heading, a_health, a_weapon_state,
+    b_position, b_heading, b_health, b_weapon_state
+})
+
+// On big hit, show replay
+replay_buffer.marked -> delay(1s) -> {
+    arena.overlay("REPLAY", color: yellow, size: 24),
+    replay_buffer.play(speed: 0.5, duration: 3s) -> arena,
+    delay(4s) -> arena.overlay.clear
+}
+
+// Manual replay (press R)
+keyboard -> gate(key: "r") -> {
+    replay_buffer.play(speed: 0.25, duration: 5s) -> arena
+}
+
+// ── COUNTDOWN ────────────────────────────────
+
+countdown.enter -> {
+    sequence(
+        {delay: 1s, action: arena.overlay("3", color: white, size: 64)},
+        {delay: 1s, action: arena.overlay("2", color: yellow, size: 64)},
+        {delay: 1s, action: arena.overlay("1", color: red, size: 64)},
+        {delay: 0, action: {
+            arena.overlay("FIGHT!", color: green, size: 64),
+            play("sfx/fight.wav")
+        }},
+        {delay: 1s, action: arena.overlay.clear}
+    )
+}
+
+// ── RESULTS ──────────────────────────────────
+
+results.enter -> {
+    winner : a_health > b_health ? "ROBOT A" : "ROBOT B",
+    winner_color : a_health > b_health ? red : blue,
+
+    arena.overlay(
+        "{winner} WINS!\n"
+        "Final HP: A={a_health}% B={b_health}%\n"
+        "Total Hits: A={a_hits.count} B={b_hits.count}",
+        color: winner_color,
+        background: rgba(0,0,0,0.8),
+        size: 24
+    ),
+
+    // Save match data
+    vault.store("matches/{date}_{timestamp}.zmatch", {
+        replay_buffer.full_dump,
+        winner, a_health, b_health, a_hits, b_hits
+    })
+}
+
+// ── TELEMETRY ────────────────────────────────
+
+a_health ~> dashboard("A_health")
+b_health ~> dashboard("B_health")
+a_speed  ~> dashboard("A_speed")
+b_speed  ~> dashboard("B_speed")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Run two robots. Watch the broadcast. Feel the difference
+//    between driving and WATCHING with data.
+//
+// 2. Add a "danger zone" — inner circle where damage is doubled.
+//    Visual: red glow on the floor.
+//
+// 3. Add commentator text — auto-generated play-by-play:
+//    "Robot A charges! Robot B dodges left!"
+//    Based on speed + heading changes.
+//
+// 4. Add a slow-motion camera that triggers on every hit.
+//    Slow the replay to 0.1x. Analyze the impact angle.
+//
+// 5. Stream this to a second screen. One screen = arena view.
+//    Second screen = stats + replay. Real broadcast setup.
+//
+// 6. Tournament mode: bracket system, match history, leaderboard.
+//    Save every match. Replay any match from history.

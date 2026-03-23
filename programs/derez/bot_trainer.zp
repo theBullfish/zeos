@@ -1,0 +1,152 @@
+// bot_trainer.zp — Teach an AI with signal chains
+// DereZ Template — Level 3 (Script)
+//
+// A tiny neural network made of signal chains.
+// Not a framework. Not a library. Just wires and math.
+// You'll understand ML better after building this than
+// after 100 YouTube tutorials.
+//
+// Codex Labs LLC — 2026
+
+// ── THE PROBLEM ──────────────────────────────
+// Teach a network to classify: is the input "big" or "small"?
+// Big = above 50. Small = below 50.
+// Trivial for an if-statement. But we're teaching a NETWORK.
+
+// ── TRAINING DATA ────────────────────────────
+
+training_data : [
+    {input: 10, label: 0},     // small
+    {input: 20, label: 0},     // small
+    {input: 30, label: 0},     // small
+    {input: 40, label: 0},     // small
+    {input: 60, label: 1},     // big
+    {input: 70, label: 1},     // big
+    {input: 80, label: 1},     // big
+    {input: 90, label: 1}      // big
+]
+
+// ── THE NETWORK ──────────────────────────────
+// One neuron. One weight. One bias.
+// That's all a neural network IS — multiply, add, squish.
+
+weight : 0.1        // random starting value
+bias   : 0.0        // random starting value
+learning_rate : 0.01
+
+// The neuron: input * weight + bias → sigmoid → output
+neuron : input -> * weight -> + bias -> sigmoid -> output
+
+// Sigmoid squishes any number to 0-1
+// sigmoid(x) = 1 / (1 + e^(-x))
+
+// ── TRAINING LOOP ────────────────────────────
+
+train(epochs: 1000) -> each_epoch {
+
+    total_loss : 0
+
+    training_data -> each(sample) {
+        // Forward pass: run the input through the network
+        sample.input -> neuron -> prediction
+
+        // Loss: how wrong were we?
+        {prediction, sample.label} -> loss(mse) -> error
+        total_loss -> + error
+
+        // Backward pass: which direction do we adjust?
+        // This is backpropagation — it's just the chain rule from calculus
+        error -> gradient(with_respect_to: weight) -> weight_grad
+        error -> gradient(with_respect_to: bias) -> bias_grad
+
+        // Update: nudge weight and bias to reduce error
+        weight -> - (learning_rate * weight_grad) -> weight
+        bias   -> - (learning_rate * bias_grad) -> bias
+    }
+
+    // Log progress every 100 epochs
+    each_epoch -> gate(mod(100) == 0) -> log(
+        "Epoch {epoch}: loss={total_loss}, weight={weight}, bias={bias}"
+    )
+}
+
+// ── TEST ─────────────────────────────────────
+
+// After training, test with values it hasn't seen
+test_inputs : [5, 25, 45, 55, 75, 95]
+
+test_inputs -> each(value) {
+    value -> neuron -> prediction
+    log("{value} → {prediction} ({gate(> 0.5) ? 'big' : 'small'})")
+}
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(layout: split, ratio: 60/40)
+
+// Left: decision boundary visualization
+plot : screen.left -> canvas(background: dark_gray)
+
+// Draw training data as dots
+training_data -> each(sample) {
+    plot.dot(
+        x: sample.input * 3,     // scale to screen
+        y: 200,
+        color: sample.label == 1 ? green : red,
+        size: 8
+    )
+}
+
+// Draw the decision boundary
+// Where does the neuron output = 0.5?
+boundary : -bias / weight      // sigmoid(0) = 0.5, so weight*x + bias = 0
+plot.vline(x: boundary * 3, color: yellow, label: "boundary")
+
+// Right: training graph
+graph : screen.right -> graph(
+    title: "Loss over time",
+    y_label: "Error",
+    color: cyan
+)
+
+total_loss ~> graph.add_point
+
+// ── TELEMETRY ────────────────────────────────
+
+weight       ~> dashboard("weight")
+bias         ~> dashboard("bias")
+total_loss   ~> dashboard("loss")
+boundary     ~> dashboard("boundary")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Run the training. Watch the loss go down.
+//    Watch the boundary line move to 50.
+//    That's learning. The network FOUND the rule.
+//
+// 2. Change the boundary. Make "big" = above 30.
+//    Update the training labels. Does the network find 30?
+//
+// 3. Change learning_rate to 0.1. Faster? More unstable?
+//    Change it to 0.001. Slower? More precise?
+//    That's the learning rate tradeoff every ML engineer faces.
+//
+// 4. What if the training data is WRONG? Set input 60 label to 0.
+//    The network still works, but worse. Garbage in, garbage out.
+//
+// 5. ADVANCED: add a second neuron. Two weights, two biases.
+//    Can you classify into THREE categories? (small, medium, big)
+//
+// 6. ADVANCED: replace the training data with sensor readings.
+//    Train the network to classify "close" vs "far" from a
+//    distance sensor. Now you have ML on a robot.
+//
+// ── THE LESSON ───────────────────────────────
+//
+// ChatGPT is this. Just bigger.
+// Billions of weights instead of one.
+// Same algorithm: forward, measure error, backward, nudge.
+//
+// You trained a neural network. You understand the foundation.
+// Everything else is scale.

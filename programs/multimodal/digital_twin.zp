@@ -1,0 +1,134 @@
+// digital_twin.zp — Real robot, virtual mirror
+// Multimodal Template — Level 3
+//
+// The robot moves. The screen shows a live copy.
+// Same signal graph feeds both the physical world
+// and the virtual one.
+//
+// Industry calls this a "digital twin."
+// You're building one at 14.
+//
+// Codex Labs LLC — 2026
+
+// ── ROBOT (physical) ─────────────────────────
+
+left_encoder   : sense(encoder, pin: 3)
+right_encoder  : sense(encoder, pin: 4)
+imu            : sense(accel_gyro, addr: 0x68)
+front_distance : sense(distance, pin: 2)
+
+left_motor     : act(dc_motor, pin: 5)
+right_motor    : act(dc_motor, pin: 6)
+
+// ── POSITION TRACKING ────────────────────────
+// Dead reckoning: estimate position from wheel encoders + heading
+
+wheel_circumference : 200    // mm — measure YOUR wheels
+encoder_ticks       : 20     // ticks per revolution — check YOUR encoder
+
+{left_encoder, right_encoder} -> odometry(
+    wheel_circ: wheel_circumference,
+    ticks_per_rev: encoder_ticks,
+    wheel_base: 150            // mm between wheels
+) -> position                  // {x, y, heading}
+
+// Correct drift with IMU
+{position, imu.heading} -> sensor_fusion -> corrected_position
+
+// ── VIRTUAL TWIN (screen) ────────────────────
+
+screen : display(layout: split, ratio: 70/30)
+
+// Left: top-down map view
+map : screen.left -> canvas(background: dark_gray)
+
+// Draw the robot as a triangle (shows heading)
+corrected_position -> map.triangle(
+    at: {position.x, position.y},
+    angle: position.heading,
+    size: 20,
+    color: cyan
+)
+
+// Draw the trail (where it's been)
+corrected_position -> trail(max_points: 500) -> map.polyline(
+    color: rgba(cyan, 0.3),
+    width: 2
+)
+
+// Draw obstacles detected by distance sensor
+{corrected_position, front_distance} -> obstacle_point
+obstacle_point -> map.dot(color: red, size: 4)
+
+// Right: live data panel
+panel : screen.right -> stack(spacing: 10)
+
+panel -> text("Digital Twin", size: 18, color: white)
+panel -> text("")  // spacer
+
+corrected_position.x -> panel.value("X", unit: "mm")
+corrected_position.y -> panel.value("Y", unit: "mm")
+corrected_position.heading -> panel.value("Heading", unit: "deg")
+front_distance -> panel.value("Distance", unit: "mm")
+
+{left_encoder, right_encoder}
+    -> delta(per: 1s)
+    -> average
+    -> panel.value("Speed", unit: "mm/s")
+
+// ── ROBOT BEHAVIOR ───────────────────────────
+// Simple: drive forward, avoid obstacles, map the room
+
+speed : 50
+
+front_distance -> {
+    gate(< 200) -> avoid_obstacle,
+    gate(>= 200) -> drive_straight
+}
+
+drive_straight -> {
+    left_motor.set(speed),
+    right_motor.set(speed)
+}
+
+avoid_obstacle -> {
+    left_motor.set(0),
+    right_motor.set(0)
+} -> delay(200ms) -> {
+    left_motor.set(speed),
+    right_motor.set(-speed)
+} -> delay(800ms)
+
+// ── RECORDING ────────────────────────────────
+
+// Save the full run — replay it later without the robot
+corrected_position -> timestamp -> vault.store("twins/{date}/path.zdat")
+
+// Replay mode (uncomment to use):
+// vault.read("twins/2026-03-22/path.zdat") -> corrected_position
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Cover one wheel. What happens to the virtual twin?
+//    (Hint: it drifts. That's why we need the IMU.)
+//
+// 2. Put obstacles on the floor. Do they show up on the map?
+//
+// 3. Record a run. Replay it. Does the virtual path match
+//    where the robot actually went?
+//
+// 4. Add a "teleop" mode — use keyboard to drive the robot
+//    while watching the twin on screen.
+//
+// 5. Two robots, one screen. Can you show both twins?
+//
+// 6. Make the twin PREDICT where the robot will be in 1 second.
+//    Draw a ghost triangle ahead of the real one.
+//    How accurate is your prediction?
+//
+// ── THE LESSON ───────────────────────────────
+//
+// Every self-driving car has a digital twin.
+// Every Mars rover has one. Every factory robot has one.
+// You just built yours in 80 lines of signal flow.

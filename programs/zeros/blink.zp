@@ -1,0 +1,44 @@
+// blink.zp — Your first hardware program
+// Zeros Template — Level 0 (Reskin)
+//
+// One LED. On. Off. On. Off.
+// The "Hello World" of robotics.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+led : act(led, pin: 13)
+
+// ── BLINK ────────────────────────────────────
+
+clock : tick(every: 500ms) -> toggle -> led
+
+// That's it. Three lines.
+// clock sends a tick every half second.
+// toggle flips between on and off.
+// led receives the signal.
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change 500ms to 100ms. What happens?
+// 2. Change 500ms to 2s. What happens?
+// 3. Add a second LED on pin 12:
+//      led2 : act(led, pin: 12)
+//      clock -> toggle -> {led, led2}
+//    Do they blink together?
+//
+// 4. Make them alternate:
+//      clock -> toggle -> led
+//      clock -> toggle -> invert -> led2
+//    Now one is on while the other is off.
+//
+// 5. Add a button:
+//      button : sense(button, pin: 2)
+//      button -> led
+//    LED follows the button. No timer needed.
+//
+// 6. Button controls the speed:
+//      button -> gate(pressed) -> speed.faster(50ms)
+//      button -> gate(released) -> speed.slower(50ms)
+//      clock(speed) -> toggle -> led

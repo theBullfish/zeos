@@ -1,0 +1,242 @@
+// tower_line.zp — Tower defense (Bloons TD-like)
+// DereZ Template — Level 3 (Script)
+//
+// Pathfinding. Spawning. Economy. Targeting.
+// Every concept transfers to robot navigation.
+//
+// Codex Labs LLC — 2026
+
+// ── WORLD ────────────────────────────────────
+
+map : tilemap("levels/td_map_01.tmx")
+
+// The path enemies follow (baked into the map)
+path : map.path("enemy_path")    // list of waypoints
+
+// ── ECONOMY ──────────────────────────────────
+
+gold   : 100
+lives  : 20
+wave   : 0
+
+// ── ENEMIES ──────────────────────────────────
+
+enemy_types : {
+    basic:  {hp: 50,  speed: 60,  reward: 5,  sprite: "sprites/enemy_basic.png"},
+    fast:   {hp: 30,  speed: 120, reward: 8,  sprite: "sprites/enemy_fast.png"},
+    tank:   {hp: 200, speed: 30,  reward: 15, sprite: "sprites/enemy_tank.png"},
+    boss:   {hp: 500, speed: 40,  reward: 50, sprite: "sprites/enemy_boss.png"}
+}
+
+// Wave definitions
+waves : [
+    [{type: basic, count: 10, interval: 1s}],
+    [{type: basic, count: 15, interval: 800ms}],
+    [{type: basic, count: 10, interval: 1s}, {type: fast, count: 5, interval: 600ms}],
+    [{type: fast, count: 20, interval: 500ms}],
+    [{type: tank, count: 5, interval: 2s}],
+    [{type: basic, count: 20, interval: 400ms}, {type: tank, count: 3, interval: 3s}],
+    [{type: boss, count: 1, interval: 0}]
+]
+
+// Spawn a wave
+start_wave -> {
+    wave -> + 1,
+    waves[wave] -> each(group) {
+        repeat(group.count, interval: group.interval) -> spawn_enemy(group.type)
+    }
+}
+
+spawn_enemy(type) -> {
+    enemy : entity(
+        sprite: enemy_types[type].sprite,
+        position: path[0],
+        hp: enemy_types[type].hp,
+        max_hp: enemy_types[type].hp,
+        speed: enemy_types[type].speed,
+        reward: enemy_types[type].reward,
+        path_index: 0,
+        collider: circle(radius: 8)
+    ),
+    enemies.add(enemy)
+}
+
+// ── ENEMY MOVEMENT ───────────────────────────
+
+enemies -> each(enemy) {
+    // Move toward next waypoint
+    target : path[enemy.path_index]
+    enemy.position -> move_toward(target, speed: enemy.speed)
+
+    // Reached waypoint? Next one.
+    enemy.position -> gate(distance_to(target) < 4) -> {
+        enemy.path_index -> + 1
+    }
+
+    // Reached the end? Lose a life.
+    enemy.path_index -> gate(>= path.length) -> {
+        enemy.destroy,
+        lives -> - 1,
+        play("sfx/leak.wav")
+    }
+
+    // Health bar above enemy
+    enemy -> hp_bar(width: 16, height: 2, offset_y: -12,
+                    color: lerp(red, green, enemy.hp / enemy.max_hp))
+
+    // Dead?
+    enemy.hp -> gate(<= 0) -> {
+        enemy.destroy,
+        gold -> + enemy.reward,
+        play("sfx/pop.wav"),
+        particles.burst(at: enemy.position, color: yellow, count: 6)
+    }
+}
+
+// ── TOWERS ───────────────────────────────────
+
+tower_types : {
+    arrow: {
+        cost: 25, range: 100, damage: 10, fire_rate: 1s,
+        sprite: "sprites/tower_arrow.png",
+        projectile: "sprites/arrow.png"
+    },
+    cannon: {
+        cost: 50, range: 80, damage: 30, fire_rate: 2s, splash: 30,
+        sprite: "sprites/tower_cannon.png",
+        projectile: "sprites/cannonball.png"
+    },
+    ice: {
+        cost: 35, range: 120, damage: 5, fire_rate: 1.5s, slow: 0.5,
+        sprite: "sprites/tower_ice.png",
+        projectile: "sprites/snowflake.png"
+    },
+    sniper: {
+        cost: 80, range: 200, damage: 50, fire_rate: 3s,
+        sprite: "sprites/tower_sniper.png",
+        projectile: "sprites/bullet.png"
+    }
+}
+
+// Place a tower (click on valid tile)
+mouse.click -> gate(map.tile_at(mouse).buildable) -> {
+    gate(gold >= selected_tower.cost) -> {
+        tower : entity(
+            sprite: tower_types[selected_tower].sprite,
+            position: map.snap_to_grid(mouse),
+            type: selected_tower,
+            range: tower_types[selected_tower].range,
+            damage: tower_types[selected_tower].damage,
+            fire_rate: tower_types[selected_tower].fire_rate
+        ),
+        towers.add(tower),
+        gold -> - tower_types[selected_tower].cost,
+        play("sfx/place.wav")
+    }
+}
+
+// ── TOWER TARGETING ──────────────────────────
+
+towers -> each(tower) {
+    // Find enemies in range
+    enemies -> gate(distance_to(tower) < tower.range) -> in_range
+
+    // Target: enemy closest to the END of the path (first priority)
+    in_range -> sort(by: path_index, order: desc) -> first -> target
+
+    // Fire at target
+    tick(every: tower.fire_rate) -> gate(target != null) -> {
+        // Spawn projectile
+        projectile : entity(
+            sprite: tower_types[tower.type].projectile,
+            position: tower.position,
+            target: target,
+            damage: tower.damage,
+            speed: 300
+        ),
+        projectile -> move_toward(target, speed: 300),
+
+        // Hit detection
+        projectile.position -> gate(distance_to(target) < 8) -> {
+            target.hp -> - tower.damage,
+            projectile.destroy,
+
+            // Splash damage (cannon)
+            gate(tower.type == "cannon") -> {
+                enemies -> gate(distance_to(target) < tower_types.cannon.splash)
+                    -> each(e) { e.hp -> - (tower.damage / 2) }
+            },
+
+            // Slow effect (ice)
+            gate(tower.type == "ice") -> {
+                target.speed -> * tower_types.ice.slow -> delay(2s) -> restore
+            }
+        },
+
+        // Tower rotates to face target
+        tower -> face(target)
+    }
+
+    // Range indicator on hover
+    mouse.hover(tower) -> show_range(tower, color: rgba(white, 0.15))
+}
+
+// ── HUD ──────────────────────────────────────
+
+hud : overlay(fixed: true)
+
+hud.text(x: 8, y: 8, "Gold: {gold}", color: yellow)
+hud.text(x: 8, y: 24, "Lives: {lives}", color: lives > 5 ? white : red)
+hud.text(x: 8, y: 40, "Wave: {wave}/{waves.length}", color: white)
+
+// Tower selection bar at bottom
+tower_bar : hud.bar(y: screen.height - 48, height: 48, background: rgba(0,0,0,0.7))
+
+tower_types -> each(type, info) {
+    tower_bar.button(
+        sprite: info.sprite,
+        label: "{info.cost}g",
+        enabled: gold >= info.cost,
+        on_click: selected_tower.set(type)
+    )
+}
+
+// Start wave button
+hud.button(x: screen.width - 80, y: 8,
+    label: "Next Wave",
+    on_click: start_wave,
+    enabled: enemies.count == 0
+)
+
+// ── GAME OVER ────────────────────────────────
+
+lives -> gate(<= 0) -> {
+    hud.overlay("GAME OVER\nWave {wave}\nPress R to restart",
+        color: red, background: rgba(0,0,0,0.8)),
+    keyboard -> gate(key: "r") -> restart
+}
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(width: 320, height: 240, scale: fit, background: #2D5A27)
+
+// ── TELEMETRY ────────────────────────────────
+
+enemies.count ~> dashboard("enemies_alive")
+towers.count  ~> dashboard("towers_placed")
+gold          ~> dashboard("gold")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change arrow tower range to 200. Overpowered? Fun?
+// 2. Add a new tower type: "laser" — low damage, no projectile,
+//    instant hit, very fast fire rate. Chain to nearby enemies.
+// 3. Make enemies come in from BOTH ends of the path.
+// 4. Add tower upgrades: click a placed tower to spend gold
+//    and increase damage/range/speed.
+// 5. Design a new map with branching paths.
+//
+// 6. ROBOT BRIDGE: the targeting system (find nearest in range,
+//    rotate to face, fire) is the same as a turret robot.
+//    The pathfinding is A* — same algorithm your maze_solver uses.

@@ -1,0 +1,113 @@
+// music_tracker.zp — Make music with signal chains
+// DereZ Template — Level 2 (Extend)
+//
+// A step sequencer. 8 tracks, 16 steps.
+// Make the soundtrack for your game.
+// Or pipe it to hardware and make a room pulse.
+//
+// Codex Labs LLC — 2026
+
+// ── CLOCK ────────────────────────────────────
+
+bpm      : 120
+step_time: 60000 / bpm / 4    // ms per step (16th notes)
+
+clock : tick(every: step_time) -> step_counter(mod: 16)
+
+// ── INSTRUMENTS ──────────────────────────────
+
+kick  : synth(type: sine,   freq: 60,  decay: 150ms, volume: 0.8)
+snare : synth(type: noise,  freq: 200, decay: 100ms, volume: 0.6)
+hat   : synth(type: noise,  freq: 8000, decay: 50ms, volume: 0.3)
+bass  : synth(type: square, decay: 200ms, volume: 0.5)
+
+// ── PATTERNS ─────────────────────────────────
+// 1 = play, 0 = silent. 16 steps.
+
+kick_pattern  : [1,0,0,0, 1,0,0,0, 1,0,0,0, 1,0,0,0]
+snare_pattern : [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0]
+hat_pattern   : [1,0,1,0, 1,0,1,0, 1,0,1,0, 1,0,1,0]
+bass_pattern  : [1,0,0,1, 0,0,1,0, 1,0,0,1, 0,0,1,0]
+bass_notes    : [C2,_,_,E2, _,_,G2,_, C2,_,_,E2, _,_,G2,_]
+
+// ── SEQUENCER ────────────────────────────────
+
+// Clock step triggers pattern lookup, pattern triggers instrument
+clock -> {
+    gate(kick_pattern[step])  -> kick.play,
+    gate(snare_pattern[step]) -> snare.play,
+    gate(hat_pattern[step])   -> hat.play,
+    gate(bass_pattern[step])  -> bass.play(note: bass_notes[step])
+}
+
+// ── MIX ──────────────────────────────────────
+
+{kick, snare, hat, bass} -> mixer -> master_out
+
+master_out -> audio.output(device: default)
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(layout: stack)
+
+// Step indicator — shows which step is playing
+clock -> screen.step_display(
+    steps: 16,
+    current_color: white,
+    inactive_color: dark_gray
+)
+
+// Pattern grid — edit by clicking
+screen.pattern_grid(
+    tracks: [
+        {name: "Kick",  pattern: kick_pattern,  color: red},
+        {name: "Snare", pattern: snare_pattern, color: orange},
+        {name: "Hat",   pattern: hat_pattern,   color: yellow},
+        {name: "Bass",  pattern: bass_pattern,  color: cyan}
+    ],
+    on_click: toggle_step
+)
+
+// BPM control
+screen.slider(label: "BPM", value: bpm, range: {60, 200},
+              on_change: bpm.set)
+
+// ── HARDWARE OUTPUT (optional) ───────────────
+// Uncomment to drive physical hardware with the beat
+
+// LED strip synced to kick drum:
+// led_strip : act(ws2812, pin: 7, count: 16)
+// clock -> led_strip.highlight(step, color: kick_pattern[step] ? red : off)
+
+// Servo bounces on snare:
+// arm : act(servo, pin: 8)
+// snare.play -> arm.pulse(angle: 90, return: 45, duration: 100ms)
+
+// ── SAVE / LOAD ──────────────────────────────
+
+keyboard -> gate(key: "s", ctrl: true) -> vault.store("songs/{name}.zsong", {
+    bpm, kick_pattern, snare_pattern, hat_pattern,
+    bass_pattern, bass_notes
+})
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change the kick pattern. Put a kick on every step.
+//    Now remove some. Where does it groove?
+//
+// 2. Change bpm to 80. Now to 160. Feel changes everything.
+//
+// 3. Change the bass notes. Try: [C2,_,_,C2, E2,_,G2,_, A2,_,_,A2, G2,_,E2,_]
+//
+// 4. Add a 5th track — a melody:
+//      melody : synth(type: triangle, decay: 300ms, volume: 0.4)
+//      melody_pattern: [1,0,0,0, 0,0,1,0, 0,1,0,0, 0,0,0,1]
+//      melody_notes:   [E4,_,_,_, _,_,G4,_, _,D4,_,_, _,_,_,C4]
+//
+// 5. Wire the LED strip. Does the room feel like the song?
+//
+// 6. Export a pattern. Use it as the soundtrack in Platform Run.
+//
+// 7. Two students, two trackers, network merge.
+//    One does drums. One does melody. Live collaboration.

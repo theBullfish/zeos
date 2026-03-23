@@ -1,0 +1,86 @@
+// sumo_bot.zp — Robot sumo wrestler
+// Zeros Template — Level 2 (Extend)
+//
+// Stay inside the ring. Push the opponent out.
+// Two behaviors: search and attack.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+front_distance : sense(distance, pin: 2)   // ultrasonic — sees opponent
+left_edge      : sense(line, pin: 3)       // sees the white ring edge
+right_edge     : sense(line, pin: 4)       // sees the white ring edge
+
+left_motor     : act(dc_motor, pin: 5)
+right_motor    : act(dc_motor, pin: 6)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+charge_speed  : 100       // full speed attack
+search_speed  : 50        // cruising speed while looking
+backup_speed  : 70        // speed when retreating from edge
+edge_threshold: 800       // sensor value for "I see the white edge"
+detect_range  : 300       // mm — opponent is close enough to charge
+
+// ── SENSE ────────────────────────────────────
+
+{front_distance, left_edge, right_edge} -> state
+
+// ── DECIDE ───────────────────────────────────
+
+// Priority: edge avoidance ALWAYS wins over attack
+state -> {
+    gate(left_edge > edge_threshold)   -> avoid_left,
+    gate(right_edge > edge_threshold)  -> avoid_right,
+    gate(front_distance < detect_range) -> attack,
+    otherwise                           -> search
+}
+
+// ── ACT ──────────────────────────────────────
+
+// Edge! Back up and turn away
+avoid_left -> {
+    left_motor.set(-backup_speed),
+    right_motor.set(-backup_speed)
+} -> delay(200ms) -> {
+    left_motor.set(search_speed),
+    right_motor.set(-search_speed)
+} -> delay(300ms)
+
+avoid_right -> {
+    left_motor.set(-backup_speed),
+    right_motor.set(-backup_speed)
+} -> delay(200ms) -> {
+    left_motor.set(-search_speed),
+    right_motor.set(search_speed)
+} -> delay(300ms)
+
+// Opponent detected — CHARGE
+attack -> {
+    left_motor.set(charge_speed),
+    right_motor.set(charge_speed)
+}
+
+// Nobody in sight — spin slowly to scan
+search -> {
+    left_motor.set(search_speed),
+    right_motor.set(-search_speed)
+}
+
+// ── TELEMETRY ─────────────────────────────────
+
+front_distance ~> dashboard("opponent_mm")
+state          ~> dashboard("state")
+
+
+// ── TRY THIS ──────────────────────────────────
+//
+// 1. What if you made search_speed faster? Does it find
+//    opponents quicker or miss them?
+// 2. What if detect_range is 500mm? 100mm?
+// 3. Can you add a rear sensor and handle being attacked
+//    from behind?
+// 4. What if the robot remembers WHERE it last saw the
+//    opponent and goes back there after losing sight?
+// 5. Two robots running this program. Who wins? Why?

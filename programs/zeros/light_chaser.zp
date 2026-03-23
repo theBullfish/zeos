@@ -1,0 +1,92 @@
+// light_chaser.zp — Follow the brightest light
+// Zeros Template — Level 1 (Tweak)
+//
+// Four light sensors. Two motors. The robot turns toward light.
+// Same as a sunflower. Same as a moth. Same as a homing missile.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+left_ldr    : sense(light, pin: A0)    // left-facing light sensor
+right_ldr   : sense(light, pin: A1)    // right-facing light sensor
+front_ldr   : sense(light, pin: A2)    // forward-facing
+back_ldr    : sense(light, pin: A3)    // rear-facing
+
+left_motor  : act(dc_motor, pin: 5)
+right_motor : act(dc_motor, pin: 6)
+
+status_led  : act(led, pin: 13)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+speed       : 50        // base speed
+sensitivity : 30        // how much difference triggers a turn
+dead_zone   : 10        // ignore differences smaller than this
+
+// ── SENSE ────────────────────────────────────
+
+{left_ldr, right_ldr, front_ldr, back_ldr} -> readings
+
+// Find the brightest direction
+readings -> max_direction -> brightest    // "left", "right", "front", "back"
+
+// How much brighter is one side than the other?
+{left_ldr, right_ldr} -> difference -> lr_diff
+
+// ── DECIDE ───────────────────────────────────
+
+lr_diff -> {
+    gate(> sensitivity)    -> turn_right,   // right is brighter
+    gate(< -sensitivity)   -> turn_left,    // left is brighter
+    gate(abs < dead_zone)  -> go_straight   // roughly equal
+}
+
+// Special: if back is brightest, spin 180
+brightest -> gate(== "back") -> spin_around
+
+// ── ACT ──────────────────────────────────────
+
+go_straight -> {
+    left_motor.set(speed),
+    right_motor.set(speed),
+    status_led.set(on)
+}
+
+turn_left -> {
+    left_motor.set(speed / 2),
+    right_motor.set(speed),
+    status_led.blink(fast)
+}
+
+turn_right -> {
+    left_motor.set(speed),
+    right_motor.set(speed / 2),
+    status_led.blink(fast)
+}
+
+spin_around -> {
+    left_motor.set(speed),
+    right_motor.set(-speed)
+} -> delay(800ms)
+
+// ── TELEMETRY ────────────────────────────────
+
+left_ldr   ~> dashboard("left_light")
+right_ldr  ~> dashboard("right_light")
+front_ldr  ~> dashboard("front_light")
+lr_diff    ~> dashboard("balance")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Use a flashlight. Can you lead the robot around the room?
+// 2. Change sensitivity to 5. Does it react to smaller changes?
+// 3. Change sensitivity to 100. Now it only chases bright lights.
+// 4. Cover one sensor. What happens? Why?
+// 5. Make it AVOID light instead of chasing it:
+//    swap turn_left and turn_right. Now it's a cockroach.
+// 6. Add a buzzer. Make it beep faster as it gets closer
+//    to the light source. Echolocation in reverse.
+// 7. GAME VERSION: replace LDRs with distance-to-sprite.
+//    Your game enemy now chases the player the same way.

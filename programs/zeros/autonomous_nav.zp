@@ -1,0 +1,263 @@
+// autonomous_nav.zp — Self-navigating robot
+// Zeros Template — Level 5 (Engine)
+//
+// LIDAR + IMU + encoders = the robot builds a map and
+// navigates to goals without human input.
+// This is the capstone. Every previous template leads here.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+lidar          : sense(lidar, port: serial0, rpm: 300)     // 360-degree scan
+imu            : sense(accel_gyro, addr: 0x68)              // heading + tilt
+left_encoder   : sense(encoder, pin: 3)
+right_encoder  : sense(encoder, pin: 4)
+front_bumper   : sense(button, pin: 2)                      // emergency stop
+
+left_motor     : act(dc_motor, pin: 5)
+right_motor    : act(dc_motor, pin: 6)
+status_led     : act(ws2812, pin: 7, count: 8)
+
+// ── CONSTANTS ────────────────────────────────
+
+wheel_circ     : 200    // mm
+ticks_per_rev  : 20
+wheel_base     : 150    // mm between wheels
+map_resolution : 50     // mm per grid cell
+max_speed      : 60
+
+// ── ODOMETRY ─────────────────────────────────
+// Where am I? Dead reckoning from wheel encoders.
+
+{left_encoder, right_encoder} -> odometry(
+    wheel_circ: wheel_circ,
+    ticks_per_rev: ticks_per_rev,
+    wheel_base: wheel_base
+) -> raw_position
+
+// Fuse with IMU for drift correction
+{raw_position, imu.heading} -> complementary_filter(alpha: 0.95) -> position
+// position = {x: mm, y: mm, heading: degrees}
+
+// ── LIDAR PROCESSING ─────────────────────────
+// LIDAR gives 360 distance readings. Process into useful data.
+
+lidar.scan -> {
+    // Filter out bad readings
+    gate(distance > 50, distance < 5000) -> clean_scan,
+
+    // Find closest obstacle in each quadrant
+    gate(angle: 315..45)   -> front_scan,
+    gate(angle: 45..135)   -> right_scan,
+    gate(angle: 135..225)  -> rear_scan,
+    gate(angle: 225..315)  -> left_scan
+}
+
+front_scan -> min -> front_clearance
+right_scan -> min -> right_clearance
+left_scan  -> min -> left_clearance
+
+// ── MAPPING ──────────────────────────────────
+// Build an occupancy grid from LIDAR scans.
+
+map : grid(
+    width: 200, height: 200,      // 200x200 cells = 10m x 10m
+    resolution: map_resolution,
+    default: unknown               // unknown, free, occupied
+)
+
+// Each LIDAR point marks a cell as occupied
+// Each ray with no hit marks cells along the ray as free
+clean_scan -> each(reading) {
+    // Ray from robot position to reading endpoint
+    ray(from: position, angle: reading.angle, distance: reading.distance)
+        -> each_cell(cell) {
+            gate(cell == endpoint) -> map.set(cell, occupied),
+            gate(cell != endpoint) -> map.set(cell, free)
+        }
+}
+
+// ── PATH PLANNING ────────────────────────────
+// A* search on the occupancy grid.
+
+goal : null    // set by user or mission
+
+goal -> gate(!= null) -> {
+    // Plan path on the map
+    astar(
+        from: position -> map.to_cell,
+        to: goal -> map.to_cell,
+        grid: map,
+        passable: free,
+        diagonal: true
+    ) -> path,
+
+    // Smooth the path (remove zigzags)
+    path -> smooth(iterations: 3) -> smooth_path
+}
+
+// ── PATH FOLLOWING ───────────────────────────
+// Pure pursuit controller — follow the planned path.
+
+smooth_path -> pure_pursuit(
+    position: position,
+    lookahead: 200,      // mm — how far ahead to aim
+    path: smooth_path
+) -> target_point
+
+// PID controller for steering
+{position.heading, angle_to(target_point)} -> pid(
+    kp: 2.0,
+    ki: 0.01,
+    kd: 0.5,
+    output_range: {-max_speed, max_speed}
+) -> steer_correction
+
+// Drive
+gate(path != null, !emergency_stop) -> {
+    left_motor.set(max_speed - steer_correction),
+    right_motor.set(max_speed + steer_correction)
+}
+
+// ── OBSTACLE AVOIDANCE ───────────────────────
+// Override path following if something unexpected appears
+
+front_clearance -> gate(< 200) -> {
+    // Stop, mark obstacle on map, replan
+    left_motor.set(0),
+    right_motor.set(0),
+    delay(100ms),
+    replan.trigger
+}
+
+front_bumper -> gate(pressed) -> emergency_stop -> {
+    left_motor.set(0),
+    right_motor.set(0),
+    status_led.set_all(red),
+    alert("Emergency stop! Bumper hit.")
+}
+
+replan : {
+    // Invalidate current path near the new obstacle
+    path.set(null),
+    // Recompute
+    goal -> trigger_replan
+}
+
+// ── STATUS LED ───────────────────────────────
+
+status_led -> {
+    gate(goal == null)        -> rainbow(slow),          // idle, looking pretty
+    gate(path != null)        -> pulse(green, speed: 1), // navigating
+    gate(front_clearance < 200) -> blink(yellow, fast),  // obstacle detected
+    gate(emergency_stop)      -> solid(red)              // stopped
+}
+
+// ── GOAL SETTING ─────────────────────────────
+
+// Set goal from keyboard (when connected to screen)
+keyboard -> {
+    gate(key: "1") -> goal.set({x: 1000, y: 0}),       // 1m forward
+    gate(key: "2") -> goal.set({x: 0, y: 1000}),       // 1m right
+    gate(key: "3") -> goal.set({x: -1000, y: 0}),      // 1m backward
+    gate(key: "0") -> goal.set({x: 0, y: 0}),          // return to start
+    gate(key: "g") -> goal.set(click_on_map),           // click on map view
+    gate(key: "x") -> goal.set(null)                    // cancel navigation
+}
+
+// ── VISUALIZATION ────────────────────────────
+
+screen : display(layout: split, ratio: 70/30)
+
+// Map view
+map_view : screen.left -> canvas(background: #111111)
+
+// Draw the occupancy grid
+map -> each_cell(cell) {
+    gate(cell == free)     -> map_view.pixel(cell, color: #222222),
+    gate(cell == occupied) -> map_view.pixel(cell, color: white),
+    gate(cell == unknown)  -> map_view.pixel(cell, color: #0A0A0A)
+}
+
+// Draw the path
+smooth_path -> map_view.polyline(color: green, width: 2)
+
+// Draw the robot
+position -> map_view.triangle(
+    at: position -> map.to_cell,
+    angle: position.heading,
+    size: 6,
+    color: cyan
+)
+
+// Draw LIDAR rays (optional, beautiful)
+clean_scan -> each(reading) {
+    map_view.line(
+        from: position -> map.to_cell,
+        to: ray_endpoint(reading) -> map.to_cell,
+        color: rgba(0, 255, 0, 0.1)
+    )
+}
+
+// Draw goal
+goal -> gate(!= null) -> map_view.dot(
+    at: goal -> map.to_cell,
+    color: yellow, size: 8, pulse: true
+)
+
+// Stats panel
+panel : screen.right -> stack(spacing: 8, background: #111111)
+panel -> text("Autonomous Nav", size: 16, color: white)
+position.x -> panel.value("X", unit: "mm")
+position.y -> panel.value("Y", unit: "mm")
+position.heading -> panel.value("Heading", unit: "deg")
+front_clearance -> panel.value("Front", unit: "mm")
+path -> gate(!= null) -> panel.value("Path", format: "{length} cells")
+map -> panel.value("Mapped", format: "{known_cells}/{total_cells} cells")
+
+// ── TELEMETRY ────────────────────────────────
+
+position        ~> dashboard("position")
+front_clearance ~> dashboard("front_mm")
+path            ~> dashboard("path_length")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Let the robot explore. Watch the map build in real time.
+//    This is SLAM (Simultaneous Localization and Mapping).
+//
+// 2. Set a goal. Watch it plan a path and follow it.
+//    Put an obstacle in the way. Watch it replan.
+//
+// 3. Change lookahead distance. Low = tight turns, might oscillate.
+//    High = smooth curves, might cut corners.
+//
+// 4. Change the PID values. Too much kp = oscillation.
+//    Too much kd = sluggish. Too much ki = overshoot.
+//    This is THE fundamental control theory exercise.
+//
+// 5. Add waypoints: visit A, then B, then C, then home.
+//    Now it's a delivery robot.
+//
+// 6. Two robots, shared map. Robot A explores the left half.
+//    Robot B explores the right. They merge their maps over radio.
+//
+// 7. Add "patrol" mode: continuously loop between waypoints.
+//    Now it's a security robot.
+//
+// ── THE LESSON ───────────────────────────────
+//
+// This program uses EVERYTHING from the previous templates:
+// - sensor reading (sensor_dashboard.zp)
+// - motor control (line_follower.zp)
+// - obstacle avoidance (sumo_bot.zp)
+// - mapping (maze_solver.zp)
+// - networking (swarm.zp)
+// - visualization (digital_twin.zp)
+// - PID control (arm_controller.zp)
+//
+// You didn't need to learn this all at once.
+// Each template taught one piece. This brings them together.
+// That's a curriculum.

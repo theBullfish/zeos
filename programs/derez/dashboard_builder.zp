@@ -1,0 +1,185 @@
+// dashboard_builder.zp — Real-time data visualization toolkit
+// DereZ Template — Level 3 (Script)
+//
+// Wire any data source to any visualization.
+// Gauges, graphs, bars, maps, indicators.
+// The tool you build dashboards WITH.
+//
+// Codex Labs LLC — 2026
+
+// ── DATA SOURCES ─────────────────────────────
+// Pick your inputs. Anything that emits signals works.
+
+// Simulated data (for learning — replace with real sources)
+cpu_usage    : simulate(wave: sine, period: 30s, range: {20, 95})
+memory_usage : simulate(wave: sawtooth, period: 60s, range: {40, 85})
+disk_io      : simulate(wave: random, range: {0, 500})
+network_in   : simulate(wave: burst, interval: 5s, range: {0, 100})
+network_out  : simulate(wave: burst, interval: 7s, range: {0, 80})
+error_rate   : simulate(wave: random, range: {0, 5})
+uptime       : counter(from: 0, step: 1s)
+
+// Real data (uncomment when you have sources):
+// cpu_usage    : connect("server.local:4200").cpu
+// memory_usage : connect("server.local:4200").memory
+// temperature  : sense(temperature, addr: 0x76)
+// rover_data   : connect("rover.local:4200")
+
+// ── LAYOUT ───────────────────────────────────
+
+screen : display(
+    layout: grid, cols: 4, rows: 3,
+    background: #0D1117,      // dark, easy on the eyes
+    gap: 8,
+    padding: 12
+)
+
+// ── ROW 1: SYSTEM HEALTH ─────────────────────
+
+screen[0,0] : gauge(cpu_usage,
+    label: "CPU",
+    unit: "%",
+    range: {0, 100},
+    zones: {
+        {0, 60, green},
+        {60, 85, yellow},
+        {85, 100, red}
+    },
+    style: arc
+)
+
+screen[1,0] : gauge(memory_usage,
+    label: "Memory",
+    unit: "%",
+    range: {0, 100},
+    zones: {
+        {0, 70, cyan},
+        {70, 90, yellow},
+        {90, 100, red}
+    },
+    style: arc
+)
+
+screen[2,0] : bar(disk_io,
+    label: "Disk I/O",
+    unit: "MB/s",
+    range: {0, 500},
+    color: magenta,
+    orientation: vertical
+)
+
+screen[3,0] : value(uptime,
+    label: "Uptime",
+    format: duration,
+    color: white,
+    size: large
+)
+
+// ── ROW 2: NETWORK ──────────────────────────
+
+screen[0..1, 1] : graph(
+    {network_in, network_out},
+    labels: {"In", "Out"},
+    colors: {green, orange},
+    label: "Network Traffic",
+    unit: "Mbps",
+    window: 120s,
+    fill: true,
+    stacked: false
+)
+
+screen[2,1] : sparkline(error_rate,
+    label: "Errors/min",
+    window: 60s,
+    color: red,
+    warn: {> 3, flash}
+)
+
+screen[3,1] : status_grid(
+    title: "Services",
+    items: [
+        {name: "API",      signal: api_health,    ok: green, fail: red},
+        {name: "Database",  signal: db_health,     ok: green, fail: red},
+        {name: "Cache",     signal: cache_health,  ok: green, fail: red},
+        {name: "Queue",     signal: queue_health,  ok: green, fail: red},
+        {name: "Search",    signal: search_health, ok: green, fail: red},
+        {name: "Storage",   signal: storage_health, ok: green, fail: red}
+    ]
+)
+
+// Simulated health signals
+api_health     : simulate(wave: mostly_true, fail_rate: 0.02)
+db_health      : simulate(wave: mostly_true, fail_rate: 0.01)
+cache_health   : simulate(wave: mostly_true, fail_rate: 0.05)
+queue_health   : simulate(wave: mostly_true, fail_rate: 0.03)
+search_health  : simulate(wave: mostly_true, fail_rate: 0.01)
+storage_health : simulate(wave: mostly_true, fail_rate: 0.005)
+
+// ── ROW 3: ALERTS + LOG ─────────────────────
+
+screen[0..1, 2] : event_log(alerts,
+    label: "Alerts",
+    max_lines: 8,
+    color_by_severity: true,
+    timestamp: true
+)
+
+screen[2..3, 2] : heatmap(
+    cpu_usage,
+    label: "CPU History (1h)",
+    window: 3600s,
+    bucket: 60s,
+    colors: {green, yellow, red}
+)
+
+// ── ALERT RULES ──────────────────────────────
+
+cpu_usage    -> gate(> 90) -> debounce(10s) -> alerts.add(
+    severity: critical, msg: "CPU above 90%: {value}%"
+)
+
+memory_usage -> gate(> 85) -> debounce(30s) -> alerts.add(
+    severity: warning, msg: "Memory high: {value}%"
+)
+
+error_rate   -> gate(> 3) -> debounce(60s) -> alerts.add(
+    severity: critical, msg: "Error spike: {value}/min"
+)
+
+{api_health, db_health, cache_health} -> gate(any: false) -> alerts.add(
+    severity: critical, msg: "Service down!"
+)
+
+// ── KEYBOARD SHORTCUTS ───────────────────────
+
+keyboard -> {
+    gate(key: "1") -> screen.focus(0, 0),     // zoom into CPU
+    gate(key: "2") -> screen.focus(0, 1),     // zoom into network
+    gate(key: "f") -> screen.fullscreen.toggle,
+    gate(key: "d") -> screen.theme.toggle(dark, light),
+    gate(key: "p") -> screen.pause.toggle,    // freeze the display
+    gate(key: "s") -> screen.screenshot("dashboard_{timestamp}.png")
+}
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change the layout. Try cols: 3, rows: 4. Rearrange widgets.
+//
+// 2. Add a new gauge. Track anything — make up a data source.
+//
+// 3. Change the color zones on CPU. When should yellow start?
+//    When should red? There's no right answer — it depends
+//    on what you're monitoring.
+//
+// 4. Connect to a real data source. Replace simulate() with
+//    connect("server:port") and read live data.
+//
+// 5. Add a rover's sensors. Put distance, speed, and heading
+//    on this dashboard. Now you're mission control.
+//
+// 6. Export the layout as a .zdash file. Share it with your
+//    team. They see the same view with their own data.
+//
+// 7. Build a COMPETITION dashboard: two robots, head-to-head,
+//    live scores, lap times, sensor comparison.

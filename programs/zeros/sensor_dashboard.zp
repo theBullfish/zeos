@@ -1,0 +1,152 @@
+// sensor_dashboard.zp — Read everything, display everything
+// Zeros Template — Level 2 (Extend)
+//
+// Plug in any sensor. This dashboard reads and displays it.
+// The Swiss Army knife of robotics debugging.
+//
+// Codex Labs LLC — 2026
+
+// ── SENSORS ──────────────────────────────────
+// Uncomment what you have connected. Add more.
+
+distance    : sense(distance, pin: 2)
+line_left   : sense(line, pin: A0)
+line_center : sense(line, pin: A1)
+line_right  : sense(line, pin: A2)
+temperature : sense(temperature, addr: 0x76)     // BME280 I2C
+light       : sense(light, pin: A3)
+button      : sense(button, pin: 4)
+// accel     : sense(accel_gyro, addr: 0x68)      // MPU6050
+// compass   : sense(compass, addr: 0x1E)         // HMC5883L
+// encoder_l : sense(encoder, pin: 5)
+// encoder_r : sense(encoder, pin: 6)
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(layout: grid, cols: 3, rows: 3, background: #1A1A1A)
+
+// Row 1: Range sensors
+screen[0,0] : gauge(distance,
+    label: "Distance", unit: "mm",
+    range: {0, 2000},
+    color: cyan,
+    warn: {< 100, red}
+)
+
+screen[1,0] : bar_triple(
+    {line_left, line_center, line_right},
+    labels: {"L", "C", "R"},
+    range: {0, 1023},
+    color: green
+)
+
+screen[2,0] : value(light,
+    label: "Light", unit: "lux",
+    color: yellow
+)
+
+// Row 2: Environment
+screen[0,1] : graph(temperature,
+    label: "Temperature", unit: "C",
+    window: 60s,
+    range: {15, 45},
+    color: orange,
+    warn: {> 35, red}
+)
+
+screen[1,1] : indicator(button,
+    label: "Button",
+    on_color: green,
+    off_color: dark_gray
+)
+
+screen[2,1] : value(timing_delta,
+    label: "Silicon Speed",
+    unit: "cycles",
+    color: magenta
+)
+
+// Row 3: System
+screen[0,2] : graph(readings_per_second,
+    label: "Sample Rate", unit: "Hz",
+    window: 30s,
+    color: blue
+)
+
+screen[1,2] : text_log(alerts,
+    label: "Alerts",
+    max_lines: 5,
+    color: white
+)
+
+screen[2,2] : text(
+    "Sensor Dashboard v1.0\n"
+    "Plug in sensors.\n"
+    "They appear here.\n"
+    "That's it.",
+    color: gray
+)
+
+// ── TIMING (Zixel) ──────────────────────────
+
+// TSC delta as silicon health indicator
+tick(every: 1s) -> measure_delta -> timing_delta
+
+// ── ALERTS ───────────────────────────────────
+
+distance    -> gate(< 50) -> alerts.add("CLOSE! Object at {value}mm")
+temperature -> gate(> 40) -> alerts.add("HOT! {value}C")
+button      -> gate(pressed) -> alerts.add("Button pressed")
+light       -> gate(< 10) -> alerts.add("Dark! {value} lux")
+
+// ── SAMPLE RATE TRACKING ─────────────────────
+
+{distance, line_left, temperature, light}
+    ~> rate(per: 1s) ~> readings_per_second
+
+// ── RAW MODE ─────────────────────────────────
+// Press 'r' to see raw hex values instead of pretty gauges
+
+keyboard -> gate(key: "r") -> raw_mode.toggle
+
+gate(raw_mode) -> screen.overlay(
+    "{distance.raw_hex}\n"
+    "{line_left.raw_hex} {line_center.raw_hex} {line_right.raw_hex}\n"
+    "{temperature.raw_hex}\n"
+    "{light.raw_hex}",
+    font: monospace,
+    color: green,
+    background: black
+)
+
+// ── RECORD ───────────────────────────────────
+
+keyboard -> gate(key: "space") -> recording.toggle
+
+gate(recording) -> tick(every: 100ms) -> {
+    {distance, line_left, line_center, line_right, temperature, light}
+        -> timestamp
+        -> vault.append("sensor_logs/{date}.zdat"),
+    screen.border(red)    // visual indicator
+}
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Plug in just a distance sensor. Wave your hand.
+//    The gauge moves. That's sensor → screen in one wire.
+//
+// 2. Plug in temperature. Breathe on it. Watch the graph.
+//
+// 3. Press R for raw mode. These are the actual bytes
+//    the sensor sends. The gauges are just a view.
+//
+// 4. Press SPACE to record. Walk around with sensors.
+//    Stop recording. Now you have data to analyze.
+//
+// 5. Add a new sensor — just add a sense() line and a
+//    screen[] display. That's it. No framework setup.
+//
+// 6. Send this data to a DereZ squad member running
+//    mission_control.zp. Your dashboard is local,
+//    theirs is remote. Same data.

@@ -1,0 +1,169 @@
+// weather_world.zp — Real weather drives a game world
+// Multimodal Template — Level 2
+//
+// Physical sensors read temperature, humidity, light.
+// A game world reacts: snow falls, sun sets, rain pours.
+// The real world IS the game engine.
+//
+// Codex Labs LLC — 2026
+
+// ── SENSORS ──────────────────────────────────
+
+temperature : sense(temperature, addr: 0x76)    // BME280
+humidity    : sense(humidity, addr: 0x76)        // BME280
+light       : sense(light, pin: A0)              // LDR
+pressure    : sense(pressure, addr: 0x76)        // BME280
+
+// Simulated fallback (if no sensors connected):
+// temperature : simulate(wave: sine, period: 300s, range: {-5, 35})
+// humidity    : simulate(wave: sine, period: 200s, range: {20, 95})
+// light       : simulate(wave: sine, period: 600s, range: {0, 1000})
+
+// ── WEATHER INTERPRETATION ───────────────────
+
+// What's the weather RIGHT NOW based on sensor fusion?
+{temperature, humidity, light, pressure} -> weather_classifier -> weather
+
+weather_classifier : {
+    gate(temperature < 2, humidity > 70)           -> "snow",
+    gate(humidity > 80, pressure < 1010)           -> "rain",
+    gate(humidity > 60, temperature > 25)          -> "humid",
+    gate(light > 500, humidity < 40)               -> "sunny",
+    gate(light < 100)                              -> "night",
+    gate(pressure > 1020, humidity < 50)           -> "clear",
+    otherwise                                       -> "cloudy"
+}
+
+// ── GAME WORLD ───────────────────────────────
+
+world : tilemap("levels/weather_world.tmx")
+
+screen : display(width: 320, height: 240, scale: fit)
+
+// ── SKY ──────────────────────────────────────
+
+// Sky color follows real light level
+light -> map(0..1000, 0..1) -> sky_brightness
+
+sky_color : {
+    gate(weather == "night")  -> lerp(#0A0A2E, #1A1A3E, sky_brightness),
+    gate(weather == "sunny")  -> #87CEEB,
+    gate(weather == "cloudy") -> #A0A0B0,
+    gate(weather == "rain")   -> #505060,
+    gate(weather == "snow")   -> #C0C8D0,
+    otherwise                 -> #87CEEB
+}
+
+screen.background -> sky_color
+
+// ── PRECIPITATION ────────────────────────────
+
+// Rain particles
+gate(weather == "rain") -> particles.continuous(
+    type: streak,
+    count: humidity -> map(60..100, 10..200),    // heavier rain = more drops
+    color: rgba(100, 150, 255, 0.5),
+    velocity: {x: -20, y: 300},
+    lifetime: 800ms
+)
+
+// Snow particles
+gate(weather == "snow") -> particles.continuous(
+    type: circle,
+    count: humidity -> map(60..100, 5..80),
+    color: white,
+    velocity: {x: random(-20, 20), y: random(30, 80)},
+    lifetime: 3s,
+    sway: true
+)
+
+// ── WORLD EFFECTS ────────────────────────────
+
+// Temperature affects the ground
+temperature -> {
+    gate(< 0)   -> world.replace_surface("grass", "snow_ground"),
+    gate(0..10) -> world.replace_surface("snow_ground", "frost_ground"),
+    gate(> 10)  -> world.replace_surface("frost_ground", "grass")
+}
+
+// Water freezes
+temperature -> gate(< 0) -> world.replace("water", "ice")
+temperature -> gate(> 2) -> world.replace("ice", "water")
+
+// Flowers bloom in warmth
+temperature -> gate(> 20) -> world.show("flowers")
+temperature -> gate(< 15) -> world.hide("flowers")
+
+// ── CREATURES ────────────────────────────────
+
+// NPCs react to weather
+animals : world.objects(type: "animal") -> each(animal) {
+    weather -> {
+        gate("rain")  -> animal.go_to("shelter") -> animal.anim("huddle"),
+        gate("snow")  -> animal.go_to("shelter") -> animal.anim("sleep"),
+        gate("sunny") -> animal.wander(radius: 100) -> animal.anim("walk"),
+        gate("night") -> animal.go_to("den") -> animal.anim("sleep")
+    }
+}
+
+// ── PLAYER ───────────────────────────────────
+
+player : entity(sprite: "sprites/player.png", x: 160, y: 120)
+
+keyboard -> {
+    gate(key: left)  -> player.move(left, speed: 80),
+    gate(key: right) -> player.move(right, speed: 80),
+    gate(key: up)    -> player.move(up, speed: 80),
+    gate(key: down)  -> player.move(down, speed: 80)
+}
+
+// Player gets cold
+temperature -> gate(< 5) -> player.effect("shiver", intensity: map(5..-10, 0..1))
+temperature -> gate(< -5) -> player.speed_modifier(0.7)    // slow in extreme cold
+
+// ── HUD ──────────────────────────────────────
+
+hud : overlay(fixed: true)
+
+hud.text(x: 8, y: 8,
+    "Weather: {weather}  Temp: {temperature}C  Humidity: {humidity}%",
+    color: white, shadow: true, size: small)
+
+// Mini weather icon
+weather -> {
+    gate("sunny")  -> hud.icon(x: 300, y: 8, sprite: "icons/sun.png"),
+    gate("rain")   -> hud.icon(x: 300, y: 8, sprite: "icons/rain.png"),
+    gate("snow")   -> hud.icon(x: 300, y: 8, sprite: "icons/snow.png"),
+    gate("cloudy") -> hud.icon(x: 300, y: 8, sprite: "icons/cloud.png"),
+    gate("night")  -> hud.icon(x: 300, y: 8, sprite: "icons/moon.png")
+}
+
+// ── TELEMETRY ────────────────────────────────
+
+temperature ~> dashboard("temp_C")
+humidity    ~> dashboard("humidity_%")
+light       ~> dashboard("light_lux")
+weather     ~> dashboard("weather")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Breathe on the temperature sensor. Watch it rain.
+// 2. Cover the light sensor. Watch night fall.
+// 3. Put the sensor near a window. Does the game match outside?
+// 4. Ice cube on the temperature sensor. Watch the world freeze.
+// 5. Add a lightning effect when pressure drops fast.
+// 6. Add a wind indicator — use a second LDR with a vane
+//    that casts shadow. Wind direction = shadow position.
+// 7. Log the weather for 24 hours. Replay it as a time-lapse.
+//    The game world compresses a day into 2 minutes.
+//
+// ── THE LESSON ───────────────────────────────
+//
+// The physical world drove the game world.
+// The same sensors that measure weather could measure
+// a robot's environment. The same game reactions could
+// be real-world responses (close the greenhouse vent,
+// turn on the heater, water the plants).
+//
+// Sensor → decision → action. Always the same pattern.

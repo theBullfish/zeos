@@ -1,0 +1,235 @@
+// block_builder.zp — Voxel sandbox (Minecraft-like)
+// DereZ Template — Level 2 (Extend)
+//
+// Place blocks. Break blocks. Build worlds.
+// Inventory. Crafting. Day/night cycle.
+//
+// Codex Labs LLC — 2026
+
+// ── WORLD ────────────────────────────────────
+
+world : voxel_grid(
+    width: 128, height: 64, depth: 128,
+    chunk_size: 16
+)
+
+// Terrain generation — simple perlin noise
+world -> generate(
+    terrain: perlin(
+        octaves: 4,
+        scale: 0.02,
+        height_range: {16, 48}
+    ),
+    surface: "grass",
+    underground: "stone",
+    deep: "bedrock",
+    water_level: 24
+)
+
+// ── PLAYER ───────────────────────────────────
+
+player : entity(
+    position: {64, 50, 64},     // center of world, above ground
+    height: 1.8,
+    eye_height: 1.6,
+    collider: capsule(radius: 0.3, height: 1.8)
+)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+move_speed    : 4.0       // blocks per second
+jump_force    : 6.0
+gravity       : 14.0
+reach         : 5.0       // how far you can place/break
+mouse_sens    : 0.3
+
+// ── CAMERA ───────────────────────────────────
+
+camera : first_person(
+    attached_to: player,
+    fov: 70,
+    near: 0.1,
+    far: 200
+)
+
+// Mouse look
+mouse.delta -> * mouse_sens -> camera.rotate
+
+// ── MOVEMENT ─────────────────────────────────
+
+keyboard -> {
+    gate(key: w)     -> player.move(forward, speed: move_speed),
+    gate(key: s)     -> player.move(backward, speed: move_speed),
+    gate(key: a)     -> player.move(left, speed: move_speed),
+    gate(key: d)     -> player.move(right, speed: move_speed),
+    gate(key: space) -> gate(player.on_ground) -> player.jump(jump_force),
+    gate(key: shift) -> player.move(speed: move_speed * 1.5)    // sprint
+}
+
+// Physics
+player -> apply_gravity(gravity)
+player -> collision_response(world)
+
+// ── BLOCK TYPES ──────────────────────────────
+
+blocks : {
+    grass:    {texture: "textures/grass.png",    hardness: 1},
+    dirt:     {texture: "textures/dirt.png",     hardness: 1},
+    stone:    {texture: "textures/stone.png",    hardness: 3},
+    wood:     {texture: "textures/wood.png",     hardness: 2},
+    leaves:   {texture: "textures/leaves.png",   hardness: 0.5},
+    sand:     {texture: "textures/sand.png",     hardness: 1},
+    water:    {texture: "textures/water.png",    hardness: -1},   // can't break
+    brick:    {texture: "textures/brick.png",    hardness: 4},
+    glass:    {texture: "textures/glass.png",    hardness: 0.5, transparent: true},
+    planks:   {texture: "textures/planks.png",   hardness: 2},
+    torch:    {texture: "textures/torch.png",    hardness: 0, light: 14}
+}
+
+// ── BLOCK INTERACTION ────────────────────────
+
+// Raycast from camera to find what block we're looking at
+camera -> raycast(distance: reach, against: world) -> crosshair
+
+// Highlight the block we're looking at
+crosshair.block -> outline(color: white, width: 1)
+
+// Break block (left click / hold)
+mouse.left_hold -> gate(crosshair.hit) -> break_progress(
+    block: crosshair.block,
+    time: blocks[crosshair.block.type].hardness * 0.5     // seconds
+) -> {
+    crosshair.block.destroy,
+    inventory.add(crosshair.block.type, 1),
+    play("sfx/break.wav"),
+    particles.burst(at: crosshair.block.position,
+                    color: blocks[crosshair.block.type].color,
+                    count: 8)
+}
+
+// Place block (right click)
+mouse.right_click -> gate(crosshair.hit) -> {
+    gate(inventory.count(selected_block) > 0) -> {
+        world.set(crosshair.adjacent, selected_block),
+        inventory.remove(selected_block, 1),
+        play("sfx/place.wav")
+    }
+}
+
+// ── INVENTORY ────────────────────────────────
+
+inventory : container(slots: 36)
+
+// Start with some blocks
+inventory.add("dirt", 64)
+inventory.add("stone", 64)
+inventory.add("wood", 32)
+inventory.add("planks", 32)
+inventory.add("glass", 16)
+inventory.add("torch", 16)
+
+// Hotbar = first 9 slots
+selected_slot : 0
+selected_block : inventory.slot(selected_slot).type
+
+// Number keys select hotbar slot
+keyboard -> gate(key: "1".."9") -> selected_slot.set(key - 1)
+
+// Scroll wheel cycles through hotbar
+mouse.scroll -> selected_slot.cycle(0, 8)
+
+// ── CRAFTING ─────────────────────────────────
+
+crafting_recipes : {
+    planks: {input: {wood: 1}, output: {planks: 4}},
+    torch:  {input: {wood: 1, stone: 1}, output: {torch: 4}},
+    brick:  {input: {stone: 4}, output: {brick: 4}},
+    glass:  {input: {sand: 4}, output: {glass: 4}}
+}
+
+keyboard -> gate(key: "c") -> crafting_menu.toggle
+
+crafting_menu -> display_recipes(crafting_recipes, inventory) -> on_craft(recipe) {
+    gate(inventory.has(recipe.input)) -> {
+        recipe.input -> each(item, count) { inventory.remove(item, count) },
+        recipe.output -> each(item, count) { inventory.add(item, count) },
+        play("sfx/craft.wav")
+    }
+}
+
+// ── DAY/NIGHT CYCLE ──────────────────────────
+
+day_length : 600s    // 10 minutes per day
+time_of_day : counter(mod: day_length)
+
+sun_angle : time_of_day -> map(0..day_length, 0..360)
+sky_color : sun_angle -> {
+    gate(0..90)    -> lerp(#1A1A2E, #87CEEB),     // dawn
+    gate(90..270)  -> #87CEEB,                      // day
+    gate(270..330) -> lerp(#87CEEB, #FF6B35),       // sunset
+    gate(330..360) -> lerp(#FF6B35, #1A1A2E)        // dusk
+}
+
+ambient_light : sun_angle -> {
+    gate(0..30)    -> lerp(0.1, 1.0),
+    gate(30..330)  -> 1.0,
+    gate(330..360) -> lerp(1.0, 0.1)
+}
+
+// ── HUD ──────────────────────────────────────
+
+hud : overlay(fixed: true)
+
+// Crosshair
+hud.crosshair(style: plus, color: white, size: 12)
+
+// Hotbar at bottom
+hud.hotbar(
+    inventory: inventory,
+    slots: 0..8,
+    selected: selected_slot,
+    y: screen.height - 44
+)
+
+// Block name when looking at something
+crosshair.hit -> hud.text(
+    x: screen.center_x, y: screen.center_y + 20,
+    text: crosshair.block.type,
+    color: white, align: center
+)
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(
+    width: 800, height: 600,
+    renderer: voxel,
+    fog: {start: 100, end: 180, color: sky_color},
+    ambient: ambient_light
+)
+
+// ── TELEMETRY ────────────────────────────────
+
+player.position  ~> dashboard("position")
+time_of_day      ~> dashboard("time")
+inventory.total  ~> dashboard("items")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Build a house. Door, windows (glass), roof.
+//    Place torches inside. Does the lighting work?
+//
+// 2. Change gravity to 4. Moon mode. Build a tower
+//    and jump off. Change to 30. Jupiter mode.
+//
+// 3. Add a new block type. Copy an existing one,
+//    change the texture and hardness.
+//
+// 4. Change day_length to 60s. Speed run a full day.
+//    What does the sky look like at each phase?
+//
+// 5. Build a maze out of blocks. Then run maze_solver.zp
+//    in it. Can your robot solve a maze YOU built?
+//
+// 6. Add TNT: place it, trigger it, destroy nearby blocks.
+//    Hint: world.sphere_remove(center, radius: 5)

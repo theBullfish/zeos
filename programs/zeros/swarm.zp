@@ -1,0 +1,134 @@
+// swarm.zp — Multi-robot coordination
+// Zeros Template — Level 4 (Create)
+//
+// Each robot runs this program. They find each other,
+// share what they see, and move as a group.
+// No leader. No central server. Emergent behavior.
+//
+// Codex Labs LLC — 2026
+
+// ── IDENTITY ─────────────────────────────────
+// Each robot gets a unique ID from its hardware
+
+my_id : device.serial_hash(mod: 256)    // 0-255, unique enough
+
+// ── HARDWARE ─────────────────────────────────
+
+front_distance : sense(distance, pin: 2)
+left_distance  : sense(distance, pin: 3)
+right_distance : sense(distance, pin: 4)
+
+left_motor     : act(dc_motor, pin: 5)
+right_motor    : act(dc_motor, pin: 6)
+
+status_led     : act(ws2812, pin: 7, count: 1)   // RGB status
+
+radio          : network(protocol: udp, port: 4201, broadcast: true)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+swarm_distance : 300    // mm — ideal distance to nearest neighbor
+avoid_distance : 150    // mm — too close to neighbor or wall
+speed          : 40
+announce_rate  : 200    // ms between radio pings
+
+// ── BROADCAST ────────────────────────────────
+// Tell everyone: here I am, here's what I see
+
+tick(every: announce_rate) -> radio.emit({
+    id: my_id,
+    distance_front: front_distance,
+    distance_left: left_distance,
+    distance_right: right_distance,
+    timestamp: now
+})
+
+// ── LISTEN ───────────────────────────────────
+// Hear everyone else
+
+radio.receive -> gate(id != my_id) -> neighbors
+
+// Track who's nearby (heard in last 2 seconds)
+neighbors -> window(duration: 2s, key: id) -> active_neighbors
+
+// ── SWARM RULES ──────────────────────────────
+// Three simple rules create complex group behavior.
+// These are the same rules that drive bird flocks and fish schools.
+
+// Rule 1: SEPARATION — don't crash into each other
+front_distance -> gate(< avoid_distance) -> too_close_wall
+active_neighbors -> gate(count > 0, nearest < avoid_distance) -> too_close_neighbor
+
+{too_close_wall, too_close_neighbor} -> avoid -> {
+    left_motor.set(-speed / 2),
+    right_motor.set(speed / 2)      // turn away
+} -> delay(300ms)
+
+// Rule 2: ALIGNMENT — move in the same general direction
+// If most neighbors are going right, go right
+active_neighbors -> average(field: heading) -> group_heading
+group_heading -> error(target: my_heading) -> alignment_correction
+
+// Rule 3: COHESION — don't get too far from the group
+active_neighbors -> gate(count > 0, nearest > swarm_distance) -> too_far
+too_far -> steer_toward(nearest_neighbor)
+
+// ── COMBINED BEHAVIOR ────────────────────────
+
+// No conflict: move forward with alignment correction
+gate(!too_close_wall, !too_close_neighbor, !too_far) -> {
+    left_motor.set(speed - alignment_correction),
+    right_motor.set(speed + alignment_correction)
+}
+
+// ── STATUS LED ───────────────────────────────
+// Visual feedback — you can see the swarm thinking
+
+active_neighbors.count -> {
+    gate(== 0) -> status_led.set(red),       // alone
+    gate(== 1) -> status_led.set(yellow),    // found one
+    gate(>= 2) -> status_led.set(green)      // in the swarm
+}
+
+// ── TELEMETRY ────────────────────────────────
+
+active_neighbors.count ~> dashboard("neighbors")
+my_id                  ~> dashboard("my_id")
+group_heading          ~> dashboard("group_heading")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Start with 2 robots. Do they find each other?
+//    Watch the LEDs — red → yellow → green.
+//
+// 2. Add a third. Does the group stay together?
+//
+// 3. Put an obstacle between two robots. Do they
+//    go around it and re-form?
+//
+// 4. Change swarm_distance to 100. They cluster tight.
+//    Change it to 500. They spread out. That one number
+//    controls the shape of the flock.
+//
+// 5. Remove Rule 2 (alignment). What happens?
+//    They clump but don't move together.
+//
+// 6. Remove Rule 3 (cohesion). What happens?
+//    They drift apart.
+//
+// 7. Remove Rule 1 (separation). What happens?
+//    They crash. Every time.
+//
+// 8. ADVANCED: add a "leader" mode. One robot has a
+//    target. Others follow. How do you designate a leader
+//    without a central server?
+//
+// ── THE LESSON ───────────────────────────────
+//
+// Three rules. No leader. No central planning.
+// The group behavior EMERGES from individual rules.
+//
+// This is how starlings murmur. How fish school.
+// How self-driving car platoons will work.
+// And you just built it with signal chains.

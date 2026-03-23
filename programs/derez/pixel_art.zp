@@ -1,0 +1,112 @@
+// pixel_art.zp — Draw sprites for your games and robots
+// DereZ Template — Level 1 (Tweak)
+//
+// A tiny pixel art editor. 16x16 grid.
+// Make sprites, save them, use them in other projects.
+//
+// Codex Labs LLC — 2026
+
+// ── CANVAS ───────────────────────────────────
+
+canvas : grid(16, 16, cell_size: 24, background: dark_gray)
+
+// ── PALETTE ──────────────────────────────────
+// Pico-8 colors — 16 colors that always look good together
+
+palette : colors [
+    #000000,    // 0  black
+    #1D2B53,    // 1  dark blue
+    #7E2553,    // 2  dark purple
+    #008751,    // 3  dark green
+    #AB5236,    // 4  brown
+    #5F574F,    // 5  dark gray
+    #C2C3C7,    // 6  light gray
+    #FFF1E8,    // 7  white
+    #FF004D,    // 8  red
+    #FFA300,    // 9  orange
+    #FFEC27,    // 10 yellow
+    #00E436,    // 11 green
+    #29ADFF,    // 12 blue
+    #83769C,    // 13 indigo
+    #FF77A8,    // 14 pink
+    #FFCCAA     // 15 peach
+]
+
+current_color : palette[8]    // start with red
+
+// ── INPUT ────────────────────────────────────
+
+mouse : sense(mouse)
+keyboard : sense(key_press)
+
+// Click to paint
+mouse.click -> canvas.cell_at(mouse.x, mouse.y) -> set(current_color)
+
+// Right-click to erase
+mouse.right_click -> canvas.cell_at(mouse.x, mouse.y) -> set(#000000)
+
+// Number keys select colors
+keyboard -> {
+    gate(key: "0") -> current_color.set(palette[0]),
+    gate(key: "1") -> current_color.set(palette[1]),
+    gate(key: "2") -> current_color.set(palette[2]),
+    gate(key: "3") -> current_color.set(palette[3]),
+    gate(key: "4") -> current_color.set(palette[4]),
+    gate(key: "5") -> current_color.set(palette[5]),
+    gate(key: "6") -> current_color.set(palette[6]),
+    gate(key: "7") -> current_color.set(palette[7]),
+    gate(key: "8") -> current_color.set(palette[8]),
+    gate(key: "9") -> current_color.set(palette[9])
+}
+
+// ── TOOLS ────────────────────────────────────
+
+keyboard -> {
+    gate(key: "s", ctrl: true) -> save,
+    gate(key: "z", ctrl: true) -> undo,
+    gate(key: "c")             -> clear,
+    gate(key: "m")             -> mirror_mode.toggle,
+    gate(key: "g")             -> grid_lines.toggle
+}
+
+// Mirror mode: paint both sides at once (great for characters)
+mirror_mode : false
+mouse.click -> gate(mirror_mode) -> {
+    canvas.cell_at(mouse.x, mouse.y) -> set(current_color),
+    canvas.cell_at(15 - mouse.x, mouse.y) -> set(current_color)
+}
+
+// ── SAVE / LOAD ──────────────────────────────
+
+save -> canvas.export("sprites/{name}.png", scale: 4)
+    -> notify("Saved!")
+
+// ── PREVIEW ──────────────────────────────────
+
+// Show a 1x preview and a 4x preview side by side
+canvas -> preview(scale: 1, position: right_top)
+canvas -> preview(scale: 4, position: right_bottom)
+
+// Animate: if you have multiple frames, cycle them
+// frame_1 : load("sprites/walk_1.png")
+// frame_2 : load("sprites/walk_2.png")
+// frame_3 : load("sprites/walk_3.png")
+// {frame_1, frame_2, frame_3} -> cycle(every: 200ms) -> preview
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Draw a character. Use mirror mode (press M) — characters
+//    look better symmetrical.
+//
+// 2. Draw a walk cycle: 3 frames. Name them walk_1, walk_2, walk_3.
+//    Uncomment the animation preview to see it move.
+//
+// 3. Draw a tileset: ground, wall, water, grass.
+//    Use these in a Platform Run game.
+//
+// 4. Draw an icon for your robot's dashboard.
+//    Export it and use it in mission_control.zp.
+//
+// 5. Challenge: draw a recognizable face using only 4 colors.
+//    Constraints breed creativity.

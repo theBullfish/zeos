@@ -1,0 +1,105 @@
+// sound_reactive.zp — Music drives everything
+// Multimodal Template — Level 2
+//
+// Audio in → frequency analysis → visual output AND hardware output
+// Same signal chain drives screen pixels and physical LEDs/servos.
+//
+// For the kid who thinks they don't like coding.
+// They like music. This is music.
+//
+// Codex Labs LLC — 2026
+
+// ── AUDIO INPUT ──────────────────────────────
+
+mic : sense(audio, source: default)
+
+// ── FREQUENCY ANALYSIS ───────────────────────
+// Split the audio into frequency bands.
+// Bass, mids, highs — like a mixing desk.
+
+mic -> fft(window: 512) -> spectrum
+
+spectrum -> {
+    gate(freq: 20..200)    -> bass,
+    gate(freq: 200..2000)  -> mids,
+    gate(freq: 2000..8000) -> highs
+}
+
+// Get the energy (loudness) of each band
+bass  -> rms -> bass_level      // 0.0 to 1.0
+mids  -> rms -> mids_level
+highs -> rms -> highs_level
+
+// ── SCREEN OUTPUT ────────────────────────────
+
+screen : display(fullscreen: true, background: black)
+
+// Bass drives big shapes
+bass_level -> map(0..1, 0..400) -> radius
+radius -> screen.circle(center: screen.center,
+                        color: lerp(blue, red, bass_level))
+
+// Mids drive horizontal bars
+mids_level -> map(0..1, 0..screen.width) -> bar_width
+bar_width -> screen.rect(x: 0, y: screen.height / 3,
+                         w: bar_width, h: 40,
+                         color: lerp(green, yellow, mids_level))
+
+// Highs drive particles
+highs_level -> gate(> 0.3) -> spawn_particles(
+    count: map(highs_level, 0..1, 1..20),
+    color: white,
+    lifetime: 500ms,
+    velocity: random(50..200)
+)
+
+// ── HARDWARE OUTPUT ──────────────────────────
+// Same signal, physical hardware.
+// Uncomment to activate.
+
+// LED strip — bass = red, mids = green, highs = blue
+// led_strip : act(ws2812, pin: 7, count: 30)
+// bass_level  -> map(0..1, 0..255) -> led_strip.red
+// mids_level  -> map(0..1, 0..255) -> led_strip.green
+// highs_level -> map(0..1, 0..255) -> led_strip.blue
+
+// Servo arm — bass makes it bounce
+// arm : act(servo, pin: 8)
+// bass_level -> map(0..1, 45..135) -> smooth(window: 3) -> arm.angle
+
+// DC motor — vibration motor pulses with beat
+// vibe : act(dc_motor, pin: 9)
+// bass_level -> gate(> 0.6) -> vibe.pulse(100ms)
+
+// ── BEAT DETECTION ───────────────────────────
+
+// Detect beats: bass spike above recent average
+bass_level -> {
+    average(window: 20) -> bass_avg,
+    identity -> bass_now
+}
+
+{bass_now, bass_avg} -> gate(bass_now > bass_avg * 1.5) -> beat
+
+// Flash screen on beat
+beat -> screen.flash(white, duration: 50ms)
+
+// ── TELEMETRY ────────────────────────────────
+
+bass_level  ~> dashboard("bass")
+mids_level  ~> dashboard("mids")
+highs_level ~> dashboard("highs")
+beat        ~> rate(per: 10s) ~> bpm_estimate
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change the colors. What looks good with YOUR music?
+// 2. Change the frequency ranges. What if bass goes up to 400Hz?
+// 3. Make the background color shift slowly over time.
+// 4. Add a "strobe" mode: beat -> screen.flash(random_color)
+// 5. Wire the LED strip. Does the room match the screen?
+// 6. Wire the servo. Can you make it "dance"?
+// 7. Record a 30-second performance. Play it back.
+// 8. Two students, two mics. Merge the signals.
+//    What does collaboration sound like?

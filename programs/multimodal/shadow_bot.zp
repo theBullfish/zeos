@@ -1,0 +1,85 @@
+// shadow_bot.zp — One brain, two bodies
+// Multimodal Template — Level 2
+//
+// Build a chase AI. It works on screen AND on a robot.
+// Change ONE line to switch targets.
+//
+// Codex Labs LLC — 2026
+
+// ── WHICH BODY? ──────────────────────────────
+// Uncomment ONE of these two blocks.
+
+// SCREEN MODE (game):
+target   : sprite("player")
+hunter   : sprite("enemy")
+eyes     : sense(target, from: hunter)
+legs     : act(hunter.velocity)
+
+// ROBOT MODE (hardware):
+// target   : sense(ir_beacon, pin: 2)        // IR beacon on target
+// hunter   : self                             // we ARE the robot
+// eyes     : sense(distance, pin: 3)          // ultrasonic
+// legs     : act(dc_motor, pins: {5, 6})      // two wheels
+
+// ── THE BRAIN (same for both) ────────────────
+
+// How far away is the target?
+eyes -> distance_reading
+
+// Decide what to do
+distance_reading -> {
+    gate(< 50)   -> too_close,
+    gate(< 200)  -> chase,
+    gate(>= 200) -> search
+}
+
+// ── BEHAVIORS ────────────────────────────────
+
+// Too close — back up
+too_close -> {
+    legs.set(speed: -30),
+    wait(500ms)
+}
+
+// In range — chase!
+chase -> {
+    angle_to(target) -> turn_amount,
+    turn_amount -> legs.steer(speed: 60)
+}
+
+// Lost them — spin to scan
+search -> {
+    legs.set(left: 40, right: -40)      // spin in place
+}
+
+// ── LOOP ─────────────────────────────────────
+
+// Continuous: sense → decide → act
+// The chain resolves on every tick.
+// Game tick = frame. Robot tick = control loop.
+
+// ── TELEMETRY ────────────────────────────────
+
+distance_reading ~> dashboard("distance")
+hunter.state     ~> dashboard("behavior")
+eyes             ~> rate(per: 1s) ~> readings_per_second
+
+
+// ── THE LESSON ───────────────────────────────
+//
+// The brain doesn't know if it's driving pixels or motors.
+// It just reads distance and sends speed.
+//
+// This is why signal chains matter:
+// the logic is separated from the body.
+//
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Change the chase speed. What happens at 100? At 10?
+// 2. Change the "too close" distance. Make it cautious (100)
+//    or aggressive (20).
+// 3. Add a new behavior: "patrol" — move in a square when
+//    no target is found. Hint: use a counter and turns.
+// 4. Add a second hunter. Do they cooperate or collide?
+// 5. Switch from screen to robot. Did you have to change
+//    the brain? (No. That's the point.)

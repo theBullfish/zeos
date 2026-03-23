@@ -1,0 +1,163 @@
+// gesture_controller.zp — Your hand controls everything
+// Multimodal Template — Level 3
+//
+// Accelerometer on a glove (or taped to your hand).
+// Tilt to move a game character. Tilt to steer a robot.
+// Same wiring. Different body.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+// MPU6050 accelerometer + gyroscope (on your hand)
+imu : sense(accel_gyro, addr: 0x68)
+
+// Optional: button on fingertip for "action"
+trigger : sense(button, pin: 2)
+
+// ── CALIBRATION ──────────────────────────────
+// Hold your hand flat. Press trigger to calibrate.
+
+trigger -> long_press(2s) -> calibrate -> {
+    zero_pitch.set(imu.pitch),
+    zero_roll.set(imu.roll),
+    zero_yaw.set(imu.yaw),
+    notify("Calibrated! Hold hand flat = neutral.")
+}
+
+// ── GESTURE RECOGNITION ──────────────────────
+
+// Relative angles (from calibrated zero)
+imu.pitch -> - zero_pitch -> pitch    // tilt forward/back
+imu.roll  -> - zero_roll  -> roll     // tilt left/right
+imu.yaw   -> - zero_yaw   -> yaw     // twist left/right
+
+// Smooth the values (hands shake)
+pitch -> smooth(window: 5) -> clean_pitch
+roll  -> smooth(window: 5) -> clean_roll
+yaw   -> smooth(window: 5) -> clean_yaw
+
+// Dead zone — small movements are intentional tremor, not commands
+clean_pitch -> gate(abs > 10) -> active_pitch
+clean_roll  -> gate(abs > 10) -> active_roll
+
+// Gestures (sudden movements)
+imu.accel -> magnitude -> {
+    gate(> 20) -> shake_detected,         // shake = special action
+    gate(> 30) -> punch_detected          // fast forward thrust
+}
+
+imu.accel.z -> delta(per: 100ms) -> {
+    gate(> 15) -> flick_up,
+    gate(< -15) -> flick_down
+}
+
+// ── TARGET: GAME CHARACTER ───────────────────
+
+screen : display(width: 320, height: 240, scale: fit, background: #1A1A2E)
+
+character : entity(
+    sprite: "sprites/player.png",
+    x: 160, y: 120,
+    collider: circle(radius: 8)
+)
+
+world : tilemap("levels/gesture_arena.tmx")
+
+// Tilt to move
+active_pitch -> map(-45..45, -120..120) -> character.velocity.y
+active_roll  -> map(-45..45, -120..120) -> character.velocity.x
+
+// No tilt = stop
+gate(!active_pitch) -> character.velocity.y.approach(0)
+gate(!active_roll)  -> character.velocity.x.approach(0)
+
+// Trigger = action (shoot / interact)
+trigger -> gate(pressed) -> character.action("shoot", direction: yaw)
+
+// Shake = special power
+shake_detected -> character.action("special") -> {
+    particles.burst(at: character.position, color: cyan, count: 20),
+    play("sfx/power.wav"),
+    cooldown(3s)
+}
+
+// ── TARGET: ROBOT ────────────────────────────
+// Uncomment to drive a robot instead
+
+// left_motor  : act(dc_motor, pin: 5)
+// right_motor : act(dc_motor, pin: 6)
+// servo_arm   : act(servo, pin: 7)
+//
+// // Pitch = speed (tilt forward = go)
+// active_pitch -> map(-45..45, -60..60) -> drive_speed
+//
+// // Roll = steering (tilt right = turn right)
+// active_roll -> map(-45..45, -30..30) -> steer_offset
+//
+// drive_speed -> {
+//     left_motor.set(drive_speed + steer_offset),
+//     right_motor.set(drive_speed - steer_offset)
+// }
+//
+// // Yaw = arm rotation
+// clean_yaw -> map(-90..90, 0..180) -> servo_arm
+//
+// // Trigger = gripper
+// trigger -> toggle -> act(servo, pin: 8).set(gate ? 90 : 0)
+
+// ── VISUALIZATION ────────────────────────────
+
+// Show the gesture input on screen
+hud : overlay(fixed: true)
+
+// Tilt indicator — circle shows current hand position
+hud.circle(
+    x: 280, y: 40,
+    radius: 30,
+    color: dark_gray,
+    fill: false
+)
+hud.dot(
+    x: 280 + (clean_roll -> map(-45..45, -25..25)),
+    y: 40 + (clean_pitch -> map(-45..45, -25..25)),
+    color: cyan,
+    size: 6
+)
+
+// Gesture state
+hud.text(x: 8, y: 8,
+    "Pitch: {clean_pitch|0}  Roll: {clean_roll|0}  Yaw: {clean_yaw|0}",
+    color: white, size: small
+)
+
+// ── TELEMETRY ────────────────────────────────
+
+clean_pitch ~> dashboard("pitch")
+clean_roll  ~> dashboard("roll")
+clean_yaw   ~> dashboard("yaw")
+imu.accel   ~> dashboard("accel")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Tilt your hand. The character moves. That's it.
+//    No keyboard. No mouse. Your hand IS the controller.
+//
+// 2. Change the dead zone from 10 to 5. More responsive?
+//    More jittery? That's the sensitivity tradeoff.
+//
+// 3. Change the smoothing window from 5 to 1. No smoothing.
+//    Change to 10. Laggy but smooth. Find YOUR sweet spot.
+//
+// 4. Add a "punch" gesture: fast forward thrust = dash
+//    in the game. Use punch_detected.
+//
+// 5. Switch to robot mode. Same hand movements, now a
+//    robot moves. Did you change the gesture code? (No.)
+//
+// 6. Two gloves. One on each hand. Left hand = movement.
+//    Right hand = arm control. You're a mech pilot.
+//
+// 7. Record your gestures. Play them back through the robot.
+//    You just programmed a robot by DOING the motion.

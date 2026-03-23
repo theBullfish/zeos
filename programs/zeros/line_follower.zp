@@ -1,0 +1,100 @@
+// line_follower.zp — Robot follows a line on the ground
+// Zeros Template — Level 1 (Tweak)
+//
+// The simplest useful robot program. Three sensors, two motors.
+// Same pattern as a game enemy following a path.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+left_sensor  : sense(line, pin: 2)     // left IR sensor
+center_sensor: sense(line, pin: 3)     // center IR sensor
+right_sensor : sense(line, pin: 4)     // right IR sensor
+
+left_motor   : act(dc_motor, pin: 5)   // left wheel
+right_motor  : act(dc_motor, pin: 6)   // right wheel
+
+// ── TWEAKABLE VALUES ─────────────────────────
+// Change these to tune your robot's behavior.
+// You don't need to understand the code below — just the numbers.
+
+speed     : 60        // 0-100, how fast (start low!)
+turn_speed: 40        // how fast it turns to correct
+threshold : 500       // sensor reading that counts as "on the line"
+
+// ── SENSE ────────────────────────────────────
+
+// Read all three sensors simultaneously
+{left_sensor, center_sensor, right_sensor} -> readings
+
+// ── DECIDE ───────────────────────────────────
+
+// Which sensors see the line?
+readings -> {
+    gate(center > threshold) -> on_center,
+    gate(left > threshold)   -> drifting_right,   // line is to our left
+    gate(right > threshold)  -> drifting_left,     // line is to our right
+    gate(all < threshold)    -> lost               // can't see the line
+}
+
+// ── ACT ──────────────────────────────────────
+
+// On the line: go straight
+on_center -> {
+    left_motor.set(speed),
+    right_motor.set(speed)
+}
+
+// Drifting right: turn left to get back
+drifting_right -> {
+    left_motor.set(turn_speed),
+    right_motor.set(speed)
+}
+
+// Drifting left: turn right to get back
+drifting_left -> {
+    left_motor.set(speed),
+    right_motor.set(turn_speed)
+}
+
+// Lost: stop and spin slowly to find the line again
+lost -> {
+    left_motor.set(turn_speed),
+    right_motor.set(-turn_speed)    // reverse one wheel = spin
+}
+
+// ── LOOP ──────────────────────────────────────
+
+// This whole chain runs continuously.
+// sense → decide → act → sense → decide → act...
+// The loop IS the signal chain resolving repeatedly.
+// Same as a game's update loop.
+
+// ── TELEMETRY ─────────────────────────────────
+
+left_sensor   ~> dashboard("left")
+center_sensor ~> dashboard("center")
+right_sensor  ~> dashboard("right")
+readings      ~> rate(per: 1s) ~> loops_per_second
+
+
+// ── TRY THIS ──────────────────────────────────
+//
+// 1. Change 'speed' to 30. Does it follow better?
+// 2. Change 'threshold' to 300. What happens?
+// 3. What if turn_speed > speed? Try it.
+// 4. Add a fourth sensor. Can you make it smoother?
+// 5. Replace 'lost' behavior — can you make it smarter
+//    than just spinning?
+//
+// ── GAME VERSION ──────────────────────────────
+//
+// Replace the hardware lines with:
+//   left_sensor  : sense(sprite("path"), offset: -20)
+//   center_sensor: sense(sprite("path"), offset: 0)
+//   right_sensor : sense(sprite("path"), offset: 20)
+//   left_motor   : act(sprite("robot").velocity.x)
+//   right_motor  : act(sprite("robot").velocity.y)
+//
+// Same logic. Screen instead of floor.

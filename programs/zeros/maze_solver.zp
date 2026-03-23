@@ -1,0 +1,107 @@
+// maze_solver.zp — Robot that solves a maze
+// Zeros Template — Level 3 (Script)
+//
+// Three wall sensors. Two motors. One rule:
+// always keep your left hand on the wall.
+//
+// Then we make it smarter.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+left_wall   : sense(distance, pin: 2)     // left-facing sensor
+front_wall  : sense(distance, pin: 3)     // forward-facing sensor
+right_wall  : sense(distance, pin: 4)     // right-facing sensor
+
+left_motor  : act(dc_motor, pin: 5)
+right_motor : act(dc_motor, pin: 6)
+
+// ── TWEAKABLE VALUES ─────────────────────────
+
+speed       : 50
+turn_speed  : 40
+wall_close  : 150    // mm — "there's a wall here"
+wall_target : 100    // mm — ideal distance from left wall
+
+// ── SENSE ────────────────────────────────────
+
+{left_wall, front_wall, right_wall} -> walls
+
+// ── LEFT-HAND RULE ───────────────────────────
+// Priority:
+// 1. If you CAN turn left, turn left
+// 2. If you can go straight, go straight
+// 3. If you CAN turn right, turn right
+// 4. Dead end — turn around
+
+walls -> {
+    gate(left > wall_close, front > wall_close)    -> turn_left,
+    gate(front > wall_close)                        -> go_straight,
+    gate(right > wall_close)                        -> turn_right,
+    otherwise                                       -> turn_around
+}
+
+// ── ACTIONS ──────────────────────────────────
+
+turn_left -> {
+    left_motor.set(-turn_speed),
+    right_motor.set(turn_speed)
+} -> delay(400ms) -> {
+    left_motor.set(speed),
+    right_motor.set(speed)
+} -> delay(300ms)
+
+go_straight -> {
+    // Wall following: stay wall_target mm from left wall
+    left_wall -> error(target: wall_target) -> correction,
+    correction -> {
+        left_motor.set(speed - correction),
+        right_motor.set(speed + correction)
+    }
+}
+
+turn_right -> {
+    left_motor.set(turn_speed),
+    right_motor.set(-turn_speed)
+} -> delay(400ms) -> {
+    left_motor.set(speed),
+    right_motor.set(speed)
+} -> delay(300ms)
+
+turn_around -> {
+    left_motor.set(turn_speed),
+    right_motor.set(-turn_speed)
+} -> delay(800ms)
+
+// ── MAP BUILDING ─────────────────────────────
+// Record what we see. Build a map as we go.
+
+walls -> timestamp -> vault.append("maze/walls.zdat")
+
+// ── TELEMETRY ────────────────────────────────
+
+left_wall  ~> dashboard("left_mm")
+front_wall ~> dashboard("front_mm")
+right_wall ~> dashboard("right_mm")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Run the left-hand rule. Does it solve every maze?
+//    (Hint: it fails on mazes with islands.)
+//
+// 2. Switch to right-hand rule. Just swap left and right
+//    in the priority. Does it find a different path?
+//
+// 3. ADVANCED: Add a "breadcrumb" system. Record every
+//    intersection you visit. If you visit the same one
+//    twice, try a different turn. This beats the island
+//    problem.
+//
+// 4. ADVANCED: Use the wall log to build a map after the
+//    run. Can the DereZ squad visualize it?
+//    (See: multimodal/digital_twin.zp)
+//
+// 5. COMPETITION: Two robots in the same maze. Who finishes
+//    first? Can they share map data to help each other?

@@ -1,0 +1,50 @@
+// hello_chain.zp — Your first signal chain
+// DereZ Template — Level 0 (Reskin)
+//
+// Three nodes. Data flows from left to right.
+// Read it. Run it. Then change things.
+//
+// Codex Labs LLC — 2026
+
+// ── THE CHAIN ────────────────────────────────
+
+// Step 1: Create a value
+source : emit(42)
+
+// Step 2: Transform it
+double : input -> * 2 -> output
+
+// Step 3: Show the result
+display : input -> print("Result: {value}")
+
+// ── WIRE THEM TOGETHER ───────────────────────
+
+source -> double -> display
+
+// That's it. Run this and you'll see:
+//   Result: 84
+//
+// source created 42.
+// double multiplied it by 2.
+// display showed you 84.
+
+// ── TRY THESE ────────────────────────────────
+//
+// 1. Change emit(42) to emit(7). What do you get?
+//
+// 2. Change * 2 to * 10. What do you get?
+//
+// 3. Add a third step:
+//      add_one : input -> + 1 -> output
+//    Wire it: source -> double -> add_one -> display
+//    What do you get? Why?
+//
+// 4. Reverse the chain:
+//      source -> add_one -> double -> display
+//    Different answer. Why?
+//    (Order matters. That's the first lesson.)
+//
+// 5. Fork the output:
+//      source -> double -> {display, logger}
+//      logger : input -> print("Log: {value}")
+//    Same data, two places. That's a real pattern.

@@ -1,0 +1,122 @@
+// arm_controller.zp — Robot arm with 3 joints
+// Zeros Template — Level 3 (Script)
+//
+// Three servos. Three potentiometers. Direct mapping.
+// Then: record a sequence and replay it.
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+// Inputs — potentiometers (manual control knobs)
+knob_base     : sense(analog, pin: A0)     // base rotation
+knob_shoulder : sense(analog, pin: A1)     // shoulder joint
+knob_gripper  : sense(analog, pin: A2)     // gripper open/close
+
+// Outputs — servos
+servo_base     : act(servo, pin: 5)        // 0-180 degrees
+servo_shoulder : act(servo, pin: 6)        // 0-180 degrees
+servo_gripper  : act(servo, pin: 7)        // 0-90 degrees (open/close)
+
+// Buttons
+record_btn  : sense(button, pin: 2)
+play_btn    : sense(button, pin: 3)
+
+status_led  : act(led, pin: 13)
+
+// ── DIRECT CONTROL ───────────────────────────
+// Knobs directly drive servos. Instant feedback.
+
+knob_base     -> map(0..1023, 0..180)   -> smooth(window: 3) -> base_angle
+knob_shoulder -> map(0..1023, 0..180)   -> smooth(window: 3) -> shoulder_angle
+knob_gripper  -> map(0..1023, 0..90)    -> smooth(window: 3) -> gripper_angle
+
+base_angle     -> servo_base
+shoulder_angle -> servo_shoulder
+gripper_angle  -> servo_gripper
+
+// ── RECORDING ────────────────────────────────
+// Press record. Move the arm. Press record again to stop.
+// The arm remembers what you did.
+
+recording : false
+sequence  : []
+
+record_btn -> toggle -> recording
+
+// When recording, capture position every 50ms
+gate(recording) -> tick(every: 50ms) -> {
+    {base_angle, shoulder_angle, gripper_angle}
+        -> timestamp
+        -> sequence.append,
+    status_led.blink(fast)
+}
+
+gate(!recording) -> status_led.set(off)
+
+// ── PLAYBACK ─────────────────────────────────
+// Press play. The arm replays exactly what you recorded.
+
+play_btn -> gate(sequence.length > 0) -> playback_mode
+
+playback_mode -> sequence.each(delay: 50ms) -> {
+    .base_angle     -> servo_base,
+    .shoulder_angle -> servo_shoulder,
+    .gripper_angle  -> servo_gripper,
+    status_led.set(on)
+}
+
+playback_mode.done -> status_led.set(off)
+
+// ── SAVE / LOAD ──────────────────────────────
+
+// Save the sequence to replay later
+record_btn -> long_press(2s) -> vault.store(
+    "arm/sequences/{timestamp}.zdat",
+    sequence
+) -> notify("Saved!")
+
+// ── PRESETS ──────────────────────────────────
+// Named positions the arm can jump to
+
+preset_home   : {base: 90, shoulder: 90, gripper: 0}
+preset_grab   : {base: 90, shoulder: 45, gripper: 70}
+preset_lift   : {base: 90, shoulder: 135, gripper: 70}
+preset_drop   : {base: 0, shoulder: 90, gripper: 0}
+
+// Keyboard shortcuts for presets (when connected to screen)
+keyboard -> {
+    gate(key: "h") -> move_to(preset_home, duration: 500ms),
+    gate(key: "g") -> move_to(preset_grab, duration: 500ms),
+    gate(key: "l") -> move_to(preset_lift, duration: 500ms),
+    gate(key: "d") -> move_to(preset_drop, duration: 500ms)
+}
+
+// Smooth movement to a preset (interpolate, don't jump)
+move_to(target, duration) -> interpolate(
+    from: {base_angle, shoulder_angle, gripper_angle},
+    to: target,
+    steps: duration / 20
+) -> {servo_base, servo_shoulder, servo_gripper}
+
+// ── TELEMETRY ────────────────────────────────
+
+base_angle     ~> dashboard("base_deg")
+shoulder_angle ~> dashboard("shoulder_deg")
+gripper_angle  ~> dashboard("gripper_deg")
+sequence.length ~> dashboard("recorded_steps")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Move the knobs slowly. The arm follows. That's direct control.
+// 2. Record picking up an object and putting it down.
+//    Play it back. Does it work every time?
+// 3. If it misses, WHY? (Hint: the object isn't in the same spot.
+//    That's why factories use jigs.)
+// 4. Add a distance sensor to the gripper. Can you make the arm
+//    FIND the object instead of blindly replaying?
+// 5. Chain two sequences: grab → lift → move → drop.
+//    Now you have a simple factory robot.
+// 6. GAME VERSION: the arm is a sprite. Knobs are mouse position.
+//    Same interpolation, same presets, screen instead of servos.

@@ -1,0 +1,68 @@
+// signal_playground.zp — Interactive signal chain builder
+// DereZ Template — Level 2 (Extend)
+//
+// Build signal chains live. See data flow. Learn by wiring.
+//
+// Codex Labs LLC — 2026
+
+// ── SOURCES ──────────────────────────────────
+// These produce data. Try changing the values.
+
+counter    : emit(0) -> tick(every: 100ms) -> increment
+random     : emit(0) -> tick(every: 250ms) -> random(1, 100)
+keyboard   : sense(key_press)
+mouse_x    : sense(mouse, axis: x)
+
+// ── TRANSFORMS ───────────────────────────────
+// These modify data flowing through them.
+
+double     : input -> * 2 -> output
+add_ten    : input -> + 10 -> output
+clamp      : input -> clamp(0, 255) -> output
+smooth     : input -> average(window: 5) -> output
+threshold  : input -> gate(> 50) -> output
+
+// ── SINKS ────────────────────────────────────
+// These display or use the data.
+
+screen     : input -> display(bar_graph)
+logger     : input -> log("{timestamp}: {value}")
+led        : input -> clamp(0, 255) -> act(led, pin: 13)
+
+// ── WIRING ───────────────────────────────────
+// Connect sources to transforms to sinks.
+// This is where you experiment.
+
+counter -> double -> screen
+random  -> smooth -> threshold -> logger
+
+// ── TRY THIS ──────────────────────────────────
+//
+// 1. Wire counter -> add_ten -> double -> screen
+//    What comes out?
+//
+// 2. Wire random -> clamp -> led
+//    Watch the LED flicker.
+//
+// 3. Wire keyboard -> double -> screen
+//    Type a number. What happens?
+//
+// 4. Wire mouse_x -> smooth -> screen
+//    Move your mouse. The smoothing removes jitter.
+//
+// 5. Build your own transform:
+//    my_thing : input -> * 3 -> - 7 -> output
+//    Wire it into a chain. Does it do what you expected?
+//
+// 6. Fork a signal — one source, two destinations:
+//    counter -> {double -> screen, add_ten -> logger}
+//    Same data goes two places.
+//
+// ── THE POINT ─────────────────────────────────
+//
+// Every program in Zeos is signal chains.
+// A web server? Signal chains.
+// A robot controller? Signal chains.
+// An AI pipeline? Signal chains.
+//
+// You're not learning a toy. You're learning the architecture.

@@ -1,0 +1,234 @@
+// crew_suspect.zp — Social deduction (Among Us-like)
+// DereZ Template — Level 3 (Script)
+//
+// Networking. State machines. Trust. Voting.
+// The hardest game to build because it's about PEOPLE.
+//
+// Codex Labs LLC — 2026
+
+// ── GAME CONFIG ──────────────────────────────
+
+config : {
+    players: {min: 4, max: 10},
+    imposters: 1,                  // 2 for 8+ players
+    tasks_to_win: 6,
+    kill_cooldown: 30s,
+    vote_time: 60s,
+    discuss_time: 30s,
+    speed: 100,
+    vision: {crew: 120, imposter: 200},
+    map: "maps/station.tmx"
+}
+
+// ── NETWORK ──────────────────────────────────
+
+server : network(port: 4220, protocol: tcp, max_clients: 10)
+
+// ── GAME STATE ───────────────────────────────
+
+game_state : state_machine {
+    lobby    -> gate(players.count >= config.players.min, host_starts) -> playing,
+    playing  -> gate(body_reported | emergency_button) -> discussion,
+    discussion -> gate(timer_done: config.discuss_time) -> voting,
+    voting   -> gate(all_voted | timer_done: config.vote_time) -> results,
+    results  -> gate(ejected | skipped) -> {
+        gate(game_over) -> endgame,
+        otherwise -> playing
+    },
+    endgame  -> gate(timer_done: 5s) -> lobby
+}
+
+// ── ROLES ────────────────────────────────────
+
+// Assign roles at game start
+playing.enter -> {
+    players -> shuffle -> assign_roles(imposters: config.imposters),
+    tasks.generate(count: config.tasks_to_win, map: config.map)
+}
+
+// ── PLAYER ───────────────────────────────────
+
+player : entity(
+    sprite: "sprites/crew_{color}.png",
+    speed: config.speed,
+    role: null,    // assigned at game start
+    alive: true,
+    color: assigned_color
+)
+
+// Movement (top-down)
+keyboard -> {
+    gate(key: w) -> player.move(up, speed: config.speed),
+    gate(key: s) -> player.move(down, speed: config.speed),
+    gate(key: a) -> player.move(left, speed: config.speed),
+    gate(key: d) -> player.move(right, speed: config.speed)
+}
+
+// ── VISION ───────────────────────────────────
+// You can only see players within your vision radius.
+// Imposters see further.
+
+vision_radius : player.role == "imposter" ? config.vision.imposter : config.vision.crew
+
+other_players -> each(other) {
+    distance_to(other) -> {
+        gate(< vision_radius) -> other.visible.set(true),
+        gate(>= vision_radius) -> other.visible.set(false)
+    }
+}
+
+// Fog of war
+world -> fog_circle(center: player.position, radius: vision_radius)
+
+// ── TASKS (Crew) ─────────────────────────────
+
+gate(player.role == "crew") -> {
+    // Show task list
+    task_list -> hud.panel(side: left, title: "Tasks")
+
+    // Approach a task location → interact prompt
+    tasks.locations -> each(task) {
+        player.position -> gate(distance_to(task) < 30) -> {
+            hud.prompt("Press E to do task"),
+            keyboard -> gate(key: "e") -> task.start
+        }
+    }
+
+    // Mini-game per task type
+    task.start -> {
+        gate(type: "wires")    -> minigame_wires,
+        gate(type: "scan")     -> minigame_scan,
+        gate(type: "download") -> minigame_download,
+        gate(type: "swipe")    -> minigame_swipe
+    }
+
+    // Complete task
+    task.complete -> {
+        tasks_done -> + 1,
+        server.emit(type: "task_complete"),
+        play("sfx/task_done.wav")
+    }
+}
+
+// ── KILL (Imposter) ──────────────────────────
+
+gate(player.role == "imposter") -> {
+    // Find nearby crew members
+    other_players -> gate(alive, distance < 50, role: "crew") -> kill_target
+
+    kill_target -> hud.button("Kill", color: red, key: "q")
+
+    keyboard -> gate(key: "q") -> gate(kill_target, kill_cooldown.ready) -> {
+        server.emit(type: "kill", victim: kill_target.id),
+        kill_target.alive.set(false),
+        kill_target -> death_animation,
+        kill_cooldown.start(config.kill_cooldown),
+        play("sfx/kill.wav")
+    }
+}
+
+// ── BODY DISCOVERY ───────────────────────────
+
+dead_bodies -> each(body) {
+    player.position -> gate(distance_to(body) < 40) -> {
+        hud.button("Report", color: red, key: "r"),
+        keyboard -> gate(key: "r") -> {
+            server.emit(type: "report", body: body.id),
+            game_state.transition("discussion")
+        }
+    }
+}
+
+// Emergency button (in cafeteria)
+emergency_button_location : map.object("emergency_button")
+player.position -> gate(distance_to(emergency_button_location) < 30) -> {
+    hud.button("Emergency Meeting", color: red, key: "r"),
+    keyboard -> gate(key: "r") -> {
+        server.emit(type: "emergency"),
+        game_state.transition("discussion")
+    }
+}
+
+// ── DISCUSSION & VOTING ──────────────────────
+
+discussion.enter -> {
+    // All players teleport to table
+    players -> each(p) { p.position.set(table_seat[p.index]) },
+
+    // Chat
+    chat : overlay(center: true, background: rgba(0,0,0,0.9))
+    keyboard -> gate(text) -> chat.send(author: me.name, text: input)
+    server.receive -> gate(type: "chat") -> chat.display
+}
+
+voting.enter -> {
+    vote_panel : overlay(center: true)
+    players -> each(p) {
+        vote_panel.button(
+            label: p.name,
+            color: p.color,
+            alive: p.alive,
+            on_click: cast_vote(p.id)
+        )
+    }
+    vote_panel.button(label: "Skip", on_click: cast_vote(null))
+}
+
+cast_vote(target) -> {
+    server.emit(type: "vote", target: target),
+    my_vote_cast : true
+}
+
+// ── RESULTS ──────────────────────────────────
+
+results.enter -> {
+    votes -> tally -> {
+        gate(majority) -> eject(target),
+        gate(tie | skip_majority) -> skip_eject
+    }
+}
+
+eject(target) -> {
+    animation.eject(target),
+    target.alive.set(false),
+    // Reveal if imposter
+    hud.announce("{target.name} was {target.role == 'imposter' ? 'An Imposter' : 'Not An Imposter'}")
+}
+
+// ── WIN CONDITIONS ───────────────────────────
+
+// Crew wins: all tasks done OR all imposters ejected
+tasks_done -> gate(>= config.tasks_to_win) -> crew_wins
+players -> gate(all imposters dead) -> crew_wins
+
+// Imposter wins: equal number of crew and imposters alive
+players -> gate(alive crew count <= alive imposter count) -> imposter_wins
+
+crew_wins    -> endgame("Crew wins!", color: cyan)
+imposter_wins -> endgame("Imposter wins!", color: red)
+
+// ── DISPLAY ──────────────────────────────────
+
+screen : display(width: 480, height: 320, scale: fit, background: #1A1A2E)
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Play with 4 people. Notice how different it feels
+//    than watching someone play.
+//
+// 2. Change vision radius. What if crew can see EVERYTHING?
+//    Too easy? What if imposters have less vision? Harder.
+//
+// 3. Add a security camera room — shows feeds from fixed
+//    points on the map. Now there's a reason to go there.
+//
+// 4. Add a "vent" system for imposters. Teleport between
+//    two points. Only imposters can use vents.
+//
+// 5. Add 2 imposters for 8+ player games. Do they know
+//    who each other is? (Yes — and that changes everything.)
+//
+// 6. The state machine here (lobby → playing → discussion →
+//    voting → results) is the same pattern used in robot
+//    competition software. Mode switching IS state machines.

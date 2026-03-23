@@ -1,0 +1,90 @@
+// rover.zp — The robot half of Mission Control
+// Multimodal Template — Level 3 (Zeros squad)
+//
+// Pairs with mission_control.zp (DereZ squad)
+//
+// Codex Labs LLC — 2026
+
+// ── HARDWARE ─────────────────────────────────
+
+front_distance : sense(distance, pin: 2)
+left_encoder   : sense(encoder, pin: 3)
+right_encoder  : sense(encoder, pin: 4)
+imu            : sense(accel_gyro, addr: 0x68)    // MPU6050 I2C
+temp_sensor    : sense(temperature, addr: 0x76)    // BME280 I2C
+battery_adc    : sense(analog, pin: A0)
+camera         : sense(camera, port: 0)
+
+left_motor     : act(dc_motor, pin: 5)
+right_motor    : act(dc_motor, pin: 6)
+
+// ── BROADCAST ────────────────────────────────
+// Send sensor data to anyone listening (mission control)
+
+broadcast : network(port: 4200, protocol: udp)
+
+front_distance -> broadcast.emit(name: "distance")
+imu.heading    -> broadcast.emit(name: "heading")
+temp_sensor    -> broadcast.emit(name: "temperature")
+camera         -> broadcast.emit(name: "camera", compress: true)
+
+// Derived values
+{left_encoder, right_encoder}
+    -> average -> delta(per: 1s) -> broadcast.emit(name: "speed")
+
+battery_adc -> map(0..1023, 0..100) -> broadcast.emit(name: "battery")
+
+// ── INCOMING COMMANDS ────────────────────────
+
+broadcast.receive -> {
+    gate(cmd: "slow_down")     -> do_slow_down,
+    gate(cmd: "return")        -> do_return,
+    gate(cmd: "stop")          -> do_stop
+}
+
+do_slow_down -> max_speed.set(30)
+do_stop      -> {left_motor.set(0), right_motor.set(0)}
+do_return    -> navigate_home
+
+// ── AUTONOMOUS DRIVE ─────────────────────────
+
+max_speed : 60
+
+// Simple obstacle avoidance
+front_distance -> {
+    gate(< 150)  -> avoid,
+    gate(>= 150) -> drive_forward
+}
+
+drive_forward -> {
+    left_motor.set(max_speed),
+    right_motor.set(max_speed)
+}
+
+avoid -> {
+    left_motor.set(-40),
+    right_motor.set(-40)
+} -> delay(300ms) -> {
+    left_motor.set(max_speed),
+    right_motor.set(-max_speed)
+} -> delay(500ms)
+
+// ── SAFETY ───────────────────────────────────
+
+// Hard stop if battery is critical
+battery_adc -> map(0..1023, 0..100) -> gate(< 10) -> {
+    left_motor.set(0),
+    right_motor.set(0),
+    broadcast.emit(name: "EMERGENCY", msg: "Battery dead")
+}
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Add a rear distance sensor. Can you avoid obstacles
+//    when backing up?
+// 2. Add a "patrol" mode — drive in a square, return to start.
+// 3. Record your path using encoders + heading. Can you
+//    replay the exact path backwards for "return to base"?
+// 4. Two rovers on the same network. Can mission control
+//    see both? (Hint: different broadcast names)

@@ -1,0 +1,104 @@
+// mission_control.zp — Two squads, one mission
+// Multimodal Template — Level 3
+//
+// DereZ squad: builds the dashboard (this file)
+// Zeros squad: builds the robot (rover.zp)
+//
+// The dashboard shows live data from the robot.
+// The robot sends signals. The dashboard displays them.
+// Neither squad needs to understand the other's code.
+//
+// Codex Labs LLC — 2026
+
+// ── CONNECTION ───────────────────────────────
+
+// The robot broadcasts its state as a signal stream.
+// We just listen.
+rover : connect("rover.local")     // mDNS — find the robot on the network
+
+// ── INCOMING SIGNALS ─────────────────────────
+
+rover.sensors -> {
+    gate(name: "distance")   -> distance,
+    gate(name: "speed")      -> speed,
+    gate(name: "heading")    -> heading,
+    gate(name: "battery")    -> battery,
+    gate(name: "temperature") -> temperature,
+    gate(name: "camera")     -> camera_feed
+}
+
+// ── DASHBOARD LAYOUT ─────────────────────────
+
+screen : display(layout: grid, cols: 3, rows: 2)
+
+// Top row: the big numbers
+screen[0,0] : gauge(distance, label: "Distance", unit: "mm",
+                     range: {0, 2000}, warn: {< 100, red})
+
+screen[1,0] : gauge(speed, label: "Speed", unit: "mm/s",
+                     range: {0, 500})
+
+screen[2,0] : compass(heading, label: "Heading")
+
+// Bottom row: status and feed
+screen[0,1] : bar(battery, label: "Battery", unit: "%",
+                  range: {0, 100}, warn: {< 20, red})
+
+screen[1,1] : graph(temperature, label: "Temp", unit: "C",
+                    window: 60s, range: {20, 60},
+                    warn: {> 45, red})
+
+screen[2,1] : feed(camera_feed, label: "Camera")
+
+// ── ALERTS ───────────────────────────────────
+
+// Low battery — flash the gauge
+battery -> gate(< 15) -> alert("Battery critical!") -> screen.flash(red)
+
+// Obstacle close — highlight distance gauge
+distance -> gate(< 100) -> alert("Obstacle!") -> screen[0,0].flash(yellow)
+
+// Overheating — the robot is working too hard
+temperature -> gate(> 50) -> alert("Overheating!") -> {
+    screen[1,1].flash(red),
+    rover.command("slow_down")     // send command BACK to robot
+}
+
+// ── RECORDING ────────────────────────────────
+
+// Log everything for post-mission analysis
+{distance, speed, heading, battery, temperature}
+    -> timestamp
+    -> vault.store("missions/{date}/log.zdat")
+
+// ── TELEMETRY ────────────────────────────────
+
+rover.sensors ~> rate(per: 1s) ~> packets_per_second
+rover.latency ~> dashboard("ping_ms")
+
+
+// ── FOR THE DEREZ SQUAD ──────────────────────
+//
+// Your job:
+// 1. Make this dashboard look good. Colors, layout, readability.
+// 2. Add alerts that help the Zeros squad drive the robot.
+// 3. Add a "mission replay" — play back the log file.
+// 4. Add a map view — plot the robot's path from heading + speed.
+//
+// ── FOR THE ZEROS SQUAD ──────────────────────
+//
+// Your job (in rover.zp):
+// 1. Wire up the sensors and broadcast them.
+// 2. Handle the "slow_down" command from mission control.
+// 3. Add a "return to base" command.
+// 4. Make the robot drive autonomously while the DereZ squad watches.
+//
+// ── THE LESSON ───────────────────────────────
+//
+// Neither squad writes the other's code.
+// The signal stream is the contract.
+// As long as the rover sends "distance", "speed", "heading",
+// the dashboard works. The rover doesn't care what the dashboard
+// looks like. The dashboard doesn't care how the rover drives.
+//
+// This is how real engineering teams work.
