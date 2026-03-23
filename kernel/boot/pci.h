@@ -41,6 +41,9 @@ int pci_device_count(void);
 /* Read a 32-bit value from PCI config space */
 uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset);
 
+/* Write a 32-bit value to PCI config space */
+void pci_config_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t val);
+
 /* Get human-readable class name */
 const char *pci_class_name(uint8_t class_code, uint8_t subclass);
 

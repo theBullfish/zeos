@@ -118,6 +118,26 @@ uint32_t pci_config_read32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offse
     return pci_legacy_read32(bus, dev, func, offset);
 }
 
+void pci_config_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t val)
+{
+    if (ecam_available) {
+        uint64_t addr = ecam_base
+                      + ((uint64_t)bus << 20)
+                      + ((uint64_t)dev << 15)
+                      + ((uint64_t)func << 12)
+                      + offset;
+        *(volatile uint32_t *)addr = val;
+    } else {
+        uint32_t addr = (1U << 31)
+                      | ((uint32_t)bus << 16)
+                      | ((uint32_t)dev << 11)
+                      | ((uint32_t)func << 8)
+                      | (offset & 0xFC);
+        outl(PCI_CONFIG_ADDR, addr);
+        outl(PCI_CONFIG_DATA, val);
+    }
+}
+
 /*
  * Parse ACPI tables to find MCFG.
  */
