@@ -42,7 +42,7 @@ LDFLAGS  = -nostdlib \
 LIBS     = -lefi -lgnuefi
 
 # Source files
-SRCS     = boot/main.c boot/fb.c boot/idt.c boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c boot/timer.c boot/signal.c boot/shell.c
+SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/idt.c boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c boot/shell.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output

@@ -1,0 +1,378 @@
+// surf.zp — Zeos Web Browser
+// DereZ Template — Level 5 (Engine)
+//
+// A web browser as signal chains.
+// url -> fetch -> parse -> layout -> paint
+// Every stage is a node. Every page is a graph.
+//
+// Codex Labs LLC — 2026
+
+// ── URL INPUT ────────────────────────────────
+
+address_bar : sense(text_input, prompt: "surf> ")
+keyboard    : sense(key_state)
+
+// Navigate when user presses Enter
+address_bar -> gate(submitted) -> url
+
+// Back / Forward
+keyboard -> gate(key: "alt+left")  -> history.back -> url
+keyboard -> gate(key: "alt+right") -> history.forward -> url
+
+// ── FETCH ────────────────────────────────────
+// HTTP request is a signal chain.
+
+url -> {
+    // Resolve domain
+    dns_resolve -> ip_address,
+
+    // Show loading state
+    status_bar.set("Loading...")
+}
+
+ip_address -> tcp_connect(port: 443) -> tls_handshake -> connection
+
+connection -> http_request(
+    method: GET,
+    headers: {
+        "User-Agent": "Surf/1.0 (Zeos)",
+        "Accept": "text/html,text/css,image/*",
+        "Accept-Encoding": "identity",
+        "Connection": "close"
+    }
+) -> response
+
+// Route by content type
+response -> {
+    gate(status: 301..399) -> redirect -> url,   // follow redirects
+    gate(status: 200) -> response.body -> content_router,
+    gate(status: 400..599) -> error_page
+}
+
+content_router -> {
+    gate(content_type: "text/html")       -> html_pipeline,
+    gate(content_type: "text/css")        -> css_pipeline,
+    gate(content_type: starts("image/"))  -> image_pipeline,
+    gate(content_type: "text/plain")      -> text_display
+}
+
+// ── HTML PARSING ─────────────────────────────
+// Tokenize → Build tree → DOM
+
+html_pipeline -> tokenizer -> tree_builder -> dom
+
+// Tokenizer: character stream → tokens
+// <p class="intro">Hello</p>
+// → [open_tag("p", class="intro"), text("Hello"), close_tag("p")]
+
+tokenizer : input -> scan {
+    gate(char: "<") -> tag_scanner -> token,
+    gate(char: "&") -> entity_scanner -> token,
+    otherwise       -> text_scanner -> token
+}
+
+// Tree builder: tokens → DOM tree
+// Maintains a stack of open elements
+// Each token either opens, closes, or adds text to current node
+tree_builder : tokens -> {
+    gate(type: open_tag)  -> push_element,
+    gate(type: close_tag) -> pop_element,
+    gate(type: text)      -> append_text,
+    gate(type: self_close) -> add_element
+}
+
+// ── CSS PARSING ──────────────────────────────
+
+// Extract <style> blocks and linked stylesheets
+dom -> find("style") -> css_pipeline
+dom -> find("link[rel=stylesheet]") -> fetch_css -> css_pipeline
+
+css_pipeline -> css_tokenizer -> rule_parser -> stylesheet
+
+// Rule: selector { property: value; }
+// p { color: red; margin: 10px; }
+// → rule(selector: "p", declarations: [{color: red}, {margin: 10px}])
+
+// ── STYLE RESOLUTION ─────────────────────────
+// For each DOM node, find matching CSS rules and compute final styles
+
+{dom, stylesheet} -> style_resolver -> styled_dom
+
+style_resolver : each_node(node) {
+    // Find rules whose selector matches this node
+    stylesheet.rules -> gate(selector_matches: node) -> matching_rules,
+
+    // Sort by specificity (inline > id > class > tag)
+    matching_rules -> sort(by: specificity) -> cascade,
+
+    // Apply cascade: last wins, !important overrides
+    cascade -> apply_declarations -> node.computed_style
+}
+
+// Default styles (user-agent stylesheet)
+defaults : {
+    "html":   {display: block, font_size: 16},
+    "body":   {display: block, margin: 8},
+    "p":      {display: block, margin_top: 16, margin_bottom: 16},
+    "h1":     {display: block, font_size: 32, font_weight: bold, margin_top: 20, margin_bottom: 20},
+    "h2":     {display: block, font_size: 24, font_weight: bold, margin_top: 16, margin_bottom: 16},
+    "h3":     {display: block, font_size: 20, font_weight: bold},
+    "a":      {display: inline, color: #29ADFF, text_decoration: underline},
+    "pre":    {display: block, font_family: monospace, background: #222222, padding: 8},
+    "code":   {display: inline, font_family: monospace, background: #222222},
+    "ul":     {display: block, padding_left: 20},
+    "li":     {display: list_item},
+    "img":    {display: inline_block},
+    "strong": {display: inline, font_weight: bold},
+    "em":     {display: inline, font_style: italic}
+}
+
+// ── LAYOUT ───────────────────────────────────
+// Styled DOM → positioned boxes
+
+styled_dom -> layout_engine -> layout_tree
+
+layout_engine : each_node(node) {
+    // Generate box based on display type
+    node.computed_style.display -> {
+        gate(== block)        -> block_layout(node),
+        gate(== inline)       -> inline_layout(node),
+        gate(== inline_block) -> inline_block_layout(node),
+        gate(== flex)         -> flex_layout(node),
+        gate(== none)         -> drop,
+        gate(== list_item)    -> list_item_layout(node)
+    }
+}
+
+// Block layout: stack vertically, full width
+block_layout(node) -> {
+    box.x      : parent.content_x,
+    box.y      : parent.cursor_y,
+    box.width  : parent.content_width,
+    box.height : content_height + padding + border + margin,
+    parent.cursor_y -> + box.height    // advance parent's cursor
+}
+
+// Inline layout: flow horizontally, wrap at edge
+inline_layout(node) -> {
+    // Text nodes: measure text width
+    gate(type: text) -> measure_text(node.text, node.font) -> text_width,
+    // Does it fit on the current line?
+    text_width -> {
+        gate(parent.cursor_x + text_width <= parent.content_width) -> place_inline,
+        gate(parent.cursor_x + text_width > parent.content_width) -> line_break -> place_inline
+    }
+}
+
+// ── PAINT ────────────────────────────────────
+// Layout tree → pixels on screen
+
+layout_tree -> painter -> framebuffer
+
+painter : each_box(box, paint_order: back_to_front) {
+    // Background
+    gate(box.background != transparent) -> fb_rect(
+        x: box.x, y: box.y - scroll_y,
+        w: box.width, h: box.height,
+        color: box.background
+    ),
+
+    // Border
+    gate(box.border_width > 0) -> fb_border(
+        x: box.x, y: box.y - scroll_y,
+        w: box.width, h: box.height,
+        width: box.border_width,
+        color: box.border_color
+    ),
+
+    // Text
+    gate(box.type == text) -> fb_text(
+        x: box.x, y: box.y - scroll_y,
+        text: box.content,
+        color: box.color,
+        font: box.font
+    ),
+
+    // Image
+    gate(box.type == image) -> fb_blit(
+        x: box.x, y: box.y - scroll_y,
+        pixels: box.decoded_image,
+        w: box.width, h: box.height
+    )
+}
+
+// ── SCROLLING ────────────────────────────────
+
+scroll_y : 0
+page_height : layout_tree.total_height
+
+keyboard -> {
+    gate(key: down)      -> scroll_y.add(40),
+    gate(key: up)        -> scroll_y.add(-40),
+    gate(key: page_down) -> scroll_y.add(viewport.height),
+    gate(key: page_up)   -> scroll_y.add(-viewport.height),
+    gate(key: home)      -> scroll_y.set(0),
+    gate(key: end)       -> scroll_y.set(page_height - viewport.height)
+}
+
+scroll_y -> clamp(0, page_height - viewport.height) -> repaint
+
+mouse.scroll -> * -40 -> scroll_y.add
+
+// ── LINKS ────────────────────────────────────
+
+// Track which link is focused
+link_nodes : dom -> find("a[href]")
+focused_link : 0
+
+keyboard -> {
+    gate(key: tab)       -> focused_link.next(mod: link_nodes.count),
+    gate(key: shift_tab) -> focused_link.prev(mod: link_nodes.count),
+    gate(key: enter)     -> link_nodes[focused_link].href -> url
+}
+
+// Highlight focused link
+link_nodes[focused_link] -> highlight(
+    color: #FFEC27,
+    style: underline_bold
+)
+
+// Mouse click on link
+mouse.click -> hit_test(layout_tree) -> {
+    gate(type: link) -> .href -> url
+}
+
+// ── HISTORY ──────────────────────────────────
+
+// Every navigation is stored
+url -> history.push
+
+history : stack(max: 100)
+
+// ── STATUS BAR ───────────────────────────────
+
+status_bar : screen.region(
+    x: 0, y: viewport.height - 20,
+    w: viewport.width, h: 20,
+    background: #111111
+)
+
+url            -> status_bar.text(x: 4, y: 4, color: gray, truncate: true)
+response.status -> status_bar.text(x: viewport.width - 40, y: 4, color: white)
+
+// ── ADDRESS BAR ──────────────────────────────
+
+address : screen.region(
+    x: 0, y: 0,
+    w: viewport.width, h: 24,
+    background: #1A1A1A
+)
+
+address -> text_input(
+    prompt: "surf> ",
+    value: url,
+    color: white,
+    on_submit: url
+)
+
+// ── SECURITY INDICATORS ──────────────────────
+
+// CFA-integrated security: the browser doesn't trust, it verifies
+connection -> {
+    gate(tls: true, cert_valid: true) -> address.icon(lock, color: green),
+    gate(tls: true, cert_valid: false) -> address.icon(lock_broken, color: red),
+    gate(tls: false) -> address.icon(warning, color: yellow)
+}
+
+// Content Security Policy enforcement
+response.headers -> gate(name: "Content-Security-Policy") -> csp_rules
+dom -> find("script[src]") -> gate(not: csp_rules.allowed) -> block_script
+
+// Mixed content blocking (HTTPS page loading HTTP resources)
+gate(url.scheme == "https") -> mixed_content_guard
+dom -> find("[src^='http:']") -> mixed_content_guard -> {
+    block,
+    status_bar.warn("Blocked insecure resource")
+}
+
+// ── DISPLAY ──────────────────────────────────
+
+viewport : {
+    width: screen.width,
+    height: screen.height - 44    // minus address bar and status bar
+}
+
+screen : display(
+    width: 800, height: 600,
+    scale: fit,
+    background: #FFFFFF           // web pages are white by default
+)
+
+// ── BOOKMARKS (VAULT) ────────────────────────
+
+keyboard -> gate(key: "ctrl+d") -> vault.store("bookmarks/{title}.zbm", {
+    url: url,
+    title: dom -> find("title").text,
+    timestamp: now
+})
+
+keyboard -> gate(key: "ctrl+b") -> vault.list("bookmarks/") -> bookmark_panel
+
+// ── TELEMETRY ────────────────────────────────
+
+dns_resolve    ~> timing("dns_ms")
+tcp_connect    ~> timing("connect_ms")
+tls_handshake  ~> timing("tls_ms")
+http_request   ~> timing("request_ms")
+html_pipeline  ~> timing("parse_ms")
+style_resolver ~> timing("style_ms")
+layout_engine  ~> timing("layout_ms")
+painter        ~> timing("paint_ms")
+
+// Total page load time
+url -> timestamp -> page_start
+painter.done -> timestamp -> page_end
+{page_start, page_end} -> delta -> status_bar.text(
+    x: viewport.width - 100, y: 4,
+    format: "{value}ms",
+    color: gray
+)
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. surf> http://example.com
+//    The simplest HTML page on the internet. Does it render?
+//
+// 2. Look at the telemetry. Which stage is slowest?
+//    DNS? Parse? Layout? Paint? That's browser engineering.
+//
+// 3. Add a new HTML tag. Find the tokenizer, add a gate
+//    for your tag, define how it renders. You just extended
+//    a browser.
+//
+// 4. Change the default stylesheet. Make links red instead
+//    of blue. Make headings bigger. You're the user-agent now.
+//
+// 5. Add "reader mode": strip everything except <p>, <h1>-<h6>,
+//    and <img>. Gate out the rest. Clean reading view.
+//
+// 6. Add a cache: before fetching, check if VAULT has a recent
+//    copy. If less than 5 minutes old, use it. You just built
+//    browser caching.
+//
+// 7. View source: tap the html_pipeline input. Show raw HTML
+//    in a <pre> block. surf ~> source_view. That's View Source.
+//
+// ── THE ARCHITECTURE ─────────────────────────
+//
+// Chromium: 35,000,000 lines of C++
+// Firefox:  25,000,000 lines of C++/Rust
+// Surf.zp:  signal chains
+//
+// Not because we're smarter. Because signal chains eliminate
+// the 95% of browser code that exists to manage state,
+// coordinate threads, and shuffle data between components.
+//
+// The browser is: fetch -> parse -> style -> layout -> paint
+// Everything else is plumbing. Signal chains ARE the plumbing.

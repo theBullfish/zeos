@@ -1,0 +1,538 @@
+// quill.zp — Zeos Office Suite
+// Documents, spreadsheets, presentations, drawings.
+// All signal chains. All VAULT-native. All real-time collaborative.
+//
+// Not Google Docs. Not LibreOffice. Not an Electron app.
+// Signal-chain-native documents where every cell, paragraph,
+// and shape is a node in the graph.
+//
+// Codex Labs LLC — 2026
+
+// ══════════════════════════════════════════════
+// DOCUMENT ENGINE (shared by all apps)
+// ══════════════════════════════════════════════
+
+// A document is a signal graph of content nodes.
+// Every node has: content, style, position, history.
+// VAULT stores the document. MasQ tracks changes.
+// Collaboration is just: two users, same signal graph.
+
+document : vault.open(path) -> content_graph
+
+// Auto-save: debounced write to VAULT
+content_graph -> debounce(3s) -> vault.write(path)
+
+// Undo/redo: VAULT temporal state — not a manual undo stack
+keyboard -> gate(key: "ctrl+z") -> vault.rewind(path, steps: 1) -> content_graph
+keyboard -> gate(key: "ctrl+y") -> vault.forward(path, steps: 1) -> content_graph
+
+// Collaboration: connect to shared document
+collaborators : network(document_id, protocol: crdt)
+content_graph -> collaborators.broadcast
+collaborators.receive -> content_graph.merge(strategy: crdt)
+
+// Each collaborator gets a cursor color
+collaborators -> each(user) {
+    user.cursor -> render_cursor(color: user.color, label: user.name)
+}
+
+// ══════════════════════════════════════════════
+// QUILL WRITE — Word Processor
+// ══════════════════════════════════════════════
+
+write : app("Quill Write") {
+
+    // ── Document Structure ───────────────────
+    // A document is a list of blocks. Each block is a signal node.
+
+    blocks : content_graph.children
+
+    block_types : {
+        paragraph:  {tag: "p", style: {font_size: 14, line_height: 1.6}},
+        heading1:   {tag: "h1", style: {font_size: 28, font_weight: bold, margin_top: 24}},
+        heading2:   {tag: "h2", style: {font_size: 22, font_weight: bold, margin_top: 20}},
+        heading3:   {tag: "h3", style: {font_size: 18, font_weight: bold, margin_top: 16}},
+        bullet:     {tag: "li", style: {margin_left: 20, bullet: "disc"}},
+        numbered:   {tag: "li", style: {margin_left: 20, bullet: "decimal"}},
+        quote:      {tag: "blockquote", style: {margin_left: 20, border_left: "3px solid #555", padding_left: 12, color: "#aaa"}},
+        code:       {tag: "pre", style: {font_family: monospace, background: "#1A1A1A", padding: 12, border_radius: 4}},
+        divider:    {tag: "hr", style: {border_top: "1px solid #333", margin: 16}},
+        image:      {tag: "img", style: {max_width: "100%"}},
+        table:      {tag: "table", style: {border_collapse: collapse}}
+    }
+
+    // ── Text Editing ─────────────────────────
+
+    keyboard -> editor_input -> {
+        // Regular typing
+        gate(printable) -> current_block.insert(char, at: cursor),
+
+        // Enter: new block
+        gate(key: enter) -> {
+            current_block.split(at: cursor) -> {new_block, remainder},
+            blocks.insert_after(current_block, new_block),
+            cursor.move_to(new_block, col: 0)
+        },
+
+        // Backspace at start of block: merge with previous
+        gate(key: backspace, cursor.col == 0) -> {
+            prev_block : blocks.before(current_block),
+            prev_block.merge(current_block),
+            current_block.remove
+        },
+
+        // Tab: indent or convert to list
+        gate(key: tab) -> current_block.indent,
+        gate(key: shift_tab) -> current_block.outdent
+    }
+
+    // ── Inline Formatting ────────────────────
+
+    keyboard -> {
+        gate(key: "ctrl+b") -> selection.toggle_format(bold),
+        gate(key: "ctrl+i") -> selection.toggle_format(italic),
+        gate(key: "ctrl+u") -> selection.toggle_format(underline),
+        gate(key: "ctrl+k") -> link_prompt -> selection.set_link(url),
+        gate(key: "ctrl+`") -> selection.toggle_format(code)
+    }
+
+    // ── Block Type Switching ─────────────────
+    // Type "/" at the start of a block to change its type
+
+    keyboard -> gate(key: "/", cursor.col == 0) -> slash_menu -> {
+        gate(select: "h1")     -> current_block.set_type(heading1),
+        gate(select: "h2")     -> current_block.set_type(heading2),
+        gate(select: "h3")     -> current_block.set_type(heading3),
+        gate(select: "bullet") -> current_block.set_type(bullet),
+        gate(select: "number") -> current_block.set_type(numbered),
+        gate(select: "quote")  -> current_block.set_type(quote),
+        gate(select: "code")   -> current_block.set_type(code),
+        gate(select: "---")    -> current_block.set_type(divider),
+        gate(select: "image")  -> image_picker -> current_block.set_image,
+        gate(select: "table")  -> table_wizard -> current_block.set_type(table)
+    }
+
+    // ── Markdown Shortcuts ───────────────────
+    // Type markdown at line start, it converts
+
+    line_start -> {
+        gate(starts: "# ")    -> set_type(heading1),
+        gate(starts: "## ")   -> set_type(heading2),
+        gate(starts: "### ")  -> set_type(heading3),
+        gate(starts: "- ")    -> set_type(bullet),
+        gate(starts: "1. ")   -> set_type(numbered),
+        gate(starts: "> ")    -> set_type(quote),
+        gate(starts: "```")   -> set_type(code),
+        gate(starts: "---")   -> set_type(divider)
+    }
+
+    // ── Page Layout ──────────────────────────
+
+    page : {
+        width: 816,             // 8.5" at 96dpi
+        height: 1056,           // 11" at 96dpi
+        margins: {top: 72, right: 72, bottom: 72, left: 72}
+    }
+
+    // ── Export ────────────────────────────────
+
+    keyboard -> gate(key: "ctrl+shift+e") -> export_menu -> {
+        gate(format: "pdf")      -> render_pdf -> vault.write("{name}.pdf"),
+        gate(format: "markdown") -> render_markdown -> vault.write("{name}.md"),
+        gate(format: "html")     -> render_html -> vault.write("{name}.html"),
+        gate(format: "plain")    -> render_plain -> vault.write("{name}.txt")
+    }
+
+    // ── Word Count ───────────────────────────
+
+    blocks -> flatten_text -> word_count -> status_bar.text(
+        format: "{words} words, {chars} characters"
+    )
+}
+
+// ══════════════════════════════════════════════
+// QUILL CALC — Spreadsheet
+// ══════════════════════════════════════════════
+
+calc : app("Quill Calc") {
+
+    // ── Grid ─────────────────────────────────
+    // Every cell is a signal node. Formulas are wires.
+    // When A1 changes, every cell that references A1 fires.
+    // This IS signal chain resolution. Natively.
+
+    grid : cell_grid(rows: 1000, cols: 26)    // A-Z, 1-1000
+
+    // A cell holds: value (raw), formula (expression), display (formatted)
+    cell(ref) : {
+        raw: null,
+        formula: null,
+        display: null,
+        format: auto,
+        style: default
+    }
+
+    // ── Cell Editing ─────────────────────────
+
+    // Click a cell → select it
+    mouse.click -> grid.cell_at(mouse) -> selected_cell
+
+    // Type → edit the cell
+    keyboard -> gate(selected_cell) -> {
+        gate(key: enter) -> commit_cell -> move_down,
+        gate(key: tab)   -> commit_cell -> move_right,
+        gate(key: escape) -> cancel_edit,
+        gate(printable)  -> cell_editor.insert(char)
+    }
+
+    // ── Formula Engine ───────────────────────
+    // A formula starting with "=" creates signal wires
+
+    commit_cell -> {
+        gate(starts: "=") -> parse_formula -> {
+            // Extract cell references
+            extract_refs(formula) -> each(ref) {
+                // Wire: when referenced cell changes, recalculate THIS cell
+                grid.cell(ref) -> recalculate(current_cell)
+            },
+            // Evaluate
+            evaluate(formula) -> current_cell.display
+        },
+        gate(not_starts: "=") -> {
+            // Raw value
+            gate(is_number) -> current_cell.raw.set(number),
+            gate(is_text)   -> current_cell.raw.set(text)
+        }
+    }
+
+    // Recalculation: signal chain resolution
+    // When a cell changes, all dependents fire
+    cell_changed -> dependents(cell) -> each(dep) {
+        re_evaluate(dep.formula) -> dep.display
+    }
+
+    // ── Built-in Functions ───────────────────
+
+    functions : {
+        "SUM":     range -> reduce(+),
+        "AVERAGE": range -> reduce(+) -> / count,
+        "COUNT":   range -> count(non_empty),
+        "MAX":     range -> reduce(max),
+        "MIN":     range -> reduce(min),
+        "IF":      (condition, true_val, false_val) -> gate(condition) -> {
+            gate(true) -> true_val,
+            gate(false) -> false_val
+        },
+        "VLOOKUP": (key, range, col) -> range -> gate(col_0 == key) -> col_n,
+        "CONCAT":  args -> reduce(+, as: string),
+        "ABS":     value -> gate(< 0) -> * -1 | gate(>= 0) -> pass,
+        "ROUND":   (value, decimals) -> round(value, decimals),
+        "NOW":     -> timestamp,
+        "TODAY":   -> date,
+
+        // Z+ native: signal chain functions
+        "DELTA":   cell -> delta,                    // change since last calc
+        "RATE":    cell -> rate(per: recalc_interval), // rate of change
+        "GATE":    (cell, op, threshold) -> gate(op, threshold),
+        "CHAIN":   (cells...) -> wire_sequential     // create a signal chain from cells
+    }
+
+    // ── Charts ───────────────────────────────
+
+    // Select data range → insert chart
+    selection -> gate(key: "ctrl+shift+c") -> chart_wizard -> {
+        gate(type: bar)    -> bar_chart(data: selection),
+        gate(type: line)   -> line_chart(data: selection),
+        gate(type: pie)    -> pie_chart(data: selection),
+        gate(type: scatter) -> scatter_chart(data: selection)
+    }
+
+    // Charts are LIVE — they update when cells change
+    chart.data_range -> chart.redraw
+
+    // ── Formatting ───────────────────────────
+
+    toolbar -> {
+        bold_button     -> selection.style.set(font_weight: bold),
+        italic_button   -> selection.style.set(font_style: italic),
+        color_picker    -> selection.style.set(color: picked),
+        bg_color_picker -> selection.style.set(background: picked),
+        number_format   -> selection.format.set(format),
+        align_buttons   -> selection.style.set(text_align: align),
+        border_button   -> selection.style.set(border: border_style)
+    }
+
+    // Auto-resize columns
+    grid.column -> double_click_border -> auto_width(
+        max(column_cells -> measure_text -> width) + padding
+    )
+}
+
+// ══════════════════════════════════════════════
+// QUILL PRESENT — Presentations
+// ══════════════════════════════════════════════
+
+present : app("Quill Present") {
+
+    // ── Slides ───────────────────────────────
+    // Each slide is a canvas with positioned elements.
+
+    slides : content_graph.children
+    current_slide : 0
+
+    // ── Slide Elements ───────────────────────
+
+    element_types : {
+        text_box:  {editable: true, default_style: {font_size: 24}},
+        heading:   {editable: true, default_style: {font_size: 48, font_weight: bold}},
+        image:     {resizable: true, default_style: {object_fit: contain}},
+        shape:     {types: [rect, circle, arrow, line, star]},
+        code_block:{editable: true, default_style: {font_family: monospace, background: "#1A1A1A"}},
+        chart:     {from_calc: true},        // embed live chart from Quill Calc
+        signal_graph: {from_forge: true}     // embed live signal graph from Forge IDE
+    }
+
+    // ── Editing ──────────────────────────────
+
+    // Drag to create element
+    mouse.drag(on: slide_canvas) -> create_element(
+        type: selected_tool,
+        bounds: drag_rect
+    )
+
+    // Click to select, double-click to edit
+    mouse.click(on: element) -> select(element)
+    mouse.double_click(on: text_element) -> edit_text(element)
+
+    // Move and resize
+    selected.drag -> element.move(delta: mouse.delta)
+    selected.handle.drag -> element.resize(handle: which, delta: mouse.delta)
+
+    // ── Slide Templates ──────────────────────
+
+    templates : {
+        title:      {heading(center, y: 40%), subtitle(center, y: 60%)},
+        content:    {heading(left, y: 10%), text_box(left, y: 25%, h: 65%)},
+        two_column: {heading(left, y: 10%), text_box(left_half, y: 25%), text_box(right_half, y: 25%)},
+        image_full: {image(full_slide)},
+        blank:      {}
+    }
+
+    // ── Transitions ──────────────────────────
+
+    slide_transition : {
+        none:      instant,
+        fade:      opacity(0 -> 1, duration: 300ms),
+        slide_left: translate_x(100% -> 0, duration: 300ms),
+        zoom:      scale(0.8 -> 1, duration: 300ms) + opacity(0 -> 1, duration: 200ms)
+    }
+
+    // ── Presenter Mode ───────────────────────
+
+    keyboard -> gate(key: "F5") -> presenter_mode -> {
+        // Full screen slide view
+        screen.fullscreen(current_slide),
+
+        // Navigation
+        keyboard -> {
+            gate(key: right | space | enter) -> next_slide,
+            gate(key: left | backspace)      -> prev_slide,
+            gate(key: escape)                -> exit_presenter,
+            gate(key: "b")                   -> black_screen.toggle,
+            gate(key: number)                -> goto_slide(number)
+        },
+
+        // Timer
+        presenter_timer : counter(from: 0),
+        presenter_timer -> presenter_notes_display(
+            notes: slides[current_slide].notes,
+            time: presenter_timer,
+            next_slide: slides[current_slide + 1].thumbnail
+        )
+    }
+
+    // ── Export ────────────────────────────────
+
+    export -> {
+        gate(format: "pdf")  -> render_slides_pdf -> vault.write("{name}.pdf"),
+        gate(format: "png")  -> render_slides_png -> vault.write("{name}/slide_{n}.png"),
+        gate(format: "html") -> render_slides_html -> vault.write("{name}/index.html")
+    }
+}
+
+// ══════════════════════════════════════════════
+// QUILL DRAW — Vector Drawing
+// ══════════════════════════════════════════════
+
+draw : app("Quill Draw") {
+
+    canvas : vector_canvas(
+        width: 1920, height: 1080,
+        background: white,
+        grid: {size: 10, snap: true, visible: true}
+    )
+
+    // ── Tools ────────────────────────────────
+
+    tools : {
+        select:    {cursor: arrow, action: select_move_resize},
+        pen:       {cursor: crosshair, action: draw_path},
+        rect:      {cursor: crosshair, action: draw_rect},
+        circle:    {cursor: crosshair, action: draw_ellipse},
+        line:      {cursor: crosshair, action: draw_line},
+        arrow:     {cursor: crosshair, action: draw_arrow},
+        text:      {cursor: text, action: place_text},
+        hand:      {cursor: grab, action: pan_canvas},
+        eyedropper:{cursor: eyedropper, action: pick_color}
+    }
+
+    keyboard -> {
+        gate(key: "v") -> tool.set(select),
+        gate(key: "p") -> tool.set(pen),
+        gate(key: "r") -> tool.set(rect),
+        gate(key: "o") -> tool.set(circle),
+        gate(key: "l") -> tool.set(line),
+        gate(key: "t") -> tool.set(text),
+        gate(key: "h") -> tool.set(hand),
+        gate(key: "i") -> tool.set(eyedropper)
+    }
+
+    // ── Drawing ──────────────────────────────
+
+    mouse.drag(tool: rect) -> draw_rect(
+        from: drag_start, to: drag_end,
+        fill: current_fill,
+        stroke: current_stroke,
+        stroke_width: current_stroke_width
+    ) -> canvas.add
+
+    mouse.drag(tool: pen) -> {
+        points.add(mouse.position),
+        preview_path(points) -> canvas.overlay,
+        mouse.release -> finalize_path(points) -> canvas.add
+    }
+
+    // ── Properties ───────────────────────────
+
+    properties_panel : display_region(side: right, width: 250)
+
+    selected -> properties_panel.show({
+        fill_color:    color_picker,
+        stroke_color:  color_picker,
+        stroke_width:  slider(0..20),
+        opacity:       slider(0..100),
+        corner_radius: slider(0..50),
+        position:      {x: number, y: number},
+        size:          {w: number, h: number},
+        rotation:      slider(0..360)
+    })
+
+    // ── Layers ───────────────────────────────
+
+    layers_panel : display_region(side: right, below: properties)
+
+    canvas.elements -> layers_panel.render(
+        draggable: true,    // reorder by drag
+        visibility_toggle: true,
+        lock_toggle: true
+    )
+
+    // ── Export ────────────────────────────────
+
+    export -> {
+        gate(format: "svg") -> render_svg -> vault.write("{name}.svg"),
+        gate(format: "png") -> rasterize(dpi: 300) -> vault.write("{name}.png"),
+        gate(format: "pdf") -> render_pdf -> vault.write("{name}.pdf")
+    }
+}
+
+// ══════════════════════════════════════════════
+// SHARED FEATURES (all apps)
+// ══════════════════════════════════════════════
+
+// ── Find & Replace ───────────────────────────
+
+keyboard -> gate(key: "ctrl+f") -> find_bar -> {
+    query -> content_graph.search(query) -> matches,
+    matches -> highlight_all,
+    keyboard -> gate(key: enter) -> matches.next,
+    keyboard -> gate(key: shift_enter) -> matches.prev,
+    replace_input -> {
+        replace_one -> matches.current.replace(replacement),
+        replace_all -> matches.each.replace(replacement)
+    }
+}
+
+// ── Print ────────────────────────────────────
+
+keyboard -> gate(key: "ctrl+p") -> print_dialog -> {
+    render_printable -> print_spooler -> printer
+}
+
+// ── Spell Check ──────────────────────────────
+
+text_content -> spell_check : {
+    each_word(word) -> dictionary.lookup -> {
+        gate(found) -> pass,
+        gate(not_found) -> mark_misspelled(word, suggestions)
+    }
+}
+
+// ── File Format ──────────────────────────────
+
+// Native format: .quill (VAULT temporal document)
+// The document IS its history. No "save as." No versions.
+// Rewind to any point in time. MasQ provenance on every edit.
+
+// Import from:
+import -> {
+    gate(ext: ".docx") -> docx_parser -> content_graph,
+    gate(ext: ".xlsx") -> xlsx_parser -> cell_grid,
+    gate(ext: ".pptx") -> pptx_parser -> slides,
+    gate(ext: ".csv")  -> csv_parser -> cell_grid,
+    gate(ext: ".md")   -> markdown_parser -> content_graph,
+    gate(ext: ".svg")  -> svg_parser -> vector_canvas
+}
+
+// ══════════════════════════════════════════════
+// DISPLAY
+// ══════════════════════════════════════════════
+
+screen : display(
+    width: 1280, height: 800,
+    background: #0D1117,
+    font: system
+)
+
+// App switcher (tabs at top)
+app_bar : screen.region(y: 0, h: 32, background: #111111)
+app_bar -> tabs(["Write", "Calc", "Present", "Draw"])
+
+// ══════════════════════════════════════════════
+// TELEMETRY
+// ══════════════════════════════════════════════
+
+buffer.edits      ~> rate(per: 1m) ~> edits_per_minute
+collaborators     ~> count ~> active_collaborators
+document.size     ~> dashboard("doc_size_bytes")
+cell_recalculations ~> rate(per: 1s) ~> recalcs_per_second
+
+
+// ══════════════════════════════════════════════
+// THE POINT
+// ══════════════════════════════════════════════
+//
+// A spreadsheet cell IS a signal node.
+// A formula IS a wire.
+// Recalculation IS signal chain resolution.
+//
+// Excel has a formula engine, a recalculation engine,
+// a dependency tracker, a change propagation system,
+// and a display update pipeline — all separate systems
+// that Microsoft spent 40 years building.
+//
+// In Z+, that's just... the signal graph. The same
+// signal graph that runs robots and renders web pages.
+//
+// The office suite isn't a special application.
+// It's the architecture, applied to documents.

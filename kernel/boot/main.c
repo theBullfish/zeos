@@ -29,6 +29,8 @@
 #include "heap.h"
 #include "timer.h"
 #include "signal.h"
+#include "serial.h"
+#include "kprint.h"
 #include "shell.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -198,31 +200,35 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     fb_init(&boot_info.fb);
     fb_clear(0x001A1A1A);  /* Dark warm gray — not pure black */
 
-    fb_puts("================================================\n");
-    fb_puts("  Zeos\n");
-    fb_puts("  The first operating system with proprioception.\n");
-    fb_puts("================================================\n\n");
+    /* Initialize serial console — debug output channel */
+    serial_init();
+    kprint_init();
 
-    fb_puts("Boot services released. We own the machine.\n\n");
+    kputs("================================================\n");
+    kputs("  Zeos\n");
+    kputs("  The first operating system with proprioception.\n");
+    kputs("================================================\n\n");
+
+    kputs("Boot services released. We own the machine.\n\n");
 
     /* Print framebuffer info */
-    fb_puts("Framebuffer: ");
-    fb_put_dec(boot_info.fb.width);
-    fb_puts("x");
-    fb_put_dec(boot_info.fb.height);
-    fb_puts(" pitch=");
-    fb_put_dec(boot_info.fb.pitch);
-    fb_puts("\n");
+    kputs("Framebuffer: ");
+    kput_dec(boot_info.fb.width);
+    kputs("x");
+    kput_dec(boot_info.fb.height);
+    kputs(" pitch=");
+    kput_dec(boot_info.fb.pitch);
+    kputs("\n");
 
     /* Print ACPI status */
-    fb_puts("ACPI RSDP:   ");
+    kputs("ACPI RSDP:   ");
     if (boot_info.rsdp) {
-        fb_puts("found at 0x");
-        fb_put_hex((uint64_t)(UINTN)boot_info.rsdp);
+        kputs("found at 0x");
+        kput_hex((uint64_t)(UINTN)boot_info.rsdp);
     } else {
-        fb_puts("not found");
+        kputs("not found");
     }
-    fb_puts("\n");
+    kputs("\n");
 
     /* Count usable memory from the UEFI map */
     uint64_t total_usable = 0;
@@ -241,77 +247,74 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         entry += boot_info.mmap.desc_size;
     }
 
-    fb_puts("Memory map:  ");
-    fb_put_dec(total_entries);
-    fb_puts(" entries, ");
-    fb_put_dec(total_usable / (1024 * 1024));
-    fb_puts(" MB usable\n\n");
+    kputs("Memory map:  ");
+    kput_dec(total_entries);
+    kputs(" entries, ");
+    kput_dec(total_usable / (1024 * 1024));
+    kputs(" MB usable\n\n");
 
     /* Read TSC — first timing measurement */
-    uint64_t tsc;
-    __asm__ volatile("rdtsc" : "=A"(tsc));
-    /* rdtsc returns low 32 in eax, high 32 in edx on x86_64 */
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    tsc = ((uint64_t)hi << 32) | lo;
+    uint64_t tsc = ((uint64_t)hi << 32) | lo;
 
-    fb_puts("TSC:         0x");
-    fb_put_hex(tsc);
-    fb_puts("\n");
-    fb_puts("             Zixel embryo — first timing delta on bare metal.\n\n");
+    kputs("TSC:         0x");
+    kput_hex(tsc);
+    kputs("\n");
+    kputs("             Zixel embryo — first timing delta on bare metal.\n\n");
 
-    fb_puts("Zeos is alive.\n\n");
+    kputs("Zeos is alive.\n\n");
 
     /* Initialize physical memory manager */
-    fb_puts("Initializing PMM... ");
+    kputs("Initializing PMM... ");
     pmm_init(&boot_info.mmap, &boot_info.fb);
-    fb_put_dec(pmm_free_pages() * 4 / 1024);
-    fb_puts(" MB free / ");
-    fb_put_dec(pmm_total_pages() * 4 / 1024);
-    fb_puts(" MB total.\n");
+    kput_dec(pmm_free_pages() * 4 / 1024);
+    kputs(" MB free / ");
+    kput_dec(pmm_total_pages() * 4 / 1024);
+    kputs(" MB total.\n");
 
     /* Initialize virtual memory */
-    fb_puts("Setting up VMM... ");
+    kputs("Setting up VMM... ");
     vmm_init();
-    fb_puts("done (4GB identity + higher-half).\n");
+    kputs("done (4GB identity + higher-half).\n");
 
     /* Initialize kernel heap */
-    fb_puts("Initializing heap... ");
+    kputs("Initializing heap... ");
     heap_init(64);  /* 64 pages = 256KB initial heap */
-    fb_put_dec(heap_total_bytes() / 1024);
-    fb_puts(" KB.\n");
+    kput_dec(heap_total_bytes() / 1024);
+    kputs(" KB.\n");
 
     /* Initialize interrupts */
-    fb_puts("Setting up IDT... ");
+    kputs("Setting up IDT... ");
     idt_init();
-    fb_puts("done.\n");
+    kputs("done.\n");
 
     /* Initialize PCI (uses I/O ports, safe after IDT is up) */
-    fb_puts("Scanning PCI bus... ");
+    kputs("Scanning PCI bus... ");
     pci_init(boot_info.rsdp);
     int pci_count = pci_enumerate();
-    fb_put_dec(pci_count);
-    fb_puts(" devices found.\n");
+    kput_dec(pci_count);
+    kputs(" devices found.\n");
 
     /* Initialize keyboard */
-    fb_puts("Initializing keyboard... ");
+    kputs("Initializing keyboard... ");
     keyboard_init();
-    fb_puts("done.\n");
+    kputs("done.\n");
 
     /* Enable interrupts */
     __asm__ volatile("sti");
 
     /* Initialize timer (1000 Hz PIT + TSC calibration) */
-    fb_puts("Calibrating timer... ");
+    kputs("Calibrating timer... ");
     timer_init(1000);
-    fb_puts("TSC freq: ");
-    fb_put_dec(timer_tsc_freq() / 1000000);
-    fb_puts(" MHz.\n");
+    kputs("TSC freq: ");
+    kput_dec(timer_tsc_freq() / 1000000);
+    kputs(" MHz.\n");
 
     /* Initialize signal chain engine */
-    fb_puts("Signal chain engine... ");
+    kputs("Signal chain engine... ");
     sig_init();
-    fb_puts("ready.\n\n");
+    kputs("ready.\n\n");
 
     /* Enter shell — never returns */
     shell_run(&boot_info);

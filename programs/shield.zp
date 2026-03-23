@@ -1,0 +1,485 @@
+// shield.zp — Zeos Security Kernel
+// The security model AS a Z+ program.
+//
+// Security is not a service running alongside the OS.
+// Security IS the signal graph. This program defines
+// the gates, policies, and enforcement that every
+// signal in the system passes through.
+//
+// If there's no wire, there's no access. Period.
+//
+// Codex Labs LLC — 2026
+
+// ══════════════════════════════════════════════
+// LAYER 1: CFA — Memory Isolation
+// ══════════════════════════════════════════════
+
+// Every process gets a unique address space seed
+// derived from the device secret + process identity.
+// No two processes see the same address layout.
+
+process_create -> {
+    device_secret : zixel.hardware_seed,
+    process_seed  : random(256),
+    cfa_key       : fractal_derive(device_secret, process_seed)
+}
+
+// Memory allocation: every address is CFA-transformed
+alloc_request -> cfa_transform(key: cfa_key) -> physical_address
+
+// Memory access: validate CFA before every dereference
+mem_access -> cfa_verify(key: cfa_key) -> {
+    gate(valid)   -> allow,
+    gate(invalid) -> {
+        fault("CFA violation: process {pid} at {address}"),
+        process.kill(reason: "memory_violation")
+    }
+}
+
+// ══════════════════════════════════════════════
+// LAYER 2: Process Isolation
+// ══════════════════════════════════════════════
+
+// A process declares its capabilities at creation.
+// These are the ONLY wires it will ever have.
+// No capability = no wire = no concept of the resource.
+
+process_create -> declare_capabilities({
+    network: [],            // empty = no network access
+    files: [],              // empty = no file access
+    devices: [],            // empty = no device access
+    ipc: [],                // empty = no inter-process communication
+    display: false,         // no screen access
+    audio: false,           // no audio access
+    sensors: []             // no sensor access
+})
+
+// Example: a text editor
+editor : process(capabilities: {
+    files: ["~/documents/**"],      // only user documents
+    display: true,                   // needs screen
+    clipboard: true                  // needs copy/paste
+    // NO network. NO devices. NO sensors. NO audio.
+    // The editor cannot phone home. It has no wire to the network.
+})
+
+// Example: the browser
+browser : process(capabilities: {
+    network: ["tcp:443", "tcp:80", "udp:53"],   // HTTPS, HTTP, DNS only
+    files: ["~/.surf/cache/**", "~/.surf/bookmarks/**"],
+    display: true,
+    audio: true,
+    sensors: []                     // no camera, no mic, no location
+    // Browser can't access your documents. No wire.
+})
+
+// ══════════════════════════════════════════════
+// LAYER 3: Kernel Signal Gate
+// ══════════════════════════════════════════════
+
+// Every signal that crosses a process boundary goes
+// through the kernel gate. This is the chokepoint.
+
+inter_process_signal -> kernel_gate : {
+    // Is there a declared wire between these processes?
+    gate(wire_exists: process_a, process_b) -> {
+        // Is the signal type allowed on this wire?
+        gate(signal_type: allowed_types) -> {
+            // Rate limit check
+            gate(rate: within_limit) -> {
+                // Audit log (always)
+                signal ~> vault.append("audit/{date}.log"),
+                // Deliver
+                signal -> destination
+            },
+            gate(rate: exceeded) -> {
+                throttle,
+                alert("Rate limit exceeded: {process_a} -> {process_b}")
+            }
+        },
+        gate(signal_type: blocked) -> {
+            drop,
+            alert("Blocked signal type {type} on wire {wire_id}")
+        }
+    },
+    gate(wire_exists: false) -> {
+        // No wire = attack attempt or bug
+        drop,
+        fault("No wire: {process_a} attempted signal to {process_b}"),
+        process_a.strike(1)     // FAFO: strikes accumulate
+    }
+}
+
+// FAFO enforcement: three strikes
+process.strikes -> gate(>= 3) -> {
+    process.quarantine,
+    alert("Process {pid} quarantined: repeated unauthorized signals")
+}
+
+// ══════════════════════════════════════════════
+// LAYER 4: File System Security (VAULT)
+// ══════════════════════════════════════════════
+
+// VAULT access is gated by process capabilities
+
+file_request -> vault_gate : {
+    // Check process has file capability
+    gate(process.capabilities.files: matches(path)) -> {
+        // Check operation permission
+        gate(op: read)    -> vault.read(path),
+        gate(op: write)   -> vault.write(path, data),
+        gate(op: delete)  -> {
+            // Delete requires confirmation for non-temp files
+            gate(path: starts("tmp/")) -> vault.delete(path),
+            gate(path: not_starts("tmp/")) -> {
+                confirm("Delete {path}?") -> {
+                    gate(yes) -> vault.delete(path),
+                    gate(no)  -> cancel
+                }
+            }
+        }
+    },
+    gate(process.capabilities.files: no_match) -> {
+        drop,
+        fault("File access denied: {pid} -> {path}")
+    }
+}
+
+// ══════════════════════════════════════════════
+// LAYER 5: Network Security
+// ══════════════════════════════════════════════
+
+// All network traffic passes through network gates
+
+net_request -> network_gate : {
+    // Process has network capability?
+    gate(process.capabilities.network: matches(destination)) -> {
+        // DNS poisoning protection: verify response
+        gate(type: dns) -> dns_resolver -> {
+            verify_dnssec -> {
+                gate(valid) -> dns_result,
+                gate(invalid) -> {
+                    drop,
+                    alert("DNSSEC validation failed for {domain}")
+                }
+            }
+        },
+
+        // TLS enforcement
+        gate(port: 80) -> {
+            // Try HTTPS upgrade first
+            try_upgrade(443) -> {
+                gate(success) -> https_connection,
+                gate(fail) -> {
+                    warn("Insecure connection to {host}"),
+                    gate(user_accepts) -> http_connection,
+                    gate(user_rejects) -> drop
+                }
+            }
+        },
+        gate(port: 443) -> tls_handshake -> {
+            gate(cert_valid, not_expired, not_revoked) -> tls_connection,
+            gate(cert_invalid) -> {
+                block,
+                alert("Invalid certificate for {host}")
+            }
+        }
+    },
+    gate(process.capabilities.network: no_match) -> {
+        drop,
+        fault("Network access denied: {pid} -> {destination}")
+    }
+}
+
+// Egress filtering: what leaves the machine
+outbound_traffic -> egress_gate : {
+    // No process should send data to unknown destinations
+    gate(destination: known_good) -> allow,
+    gate(destination: unknown) -> {
+        quarantine,
+        alert("Unknown egress destination: {destination}"),
+        user_prompt("Allow {process} to contact {destination}?")
+    }
+}
+
+// ══════════════════════════════════════════════
+// LAYER 6: Device Security
+// ══════════════════════════════════════════════
+
+// Hardware devices are signal nodes. Access requires a wire.
+
+device_request -> device_gate : {
+    gate(process.capabilities.devices: matches(device)) -> {
+        // DMA protection: all device memory access through IOMMU
+        gate(type: dma) -> iommu.validate -> {
+            gate(valid_range) -> allow,
+            gate(invalid_range) -> {
+                block,
+                alert("DMA violation: {device} accessing {address}"),
+                device.isolate
+            }
+        },
+        gate(type: io) -> allow
+    },
+    gate(process.capabilities.devices: no_match) -> {
+        drop
+        // No alert needed — process doesn't know the device exists
+    }
+}
+
+// PCIe hot-plug security
+pci.hot_plug -> {
+    device_identify -> masq.check_provenance -> {
+        gate(known_device, valid_history) -> {
+            device.enable,
+            alert("Device connected: {device.name}")
+        },
+        gate(unknown_device) -> {
+            device.isolate,
+            user_prompt("Unknown device {vendor}:{device}. Allow?"),
+            gate(user_allows) -> device.enable,
+            gate(user_denies) -> device.reject
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// LAYER 7: Zixel Hardware Integrity
+// ══════════════════════════════════════════════
+
+// The machine watches itself. Anomalies trigger responses.
+
+// Timing anomaly: possible side-channel or fault injection
+zixel.timing -> baseline(window: 60s) -> normal_timing
+zixel.timing -> deviation(from: normal_timing) -> timing_deviation
+
+timing_deviation -> gate(> 3) -> {      // > 3 sigma
+    alert("Timing anomaly: {deviation} sigma"),
+    // Add jitter to sensitive operations
+    crypto_ops -> add_constant_time_padding,
+    // Log for analysis
+    timing_deviation ~> vault.append("security/timing_anomalies.log")
+}
+
+// Thermal spike: possible fault injection
+zixel.thermal -> delta(per: 100ms) -> thermal_rate
+thermal_rate -> gate(> 20) -> {         // > 20C per 100ms = not natural
+    halt_sensitive_ops,
+    alert("Thermal spike: possible fault injection attack"),
+    thermal_rate ~> vault.append("security/thermal_events.log")
+}
+
+// Power anomaly: possible glitching
+zixel.power -> baseline(window: 10s) -> normal_power
+zixel.power -> deviation(from: normal_power) -> power_deviation
+
+power_deviation -> gate(> 5) -> {       // > 5 sigma
+    alert("Power anomaly: possible glitch attack"),
+    // Restart sensitive computations from checkpoint
+    sensitive_ops -> restart_from_checkpoint
+}
+
+// ══════════════════════════════════════════════
+// LAYER 8: MasQ Provenance Verification
+// ══════════════════════════════════════════════
+
+// Every executable, module, and critical data file
+// must have verifiable provenance before loading.
+
+module_load_request -> masq_verify : {
+    masq.history(module) -> {
+        // Has continuous history? (no gaps = no tampering)
+        gate(history: continuous) -> {
+            // Hash chain valid? (each version links to previous)
+            gate(hash_chain: valid) -> {
+                // Known publisher?
+                gate(publisher: trusted) -> load_module,
+                gate(publisher: unknown) -> {
+                    quarantine_sandbox -> load_sandboxed,
+                    alert("Loading unknown-publisher module: {module}")
+                }
+            },
+            gate(hash_chain: broken) -> {
+                reject,
+                alert("TAMPERED MODULE: {module} — hash chain broken")
+            }
+        },
+        gate(history: none) -> {
+            // Brand new module — no history
+            quarantine_sandbox -> load_sandboxed,
+            warn("Module {module} has no history — running sandboxed")
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// LAYER 9: Browser Security
+// ══════════════════════════════════════════════
+
+// Same-origin isolation: each origin is a separate signal chain
+browser.navigate(url) -> {
+    origin : url.scheme + "://" + url.host + ":" + url.port,
+
+    // Get or create isolated chain for this origin
+    origin_chain : origin_chains.get_or_create(origin),
+
+    // Page runs inside origin_chain — no wires to other origins
+    origin_chain -> fetch(url) -> parse -> render
+}
+
+// Cross-origin request: requires explicit CORS
+origin_a.fetch(url_on_origin_b) -> cors_gate : {
+    // Preflight check
+    options_request(url_on_origin_b) -> {
+        gate(access_control_allow_origin: origin_a) -> allow_fetch,
+        gate(no_cors_header) -> {
+            block,
+            console.warn("CORS blocked: {origin_a} -> {origin_b}")
+        }
+    }
+}
+
+// CSP enforcement
+browser.response -> extract_csp -> csp_rules
+
+browser.dom.scripts -> csp_script_gate : {
+    gate(src: csp_rules.script_src) -> allow,
+    gate(inline, csp_rules.unsafe_inline: false) -> block,
+    gate(eval, csp_rules.unsafe_eval: false) -> block,
+    otherwise -> {
+        block,
+        report(csp_violation) -> csp_rules.report_uri
+    }
+}
+
+// XSS prevention: user input → sanitize gate → DOM
+browser.user_input -> sanitize : {
+    // HTML entities escaped
+    input -> escape_html -> safe_text,
+    // Script tags stripped
+    input -> gate(not: contains("<script")) -> safe_text,
+    // Event handlers stripped
+    input -> gate(not: matches("on\\w+=")) -> safe_text
+}
+safe_text -> browser.dom.insert
+// browser.user_input has NO direct wire to browser.dom.insert
+
+// ══════════════════════════════════════════════
+// LAYER 10: School/Kid Safety
+// ══════════════════════════════════════════════
+
+// Content filtering (when school_mode is enabled)
+school_mode : config("school_mode", default: false)
+
+gate(school_mode) -> {
+    // All fetched content passes through safety check
+    browser.response.body -> content_safety : {
+        toxicity  @ mde("content-safety.zdx") -> gate(< 0.3) -> pass,
+        adult     @ mde("adult-detect.zdx")   -> gate(< 0.1) -> pass,
+        violence  @ mde("violence-detect.zdx") -> gate(< 0.2) -> pass,
+        otherwise -> {
+            block_page("This content is not available in school mode."),
+            vault.append("content_blocks/{date}.log", {url, reason})
+        }
+    },
+
+    // URL allowlist/blocklist
+    browser.url -> {
+        gate(domain: blocklist) -> block_page("Site blocked."),
+        gate(domain: allowlist) -> allow,
+        gate(domain: unknown)  -> content_safety    // check content
+    },
+
+    // Session time tracking (transparent to student)
+    session_start : now,
+    tick(every: 1m) -> {
+        elapsed : now - session_start,
+        elapsed ~> student_dashboard("session_minutes"),
+        elapsed -> gate(> session_limit) -> {
+            warn("Session time reached. Save your work."),
+            delay(5m) -> session.end
+        }
+    },
+
+    // Browsing log (student can see their own)
+    browser.url ~> vault.append("usage/{student_id}/{date}.log"),
+    browser.url ~> student_dashboard("sites_visited")
+}
+
+// ══════════════════════════════════════════════
+// AUDIT & TELEMETRY
+// ══════════════════════════════════════════════
+
+// Every security event is logged. Every gate decision is traceable.
+
+kernel_gate        ~> vault.append("audit/kernel_gate.log")
+vault_gate         ~> vault.append("audit/file_access.log")
+network_gate       ~> vault.append("audit/network.log")
+device_gate        ~> vault.append("audit/device.log")
+masq_verify        ~> vault.append("audit/provenance.log")
+
+// Security dashboard (for admin / teacher)
+security_dashboard : display(layout: grid, cols: 2, rows: 3)
+
+security_dashboard[0,0] : event_log(
+    vault.read("audit/kernel_gate.log"),
+    label: "Kernel Gate", filter: "blocked"
+)
+security_dashboard[1,0] : event_log(
+    vault.read("audit/network.log"),
+    label: "Network", filter: "blocked"
+)
+security_dashboard[0,1] : graph(
+    timing_deviation, label: "Timing Anomalies",
+    window: 3600s, warn: {> 3, red}
+)
+security_dashboard[1,1] : graph(
+    thermal_rate, label: "Thermal Rate",
+    window: 3600s, warn: {> 10, red}
+)
+security_dashboard[0,2] : status_grid(
+    title: "Process Health",
+    items: processes -> each(p) {
+        {name: p.name, signal: p.strikes, ok: green, warn: yellow, fail: red}
+    }
+)
+security_dashboard[1,2] : value(
+    processes.count, label: "Active Processes"
+)
+
+
+// ══════════════════════════════════════════════
+// THE POINT
+// ══════════════════════════════════════════════
+
+// This entire security model is ~300 lines of signal flow.
+//
+// It covers:
+// - Memory isolation (CFA)
+// - Process isolation (capability-based wiring)
+// - File access control (VAULT gates)
+// - Network security (TLS, DNSSEC, egress filtering)
+// - Device security (IOMMU, hot-plug verification)
+// - Hardware integrity (Zixel anomaly detection)
+// - Code provenance (MasQ verification)
+// - Browser security (same-origin, CSP, XSS prevention)
+// - Kid safety (content filtering, time limits, transparent logging)
+// - Full audit trail
+//
+// In a conventional OS, this is:
+// - SELinux: 400,000 lines of C
+// - AppArmor: 50,000 lines of C
+// - Windows Defender: millions of lines
+// - Chrome sandbox: hundreds of thousands of lines
+// - Plus firewall, IDS, DLP, MDM, EDR...
+//
+// All of it exists because conventional OSes start with
+// "everything is connected" and spend forever adding walls.
+//
+// Zeos starts with "nothing is connected" and you add wires.
+// The security model is the ABSENCE of wires.
+// You can't exploit a connection that doesn't exist.
+//
+// shield.zp doesn't ADD security to Zeos.
+// shield.zp defines which wires ARE ALLOWED to exist.
+// Everything else is already secure by not existing.

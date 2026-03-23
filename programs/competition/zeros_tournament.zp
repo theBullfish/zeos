@@ -1,0 +1,223 @@
+// zeros_tournament.zp — Tournament management system
+// Competition Template
+//
+// Bracket system. Match scheduling. Live scoring.
+// Leaderboard. Match replay. The whole infrastructure.
+//
+// Run this on a separate machine. It manages the event.
+//
+// Codex Labs LLC — 2026
+
+// ── CONFIGURATION ────────────────────────────
+
+tournament : {
+    name: "Zeros Invitational 2026",
+    format: "double_elimination",       // or round_robin, swiss
+    teams: [],                          // filled at registration
+    matches_per_round: 4,              // parallel fields
+    match_duration: 180s,              // 3 minutes
+    break_between: 300s                // 5 minutes between rounds
+}
+
+// ── REGISTRATION ─────────────────────────────
+
+// Teams register via network or manually
+registration : network(port: 4230)
+
+registration.receive -> gate(type: "register") -> {
+    team : {
+        name: msg.team_name,
+        id: uuid(),
+        members: msg.members,
+        robot_name: msg.robot_name,
+        registered: now
+    },
+    tournament.teams.add(team),
+    registration.reply("Registered: {team.name}")
+}
+
+// ── BRACKET GENERATION ───────────────────────
+
+keyboard -> gate(key: "g") -> gate(tournament.teams.count >= 4) -> {
+    bracket : generate_bracket(
+        teams: tournament.teams,
+        format: tournament.format,
+        seed: "random"                  // or "ranked" for seeded brackets
+    ),
+    display_bracket(bracket)
+}
+
+// ── MATCH MANAGEMENT ─────────────────────────
+
+current_round : 0
+active_matches : []
+
+next_round -> {
+    current_round -> + 1,
+    bracket.round(current_round) -> each(match_pairing) {
+        match : {
+            id: uuid(),
+            round: current_round,
+            team_a: match_pairing.team_a,
+            team_b: match_pairing.team_b,
+            score_a: 0,
+            score_b: 0,
+            state: "pending",
+            field: assign_field()
+        },
+        active_matches.add(match)
+    }
+}
+
+// Start a match
+start_match(match_id) -> {
+    match : active_matches.find(id: match_id),
+    match.state.set("running"),
+    match.start_time.set(now),
+    match.timer.start(tournament.match_duration),
+
+    // Connect to robots on the field
+    match.robot_a : connect("{match.team_a.robot_name}.local:4200"),
+    match.robot_b : connect("{match.team_b.robot_name}.local:4200"),
+
+    // Start recording
+    match.recording.start(sources: {match.robot_a, match.robot_b}),
+
+    announcement("Match {match_id}: {match.team_a.name} vs {match.team_b.name}")
+}
+
+// End match
+match.timer.done -> {
+    match.state.set("scoring"),
+    match.recording.stop
+}
+
+// Score entry (referee)
+score_match(match_id, score_a, score_b) -> {
+    match : active_matches.find(id: match_id),
+    match.score_a.set(score_a),
+    match.score_b.set(score_b),
+    match.winner.set(score_a > score_b ? match.team_a : match.team_b),
+    match.state.set("complete"),
+
+    // Update bracket
+    bracket.advance(match.winner, from: match),
+
+    // Update leaderboard
+    leaderboard.update(match)
+}
+
+// ── LEADERBOARD ──────────────────────────────
+
+leaderboard : sorted_list(
+    key: "rank_score",
+    fields: {
+        team, wins, losses, total_score, avg_score,
+        rank_score: wins * 1000 + total_score
+    }
+)
+
+// ── DISPLAY ──────────────────────────────────
+
+// Main display (projector / big screen)
+main_screen : display(width: 1280, height: 720, background: #0A0A0A)
+
+// Layout depends on what's happening
+gate(active_matches.count > 0) -> show_live_matches
+gate(active_matches.count == 0) -> show_bracket_and_leaderboard
+
+show_live_matches -> {
+    // Split screen for up to 4 simultaneous matches
+    active_matches -> each_with_index(match, idx) {
+        quadrant : main_screen.region(
+            x: (idx % 2) * 640,
+            y: (idx / 2) * 360,
+            w: 640, h: 360
+        )
+
+        // Mini battle arena view
+        quadrant.header("{match.team_a.name} vs {match.team_b.name}",
+            color: white, background: #222222)
+
+        quadrant.timer(match.timer, color: white, size: 24)
+
+        quadrant.score_display(
+            a: {name: match.team_a.name, score: match.score_a, color: red},
+            b: {name: match.team_b.name, score: match.score_b, color: blue}
+        )
+
+        // Live robot telemetry (if connected)
+        match.robot_a.sensors ~> quadrant.mini_status(side: left)
+        match.robot_b.sensors ~> quadrant.mini_status(side: right)
+    }
+}
+
+show_bracket_and_leaderboard -> {
+    // Left: bracket tree
+    bracket_view : main_screen.region(x: 0, y: 0, w: 800, h: 720)
+    bracket -> bracket_view.draw_bracket(
+        colors: {winner: green, loser: red, pending: gray},
+        highlight: next_matches
+    )
+
+    // Right: leaderboard
+    lb_view : main_screen.region(x: 800, y: 0, w: 480, h: 720)
+    leaderboard -> lb_view.table(
+        columns: ["#", "Team", "W", "L", "Score"],
+        row_colors: {1: gold, 2: silver, 3: bronze},
+        highlight: last_winner
+    )
+}
+
+// ── ANNOUNCEMENTS ────────────────────────────
+
+announcement(text) -> {
+    main_screen.banner(text, duration: 5s, color: yellow, size: 28),
+    play("sfx/announcement.wav")
+}
+
+// Auto-announcements
+match.state -> gate("complete") -> announcement(
+    "{match.winner.name} wins! ({match.score_a} - {match.score_b})"
+)
+
+bracket -> gate(finals_complete) -> announcement(
+    "CHAMPION: {bracket.winner.name}!"
+)
+
+// ── SCHEDULE ─────────────────────────────────
+
+// Show upcoming matches
+schedule : bracket.upcoming(count: 6)
+
+// Announce next match 2 minutes before
+schedule.next -> delay_until(start_time - 120s) -> announcement(
+    "Next match in 2 minutes: {team_a.name} vs {team_b.name} on Field {field}"
+)
+
+// ── SAVE EVERYTHING ──────────────────────────
+
+// Every match, every score, every replay
+vault.store("tournaments/{tournament.name}/bracket.zdat", bracket)
+vault.store("tournaments/{tournament.name}/leaderboard.zdat", leaderboard)
+// Match recordings saved per-match in start_match()
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Run a 4-team tournament. See the bracket generate.
+//
+// 2. Add "alliance" matches: 2v2 instead of 1v1.
+//    Teams that were opponents now cooperate.
+//
+// 3. Add "awards" beyond 1st place: Best Autonomous,
+//    Best Design, Most Improved, Spirit Award.
+//
+// 4. Stream the main_screen output to a projector.
+//    Add commentary audio. You're running a broadcast.
+//
+// 5. Pull up any match replay and analyze it.
+//    What moment decided the match?
+//
+// 6. Cross-tournament stats: track teams across multiple
+//    events. Season rankings. Historical records.

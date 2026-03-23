@@ -1,0 +1,412 @@
+// forge_ide.zp — Zeos Integrated Development Environment
+// The tool you build everything else with.
+//
+// Not VS Code. Not vim. Not an electron wrapper.
+// A signal-chain-native IDE where the editor, compiler,
+// debugger, and signal visualizer are ONE graph.
+//
+// Codex Labs LLC — 2026
+
+// ══════════════════════════════════════════════
+// EDITOR CORE
+// ══════════════════════════════════════════════
+
+// A file is a signal source. Edits are signals.
+// The buffer IS a signal chain node.
+
+buffer : text_buffer(
+    encoding: utf8,
+    undo_depth: 1000,
+    tab_size: 4
+)
+
+// Open file
+file_open(path) -> vault.read(path) -> buffer.load
+file_save -> buffer.content -> vault.write(current_path)
+
+// Every keystroke is a signal
+keyboard -> editor_input -> {
+    gate(mode: insert) -> buffer.insert(char, at: cursor),
+    gate(mode: command) -> command_dispatch,
+    gate(mode: visual) -> selection_extend
+}
+
+// Cursor is a signal
+cursor : {line: 0, col: 0}
+
+keyboard -> {
+    gate(key: up)        -> cursor.line.add(-1),
+    gate(key: down)      -> cursor.line.add(1),
+    gate(key: left)      -> cursor.col.add(-1),
+    gate(key: right)     -> cursor.col.add(1),
+    gate(key: home)      -> cursor.col.set(0),
+    gate(key: end)       -> cursor.col.set(line_length),
+    gate(key: page_up)   -> cursor.line.add(-viewport_lines),
+    gate(key: page_down) -> cursor.line.add(viewport_lines),
+    gate(key: "ctrl+g")  -> goto_line_prompt
+}
+
+// ══════════════════════════════════════════════
+// SYNTAX HIGHLIGHTING (Z+ aware)
+// ══════════════════════════════════════════════
+
+// Highlighting is a transform on the buffer — not a separate system
+buffer.content -> syntax_highlighter -> colored_tokens
+
+syntax_highlighter : each_line(line) {
+    line -> tokenize_zplus -> each(token) {
+        token.type -> {
+            gate(== keyword)    -> color(#FF6B35),   // orange
+            gate(== operator)   -> color(#29ADFF),   // blue (-> ~> gate)
+            gate(== string)     -> color(#00E436),   // green
+            gate(== number)     -> color(#FFEC27),   // yellow
+            gate(== comment)    -> color(#5F574F),   // gray
+            gate(== identifier) -> color(#FFF1E8),   // white
+            gate(== builtin)    -> color(#FF77A8),   // pink (emit, sense, act)
+            gate(== type)       -> color(#83769C)    // indigo
+        }
+    }
+}
+
+// Language detection by extension
+file_extension -> {
+    gate(== ".zp")  -> highlighter.set(zplus),
+    gate(== ".c")   -> highlighter.set(c),
+    gate(== ".h")   -> highlighter.set(c),
+    gate(== ".py")  -> highlighter.set(python),
+    gate(== ".md")  -> highlighter.set(markdown),
+    otherwise       -> highlighter.set(plain)
+}
+
+// ══════════════════════════════════════════════
+// SIGNAL GRAPH PANEL
+// ══════════════════════════════════════════════
+
+// The killer feature: see your Z+ program as a live signal graph.
+// Edit the text, graph updates. Click the graph, cursor jumps.
+// Bidirectional. Always in sync.
+
+buffer.content -> zp_parse -> program_graph
+
+graph_panel : display_region(side: right, width: 40%) -> canvas
+
+// Draw nodes as boxes
+program_graph.nodes -> each(node) {
+    graph_panel.rect(
+        at: layout_position(node),
+        w: 100, h: 30,
+        color: node_color(node.type),
+        label: node.name,
+        on_click: cursor.goto(node.source_line)
+    )
+}
+
+// Draw edges as lines
+program_graph.edges -> each(edge) {
+    graph_panel.line(
+        from: layout_position(edge.src),
+        to: layout_position(edge.dst),
+        color: #29ADFF,
+        arrow: true
+    )
+}
+
+// Live execution: if the program is running, animate data flow
+program_graph.running -> {
+    sig_get_chain(chain_id) -> each(node) {
+        node.state -> {
+            gate(== SIG_IDLE)    -> graph_panel.node(node).color(#333333),
+            gate(== SIG_READY)   -> graph_panel.node(node).color(#CCAA00),
+            gate(== SIG_RUNNING) -> graph_panel.node(node).color(#FFFFFF),
+            gate(== SIG_DONE)    -> graph_panel.node(node).color(#00AA44),
+            gate(== SIG_ERROR)   -> graph_panel.node(node).color(#AA0000)
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// COMPILER / INTERPRETER INTEGRATION
+// ══════════════════════════════════════════════
+
+// Compile on save (or on keystroke with debounce)
+buffer.content -> debounce(500ms) -> zp_parse -> {
+    gate(success) -> {
+        errors_panel.clear,
+        program_graph.update
+    },
+    gate(error) -> {
+        errors_panel.show(error),
+        buffer.mark_error(error.line, error.col)
+    }
+}
+
+// Run current file
+keyboard -> gate(key: "F5") -> run_current -> {
+    buffer.content -> zp_compile -> zp_execute -> {
+        output_panel.show(output),
+        program_graph.animate
+    }
+}
+
+// Run with breakpoint
+keyboard -> gate(key: "F9") -> toggle_breakpoint(cursor.line)
+keyboard -> gate(key: "F5", breakpoints: active) -> debug_mode -> {
+    buffer.content -> zp_compile_debug -> step_executor -> {
+        // Pause at breakpoints
+        gate(hit_breakpoint) -> {
+            // Show all signal values at this point
+            variables_panel.show(chain_state),
+            // Highlight active node in graph
+            program_graph.highlight(current_node),
+            // Wait for step/continue
+            keyboard -> {
+                gate(key: "F10") -> step_over,
+                gate(key: "F11") -> step_into,
+                gate(key: "F5")  -> continue
+            }
+        }
+    }
+}
+
+// ══════════════════════════════════════════════
+// TERMINAL
+// ══════════════════════════════════════════════
+
+terminal : display_region(side: bottom, height: 30%)
+
+// Shell integration
+terminal -> shell_process -> {
+    terminal.input  -> shell_process.stdin,
+    shell_process.stdout -> terminal.output,
+    shell_process.stderr -> terminal.output(color: red)
+}
+
+// Quick commands
+keyboard -> gate(key: "ctrl+`") -> terminal.toggle
+keyboard -> gate(key: "ctrl+shift+b") -> terminal.run("zeos build")
+keyboard -> gate(key: "ctrl+shift+t") -> terminal.run("zeos run")
+
+// ══════════════════════════════════════════════
+// FILE EXPLORER
+// ══════════════════════════════════════════════
+
+explorer : display_region(side: left, width: 200)
+
+vault.list(project_root) -> file_tree -> explorer.render(
+    icons: {
+        ".zp":  icon_zplus,
+        ".c":   icon_c,
+        ".h":   icon_header,
+        ".md":  icon_doc,
+        "/":    icon_folder
+    },
+    on_click: file_open,
+    on_double_click: file_open
+)
+
+// File search
+keyboard -> gate(key: "ctrl+p") -> quick_open -> {
+    text_input(prompt: "Open file: ") -> query,
+    vault.search(project_root, query) -> fuzzy_match -> results_list,
+    results_list.select -> file_open
+}
+
+// Content search
+keyboard -> gate(key: "ctrl+shift+f") -> search_all -> {
+    text_input(prompt: "Search: ") -> query,
+    vault.grep(project_root, query) -> results,
+    results -> search_results_panel.show
+}
+
+// ══════════════════════════════════════════════
+// AUTOCOMPLETE
+// ══════════════════════════════════════════════
+
+// Z+ autocomplete: suggest nodes, keywords, and connections
+buffer.content -> cursor_context -> autocomplete_engine
+
+autocomplete_engine : {
+    // Keyword completion
+    gate(partial_keyword) -> zplus_keywords -> filter(starts_with: partial) -> suggestions,
+
+    // Node name completion (from current file's parsed graph)
+    gate(after_arrow) -> program_graph.nodes -> map(name) -> suggestions,
+
+    // Built-in function completion
+    gate(after_colon) -> builtins(["emit", "sense", "act", "gate", "print",
+                                    "delta", "debounce", "rate", "map",
+                                    "clamp", "smooth"]) -> suggestions,
+
+    // Snippet completion
+    gate(line_start) -> snippets -> filter(starts_with: partial) -> suggestions
+}
+
+// Show popup
+suggestions -> gate(count > 0) -> autocomplete_popup(
+    at: cursor,
+    items: suggestions,
+    on_select: buffer.insert(selected)
+)
+
+keyboard -> gate(key: "ctrl+space") -> autocomplete_engine.trigger
+
+// ══════════════════════════════════════════════
+// SNIPPETS
+// ══════════════════════════════════════════════
+
+snippets : {
+    "source":   "name : emit(${1:value})\n",
+    "transform":"name : input -> ${1:* 2} -> output\n",
+    "gate":     "name : input -> gate(${1:> 0}) -> output\n",
+    "print":    "name : input -> print(\"${1:{value}}\")\n",
+    "sense":    "name : sense(${1:distance}, pin: ${2:2})\n",
+    "act":      "name : act(${1:dc_motor}, pin: ${2:5})\n",
+    "wire":     "${1:source} -> ${2:transform} -> ${3:sink}\n",
+    "fork":     "${1:source} -> {${2:a}, ${3:b}}\n",
+    "tap":      "${1:source} ~> dashboard(\"${2:label}\")\n"
+}
+
+// ══════════════════════════════════════════════
+// MULTIPLE TABS / SPLIT VIEW
+// ══════════════════════════════════════════════
+
+tabs : tab_bar(position: top)
+
+keyboard -> {
+    gate(key: "ctrl+n")     -> tabs.new,
+    gate(key: "ctrl+w")     -> tabs.close_current,
+    gate(key: "ctrl+tab")   -> tabs.next,
+    gate(key: "ctrl+1".."9") -> tabs.goto(key - 1)
+}
+
+// Split editing
+keyboard -> gate(key: "ctrl+\\") -> split_view(direction: vertical)
+keyboard -> gate(key: "ctrl+-")  -> split_view(direction: horizontal)
+
+// ══════════════════════════════════════════════
+// GIT INTEGRATION
+// ══════════════════════════════════════════════
+
+// Git status as signal
+vault.watch(".git") -> git_status
+
+git_status -> {
+    modified_files  -> explorer.mark(color: yellow),
+    untracked_files -> explorer.mark(color: green),
+    deleted_files   -> explorer.mark(color: red)
+}
+
+// Inline diff
+buffer.content -> diff(against: git.head) -> {
+    added_lines   -> gutter.mark(color: green),
+    removed_lines -> gutter.mark(color: red),
+    changed_lines -> gutter.mark(color: yellow)
+}
+
+keyboard -> gate(key: "ctrl+shift+g") -> git_panel -> {
+    git.status -> panel.show,
+    panel.stage -> git.add,
+    panel.commit(message) -> git.commit,
+    panel.push -> git.push
+}
+
+// ══════════════════════════════════════════════
+// ROBOT LIVE LINK (Zeros integration)
+// ══════════════════════════════════════════════
+
+// When editing a robotics .zp file, connect to the robot
+// and see sensor data LIVE while you edit
+
+robot_link : connect("robot.local:4200")
+
+gate(file_extension == ".zp", robot_link.connected) -> {
+    // Show live sensor values inline as ghost text
+    buffer.nodes -> each(node) {
+        gate(node.type: "sense") -> {
+            robot_link.sensor(node.name) -> live_value,
+            buffer.ghost_text(
+                line: node.source_line,
+                text: "  // live: {live_value}",
+                color: #5F574F
+            )
+        }
+    },
+
+    // Live reload: save → upload to robot → restart
+    file_save -> robot_link.upload(buffer.content) -> robot_link.restart,
+
+    // Status in status bar
+    robot_link.status ~> status_bar.indicator(
+        connected: green,
+        disconnected: red
+    )
+}
+
+// ══════════════════════════════════════════════
+// DISPLAY LAYOUT
+// ══════════════════════════════════════════════
+
+screen : display(
+    width: 1280, height: 800,
+    background: #0D1117,           // dark, warm, long sessions
+    font: monospace,
+    font_size: 14
+)
+
+// Layout: explorer | editor + graph | terminal
+//         ─────────┼────────────────┼──────────
+//         file tree| code    | graph| output
+//                  |         |      |
+//         ─────────┼────────────────┼──────────
+//                  | terminal / errors
+
+status_bar : screen.region(
+    x: 0, y: screen.height - 24,
+    w: screen.width, h: 24,
+    background: #1A1A2E
+)
+
+cursor -> status_bar.text(x: screen.width - 150, y: 4,
+    format: "Ln {line}, Col {col}", color: gray)
+file_extension -> status_bar.text(x: screen.width - 60, y: 4, color: gray)
+current_path -> status_bar.text(x: 8, y: 4, color: gray, truncate: true)
+
+// ══════════════════════════════════════════════
+// THEME
+// ══════════════════════════════════════════════
+
+// Follows Zeos UI principles:
+// - Dark, warm, not clinical
+// - Density is respect
+// - Glow is earned (only active elements light up)
+// - Built for long sessions
+// - Low stimuli mode available
+
+theme : {
+    background:     #0D1117,
+    foreground:     #FFF1E8,
+    gutter:         #1A1A2E,
+    selection:      #29ADFF30,
+    cursor:         #FFEC27,
+    line_highlight: #FFFFFF08,
+    comment:        #5F574F,
+    keyword:        #FF6B35,
+    string:         #00E436,
+    number:         #FFEC27,
+    operator:       #29ADFF,
+    builtin:        #FF77A8,
+    error:          #FF004D,
+    warning:        #FFA300,
+    success:        #00E436
+}
+
+keyboard -> gate(key: "ctrl+shift+l") -> theme.toggle(dark, low_stimuli, high_contrast)
+
+
+// ══════════════════════════════════════════════
+// TELEMETRY
+// ══════════════════════════════════════════════
+
+buffer.edits      ~> rate(per: 1m) ~> edits_per_minute
+file_save         ~> rate(per: 1h) ~> saves_per_hour
+autocomplete.used ~> rate(per: 1h) ~> completions_per_hour

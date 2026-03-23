@@ -1,30 +1,42 @@
 /*
- * Zeos — Minimal shell
+ * Zeos — Shell with Persona System
  *
- * Commands:
- *   help     — show available commands
- *   info     — system info (framebuffer, memory, ACPI)
- *   tsc      — read the TSC (Zixel timing)
- *   clear    — clear screen
- *   zeos     — about
+ * Three views of the same shell:
+ *   zeros>  — Robotics/hardware-first (Zeros)
+ *   derez>  — Code/AI-first (DereZ)
+ *   zeos>   — Full system (curtain raised)
+ *
+ * Every command exists in all modes. The persona only changes what
+ * 'help' shows. You can always type any command. The curtain is
+ * about discovery, not restriction.
+ *
+ * "raise"  — lift the curtain, see everything
+ * "zeros"  — drop into robotics persona
+ * "derez"  — drop into dev persona
  */
 
 #include "shell.h"
+#include "persona.h"
+#include "kprint.h"
 #include "fb.h"
 #include "keyboard.h"
 #include "pci.h"
 #include "pmm.h"
 #include "heap.h"
+#include "zplus.h"
+#include "sigviz.h"
+#include "vault.h"
 #include "timer.h"
 #include "signal.h"
 
 #define CMD_BUF_SIZE 256
 
 static struct zeos_boot_info *g_boot;
+static enum persona g_persona = PERSONA_FULL;
+static int vault_ready = 0;
 
-/*
- * Simple string comparison.
- */
+/* ── String helpers ─────────────────────────────── */
+
 static int streq(const char *a, const char *b)
 {
     while (*a && *b) {
@@ -36,38 +48,158 @@ static int streq(const char *a, const char *b)
     return *a == *b;
 }
 
-static void cmd_help(void)
+/* Return pointer past the first word (skip command name, return args) */
+static const char *skip_word(const char *s)
 {
-    fb_puts("  help     show this message\n");
-    fb_puts("  info     system information\n");
-    fb_puts("  mem      memory stats\n");
-    fb_puts("  heap     heap stats\n");
-    fb_puts("  lspci    list PCI/PCIe devices\n");
-    fb_puts("  tsc      read TSC (Zixel timing)\n");
-    fb_puts("  delta    measure TSC delta (two reads)\n");
-    fb_puts("  signal   run signal chain demo\n");
-    fb_puts("  clear    clear screen\n");
-    fb_puts("  zeos     about\n");
+    while (*s && *s != ' ')
+        s++;
+    while (*s == ' ')
+        s++;
+    return s;
 }
 
-static void cmd_info(void)
-{
-    fb_puts("Framebuffer: ");
-    fb_put_dec(g_boot->fb.width);
-    fb_puts("x");
-    fb_put_dec(g_boot->fb.height);
-    fb_puts(" pitch=");
-    fb_put_dec(g_boot->fb.pitch);
-    fb_puts("\n");
+/* ── Forward declarations ───────────────────────── */
 
-    fb_puts("ACPI RSDP:   ");
-    if (g_boot->rsdp) {
-        fb_puts("0x");
-        fb_put_hex((uint64_t)(unsigned long)g_boot->rsdp);
-    } else {
-        fb_puts("not found");
+static void cmd_help(const char *args);
+static void cmd_info(const char *args);
+static void cmd_mem(const char *args);
+static void cmd_heap(const char *args);
+static void cmd_lspci(const char *args);
+static void cmd_tsc(const char *args);
+static void cmd_delta(const char *args);
+static void cmd_signal(const char *args);
+static void cmd_clear(const char *args);
+static void cmd_about(const char *args);
+
+/* Persona switching */
+static void cmd_raise(const char *args);
+static void cmd_zeros(const char *args);
+static void cmd_derez(const char *args);
+
+/* Zeros persona — robotics/hardware */
+static void cmd_scan(const char *args);
+static void cmd_sensors(const char *args);
+static void cmd_motors(const char *args);
+static void cmd_build(const char *args);
+
+/* DereZ persona — code/dev */
+static void cmd_chains(const char *args);
+static void cmd_trace(const char *args);
+static void cmd_nodes(const char *args);
+static void cmd_inject(const char *args);
+
+/* Z+ interpreter */
+static void cmd_run(const char *args);
+static void cmd_programs(const char *args);
+
+/* Signal visualizer */
+static void cmd_viz(const char *args);
+
+/* VAULT filesystem */
+static void cmd_ls(const char *args);
+static void cmd_cat(const char *args);
+static void cmd_write_file(const char *args);
+static void cmd_mkdir(const char *args);
+static void cmd_df(const char *args);
+
+/* ── Command table ──────────────────────────────── */
+
+static const struct shell_cmd commands[] = {
+    /* Always visible */
+    {"help",    "show available commands",       cmd_help,    VIS_ALWAYS},
+    {"clear",   "clear screen",                  cmd_clear,   VIS_ALWAYS},
+
+    /* Persona switching — always visible */
+    {"raise",   "raise the curtain (full mode)",  cmd_raise,   VIS_ALWAYS},
+    {"zeros",   "robotics mode",                  cmd_zeros,   VIS_ALWAYS},
+    {"derez",   "dev mode",                       cmd_derez,   VIS_ALWAYS},
+
+    /* Zeros persona — robotics/hardware */
+    {"scan",    "scan for hardware devices",      cmd_scan,    VIS_ZEROS},
+    {"sensors", "read sensor values",             cmd_sensors, VIS_ZEROS},
+    {"motors",  "motor status and control",       cmd_motors,  VIS_ZEROS},
+    {"build",   "build and flash project",        cmd_build,   VIS_ZEROS},
+    {"delta",   "measure timing delta",           cmd_delta,   VIS_ZEROS},
+    {"info",    "system information",             cmd_info,    VIS_ZEROS},
+    {"mem",     "memory stats",                   cmd_mem,     VIS_ZEROS},
+
+    /* DereZ persona — code/dev */
+    {"signal",  "run signal chain demo",          cmd_signal,  VIS_DEREZ},
+    {"chains",  "list active signal chains",      cmd_chains,  VIS_DEREZ},
+    {"nodes",   "show nodes in a chain",          cmd_nodes,   VIS_DEREZ},
+    {"trace",   "trace signal flow with timing",  cmd_trace,   VIS_DEREZ},
+    {"inject",  "inject data into a signal node", cmd_inject,  VIS_DEREZ},
+    {"tsc",     "read TSC (raw timing)",          cmd_tsc,     VIS_DEREZ},
+    {"heap",    "heap allocator stats",           cmd_heap,    VIS_DEREZ},
+
+    /* Z+ interpreter — visible in DereZ and Full */
+    {"run",     "run a Z+ program",               cmd_run,     VIS_DEREZ},
+    {"programs","list built-in Z+ programs",       cmd_programs,VIS_DEREZ},
+    {"viz",     "visualize signal chain (graphical)", cmd_viz,  VIS_DEREZ},
+
+    /* VAULT filesystem — always visible */
+    {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
+    {"cat",     "show file contents",              cmd_cat,     VIS_ALWAYS},
+    {"save",    "save text to file (save path text)", cmd_write_file, VIS_DEREZ},
+    {"mkdir",   "create directory",                cmd_mkdir,   VIS_DEREZ},
+    {"df",      "VAULT disk usage",                cmd_df,      VIS_FULL},
+
+    /* Full only — deep system commands */
+    {"lspci",   "list PCI/PCIe devices (raw)",    cmd_lspci,   VIS_FULL},
+    {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
+};
+
+#define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
+
+/* ── Core commands (unchanged logic) ────────────── */
+
+static void cmd_help(const char *args)
+{
+    (void)args;
+    kputs("\n");
+    kputs(persona_banner(g_persona));
+
+    for (int i = 0; i < (int)NUM_COMMANDS; i++) {
+        if (cmd_visible(&commands[i], g_persona)) {
+            kputs("  ");
+            kputs(commands[i].name);
+            /* Pad to 10 chars */
+            int len = 0;
+            const char *p = commands[i].name;
+            while (*p++) len++;
+            for (int j = len; j < 10; j++)
+                kputc(' ');
+            kputs(commands[i].desc);
+            kputs("\n");
+        }
     }
-    fb_puts("\n");
+    kputs("\n");
+
+    if (g_persona != PERSONA_FULL) {
+        kputs("  Tip: any command works even if not listed. ");
+        kputs("'raise' shows all.\n\n");
+    }
+}
+
+static void cmd_info(const char *args)
+{
+    (void)args;
+    kputs("Framebuffer: ");
+    kput_dec(g_boot->fb.width);
+    kputs("x");
+    kput_dec(g_boot->fb.height);
+    kputs(" pitch=");
+    kput_dec(g_boot->fb.pitch);
+    kputs("\n");
+
+    kputs("ACPI RSDP:   ");
+    if (g_boot->rsdp) {
+        kputs("0x");
+        kput_hex((uint64_t)(unsigned long)g_boot->rsdp);
+    } else {
+        kputs("not found");
+    }
+    kputs("\n");
 
     /* Count memory */
     uint64_t usable = 0;
@@ -82,9 +214,9 @@ static void cmd_info(void)
         }
         entry += g_boot->mmap.desc_size;
     }
-    fb_puts("Memory:      ");
-    fb_put_dec(usable / (1024 * 1024));
-    fb_puts(" MB usable\n");
+    kputs("Memory:      ");
+    kput_dec(usable / (1024 * 1024));
+    kputs(" MB usable\n");
 }
 
 static uint64_t read_tsc(void)
@@ -94,37 +226,46 @@ static uint64_t read_tsc(void)
     return ((uint64_t)hi << 32) | lo;
 }
 
-static void cmd_tsc(void)
+static void cmd_tsc(const char *args)
 {
+    (void)args;
     uint64_t tsc = read_tsc();
-    fb_puts("TSC: 0x");
-    fb_put_hex(tsc);
-    fb_puts("\n");
+    kputs("TSC: 0x");
+    kput_hex(tsc);
+    kputs("\n");
 }
 
-static void cmd_delta(void)
+static void cmd_delta(const char *args)
 {
-    fb_puts("Reading TSC delta (two sequential reads)...\n");
+    (void)args;
+    kputs("Reading TSC delta (two sequential reads)...\n");
     uint64_t t1 = read_tsc();
     uint64_t t2 = read_tsc();
     uint64_t delta = t2 - t1;
-    fb_puts("  t1:    0x");
-    fb_put_hex(t1);
-    fb_puts("\n  t2:    0x");
-    fb_put_hex(t2);
-    fb_puts("\n  delta: ");
-    fb_put_dec(delta);
-    fb_puts(" cycles\n");
-    fb_puts("  Zixel: timing granularity = ");
-    fb_put_dec(delta);
-    fb_puts(" TSC ticks\n");
+    kputs("  t1:    0x");
+    kput_hex(t1);
+    kputs("\n  t2:    0x");
+    kput_hex(t2);
+    kputs("\n  delta: ");
+    kput_dec(delta);
+    kputs(" cycles\n");
+
+    if (g_persona == PERSONA_ZEROS) {
+        /* Student-friendly explanation */
+        kputs("\n  This is how fast your hardware thinks.\n");
+        kputs("  Lower = faster silicon. Watch it change with temperature.\n");
+    } else {
+        kputs("  Zixel: timing granularity = ");
+        kput_dec(delta);
+        kputs(" TSC ticks\n");
+    }
 }
 
 static void fb_put_hex8(uint8_t val)
 {
     static const char hex[] = "0123456789abcdef";
-    fb_putc(hex[(val >> 4) & 0xf]);
-    fb_putc(hex[val & 0xf]);
+    kputc(hex[(val >> 4) & 0xf]);
+    kputc(hex[val & 0xf]);
 }
 
 static void fb_put_hex16(uint16_t val)
@@ -133,42 +274,42 @@ static void fb_put_hex16(uint16_t val)
     fb_put_hex8(val & 0xff);
 }
 
-static void cmd_mem(void)
+static void cmd_mem(const char *args)
 {
-    fb_puts("Physical pages: ");
-    fb_put_dec(pmm_total_pages());
-    fb_puts(" total, ");
-    fb_put_dec(pmm_free_pages());
-    fb_puts(" free, ");
-    fb_put_dec(pmm_used_pages());
-    fb_puts(" used\n");
+    (void)args;
+    kputs("Physical pages: ");
+    kput_dec(pmm_total_pages());
+    kputs(" total, ");
+    kput_dec(pmm_free_pages());
+    kputs(" free, ");
+    kput_dec(pmm_used_pages());
+    kputs(" used\n");
 
-    fb_puts("Memory:         ");
-    fb_put_dec(pmm_free_pages() * 4 / 1024);
-    fb_puts(" MB free / ");
-    fb_put_dec(pmm_total_pages() * 4 / 1024);
-    fb_puts(" MB total\n");
+    kputs("Memory:         ");
+    kput_dec(pmm_free_pages() * 4 / 1024);
+    kputs(" MB free / ");
+    kput_dec(pmm_total_pages() * 4 / 1024);
+    kputs(" MB total\n");
 }
 
-static void cmd_alloc(void)
+static void cmd_heap(const char *args)
 {
-    uint64_t page = pmm_alloc();
-    if (page) {
-        fb_puts("Allocated page at 0x");
-        fb_put_hex(page);
-        fb_puts(" (");
-        fb_put_dec(pmm_free_pages());
-        fb_puts(" pages remaining)\n");
-    } else {
-        fb_puts("Out of memory!\n");
-    }
+    (void)args;
+    kputs("Heap: ");
+    kput_dec(heap_used_bytes());
+    kputs(" used / ");
+    kput_dec(heap_total_bytes());
+    kputs(" total (");
+    kput_dec(heap_free_bytes());
+    kputs(" free)\n");
 }
 
-static void cmd_lspci(void)
+static void cmd_lspci(const char *args)
 {
+    (void)args;
     int count = pci_device_count();
     if (count == 0) {
-        fb_puts("No PCI devices found.\n");
+        kputs("No PCI devices found.\n");
         return;
     }
 
@@ -178,75 +319,64 @@ static void cmd_lspci(void)
 
         /* Bus:Dev.Func */
         fb_put_hex8(d->bus);
-        fb_puts(":");
+        kputs(":");
         fb_put_hex8(d->dev);
-        fb_puts(".");
-        fb_putc('0' + d->func);
-        fb_puts("  ");
+        kputs(".");
+        kputc('0' + d->func);
+        kputs("  ");
 
         /* Vendor:Device */
         fb_put_hex16(d->vendor_id);
-        fb_puts(":");
+        kputs(":");
         fb_put_hex16(d->device_id);
-        fb_puts("  ");
+        kputs("  ");
 
         /* Class name */
-        fb_puts(pci_class_name(d->class_code, d->subclass));
+        kputs(pci_class_name(d->class_code, d->subclass));
 
         /* Flag known devices */
         if (d->vendor_id == 0x1da3 && d->device_id == 0x0001)
-            fb_puts("  ** GOYA HL-1000 **");
+            kputs("  ** GOYA HL-1000 **");
         else if (d->vendor_id == 0x1002)
-            fb_puts("  [AMD/ATI]");
+            kputs("  [AMD/ATI]");
         else if (d->vendor_id == 0x8086)
-            fb_puts("  [Intel]");
+            kputs("  [Intel]");
         else if (d->vendor_id == 0x10ee)
-            fb_puts("  [Xilinx]");
+            kputs("  [Xilinx]");
         else if (d->vendor_id == 0x15b3)
-            fb_puts("  [Mellanox]");
+            kputs("  [Mellanox]");
         else if (d->vendor_id == 0x10de)
-            fb_puts("  [NVIDIA]");
+            kputs("  [NVIDIA]");
         else if (d->vendor_id == 0x1022)
-            fb_puts("  [AMD]");
+            kputs("  [AMD]");
 
-        fb_puts("\n");
+        kputs("\n");
     }
 
-    fb_put_dec(count);
-    fb_puts(" devices total.\n");
+    kput_dec(count);
+    kputs(" devices total.\n");
 }
 
-static void cmd_heap(void)
+static void cmd_clear(const char *args)
 {
-    fb_puts("Heap: ");
-    fb_put_dec(heap_used_bytes());
-    fb_puts(" used / ");
-    fb_put_dec(heap_total_bytes());
-    fb_puts(" total (");
-    fb_put_dec(heap_free_bytes());
-    fb_puts(" free)\n");
+    (void)args;
+    fb_clear(0x001A1A1A);
 }
 
-/*
- * Signal chain demo: three-node pipeline
- *   [Source] → [Double] → [Display]
- *
- * Source produces a number. Double multiplies by 2. Display shows it.
- * This is TRISA's pattern: detect → transform → output.
- */
+/* ── Signal chain demo (unchanged) ──────────────── */
+
 static int demo_source(struct sig_node *node, struct sig_data *in,
                         struct sig_data *out)
 {
     (void)node;
     (void)in;
-    /* Produce the number 42 */
     uint32_t val = 42;
     out->data[0] = val & 0xFF;
     out->data[1] = (val >> 8) & 0xFF;
     out->data[2] = (val >> 16) & 0xFF;
     out->data[3] = (val >> 24) & 0xFF;
     out->size = 4;
-    out->type = 1;  /* uint32 */
+    out->type = 1;
     return 0;
 }
 
@@ -273,74 +403,803 @@ static int demo_display(struct sig_node *node, struct sig_data *in,
     (void)out;
     uint32_t val = in->data[0] | (in->data[1] << 8) |
                    (in->data[2] << 16) | (in->data[3] << 24);
-    fb_puts("  [Display] received: ");
-    fb_put_dec(val);
-    fb_puts("\n");
+    kputs("  [Display] received: ");
+    kput_dec(val);
+    kputs("\n");
     return 0;
 }
 
-static void cmd_signal(void)
+static void cmd_signal(const char *args)
 {
-    fb_puts("Signal chain demo: [Source:42] -> [Double] -> [Display]\n\n");
+    (void)args;
+    kputs("Signal chain demo: [Source:42] -> [Double] -> [Display]\n\n");
 
-    /* Create chain */
     int chain = sig_chain_create("demo");
     if (chain < 0) {
-        fb_puts("Failed to create chain!\n");
+        kputs("Failed to create chain!\n");
         return;
     }
 
-    /* Add nodes */
     int src = sig_node_add(chain, "Source", demo_source, 0);
     int dbl = sig_node_add(chain, "Double", demo_double, 0);
     int dsp = sig_node_add(chain, "Display", demo_display, 0);
 
-    /* Connect: Source → Double → Display */
     sig_edge_add(chain, src, dbl);
     sig_edge_add(chain, dbl, dsp);
 
-    /* Inject empty data to trigger Source */
     struct sig_data trigger = {.size = 0, .type = 0};
     sig_inject(chain, src, &trigger);
 
-    /* Resolve the chain */
-    fb_puts("  Resolving...\n");
+    kputs("  Resolving...\n");
     int fired = sig_resolve(chain);
 
-    fb_puts("  ");
-    fb_put_dec(fired);
-    fb_puts(" nodes fired.\n\n");
+    kputs("  ");
+    kput_dec(fired);
+    kputs(" nodes fired.\n\n");
 
-    /* Print timing for each node */
     struct sig_chain *c = sig_get_chain(chain);
     if (c) {
-        fb_puts("  Node timing (TSC cycles):\n");
+        kputs("  Node timing (TSC cycles):\n");
         for (int i = 0; i < c->node_count; i++) {
             struct sig_node *n = &c->nodes[i];
-            fb_puts("    ");
-            fb_puts(n->name);
-            fb_puts(": ");
-            fb_put_dec(n->tsc_end - n->tsc_start);
-            fb_puts(" cycles\n");
+            kputs("    ");
+            kputs(n->name);
+            kputs(": ");
+            kput_dec(n->tsc_end - n->tsc_start);
+            kputs(" cycles\n");
         }
-        fb_puts("\n  Chain total: ");
-        fb_put_dec(c->tsc_end - c->tsc_start);
-        fb_puts(" cycles (");
-        fb_put_dec(c->resolve_count);
-        fb_puts(" resolutions)\n");
+        kputs("\n  Chain total: ");
+        kput_dec(c->tsc_end - c->tsc_start);
+        kputs(" cycles (");
+        kput_dec(c->resolve_count);
+        kputs(" resolutions)\n");
     }
 }
 
-static void cmd_zeos(void)
+static void cmd_about(const char *args)
 {
-    fb_puts("\n");
-    fb_puts("  Zeos\n");
-    fb_puts("  The first operating system with proprioception.\n");
-    fb_puts("  Built by Codex Labs LLC.\n\n");
-    fb_puts("  Signal chains, not processes.\n");
-    fb_puts("  CFA addressing, not flat memory.\n");
-    fb_puts("  TRISA decides. The machine feels.\n\n");
+    (void)args;
+    kputs("\n");
+    kputs("  Zeos\n");
+    kputs("  The first operating system with proprioception.\n");
+    kputs("  Built by Codex Labs LLC.\n\n");
+    kputs("  Signal chains, not processes.\n");
+    kputs("  CFA addressing, not flat memory.\n");
+    kputs("  TRISA decides. The machine feels.\n\n");
 }
+
+/* ── Persona switching ──────────────────────────── */
+
+static void cmd_raise(const char *args)
+{
+    (void)args;
+    g_persona = PERSONA_FULL;
+    kputs(persona_banner(g_persona));
+}
+
+static void cmd_zeros(const char *args)
+{
+    (void)args;
+    g_persona = PERSONA_ZEROS;
+    kputs(persona_banner(g_persona));
+}
+
+static void cmd_derez(const char *args)
+{
+    (void)args;
+    g_persona = PERSONA_DEREZ;
+    kputs(persona_banner(g_persona));
+}
+
+/* ── Zeros persona commands ─────────────────────── */
+
+static void cmd_scan(const char *args)
+{
+    (void)args;
+    kputs("\n  Scanning for hardware...\n\n");
+
+    int count = pci_device_count();
+    int hw_count = 0;
+
+    for (int i = 0; i < count; i++) {
+        struct pci_device *d = pci_get_device(i);
+        if (!d) continue;
+
+        /* Show hardware in student-friendly terms */
+        const char *friendly = 0;
+
+        if (d->vendor_id == 0x1da3 && d->device_id == 0x0001)
+            friendly = "Goya Brain Card (AI accelerator)";
+        else if (d->vendor_id == 0x10ee)
+            friendly = "FPGA Board (programmable logic)";
+        else if (d->class_code == 0x03)
+            friendly = "Display (graphics)";
+        else if (d->class_code == 0x01)
+            friendly = "Storage (disk/SSD)";
+        else if (d->class_code == 0x02)
+            friendly = "Network (ethernet/wifi)";
+        else if (d->class_code == 0x0C && d->subclass == 0x03)
+            friendly = "USB Controller";
+        else if (d->class_code == 0x04)
+            friendly = "Audio";
+        else
+            continue;  /* Skip boring bridge/host devices */
+
+        kputs("  ");
+        kputs(friendly);
+        kputs("\n");
+        hw_count++;
+    }
+
+    if (hw_count == 0) {
+        kputs("  No interesting hardware found.\n");
+    }
+
+    kputs("\n  ");
+    kput_dec(hw_count);
+    kputs(" devices ready.\n");
+    kputs("  Use 'lspci' for the raw PCI bus view.\n\n");
+}
+
+static void cmd_sensors(const char *args)
+{
+    (void)args;
+    kputs("\n  Sensor readings:\n\n");
+
+    /* TSC delta as a "temperature proxy" — this is real Zixel */
+    uint64_t t1 = read_tsc();
+    uint64_t t2 = read_tsc();
+    uint64_t delta = t2 - t1;
+
+    kputs("  timing    ");
+    kput_dec(delta);
+    kputs(" cycles  (silicon speed — changes with heat)\n");
+
+    kputs("  memory    ");
+    kput_dec(pmm_free_pages() * 4 / 1024);
+    kputs(" MB free\n");
+
+    kputs("  heap      ");
+    kput_dec(heap_free_bytes());
+    kputs(" bytes free\n");
+
+    /* PCI device count as "what's connected" */
+    kputs("  devices   ");
+    kput_dec(pci_device_count());
+    kputs(" on bus\n");
+
+    /* Signal chains as "running programs" */
+    kputs("  chains    ");
+    kput_dec(sig_chain_count());
+    kputs(" active\n");
+
+    kputs("\n  Tip: run 'sensors' again — watch the timing value change.\n");
+    kputs("  That's your hardware's heartbeat.\n\n");
+}
+
+static void cmd_motors(const char *args)
+{
+    (void)args;
+    kputs("\n  Motor subsystem: no hardware connected.\n\n");
+    kputs("  When a motor controller is on the bus, this command\n");
+    kputs("  shows speed, direction, current draw, and fault state.\n\n");
+    kputs("  Supported controllers:\n");
+    kputs("    - PWM via GPIO (direct pin)\n");
+    kputs("    - I2C motor drivers (PCA9685, etc.)\n");
+    kputs("    - CAN bus (industrial servos)\n\n");
+    kputs("  Connect hardware and run 'scan' to detect it.\n\n");
+}
+
+static void cmd_build(const char *args)
+{
+    (void)args;
+    kputs("\n  Build system: use 'zeos build' from the host.\n\n");
+    kputs("  From your Linux terminal:\n");
+    kputs("    zeos build       compile the kernel\n");
+    kputs("    zeos run         build and test in QEMU\n");
+    kputs("    zeos flash       write to USB for real hardware\n");
+    kputs("    zeos doctor      check dependencies\n\n");
+}
+
+/* ── DereZ persona commands ─────────────────────── */
+
+static void cmd_chains(const char *args)
+{
+    (void)args;
+    int count = sig_chain_count();
+    if (count == 0) {
+        kputs("No signal chains active.\n");
+        kputs("Run 'signal' to create the demo chain.\n");
+        return;
+    }
+
+    kputs("\n  Active signal chains:\n\n");
+    for (int i = 0; i < count; i++) {
+        struct sig_chain *c = sig_get_chain(i);
+        if (!c || !c->active) continue;
+
+        kputs("  [");
+        kput_dec(i);
+        kputs("] ");
+        kputs(c->name);
+        kputs("  (");
+        kput_dec(c->node_count);
+        kputs(" nodes, ");
+        kput_dec(c->resolve_count);
+        kputs(" resolutions)\n");
+    }
+    kputs("\n  Use 'nodes <id>' to inspect a chain.\n\n");
+}
+
+static void cmd_nodes(const char *args)
+{
+    /* Parse chain ID from args */
+    int chain_id = 0;
+    if (*args >= '0' && *args <= '9') {
+        chain_id = *args - '0';
+    }
+
+    struct sig_chain *c = sig_get_chain(chain_id);
+    if (!c) {
+        kputs("Chain ");
+        kput_dec(chain_id);
+        kputs(" not found. Run 'chains' to see active chains.\n");
+        return;
+    }
+
+    kputs("\n  Chain: ");
+    kputs(c->name);
+    kputs("\n\n");
+
+    for (int i = 0; i < c->node_count; i++) {
+        struct sig_node *n = &c->nodes[i];
+
+        kputs("  [");
+        kput_dec(i);
+        kputs("] ");
+        kputs(n->name);
+
+        /* State */
+        kputs("  state=");
+        switch (n->state) {
+        case SIG_IDLE:    kputs("idle");    break;
+        case SIG_READY:   kputs("ready");   break;
+        case SIG_RUNNING: kputs("running"); break;
+        case SIG_DONE:    kputs("done");    break;
+        case SIG_ERROR:   kputs("ERROR");   break;
+        }
+
+        /* Timing (if fired) */
+        if (n->state == SIG_DONE && n->tsc_end > n->tsc_start) {
+            kputs("  (");
+            kput_dec(n->tsc_end - n->tsc_start);
+            kputs(" cycles)");
+        }
+
+        /* Edges */
+        if (n->output_count > 0) {
+            kputs("  -> ");
+            for (int e = 0; e < n->output_count; e++) {
+                if (e > 0) kputs(", ");
+                kputs(c->nodes[n->output_nodes[e]].name);
+            }
+        }
+
+        kputs("\n");
+    }
+    kputs("\n");
+}
+
+static void cmd_trace(const char *args)
+{
+    /* Parse chain ID */
+    int chain_id = 0;
+    if (*args >= '0' && *args <= '9') {
+        chain_id = *args - '0';
+    }
+
+    struct sig_chain *c = sig_get_chain(chain_id);
+    if (!c) {
+        kputs("Chain ");
+        kput_dec(chain_id);
+        kputs(" not found. Run 'signal' first to create a chain.\n");
+        return;
+    }
+
+    kputs("\n  Signal trace: ");
+    kputs(c->name);
+    kputs("\n\n");
+
+    /* Visual flow diagram */
+    for (int i = 0; i < c->node_count; i++) {
+        struct sig_node *n = &c->nodes[i];
+
+        /* Node box */
+        kputs("  [");
+        kputs(n->name);
+        kputs("]");
+
+        /* Timing bar — proportional to cycles spent */
+        if (n->state == SIG_DONE && n->tsc_end > n->tsc_start) {
+            uint64_t cycles = n->tsc_end - n->tsc_start;
+            kputs(" ");
+            kput_dec(cycles);
+            kputs("cy ");
+
+            /* Simple bar graph (1 block per ~100 cycles, capped at 20) */
+            int bars = (int)(cycles / 100);
+            if (bars < 1) bars = 1;
+            if (bars > 20) bars = 20;
+            for (int b = 0; b < bars; b++)
+                kputs("#");
+        }
+
+        kputs("\n");
+
+        /* Arrow to next */
+        if (n->output_count > 0 && i < c->node_count - 1) {
+            kputs("    |\n");
+            kputs("    v\n");
+        }
+    }
+
+    kputs("\n  Chain total: ");
+    kput_dec(c->tsc_end - c->tsc_start);
+    kputs(" cycles across ");
+    kput_dec(c->node_count);
+    kputs(" nodes\n\n");
+}
+
+static void cmd_inject(const char *args)
+{
+    (void)args;
+    kputs("\n  inject: inject data into a running signal chain.\n\n");
+    kputs("  Usage:  inject <chain_id> <node_id> <value>\n");
+    kputs("  Example: inject 0 0 42\n\n");
+    kputs("  This feeds a value into a node's input and triggers\n");
+    kputs("  the chain to resolve. Watch data flow with 'trace'.\n\n");
+}
+
+/* ── Z+ built-in programs ───────────────────────── */
+
+/* hello_chain.zp — the first Z+ program */
+static const char zp_hello_chain[] =
+    "// hello_chain.zp — Your first signal chain\n"
+    "source : emit(42)\n"
+    "double : input -> * 2 -> output\n"
+    "display : input -> print(\"Result: {value}\")\n"
+    "source -> double -> display\n";
+
+/* triple_chain — three transforms */
+static const char zp_triple[] =
+    "// Triple chain — three stages\n"
+    "start : emit(10)\n"
+    "add5 : input -> + 5 -> output\n"
+    "times3 : input -> * 3 -> output\n"
+    "show : input -> print(\"Final: {value}\")\n"
+    "start -> add5 -> times3 -> show\n";
+
+/* math_test — multiple operations */
+static const char zp_math[] =
+    "// Math pipeline\n"
+    "seed : emit(7)\n"
+    "double : input -> * 2 -> output\n"
+    "add100 : input -> + 100 -> output\n"
+    "triple : input -> * 3 -> output\n"
+    "sub10 : input -> - 10 -> output\n"
+    "result : input -> print(\"7 * 2 + 100 * 3 - 10 = {value}\")\n"
+    "seed -> double -> add100 -> triple -> sub10 -> result\n";
+
+/* gate_demo — conditional signal flow */
+static const char zp_gate[] =
+    "// Gate demo — signals pass or block\n"
+    "big : emit(100)\n"
+    "small : emit(5)\n"
+    "check_big : input -> gate(> 50) -> output\n"
+    "check_small : input -> gate(> 50) -> output\n"
+    "show_big : input -> print(\"PASSED: {value} > 50\")\n"
+    "show_small : input -> print(\"PASSED: {value} > 50\")\n"
+    "big -> check_big -> show_big\n"
+    "small -> check_small -> show_small\n";
+
+/* fork_demo — one source, multiple destinations */
+static const char zp_fork[] =
+    "// Fork demo — one signal, three paths\n"
+    "source : emit(42)\n"
+    "double : input -> * 2 -> output\n"
+    "triple : input -> * 3 -> output\n"
+    "show_raw : input -> print(\"Raw: {value}\")\n"
+    "show_dbl : input -> print(\"Doubled: {value}\")\n"
+    "show_tri : input -> print(\"Tripled: {value}\")\n"
+    "source -> {show_raw, double, triple}\n"
+    "double -> show_dbl\n"
+    "triple -> show_tri\n";
+
+/* pipeline — gate + math combined */
+static const char zp_pipeline[] =
+    "// Pipeline: emit -> transform -> gate -> display\n"
+    "start : emit(30)\n"
+    "boost : input -> * 3 -> output\n"
+    "check : input -> gate(> 50) -> output\n"
+    "result : input -> print(\"Passed gate: {value}\")\n"
+    "blocked : input -> gate(< 50) -> output\n"
+    "nope : input -> print(\"This should not print\")\n"
+    "start -> boost -> check -> result\n"
+    "start -> blocked -> nope\n";
+
+struct zp_builtin {
+    const char *name;
+    const char *desc;
+    const char *source;
+};
+
+static const struct zp_builtin builtins[] = {
+    {"hello",    "first signal chain (42 * 2 = 84)",                zp_hello_chain},
+    {"triple",   "three-stage pipeline (10 + 5 * 3 = 45)",         zp_triple},
+    {"math",     "five-stage math pipeline",                        zp_math},
+    {"gate",     "gate demo — 100 passes, 5 blocks (threshold 50)", zp_gate},
+    {"fork",     "fork demo — one source, three paths",             zp_fork},
+    {"pipeline", "gate + math combined — transform then filter",    zp_pipeline},
+};
+
+#define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
+
+static void cmd_programs(const char *args)
+{
+    (void)args;
+    kputs("\n  Built-in Z+ programs:\n\n");
+    for (int i = 0; i < (int)NUM_BUILTINS; i++) {
+        kputs("  ");
+        kputs(builtins[i].name);
+        int len = 0;
+        const char *p = builtins[i].name;
+        while (*p++) len++;
+        for (int j = len; j < 10; j++)
+            kputc(' ');
+        kputs(builtins[i].desc);
+        kputs("\n");
+    }
+    kputs("\n  Usage: run <name>\n");
+    kputs("  Example: run hello\n\n");
+}
+
+static void cmd_run(const char *args)
+{
+    if (!*args) {
+        kputs("  Usage: run <program>\n");
+        kputs("  Type 'programs' to see available programs.\n");
+        return;
+    }
+
+    /* Find the built-in program */
+    for (int i = 0; i < (int)NUM_BUILTINS; i++) {
+        /* Compare args to builtin name */
+        const char *a = args;
+        const char *b = builtins[i].name;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*b == '\0' && (*a == '\0' || *a == ' ')) {
+            /* Show the source */
+            kputs("\n  Source:\n");
+            const char *src = builtins[i].source;
+            while (*src) {
+                if (*src == '\n') {
+                    kputs("\n");
+                    if (*(src + 1))
+                        kputs("    ");
+                } else {
+                    kputc(*src);
+                }
+                src++;
+            }
+            kputs("\n");
+
+            /* Run it */
+            zp_run(builtins[i].source);
+            return;
+        }
+    }
+
+    /* Not a built-in — try loading from VAULT */
+    if (vault_ready) {
+        char vpath[128];
+        int pi = 0;
+        const char *prefix = "/programs/";
+        while (*prefix && pi < 100) vpath[pi++] = *prefix++;
+        const char *a = args;
+        while (*a && *a != ' ' && pi < 120) vpath[pi++] = *a++;
+        /* Add .zp extension if not present */
+        if (pi < 4 || vpath[pi-3] != '.' || vpath[pi-2] != 'z' || vpath[pi-1] != 'p') {
+            vpath[pi++] = '.'; vpath[pi++] = 'z'; vpath[pi++] = 'p';
+        }
+        vpath[pi] = '\0';
+
+        int sz = vault_size(vpath);
+        if (sz > 0 && sz < 2048) {
+            char src[2048];
+            int got = vault_read(vpath, src, 2047);
+            if (got > 0) {
+                src[got] = '\0';
+                kputs("\n  Loading from VAULT: ");
+                kputs(vpath);
+                kputs("\n");
+                zp_run(src);
+                return;
+            }
+        }
+
+        /* Also try the exact path given */
+        sz = vault_size(args);
+        if (sz > 0 && sz < 2048) {
+            char src[2048];
+            int got = vault_read(args, src, 2047);
+            if (got > 0) {
+                src[got] = '\0';
+                kputs("\n  Loading from VAULT: ");
+                kputs(args);
+                kputs("\n");
+                zp_run(src);
+                return;
+            }
+        }
+    }
+
+    kputs("  Unknown program: ");
+    kputs(args);
+    kputs("\n  Type 'programs' to see available programs.\n");
+    kputs("  Or save a .zp file to /programs/ and run it by name.\n");
+}
+
+static void cmd_viz(const char *args)
+{
+    /* Parse chain ID from args (default 0) */
+    int chain_id = 0;
+    if (*args >= '0' && *args <= '9')
+        chain_id = *args - '0';
+
+    struct sig_chain *c = sig_get_chain(chain_id);
+    if (!c) {
+        kputs("No chain ");
+        kput_dec(chain_id);
+        kputs(". Run 'signal' or 'run hello' first.\n");
+        return;
+    }
+
+    /* Save cursor position */
+    uint32_t save_col, save_row;
+    fb_cursor_pos(&save_col, &save_row);
+
+    /* Draw visualization in the right half of the screen */
+    uint32_t sw = fb_width();
+    uint32_t sh = fb_height();
+    int viz_x = (int)(sw / 2);
+    int viz_y = 0;
+    int viz_w = (int)(sw - viz_x);
+    int viz_h = (int)sh;
+
+    sigviz_draw(chain_id, viz_x, viz_y, viz_w, viz_h);
+
+    kputs("  Signal chain ");
+    kput_dec(chain_id);
+    kputs(" drawn on right half. Press any key to dismiss.\n");
+
+    /* Wait for keypress */
+    keyboard_getc();
+
+    /* Restore: clear the viz area and redraw will happen on next output */
+    fb_rect(viz_x, viz_y, viz_w, viz_h, 0x001A1A1A);
+
+    /* Restore cursor */
+    fb_set_cursor(save_col, save_row);
+}
+
+/* ── VAULT filesystem commands ──────────────────── */
+
+/* RAM disk for VAULT — 2MB */
+#define VAULT_RAM_SIZE (2 * 1024 * 1024)
+static uint8_t vault_ram[VAULT_RAM_SIZE] __attribute__((aligned(4096)));
+
+static void vault_init_ramdisk(void)
+{
+    if (vault_format(vault_ram, VAULT_RAM_SIZE, "zeos") == 0 &&
+        vault_mount(vault_ram, VAULT_RAM_SIZE) == 0) {
+        vault_ready = 1;
+
+        /* Create default directories */
+        vault_create("/programs", VAULT_TIER_REFERENCE);
+        vault_create("/home", VAULT_TIER_SOVEREIGN);
+        vault_create("/tmp", VAULT_TIER_INTERNAL);
+
+        /* Store built-in Z+ programs in VAULT */
+        for (int i = 0; i < (int)NUM_BUILTINS; i++) {
+            char path[64];
+            /* Build path: /programs/name.zp */
+            int pi = 0;
+            const char *prefix = "/programs/";
+            while (*prefix) path[pi++] = *prefix++;
+            const char *n = builtins[i].name;
+            while (*n) path[pi++] = *n++;
+            path[pi++] = '.'; path[pi++] = 'z'; path[pi++] = 'p';
+            path[pi] = '\0';
+
+            int len = 0;
+            const char *s = builtins[i].source;
+            while (s[len]) len++;
+            vault_write(path, builtins[i].source, (uint32_t)len);
+        }
+    }
+}
+
+static void cmd_ls(const char *args)
+{
+    if (!vault_ready) {
+        kputs("VAULT not mounted.\n");
+        return;
+    }
+
+    const char *path = (*args) ? args : "/";
+
+    struct vault_dirent entries[64];
+    int count = vault_list(path, entries, 64);
+
+    if (count < 0) {
+        kputs("  Not a directory: ");
+        kputs(path);
+        kputs("\n");
+        return;
+    }
+
+    kputs("\n");
+    for (int i = 0; i < count; i++) {
+        kputs("  ");
+        kputs(entries[i].name);
+
+        /* Show file size if we can determine it */
+        char check_path[128];
+        int pi = 0;
+        const char *p = path;
+        while (*p && pi < 120) check_path[pi++] = *p++;
+        if (pi > 0 && check_path[pi-1] != '/') check_path[pi++] = '/';
+        const char *n = entries[i].name;
+        while (*n && pi < 126) check_path[pi++] = *n++;
+        check_path[pi] = '\0';
+
+        int sz = vault_size(check_path);
+        if (sz > 0) {
+            kputs("  (");
+            kput_dec((uint64_t)sz);
+            kputs(" bytes)");
+        } else if (sz == 0) {
+            kputs("  (dir)");
+        }
+
+        kputs("\n");
+    }
+
+    if (count == 0)
+        kputs("  (empty)\n");
+
+    kputs("\n");
+}
+
+static void cmd_cat(const char *args)
+{
+    if (!vault_ready || !*args) {
+        kputs("  Usage: cat <path>\n");
+        return;
+    }
+
+    int sz = vault_size(args);
+    if (sz < 0) {
+        kputs("  File not found: ");
+        kputs(args);
+        kputs("\n");
+        return;
+    }
+
+    /* Read file content — limit display to 2K */
+    char buf[2048];
+    int to_read = sz;
+    if (to_read > 2047) to_read = 2047;
+
+    int got = vault_read(args, buf, (uint32_t)to_read);
+    if (got > 0) {
+        buf[got] = '\0';
+        kputs("\n");
+        kputs(buf);
+        if (buf[got-1] != '\n')
+            kputs("\n");
+        kputs("\n");
+    }
+}
+
+static void cmd_write_file(const char *args)
+{
+    if (!vault_ready || !*args) {
+        kputs("  Usage: save <path> <content>\n");
+        return;
+    }
+
+    /* Split args into path and content */
+    const char *p = args;
+    while (*p && *p != ' ') p++;
+
+    if (!*p) {
+        kputs("  Usage: save <path> <content>\n");
+        return;
+    }
+
+    /* Copy path */
+    char path[128];
+    int pi = 0;
+    const char *a = args;
+    while (a < p && pi < 127) path[pi++] = *a++;
+    path[pi] = '\0';
+
+    /* Skip space */
+    p++;
+
+    int len = 0;
+    const char *c = p;
+    while (c[len]) len++;
+
+    int wrote = vault_write(path, p, (uint32_t)len);
+    if (wrote > 0) {
+        kputs("  Wrote ");
+        kput_dec((uint64_t)wrote);
+        kputs(" bytes to ");
+        kputs(path);
+        kputs("\n");
+    } else {
+        kputs("  Write failed.\n");
+    }
+}
+
+static void cmd_mkdir(const char *args)
+{
+    if (!vault_ready || !*args) {
+        kputs("  Usage: mkdir <path>\n");
+        return;
+    }
+
+    int ino = vault_create(args, VAULT_TIER_INTERNAL);
+    if (ino >= 0) {
+        kputs("  Created: ");
+        kputs(args);
+        kputs("\n");
+    } else {
+        kputs("  Failed to create: ");
+        kputs(args);
+        kputs("\n");
+    }
+}
+
+static void cmd_df(const char *args)
+{
+    (void)args;
+    if (!vault_ready) {
+        kputs("VAULT not mounted.\n");
+        return;
+    }
+
+    uint32_t total_b, free_b, total_i, free_i;
+    vault_stat(&total_b, &free_b, &total_i, &free_i);
+
+    kputs("\n  VAULT Filesystem\n\n");
+    kputs("  Blocks: ");
+    kput_dec(free_b);
+    kputs(" free / ");
+    kput_dec(total_b);
+    kputs(" total (");
+    kput_dec((uint64_t)free_b * VAULT_BLOCK_SIZE / 1024);
+    kputs(" KB free)\n");
+    kputs("  Inodes: ");
+    kput_dec(free_i);
+    kputs(" free / ");
+    kput_dec(total_i);
+    kputs(" total\n\n");
+}
+
+/* ── Main shell loop ────────────────────────────── */
 
 void shell_run(struct zeos_boot_info *boot)
 {
@@ -348,10 +1207,19 @@ void shell_run(struct zeos_boot_info *boot)
     char cmd[CMD_BUF_SIZE];
     int pos;
 
-    fb_puts("Type 'help' for commands.\n\n");
+    /* Initialize VAULT ramdisk */
+    vault_init_ramdisk();
+    if (vault_ready) {
+        kputs("VAULT: 2MB ramdisk mounted. ");
+        kput_dec(NUM_BUILTINS);
+        kputs(" programs loaded.\n");
+    }
+
+    kputs("Type 'help' for commands.\n");
+    kputs("Switch modes: 'zeros' (robotics) | 'derez' (dev) | 'raise' (full)\n\n");
 
     for (;;) {
-        fb_puts("zeos> ");
+        kputs(persona_prompt(g_persona));
         pos = 0;
 
         /* Read a line */
@@ -359,50 +1227,47 @@ void shell_run(struct zeos_boot_info *boot)
             char c = keyboard_getc();
 
             if (c == '\n') {
-                fb_putc('\n');
+                kputc('\n');
                 cmd[pos] = '\0';
                 break;
             } else if (c == '\b') {
                 if (pos > 0) {
                     pos--;
-                    /* Erase character on screen */
-                    fb_puts("\b \b");
+                    kputs("\b \b");
                 }
             } else if (pos < CMD_BUF_SIZE - 1) {
                 cmd[pos++] = c;
-                fb_putc(c);
+                kputc(c);
             }
         }
 
-        /* Skip empty lines */
         if (pos == 0)
             continue;
 
-        /* Dispatch */
-        if (streq(cmd, "help"))
-            cmd_help();
-        else if (streq(cmd, "info"))
-            cmd_info();
-        else if (streq(cmd, "mem"))
-            cmd_mem();
-        else if (streq(cmd, "heap"))
-            cmd_heap();
-        else if (streq(cmd, "lspci"))
-            cmd_lspci();
-        else if (streq(cmd, "tsc"))
-            cmd_tsc();
-        else if (streq(cmd, "delta"))
-            cmd_delta();
-        else if (streq(cmd, "signal"))
-            cmd_signal();
-        else if (streq(cmd, "clear"))
-            fb_clear(0x001A1A1A);
-        else if (streq(cmd, "zeos"))
-            cmd_zeos();
-        else {
-            fb_puts("unknown command: ");
-            fb_puts(cmd);
-            fb_puts("\n");
+        /* Extract command name (first word) */
+        const char *args = skip_word(cmd);
+
+        /* Null-terminate the command name for matching */
+        char name[32];
+        int ni = 0;
+        for (int i = 0; cmd[i] && cmd[i] != ' ' && ni < 31; i++)
+            name[ni++] = cmd[i];
+        name[ni] = '\0';
+
+        /* Search command table — ALL commands work in ALL modes */
+        int found = 0;
+        for (int i = 0; i < (int)NUM_COMMANDS; i++) {
+            if (streq(name, commands[i].name)) {
+                commands[i].handler(args);
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            kputs("unknown command: ");
+            kputs(name);
+            kputs("  (type 'help')\n");
         }
     }
 }

@@ -1,0 +1,229 @@
+#!/bin/bash
+#
+# zeos — Student-friendly build tool for Zeos
+#
+# Wraps the kernel Makefile with commands that speak human.
+# No make knowledge required. No flag memorization.
+#
+# Usage:
+#   zeos build        Build the kernel
+#   zeos run          Build and launch in QEMU
+#   zeos clean        Clean build artifacts
+#   zeos flash <dev>  Flash to USB drive for real hardware
+#   zeos status       Show what's built, what's changed
+#   zeos doctor       Check that all build dependencies are installed
+#   zeos help         This message
+#
+# Codex Labs LLC — 2026
+
+set -euo pipefail
+
+# Find the kernel directory (relative to this script or from ZEOS_ROOT)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ZEOS_ROOT="${ZEOS_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+KERNEL_DIR="$ZEOS_ROOT/kernel"
+BUILD_DIR="$KERNEL_DIR/build"
+
+# Colors (only if terminal supports them)
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' CYAN='' BOLD='' RESET=''
+fi
+
+msg()  { echo -e "${GREEN}${BOLD}>>>${RESET} $1"; }
+warn() { echo -e "${YELLOW}${BOLD}!!${RESET} $1"; }
+err()  { echo -e "${RED}${BOLD}ERROR:${RESET} $1" >&2; }
+
+cmd_build() {
+    msg "Building Zeos kernel..."
+    make -C "$KERNEL_DIR" all
+    if [ $? -eq 0 ]; then
+        msg "Done. Kernel at: ${CYAN}$BUILD_DIR/BOOTZ.EFI${RESET}"
+    fi
+}
+
+cmd_run() {
+    msg "Building and launching Zeos in QEMU..."
+    echo ""
+    make -C "$KERNEL_DIR" run
+}
+
+cmd_clean() {
+    msg "Cleaning build artifacts..."
+    make -C "$KERNEL_DIR" clean
+    msg "Clean."
+}
+
+cmd_flash() {
+    local device="${1:-}"
+    if [ -z "$device" ]; then
+        err "Usage: zeos flash /dev/sdX"
+        echo ""
+        echo "  Available devices:"
+        lsblk -d -o NAME,SIZE,MODEL,TRAN | grep -E "usb|removable" || echo "  (no USB drives found)"
+        echo ""
+        warn "Be VERY sure you pick the right drive. This overwrites it."
+        return 1
+    fi
+
+    if [ ! -f "$BUILD_DIR/BOOTZ.EFI" ]; then
+        err "No kernel built yet. Run 'zeos build' first."
+        return 1
+    fi
+
+    # Safety check
+    if [[ "$device" == "/dev/sda" || "$device" == "/dev/nvme0n1" ]]; then
+        err "Refusing to flash to $device — that looks like your system drive."
+        return 1
+    fi
+
+    warn "This will create an EFI boot partition on $device"
+    echo -n "  Type YES to confirm: "
+    read -r confirm
+    if [ "$confirm" != "YES" ]; then
+        msg "Cancelled."
+        return 0
+    fi
+
+    msg "Creating EFI partition on $device..."
+
+    # Create GPT partition table with EFI system partition
+    sudo parted -s "$device" mklabel gpt
+    sudo parted -s "$device" mkpart ESP fat32 1MiB 100MiB
+    sudo parted -s "$device" set 1 esp on
+
+    # Determine partition name
+    local part="${device}1"
+    if [[ "$device" == *"nvme"* || "$device" == *"mmcblk"* ]]; then
+        part="${device}p1"
+    fi
+
+    # Format and copy
+    sudo mkfs.fat -F32 "$part"
+    local mnt=$(mktemp -d)
+    sudo mount "$part" "$mnt"
+    sudo mkdir -p "$mnt/EFI/BOOT"
+    sudo cp "$BUILD_DIR/BOOTZ.EFI" "$mnt/EFI/BOOT/BOOTX64.EFI"
+    sudo umount "$mnt"
+    rmdir "$mnt"
+
+    msg "Flashed to $device. Boot from USB to run Zeos."
+}
+
+cmd_status() {
+    echo ""
+    echo -e "  ${BOLD}Zeos Build Status${RESET}"
+    echo ""
+
+    if [ -f "$BUILD_DIR/BOOTZ.EFI" ]; then
+        local size=$(stat -c%s "$BUILD_DIR/BOOTZ.EFI" 2>/dev/null || echo "?")
+        local date=$(stat -c%y "$BUILD_DIR/BOOTZ.EFI" 2>/dev/null | cut -d. -f1 || echo "?")
+        echo -e "  Kernel:  ${GREEN}built${RESET} ($size bytes, $date)"
+    else
+        echo -e "  Kernel:  ${RED}not built${RESET} — run 'zeos build'"
+    fi
+
+    # Check for uncommitted changes
+    if command -v git &>/dev/null && [ -d "$ZEOS_ROOT/.git" ]; then
+        local changes=$(cd "$ZEOS_ROOT" && git status --porcelain | wc -l)
+        if [ "$changes" -gt 0 ]; then
+            echo -e "  Changes: ${YELLOW}$changes file(s) modified${RESET}"
+        else
+            echo -e "  Changes: ${GREEN}clean${RESET}"
+        fi
+    fi
+
+    echo ""
+}
+
+cmd_doctor() {
+    echo ""
+    echo -e "  ${BOLD}Zeos Dependency Check${RESET}"
+    echo ""
+    local ok=0
+    local fail=0
+
+    check_dep() {
+        local name="$1"
+        local cmd="$2"
+        local pkg="${3:-$cmd}"
+        if command -v "$cmd" &>/dev/null; then
+            echo -e "  ${GREEN}ok${RESET}  $name ($cmd)"
+            ok=$((ok + 1))
+        else
+            echo -e "  ${RED}missing${RESET}  $name — install: sudo apt install $pkg"
+            fail=$((fail + 1))
+        fi
+    }
+
+    check_dep "GCC compiler"        gcc
+    check_dep "GNU linker"          ld          binutils
+    check_dep "Object copy"         objcopy     binutils
+    check_dep "Make"                make
+    check_dep "QEMU (x86_64)"       qemu-system-x86_64 qemu-system-x86
+
+    # Check GNU-EFI headers
+    if [ -f /usr/include/efi/efi.h ]; then
+        echo -e "  ${GREEN}ok${RESET}  GNU-EFI headers (/usr/include/efi/efi.h)"
+        ok=$((ok + 1))
+    else
+        echo -e "  ${RED}missing${RESET}  GNU-EFI headers — install: sudo apt install gnu-efi"
+        fail=$((fail + 1))
+    fi
+
+    # Check OVMF
+    if [ -f /usr/share/OVMF/OVMF_CODE_4M.fd ]; then
+        echo -e "  ${GREEN}ok${RESET}  OVMF firmware (/usr/share/OVMF/OVMF_CODE_4M.fd)"
+        ok=$((ok + 1))
+    else
+        echo -e "  ${RED}missing${RESET}  OVMF firmware — install: sudo apt install ovmf"
+        fail=$((fail + 1))
+    fi
+
+    echo ""
+    if [ "$fail" -eq 0 ]; then
+        msg "All dependencies satisfied. Ready to build."
+    else
+        warn "$fail missing. Install them and run 'zeos doctor' again."
+    fi
+    echo ""
+}
+
+cmd_help() {
+    echo ""
+    echo -e "  ${BOLD}zeos${RESET} — build tool for the Zeos operating system"
+    echo ""
+    echo -e "  ${CYAN}zeos build${RESET}          Build the kernel"
+    echo -e "  ${CYAN}zeos run${RESET}            Build and launch in QEMU"
+    echo -e "  ${CYAN}zeos clean${RESET}          Clean build artifacts"
+    echo -e "  ${CYAN}zeos flash <dev>${RESET}    Flash to USB for real hardware"
+    echo -e "  ${CYAN}zeos status${RESET}         What's built, what's changed"
+    echo -e "  ${CYAN}zeos doctor${RESET}         Check build dependencies"
+    echo -e "  ${CYAN}zeos help${RESET}           This message"
+    echo ""
+    echo "  The full Makefile is at kernel/Makefile if you want it raw."
+    echo ""
+}
+
+# ── DISPATCH ───────────────────────────────────────
+
+case "${1:-help}" in
+    build)    cmd_build ;;
+    run)      cmd_run ;;
+    clean)    cmd_clean ;;
+    flash)    cmd_flash "${2:-}" ;;
+    status)   cmd_status ;;
+    doctor)   cmd_doctor ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        err "Unknown command: $1"
+        cmd_help
+        exit 1
+        ;;
+esac

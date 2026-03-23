@@ -1,0 +1,206 @@
+// first_challenge.zp — FIRST-style robotics competition template
+// Competition Template
+//
+// Autonomous period + driver-controlled period.
+// Scoring zones. Time limits. Strategy.
+//
+// Codex Labs LLC — 2026
+
+// ── MATCH STRUCTURE ──────────────────────────
+
+match : state_machine {
+    setup      -> gate(referee_start) -> autonomous,
+    autonomous -> gate(timer: 30s) -> transition,
+    transition -> gate(timer: 5s) -> teleop,
+    teleop     -> gate(timer: 120s) -> endgame,
+    endgame    -> gate(timer: 30s) -> scoring,
+    scoring    -> gate(referee_confirm) -> done
+}
+
+// ── HARDWARE ─────────────────────────────────
+
+// Drive train (4-wheel tank drive)
+left_front   : act(dc_motor, pin: 1)
+left_rear    : act(dc_motor, pin: 2)
+right_front  : act(dc_motor, pin: 3)
+right_rear   : act(dc_motor, pin: 4)
+
+// Mechanisms
+intake       : act(dc_motor, pin: 5)       // pick up game pieces
+shooter      : act(dc_motor, pin: 6)       // launch game pieces
+arm          : act(servo, pin: 7)          // lift/lower mechanism
+gripper      : act(servo, pin: 8)          // grab/release
+
+// Sensors
+front_dist   : sense(distance, pin: A0)
+left_dist    : sense(distance, pin: A1)
+right_dist   : sense(distance, pin: A2)
+line_sensor  : sense(line, pin: A3)        // for autonomous positioning
+imu          : sense(accel_gyro, addr: 0x68)
+encoder_l    : sense(encoder, pin: 9)
+encoder_r    : sense(encoder, pin: 10)
+limit_arm    : sense(button, pin: 11)      // arm at bottom
+camera       : sense(camera, port: 0)      // for vision targeting
+
+// Controller (for teleop)
+controller   : sense(gamepad, port: 0)     // USB gamepad
+
+// ── DRIVE SYSTEM ─────────────────────────────
+
+drive(left_speed, right_speed) -> {
+    left_front.set(left_speed),
+    left_rear.set(left_speed),
+    right_front.set(right_speed),
+    right_rear.set(right_speed)
+}
+
+// ── AUTONOMOUS PERIOD ────────────────────────
+// 30 seconds. No driver input. Pre-programmed routine.
+
+gate(match.state == "autonomous") -> {
+    // Strategy: drive forward, pick up game piece, score
+
+    // Step 1: Drive forward to game piece
+    drive_distance(forward: 1000, speed: 60) -> {
+
+    // Step 2: Pick up game piece
+    intake.set(100) -> delay(1s) -> intake.set(0) -> {
+
+    // Step 3: Turn toward scoring zone
+    turn_angle(90, speed: 40) -> {
+
+    // Step 4: Drive to scoring zone
+    drive_distance(forward: 1500, speed: 60) -> {
+
+    // Step 5: Score
+    arm.set(120) -> delay(500ms) ->
+    shooter.set(100) -> delay(500ms) ->
+    shooter.set(0) -> arm.set(0) -> {
+
+    // Step 6: Back up
+    drive_distance(backward: 500, speed: 40)
+
+    }}}}}
+}
+
+// Helper: drive a set distance using encoders
+drive_distance(direction, distance, speed) -> {
+    start_count : encoder_l.count,
+    target : start_count + (distance * ticks_per_mm),
+    gate(direction == "forward")  -> drive(speed, speed),
+    gate(direction == "backward") -> drive(-speed, -speed),
+    encoder_l.count -> gate(>= target) -> drive(0, 0)
+}
+
+// Helper: turn a set angle using IMU
+turn_angle(degrees, speed) -> {
+    start_heading : imu.heading,
+    target : start_heading + degrees,
+    drive(speed, -speed),
+    imu.heading -> gate(within(target, tolerance: 3)) -> drive(0, 0)
+}
+
+// ── TELEOP PERIOD ────────────────────────────
+// 120 seconds. Driver controls the robot.
+
+gate(match.state == "teleop" | match.state == "endgame") -> {
+    // Tank drive: left stick = left wheels, right stick = right wheels
+    controller.left_y  -> map(-1..1, -100..100) -> left_drive,
+    controller.right_y -> map(-1..1, -100..100) -> right_drive,
+
+    drive(left_drive, right_drive),
+
+    // Buttons
+    controller.a -> gate(pressed) -> intake.toggle(100),     // intake on/off
+    controller.b -> gate(pressed) -> shooter.pulse(100, 1s), // shoot
+    controller.x -> arm.set(controller.x ? 120 : 0),        // arm up/down
+    controller.y -> gripper.set(controller.y ? 90 : 0),     // grip/release
+
+    // Speed control (bumpers)
+    controller.lb -> speed_modifier.set(0.5),   // slow mode
+    controller.rb -> speed_modifier.set(1.0)    // full speed
+}
+
+// ── ENDGAME ──────────────────────────────────
+// Last 30 seconds — special scoring opportunity
+
+gate(match.state == "endgame") -> {
+    // Flash LEDs to signal endgame
+    status_led.blink(yellow, fast),
+
+    // Enable climb mechanism (if you have one)
+    controller.start -> climb_sequence
+}
+
+climb_sequence -> {
+    arm.set(180) -> delay(500ms),
+    drive(80, 80) -> delay(2s),
+    drive(0, 0),
+    arm.set(90)
+}
+
+// ── SAFETY ───────────────────────────────────
+
+// Emergency stop — always active
+controller.back -> {
+    drive(0, 0),
+    intake.set(0),
+    shooter.set(0),
+    arm.set(0),
+    status_led.set_all(red),
+    alert("EMERGENCY STOP")
+}
+
+// Arm limit switch — don't drive past the bottom
+limit_arm -> gate(pressed) -> gate(arm.angle < 10) -> arm.hold
+
+// ── DASHBOARD ────────────────────────────────
+// Driver station display
+
+screen : display(layout: grid, cols: 3, rows: 2)
+
+screen[0,0] : match_timer(match, size: large)
+screen[1,0] : compass(imu.heading, label: "Heading")
+screen[2,0] : camera_feed(camera, overlay: target_tracking)
+
+screen[0,1] : gauge(left_drive, label: "Left", range: {-100, 100})
+screen[1,1] : gauge(right_drive, label: "Right", range: {-100, 100})
+screen[2,1] : status_panel({
+    "Intake":  intake.speed > 0 ? green : gray,
+    "Shooter": shooter.speed > 0 ? green : gray,
+    "Arm":     arm.angle > 10 ? yellow : gray,
+    "Grip":    gripper.angle > 10 ? yellow : gray
+})
+
+// ── TELEMETRY ────────────────────────────────
+
+match.state    ~> dashboard("match_state")
+match.timer    ~> dashboard("time_remaining")
+front_dist     ~> dashboard("front_mm")
+imu.heading    ~> dashboard("heading")
+
+
+// ── TRY THIS ─────────────────────────────────
+//
+// 1. Modify the autonomous routine. Can you score TWO
+//    game pieces in 30 seconds? Plan the route.
+//
+// 2. Add vision tracking: use the camera to FIND the
+//    game piece instead of driving a fixed distance.
+//
+// 3. Add a "targeting assist" for teleop: when the driver
+//    presses a button, the robot auto-aims at the goal
+//    using the camera. Driver controls movement, robot
+//    controls aim.
+//
+// 4. Practice match: run the full 3-minute match.
+//    Record all telemetry. Review it afterward.
+//    Where did you lose time? Where can you optimize?
+//
+// 5. Alliance mode: two robots coordinate. One plays
+//    offense (scoring), one plays defense (blocking).
+//    Signal each other via radio.
+//
+// 6. Scouting: record OTHER teams' autonomous routines.
+//    Analyze their strategies. Plan counter-strategies.
+//    Data wins competitions.

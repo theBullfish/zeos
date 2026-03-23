@@ -1,8 +1,13 @@
 /*
- * Zeos — Minimal shell
+ * Zeos — Shell with Persona System
  *
- * First interactive interface. Type commands, get responses.
- * Proof that Zeos can talk to a human.
+ * Three modes, one shell:
+ *   zeros>  — robotics/hardware (Zeros)
+ *   derez>  — code/AI (DereZ)
+ *   zeos>   — full system (curtain raised)
+ *
+ * Every command exists in every mode. The persona filters
+ * what 'help' surfaces, not what's available.
  */
 
 #ifndef ZEOS_SHELL_H
