@@ -63,7 +63,7 @@ void sigviz_draw(int chain_id, int x, int y, int w, int h)
     fb_rect(x, y, w, h, SIGVIZ_BG);
 
     /* Title bar */
-    fb_rect(x, y, w, 20, 0x001A1A2E);
+    fb_rect(x, y, w, 20, COLOR_SURFACE_HIGH);
     fb_text(x + 4, y + 2, chain->name, SIGVIZ_TEXT);
 
     /* Calculate layout */
@@ -111,8 +111,8 @@ void sigviz_draw(int chain_id, int x, int y, int w, int h)
             fb_rect(bar_x, bar_y, bar_w, 3, sc);
         }
 
-        /* Border */
-        fb_rect_outline(nx, ny, NODE_W, NODE_H, SIGVIZ_BORDER, 1);
+        /* Border — uses persona accent for visual identity */
+        fb_rect_outline(nx, ny, NODE_W, NODE_H, theme_accent_dim(), 1);
 
         /* Draw arrows to downstream nodes */
         for (int e = 0; e < node->output_count; e++) {
@@ -134,7 +134,7 @@ void sigviz_draw(int chain_id, int x, int y, int w, int h)
     /* Chain timing at bottom */
     if (chain->resolve_count > 0) {
         int info_y = y + h - 18;
-        fb_text(x + 4, info_y, "Resolved: ", 0x005F574F);
+        fb_text(x + 4, info_y, "Resolved: ", COLOR_ON_SURFACE_3);
 
         /* Convert cycles to simple number text */
         char buf[32];
@@ -155,7 +155,7 @@ void sigviz_draw(int chain_id, int x, int y, int w, int h)
         }
         buf[bi] = '\0';
 
-        fb_text(x + 84, info_y, buf, 0x005F574F);
-        fb_text(x + 84 + bi * 8 + 4, info_y, "cy", 0x005F574F);
+        fb_text(x + 84, info_y, buf, COLOR_ON_SURFACE_3);
+        fb_text(x + 84 + bi * 8 + 4, info_y, "cy", COLOR_ON_SURFACE_3);
     }
 }

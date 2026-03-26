@@ -20,6 +20,7 @@
 #include <efilib.h>
 
 #include "fb.h"
+#include "theme.h"
 #include "zeos_boot.h"
 #include "idt.h"
 #include "keyboard.h"
@@ -198,7 +199,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Initialize framebuffer console */
     fb_init(&boot_info.fb);
-    fb_clear(0x001A1A1A);  /* Dark warm gray — not pure black */
+    fb_clear(COLOR_SURFACE);  /* Design system background */
 
     /* Initialize serial console — debug output channel */
     serial_init();

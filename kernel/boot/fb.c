@@ -14,9 +14,10 @@ static uint32_t cursor_y;  /* Character row */
 static uint32_t max_cols;
 static uint32_t max_rows;
 
-/* Text colors — warm, not clinical */
-#define FG_COLOR  0x00E0D8D0   /* Warm light text */
-#define BG_COLOR  0x001A1A1A   /* Dark warm gray */
+/* Text colors — from design system */
+#include "theme.h"
+#define FG_COLOR  COLOR_ON_SURFACE   /* Primary text */
+#define BG_COLOR  COLOR_SURFACE      /* Background */
 
 void fb_init(struct zeos_framebuffer *fb)
 {

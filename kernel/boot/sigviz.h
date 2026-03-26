@@ -18,16 +18,22 @@
  */
 void sigviz_draw(int chain_id, int x, int y, int w, int h);
 
-/* Colors for node states */
-#define SIGVIZ_IDLE      0x00333333
-#define SIGVIZ_READY     0x00CCAA00
-#define SIGVIZ_RUNNING   0x00FFFFFF
-#define SIGVIZ_DONE      0x0000AA44
-#define SIGVIZ_ERROR     0x00AA0000
-#define SIGVIZ_EDGE      0x0029ADFF
-#define SIGVIZ_TEXT       0x00FFF1E8
-#define SIGVIZ_BG        0x000D1117
-#define SIGVIZ_NODE_BG   0x001A1A2E
-#define SIGVIZ_BORDER    0x00333333
+/* Colors for node states — derived from theme.h design tokens */
+#include "theme.h"
+
+#define SIGVIZ_IDLE      COLOR_ON_SURFACE_4   /* quaternary text — idle */
+#define SIGVIZ_READY     COLOR_WARNING        /* amber — ready to fire */
+#define SIGVIZ_RUNNING   COLOR_PRIMARY        /* persona accent — active */
+#define SIGVIZ_DONE      COLOR_SUCCESS        /* teal — complete */
+#define SIGVIZ_ERROR     COLOR_DANGER         /* red — error */
+#define SIGVIZ_EDGE      COLOR_ON_SURFACE_3   /* tertiary text — edges */
+#define SIGVIZ_TEXT       COLOR_ON_SURFACE     /* primary text */
+#define SIGVIZ_BG        COLOR_SURFACE        /* background */
+#define SIGVIZ_NODE_BG   COLOR_SURFACE_HIGH   /* raised surface — node fill */
+#define SIGVIZ_BORDER    COLOR_SEPARATOR      /* border/divider */
+
+/* Get current persona's accent for node highlights (defined in shell.c) */
+uint32_t theme_accent(void);
+uint32_t theme_accent_dim(void);
 
 #endif /* ZEOS_SIGVIZ_H */

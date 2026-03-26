@@ -17,6 +17,7 @@
 
 #include "shell.h"
 #include "persona.h"
+#include "theme.h"
 #include "kprint.h"
 #include "fb.h"
 #include "keyboard.h"
@@ -32,12 +33,74 @@
 #include "net_http.h"
 #include "timer.h"
 #include "signal.h"
+#include "serial.h"
 
 #define CMD_BUF_SIZE 256
 
 static struct zeos_boot_info *g_boot;
 static enum persona g_persona = PERSONA_FULL;
 static int vault_ready = 0;
+
+/* ── Persona-aware accent colors ───────────────── */
+
+static const uint32_t persona_accents[] = {
+    COLOR_ZEROS_ACCENT,   /* PERSONA_ZEROS */
+    COLOR_DEREZ_ACCENT,   /* PERSONA_DEREZ */
+    COLOR_FULL_ACCENT,    /* PERSONA_FULL */
+};
+
+static const uint32_t persona_dims[] = {
+    COLOR_ZEROS_DIM,      /* PERSONA_ZEROS */
+    COLOR_DEREZ_DIM,      /* PERSONA_DEREZ */
+    COLOR_FULL_DIM,       /* PERSONA_FULL */
+};
+
+/* Get current persona's accent color — used by sigviz and UI */
+uint32_t theme_accent(void)
+{
+    return persona_accents[g_persona];
+}
+
+uint32_t theme_accent_dim(void)
+{
+    return persona_dims[g_persona];
+}
+
+/*
+ * Draw the shell prompt in the current persona's accent color.
+ * Framebuffer gets colored text; serial gets plain text.
+ */
+static void shell_prompt(void)
+{
+    const char *tag;
+    switch (g_persona) {
+    case PERSONA_ZEROS: tag = "zeros"; break;
+    case PERSONA_DEREZ: tag = "derez"; break;
+    case PERSONA_FULL:  tag = "zeos";  break;
+    default:            tag = "zeos";  break;
+    }
+
+    /* Get current cursor position (character grid) */
+    uint32_t col, row;
+    fb_cursor_pos(&col, &row);
+    int px = (int)(col * 8);
+    int py = (int)(row * 16);
+
+    /* Render colored prompt on framebuffer */
+    uint32_t accent = theme_accent();
+    fb_text(px, py, tag, accent);
+    int tag_len = 0;
+    const char *t = tag;
+    while (*t++) tag_len++;
+    fb_text(px + tag_len * 8, py, "> ", COLOR_ON_SURFACE_2);
+
+    /* Advance framebuffer cursor past the prompt */
+    fb_set_cursor(col + (uint32_t)tag_len + 2, row);
+
+    /* Send plain text to serial */
+    serial_puts(tag);
+    serial_puts("> ");
+}
 
 /* ── String helpers ─────────────────────────────── */
 
@@ -79,6 +142,7 @@ static void cmd_about(const char *args);
 static void cmd_raise(const char *args);
 static void cmd_zeros(const char *args);
 static void cmd_derez(const char *args);
+static void persona_banner_colored(void);
 
 /* Zeros persona — robotics/hardware */
 static void cmd_scan(const char *args);
@@ -173,7 +237,7 @@ static void cmd_help(const char *args)
 {
     (void)args;
     kputs("\n");
-    kputs(persona_banner(g_persona));
+    persona_banner_colored();
 
     for (int i = 0; i < (int)NUM_COMMANDS; i++) {
         if (cmd_visible(&commands[i], g_persona)) {
@@ -376,7 +440,7 @@ static void cmd_lspci(const char *args)
 static void cmd_clear(const char *args)
 {
     (void)args;
-    fb_clear(0x001A1A1A);
+    fb_clear(COLOR_SURFACE);
 }
 
 /* ── Signal chain demo (unchanged) ──────────────── */
@@ -486,25 +550,77 @@ static void cmd_about(const char *args)
 
 /* ── Persona switching ──────────────────────────── */
 
+/*
+ * Persona banner with accent-colored header line.
+ * The bracket header is drawn in the persona's accent color,
+ * the rest of the banner in secondary text.
+ */
+static void persona_banner_colored(void)
+{
+    const char *header;
+    const char *sub;
+
+    switch (g_persona) {
+    case PERSONA_ZEROS:
+        header = "  [ Zeros — Robotics Mode ]";
+        sub = "  Hardware, sensors, motors. Type 'raise' to see everything.\n\n";
+        break;
+    case PERSONA_DEREZ:
+        header = "  [ DereZ — Dev Mode ]";
+        sub = "  Code, signals, debug. Type 'raise' to see everything.\n\n";
+        break;
+    case PERSONA_FULL:
+        header = "  [ Zeos — Full System ]";
+        sub = "  Curtain raised. Everything visible.\n\n";
+        break;
+    default:
+        header = "  [ Zeos ]";
+        sub = "\n";
+        break;
+    }
+
+    /* Draw header in accent color on framebuffer */
+    uint32_t col, row;
+    fb_cursor_pos(&col, &row);
+    fb_text((int)(col * 8), (int)(row * 16), header, theme_accent());
+
+    /* Advance cursor past header */
+    int hlen = 0;
+    const char *h = header;
+    while (*h++) hlen++;
+    /* Header goes to end of line — just advance to next line */
+    fb_set_cursor(0, row + 1);
+
+    /* Send plain text to serial */
+    serial_puts(header);
+    serial_putc('\n');
+
+    /* Subtitle in normal text */
+    kputs(sub);
+}
+
 static void cmd_raise(const char *args)
 {
     (void)args;
     g_persona = PERSONA_FULL;
-    kputs(persona_banner(g_persona));
+    kputs("\n");
+    persona_banner_colored();
 }
 
 static void cmd_zeros(const char *args)
 {
     (void)args;
     g_persona = PERSONA_ZEROS;
-    kputs(persona_banner(g_persona));
+    kputs("\n");
+    persona_banner_colored();
 }
 
 static void cmd_derez(const char *args)
 {
     (void)args;
     g_persona = PERSONA_DEREZ;
-    kputs(persona_banner(g_persona));
+    kputs("\n");
+    persona_banner_colored();
 }
 
 /* ── Zeros persona commands ─────────────────────── */
@@ -1002,7 +1118,7 @@ static void cmd_viz(const char *args)
     keyboard_getc();
 
     /* Restore: clear the viz area and redraw will happen on next output */
-    fb_rect(viz_x, viz_y, viz_w, viz_h, 0x001A1A1A);
+    fb_rect(viz_x, viz_y, viz_w, viz_h, COLOR_SURFACE);
 
     /* Restore cursor */
     fb_set_cursor(save_col, save_row);
@@ -1409,7 +1525,7 @@ void shell_run(struct zeos_boot_info *boot)
     kputs("Switch modes: 'zeros' (robotics) | 'derez' (dev) | 'raise' (full)\n\n");
 
     for (;;) {
-        kputs(persona_prompt(g_persona));
+        shell_prompt();
         pos = 0;
 
         /* Read a line */
