@@ -52,7 +52,7 @@ TARGET   = BOOTZ.EFI
 BUILDDIR = build
 ESP      = $(BUILDDIR)/esp
 
-.PHONY: all clean run
+.PHONY: all clean run usb
 
 all: $(BUILDDIR)/$(TARGET)
 
@@ -97,6 +97,39 @@ $(BUILDDIR)/OVMF_VARS.fd:
 
 # Ensure OVMF vars exist before run
 run: $(BUILDDIR)/OVMF_VARS.fd
+
+# ── USB boot image (GPT + EFI System Partition) ──────────────────
+# Creates a raw disk image that can be dd'd to a USB stick.
+# Uses mtools (no root required). Target: ASUS CN60 Chromebox and
+# any x86_64 UEFI system.
+#
+# Flash with: sudo dd if=build/zeos-usb.img of=/dev/sdX bs=4M status=progress
+#
+USB_IMG  = $(BUILDDIR)/zeos-usb.img
+USB_SIZE = 64
+USB_OFF  = 1048576
+
+usb: $(BUILDDIR)/$(TARGET)
+	@echo ""
+	@echo "  Creating $(USB_SIZE)MB USB boot image..."
+	dd if=/dev/zero of=$(USB_IMG) bs=1M count=$(USB_SIZE) 2>/dev/null
+	sgdisk --clear \
+		--new=1:2048:131038 \
+		--typecode=1:ef00 \
+		--change-name=1:"EFI System" \
+		$(USB_IMG) >/dev/null 2>&1
+	MTOOLS_SKIP_CHECK=1 mformat -i $(USB_IMG)@@$(USB_OFF) -F -h 32 -t 128 -s 63 ::
+	MTOOLS_SKIP_CHECK=1 mmd -i $(USB_IMG)@@$(USB_OFF) ::/EFI
+	MTOOLS_SKIP_CHECK=1 mmd -i $(USB_IMG)@@$(USB_OFF) ::/EFI/BOOT
+	MTOOLS_SKIP_CHECK=1 mcopy -i $(USB_IMG)@@$(USB_OFF) \
+		$(BUILDDIR)/$(TARGET) ::/EFI/BOOT/BOOTX64.EFI
+	@echo ""
+	@echo "  USB image: $(USB_IMG)"
+	@ls -lh $(USB_IMG) | awk '{print "  Size:      " $$5}'
+	@echo ""
+	@echo "  Flash with:"
+	@echo "    sudo dd if=$(USB_IMG) of=/dev/sdX bs=4M status=progress"
+	@echo ""
 
 clean:
 	rm -rf $(OBJS) $(BUILDDIR)
