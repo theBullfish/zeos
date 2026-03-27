@@ -137,6 +137,12 @@ int vault_mount(void *base, uint64_t size);
 int vault_create(const char *path, uint32_t tier);
 
 /*
+ * Create a directory. Returns inode number, or -1 on error.
+ * Creates parent directories as needed.
+ */
+int vault_mkdir(const char *path, uint32_t tier);
+
+/*
  * Write data to a file. Creates a new version (temporal history).
  * Returns bytes written, or -1 on error.
  */

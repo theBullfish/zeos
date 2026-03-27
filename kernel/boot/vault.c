@@ -407,6 +407,41 @@ int vault_create(const char *path, uint32_t tier)
     return ino;
 }
 
+int vault_mkdir(const char *path, uint32_t tier)
+{
+    if (!g_vault.mounted) return -1;
+
+    int parent_ino = -1;
+    int existing = resolve_path(path, 1, &parent_ino);
+
+    if (existing >= 0)
+        return existing;  /* Already exists */
+
+    if (parent_ino < 0)
+        return -1;
+
+    /* Allocate inode */
+    int ino = alloc_inode();
+    if (ino < 0) return -1;
+
+    struct vault_inode *node = inode_ptr((uint32_t)ino);
+    node->type = VAULT_TYPE_DIR;
+    node->tier = tier;
+    node->size = 0;
+    node->blocks = 0;
+    node->created_tsc = read_tsc();
+    node->modified_tsc = node->created_tsc;
+    node->version = 1;
+    node->prev_version = 0;
+
+    /* Add to parent directory */
+    const char *name = path_filename(path);
+    if (dir_add_entry((uint32_t)parent_ino, name, (uint32_t)ino) < 0)
+        return -1;
+
+    return ino;
+}
+
 int vault_write(const char *path, const void *data, uint32_t size)
 {
     if (!g_vault.mounted) return -1;

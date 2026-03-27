@@ -22,7 +22,9 @@
 #include "fb.h"
 #include "theme.h"
 #include "zeos_boot.h"
+#include "gdt.h"
 #include "idt.h"
+#include "panic.h"
 #include "keyboard.h"
 #include "pci.h"
 #include "pmm.h"
@@ -164,6 +166,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     Print(L"%s at %p\r\n", boot_info.rsdp ? L"found" : L"NOT FOUND",
           boot_info.rsdp);
 
+    /* Disable UEFI watchdog timer — firmware sets a 5-minute watchdog
+     * that resets the machine if the OS doesn't disable it. */
+    uefi_call_wrapper(st->BootServices->SetWatchdogTimer, 4, 0, 0, 0, NULL);
+
     /* Step 3: Memory map + exit boot services */
     Print(L"Getting memory map and exiting boot services...\r\n");
 
@@ -269,6 +275,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Initialize physical memory manager */
     kputs("Initializing PMM... ");
     pmm_init(&boot_info.mmap, &boot_info.fb);
+    if (pmm_free_pages() == 0)
+        panic("PMM init failed — no free memory");
     kput_dec(pmm_free_pages() * 4 / 1024);
     kputs(" MB free / ");
     kput_dec(pmm_total_pages() * 4 / 1024);
@@ -282,13 +290,25 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Initialize kernel heap */
     kputs("Initializing heap... ");
     heap_init(64);  /* 64 pages = 256KB initial heap */
+    if (heap_total_bytes() == 0)
+        panic("Heap init failed — cannot allocate initial pages");
     kput_dec(heap_total_bytes() / 1024);
     kputs(" KB.\n");
 
-    /* Initialize interrupts */
+    /*
+     * ── GDT + TSS ──────────────────────────────────────────
+     * Replace UEFI's GDT (which is in freed memory) with our own.
+     * Must happen BEFORE IDT init — IDT gates reference GDT selectors.
+     * The TSS provides IST stacks for safe exception handling.
+     */
+    kputs("Loading GDT+TSS... ");
+    gdt_init();
+    kputs("done.\n");
+
+    /* Initialize interrupts (IDT with exception handlers + IRQ stubs) */
     kputs("Setting up IDT... ");
     idt_init();
-    kputs("done.\n");
+    kputs("done (vectors 0x00-0x14 + 0x20-0x2F).\n");
 
     /* Initialize PCI (uses I/O ports, safe after IDT is up) */
     kputs("Scanning PCI bus... ");
@@ -320,5 +340,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Enter shell — never returns */
     shell_run(&boot_info);
 
+    /* Safety net: if shell_run ever returns, halt instead of
+     * returning to the UEFI CRT0 stub (which is in freed memory). */
+    panic("shell_run returned unexpectedly");
+
+    /* Unreachable, but keeps the compiler happy */
     return EFI_SUCCESS;
 }

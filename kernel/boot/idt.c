@@ -7,6 +7,8 @@
  */
 
 #include "idt.h"
+#include "gdt.h"
+#include "panic.h"
 #include "io.h"
 #include "fb.h"
 
@@ -37,8 +39,20 @@ static isr_handler_t handlers[IDT_ENTRIES];
 static void idt_set_gate(uint8_t vector, uint64_t handler_addr, uint8_t type)
 {
     idt[vector].offset_low  = handler_addr & 0xFFFF;
-    idt[vector].selector    = 0x38;  /* UEFI code segment selector */
+    idt[vector].selector    = GDT_KERNEL_CODE;
     idt[vector].ist         = 0;
+    idt[vector].type_attr   = type;
+    idt[vector].offset_mid  = (handler_addr >> 16) & 0xFFFF;
+    idt[vector].offset_high = (handler_addr >> 32) & 0xFFFFFFFF;
+    idt[vector].reserved    = 0;
+}
+
+void idt_set_gate_ext(uint8_t vector, uint64_t handler_addr,
+                      uint16_t selector, uint8_t ist, uint8_t type)
+{
+    idt[vector].offset_low  = handler_addr & 0xFFFF;
+    idt[vector].selector    = selector;
+    idt[vector].ist         = ist;
     idt[vector].type_attr   = type;
     idt[vector].offset_mid  = (handler_addr >> 16) & 0xFFFF;
     idt[vector].offset_high = (handler_addr >> 32) & 0xFFFFFFFF;
@@ -53,6 +67,26 @@ void isr_dispatch(uint64_t vector, uint64_t error_code)
 {
     if (vector < IDT_ENTRIES && handlers[vector]) {
         handlers[vector](vector, error_code);
+    } else if (vector < 0x20) {
+        /* Unhandled CPU exception — panic with register capture */
+        struct cpu_state regs;
+        __asm__ volatile("movq %%rbx, %0" : "=m"(regs.rbx));
+        __asm__ volatile("movq %%rbp, %0" : "=m"(regs.rbp));
+        __asm__ volatile("movq %%r12, %0" : "=m"(regs.r12));
+        __asm__ volatile("movq %%r13, %0" : "=m"(regs.r13));
+        __asm__ volatile("movq %%r14, %0" : "=m"(regs.r14));
+        __asm__ volatile("movq %%r15, %0" : "=m"(regs.r15));
+        regs.rax = 0; regs.rcx = 0; regs.rdx = 0;
+        regs.rsi = 0; regs.rdi = 0; regs.rsp = 0;
+        regs.r8 = 0; regs.r9 = 0; regs.r10 = 0; regs.r11 = 0;
+        regs.rip = 0; regs.rflags = 0;
+        __asm__ volatile("movq %%cr0, %%rax; movq %%rax, %0" : "=m"(regs.cr0) : : "rax");
+        __asm__ volatile("movq %%cr2, %%rax; movq %%rax, %0" : "=m"(regs.cr2) : : "rax");
+        __asm__ volatile("movq %%cr3, %%rax; movq %%rax, %0" : "=m"(regs.cr3) : : "rax");
+        __asm__ volatile("movq %%cr4, %%rax; movq %%rax, %0" : "=m"(regs.cr4) : : "rax");
+        regs.cs = GDT_KERNEL_CODE;
+        regs.ss = GDT_KERNEL_DATA;
+        panic_with_state("Unhandled CPU exception", vector, error_code, &regs);
     } else {
         fb_puts("\n!!! Unhandled interrupt: vector=0x");
         fb_put_hex(vector);
@@ -105,8 +139,62 @@ void isr_dispatch(uint64_t vector, uint64_t error_code)
             ::: "memory"); \
     }
 
-/* Generate stubs for the IRQs we care about: IRQ0 (timer) and IRQ1 (keyboard) */
-/* These are vectors 0x20 and 0x21 after PIC remap */
+/* ISR stub WITH error code (CPU pushes error code for vectors 8, 10-14, 17, 21, 29, 30) */
+#define ISR_STUB_ERR(n) \
+    static void __attribute__((naked)) isr_stub_##n(void) { \
+        __asm__ volatile( \
+            /* Error code already on stack from CPU */ \
+            "pushq $" #n "\n"  /* Vector number */ \
+            "pushq %%rax\n" \
+            "pushq %%rcx\n" \
+            "pushq %%rdx\n" \
+            "pushq %%rdi\n" \
+            "pushq %%rsi\n" \
+            "pushq %%r8\n" \
+            "pushq %%r9\n" \
+            "pushq %%r10\n" \
+            "pushq %%r11\n" \
+            "movq 72(%%rsp), %%rdi\n"  /* vector */ \
+            "movq 80(%%rsp), %%rsi\n"  /* error code */ \
+            "call isr_dispatch\n" \
+            "popq %%r11\n" \
+            "popq %%r10\n" \
+            "popq %%r9\n" \
+            "popq %%r8\n" \
+            "popq %%rsi\n" \
+            "popq %%rdi\n" \
+            "popq %%rdx\n" \
+            "popq %%rcx\n" \
+            "popq %%rax\n" \
+            "addq $16, %%rsp\n" /* Pop vector + error */ \
+            "iretq\n" \
+            ::: "memory"); \
+    }
+
+/* CPU exception stubs — vectors 0-20 */
+ISR_STUB_NOERR(0x00)   /* #DE Divide Error */
+ISR_STUB_NOERR(0x01)   /* #DB Debug */
+ISR_STUB_NOERR(0x02)   /* NMI */
+ISR_STUB_NOERR(0x03)   /* #BP Breakpoint */
+ISR_STUB_NOERR(0x04)   /* #OF Overflow */
+ISR_STUB_NOERR(0x05)   /* #BR Bound Range */
+ISR_STUB_NOERR(0x06)   /* #UD Invalid Opcode */
+ISR_STUB_NOERR(0x07)   /* #NM Device Not Available */
+ISR_STUB_ERR(0x08)      /* #DF Double Fault */
+ISR_STUB_NOERR(0x09)   /* Coprocessor Segment Overrun */
+ISR_STUB_ERR(0x0a)      /* #TS Invalid TSS */
+ISR_STUB_ERR(0x0b)      /* #NP Segment Not Present */
+ISR_STUB_ERR(0x0c)      /* #SS Stack-Segment Fault */
+ISR_STUB_ERR(0x0d)      /* #GP General Protection Fault */
+ISR_STUB_ERR(0x0e)      /* #PF Page Fault */
+ISR_STUB_NOERR(0x0f)   /* (reserved) */
+ISR_STUB_NOERR(0x10)   /* #MF x87 FP Error */
+ISR_STUB_ERR(0x11)      /* #AC Alignment Check */
+ISR_STUB_NOERR(0x12)   /* #MC Machine Check */
+ISR_STUB_NOERR(0x13)   /* #XM SIMD FP Error */
+ISR_STUB_NOERR(0x14)   /* #VE Virtualization */
+
+/* IRQ stubs (vectors 0x20-0x2F after PIC remap) */
 ISR_STUB_NOERR(0x20)
 ISR_STUB_NOERR(0x21)
 ISR_STUB_NOERR(0x22)
@@ -195,19 +283,9 @@ void idt_register(uint8_t vector, isr_handler_t handler)
     handlers[vector] = handler;
 }
 
-/*
- * Read the current CS selector — needed for IDT gate setup.
- */
-static uint16_t get_cs(void)
-{
-    uint16_t cs;
-    __asm__ volatile("mov %%cs, %0" : "=r"(cs));
-    return cs;
-}
-
 void idt_init(void)
 {
-    uint16_t cs = get_cs();
+    uint16_t cs = gdt_kernel_cs();
 
     /* Zero out */
     for (int i = 0; i < IDT_ENTRIES; i++) {
@@ -215,10 +293,33 @@ void idt_init(void)
         handlers[i] = 0;
     }
 
-    /* Update all gates to use actual CS */
-    /* Install IRQ stubs (vectors 0x20-0x2F) */
+    /* ── CPU exception stubs (vectors 0x00-0x14) ────────────── */
     typedef void (*stub_fn)(void);
-    stub_fn stubs[16] = {
+    stub_fn exc_stubs[21] = {
+        isr_stub_0x00, isr_stub_0x01, isr_stub_0x02, isr_stub_0x03,
+        isr_stub_0x04, isr_stub_0x05, isr_stub_0x06, isr_stub_0x07,
+        isr_stub_0x08, isr_stub_0x09, isr_stub_0x0a, isr_stub_0x0b,
+        isr_stub_0x0c, isr_stub_0x0d, isr_stub_0x0e, isr_stub_0x0f,
+        isr_stub_0x10, isr_stub_0x11, isr_stub_0x12, isr_stub_0x13,
+        isr_stub_0x14,
+    };
+
+    for (int i = 0; i < 21; i++) {
+        idt_set_gate(i, (uint64_t)exc_stubs[i], IDT_GATE_INTERRUPT);
+        idt[i].selector = cs;
+    }
+
+    /* Double fault (#DF) uses IST1 — must not trust the current stack */
+    idt[8].ist = IST_DOUBLE_FAULT;
+
+    /* NMI uses IST2 — can fire at any time */
+    idt[2].ist = IST_NMI;
+
+    /* Machine check uses IST3 — hardware failure, stack unreliable */
+    idt[18].ist = IST_MCE;
+
+    /* ── IRQ stubs (vectors 0x20-0x2F) ──────────────────────── */
+    stub_fn irq_stubs[16] = {
         isr_stub_0x20, isr_stub_0x21, isr_stub_0x22, isr_stub_0x23,
         isr_stub_0x24, isr_stub_0x25, isr_stub_0x26, isr_stub_0x27,
         isr_stub_0x28, isr_stub_0x29, isr_stub_0x2a, isr_stub_0x2b,
@@ -226,7 +327,7 @@ void idt_init(void)
     };
 
     for (int i = 0; i < 16; i++) {
-        idt_set_gate(0x20 + i, (uint64_t)stubs[i], IDT_GATE_INTERRUPT);
+        idt_set_gate(0x20 + i, (uint64_t)irq_stubs[i], IDT_GATE_INTERRUPT);
         idt[0x20 + i].selector = cs;
     }
 

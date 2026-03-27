@@ -36,4 +36,11 @@ void pic_remap(void);
 void pic_unmask(uint8_t irq);
 void pic_mask(uint8_t irq);
 
+/*
+ * Set an IDT gate externally (needed by gdt.c to update CS selector
+ * and set IST fields after GDT is loaded).
+ */
+void idt_set_gate_ext(uint8_t vector, uint64_t handler_addr,
+                      uint16_t selector, uint8_t ist, uint8_t type);
+
 #endif /* ZEOS_IDT_H */

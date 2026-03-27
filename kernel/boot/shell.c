@@ -1464,9 +1464,9 @@ static void cmd_mkdir(const char *args)
         return;
     }
 
-    int ino = vault_create(args, VAULT_TIER_INTERNAL);
+    int ino = vault_mkdir(args, VAULT_TIER_INTERNAL);
     if (ino >= 0) {
-        kputs("  Created: ");
+        kputs("  Created directory: ");
         kputs(args);
         kputs("\n");
     } else {

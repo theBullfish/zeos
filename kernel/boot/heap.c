@@ -32,19 +32,6 @@ static struct block_header *heap_end;
 static uint64_t total_size;
 static uint64_t used_size;
 
-/*
- * Expand the heap by N pages.
- */
-static int heap_expand(uint64_t pages)
-{
-    for (uint64_t i = 0; i < pages; i++) {
-        uint64_t page = pmm_alloc();
-        if (!page)
-            return -1;
-    }
-    return 0;
-}
-
 void heap_init(uint64_t initial_pages)
 {
     /* Allocate contiguous physical pages for the initial heap */
@@ -157,13 +144,25 @@ void *kmalloc(uint64_t size)
 }
 
 /*
+ * Check if two blocks are physically adjacent in memory.
+ * Only adjacent blocks can be safely merged — merging non-adjacent blocks
+ * (from separate heap expansions) would claim memory between them.
+ */
+static int blocks_adjacent(struct block_header *a, struct block_header *b)
+{
+    return ((uint8_t *)a + HEADER_SIZE + a->size) == (uint8_t *)b;
+}
+
+/*
  * Coalesce adjacent free blocks.
+ * Only merges blocks that are physically contiguous in memory.
  */
 static void coalesce(struct block_header *block)
 {
-    /* Merge with next */
+    /* Merge with next — only if physically adjacent */
     while (block->next && block->next->free &&
-           block->next->magic == HEAP_MAGIC) {
+           block->next->magic == HEAP_MAGIC &&
+           blocks_adjacent(block, block->next)) {
         struct block_header *next = block->next;
         block->size += HEADER_SIZE + next->size;
         block->next = next->next;
@@ -173,9 +172,10 @@ static void coalesce(struct block_header *block)
             heap_end = block;
     }
 
-    /* Merge with prev */
+    /* Merge with prev — only if physically adjacent */
     if (block->prev && block->prev->free &&
-        block->prev->magic == HEAP_MAGIC) {
+        block->prev->magic == HEAP_MAGIC &&
+        blocks_adjacent(block->prev, block)) {
         struct block_header *prev = block->prev;
         prev->size += HEADER_SIZE + block->size;
         prev->next = block->next;

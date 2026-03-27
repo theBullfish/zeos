@@ -10,9 +10,18 @@
 
 #include "pmm.h"
 #include "fb.h"
+#include "kprint.h"
 #include <efi.h>
 
 #define PAGE_SIZE 4096
+
+/*
+ * Linker-provided symbols marking the kernel image boundaries.
+ * These are defined by the GNU-EFI linker script (elf_x86_64_efi.lds)
+ * and correspond to the loaded PE/COFF image in memory.
+ */
+extern char _text, _etext;    /* .text section bounds */
+extern char _data, _edata;    /* .data section bounds */
 
 /* Bitmap — one bit per frame */
 static uint64_t *bitmap;
@@ -176,6 +185,41 @@ void pmm_init(struct zeos_memory_map *mmap, struct zeos_framebuffer *fb)
             used_frames++;
         }
     }
+
+    /*
+     * Reserve the kernel image itself.
+     * The kernel was loaded by UEFI into EfiLoaderCode/EfiLoaderData memory,
+     * which we just freed above. Without this, the PMM will hand out pages
+     * containing the running kernel code and data.
+     *
+     * We use the linker symbols to find the extent, but fall back to a
+     * conservative estimate if they're not where we expect.
+     */
+    {
+        uint64_t kern_start = (uint64_t)&_text;
+        uint64_t kern_end   = (uint64_t)&_edata;
+
+        /* Sanity check: kernel should be above 1MB and below 4GB */
+        if (kern_start >= 0x100000 && kern_end > kern_start && kern_end < 0x100000000ULL) {
+            uint64_t reserved = pmm_reserve_range(kern_start, kern_end - kern_start);
+            (void)reserved;
+        } else {
+            /*
+             * Linker symbols not usable (can happen with some EFI loaders).
+             * Reserve a conservative 4MB starting at 1MB as fallback.
+             */
+            pmm_reserve_range(0x100000, 4 * 1024 * 1024);
+        }
+    }
+
+    /*
+     * Reserve the UEFI memory map buffer itself.
+     * It's in EfiLoaderData memory which we freed. If any code touches
+     * the memory map after this point, it's reading freed memory.
+     */
+    if (mmap->entries) {
+        pmm_reserve_range((uint64_t)(uintptr_t)mmap->entries, mmap->size);
+    }
 }
 
 uint64_t pmm_alloc(void)
@@ -230,6 +274,22 @@ uint64_t pmm_alloc_contiguous(uint64_t count)
         }
     }
     return 0;
+}
+
+uint64_t pmm_reserve_range(uint64_t phys_start, uint64_t size)
+{
+    uint64_t count = 0;
+    uint64_t frame_start = phys_start / PAGE_SIZE;
+    uint64_t frame_end = (phys_start + size + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    for (uint64_t f = frame_start; f < frame_end && f < total_frames; f++) {
+        if (!bitmap_test(f)) {
+            bitmap_set(f);
+            used_frames++;
+            count++;
+        }
+    }
+    return count;
 }
 
 uint64_t pmm_total_pages(void)  { return total_frames; }

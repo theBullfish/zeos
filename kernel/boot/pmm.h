@@ -23,6 +23,9 @@ void pmm_free(uint64_t phys_addr);
 /* Allocate N contiguous 4K frames. Returns physical address, or 0 on failure. */
 uint64_t pmm_alloc_contiguous(uint64_t count);
 
+/* Reserve a physical address range (mark as used). Returns count of newly reserved frames. */
+uint64_t pmm_reserve_range(uint64_t phys_start, uint64_t size);
+
 /* Get total/free/used page counts */
 uint64_t pmm_total_pages(void);
 uint64_t pmm_free_pages(void);
