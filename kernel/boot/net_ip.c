@@ -4,7 +4,7 @@
 
 #include "net_ip.h"
 #include "net_arp.h"
-#include "net_virtio.h"
+#include "net.h"
 #include "kprint.h"
 
 /* Forward declarations for protocol handlers */
@@ -77,7 +77,7 @@ int ip_send(struct ipv4_addr dst, uint8_t protocol, const void *payload, uint16_
     for (uint16_t i = 0; i < len; i++)
         payload_dst[i] = payload_src[i];
 
-    return virtio_net_send(frame, total);
+    return net_drv_send(frame, total);
 }
 
 void ip_process(const void *frame, uint16_t len)

@@ -75,6 +75,13 @@ struct net_config {
 
 extern struct net_config g_net;
 
+/* ── Driver dispatch (set by net_init based on hardware) ── */
+
+/* Function pointers to active NIC driver (virtio or e1000) */
+extern int  (*net_drv_send)(const void *data, uint16_t len);
+extern int  (*net_drv_recv)(void *buf, uint16_t max_len);
+extern void (*net_drv_get_mac)(struct mac_addr *mac);
+
 /* ── Byte-swap helpers ────────────────────────── */
 
 static inline uint16_t htons(uint16_t v) { return (v >> 8) | (v << 8); }

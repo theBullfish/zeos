@@ -8,6 +8,7 @@
 
 #include "net.h"
 #include "net_virtio.h"
+#include "net_e1000.h"
 #include "net_arp.h"
 #include "net_ip.h"
 #include "net_tcp.h"
@@ -16,6 +17,11 @@
 
 /* Global network config */
 struct net_config g_net;
+
+/* Driver dispatch function pointers */
+int  (*net_drv_send)(const void *data, uint16_t len);
+int  (*net_drv_recv)(void *buf, uint16_t max_len);
+void (*net_drv_get_mac)(struct mac_addr *mac);
 
 int net_init(void)
 {
@@ -26,14 +32,24 @@ int net_init(void)
     g_net.dns     = (struct ipv4_addr){{10, 0, 2, 3}};
     g_net.up = 0;
 
-    /* Initialize virtio-net driver */
-    if (virtio_net_init() < 0) {
+    /* Try virtio-net first (QEMU), then e1000 (real hardware) */
+    if (virtio_net_init() == 0) {
+        net_drv_send    = virtio_net_send;
+        net_drv_recv    = virtio_net_recv;
+        net_drv_get_mac = virtio_net_get_mac;
+        kputs("NET: using virtio-net driver\n");
+    } else if (e1000_init() == 0) {
+        net_drv_send    = e1000_send;
+        net_drv_recv    = e1000_recv;
+        net_drv_get_mac = e1000_get_mac;
+        kputs("NET: using e1000 driver\n");
+    } else {
         kputs("NET: no network device found\n");
         return -1;
     }
 
     /* Get our MAC */
-    virtio_net_get_mac(&g_net.mac);
+    net_drv_get_mac(&g_net.mac);
 
     g_net.up = 1;
 
@@ -65,7 +81,7 @@ void net_poll(void)
     if (!g_net.up) return;
 
     uint8_t frame[NET_BUF_SIZE];
-    int len = virtio_net_recv(frame, NET_BUF_SIZE);
+    int len = net_drv_recv(frame, NET_BUF_SIZE);
 
     if (len < (int)sizeof(struct eth_hdr))
         return;

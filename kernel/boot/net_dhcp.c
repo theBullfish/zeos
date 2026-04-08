@@ -11,7 +11,7 @@
 #include "net_dhcp.h"
 #include "net_udp.h"
 #include "net_ip.h"
-#include "net_virtio.h"
+#include "net.h"
 #include "kprint.h"
 
 /* ── State ── */
@@ -239,7 +239,7 @@ static void dhcp_send_broadcast(const void *dhcp_data, int dhcp_len)
     int total = (int)sizeof(struct eth_hdr) + (int)sizeof(struct ipv4_hdr) +
                 (int)sizeof(struct udp_hdr) + dhcp_len;
 
-    virtio_net_send(frame, (uint16_t)total);
+    net_drv_send(frame, (uint16_t)total);
 }
 
 /* ── Parse offer/ack options into lease ── */

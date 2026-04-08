@@ -3,7 +3,7 @@
  */
 
 #include "net_arp.h"
-#include "net_virtio.h"
+#include "net.h"
 #include "kprint.h"
 #include "timer.h"
 
@@ -85,7 +85,7 @@ void arp_process(const void *frame, uint16_t len)
         rarp->target_mac = arp->sender_mac;
         rarp->target_ip = arp->sender_ip;
 
-        virtio_net_send(reply, sizeof(reply));
+        net_drv_send(reply, sizeof(reply));
     }
 }
 
@@ -109,7 +109,7 @@ static void arp_send_request(struct ipv4_addr target)
     arp->target_mac = mac_zero;
     arp->target_ip = target;
 
-    virtio_net_send(pkt, sizeof(pkt));
+    net_drv_send(pkt, sizeof(pkt));
 }
 
 int arp_resolve(struct ipv4_addr target, struct mac_addr *out)
