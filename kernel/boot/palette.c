@@ -109,12 +109,11 @@ static void action_toggle_tiling(void *ctx)
 static void action_show_desktop(void *ctx)
 {
     (void)ctx;
-    /* Minimize all visible surfaces on current workspace */
-    for (int i = 0; i < WM_MAX_SURFACES; i++) {
-        chain_surface_t *s = wm_get_surface(i);
-        if (s && s->visible && s->workspace == wm_get_workspace())
-            wm_minimize_surface(s->id);
-    }
+    /* Spring-animated show/restore desktop toggle */
+    if (wm_is_desktop_shown())
+        wm_restore_desktop();
+    else
+        wm_show_desktop();
 }
 
 static void action_switch_ws1(void *ctx) { (void)ctx; wm_switch_workspace(0); }

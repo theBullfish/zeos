@@ -305,32 +305,13 @@ void keybinds_execute(action_id_t action)
     /* ── Desktop ── */
     case ACTION_SHOW_DESKTOP:
         /*
-         * Minimize all visible surfaces on current workspace.
-         * If all are already minimized, restore them.
+         * Spring-animate all surfaces: scale to 0.9 + fade out.
+         * Toggle: if already shown, spring back.
          */
-        {
-            int count = wm_surface_count();
-            int ws = wm_get_workspace();
-            int any_visible = 0;
-
-            for (int i = 0; i < count; i++) {
-                chain_surface_t *s = wm_get_surface(i);
-                if (s && s->workspace == ws && s->state != SURFACE_MINIMIZED && s->visible) {
-                    any_visible = 1;
-                    break;
-                }
-            }
-
-            for (int i = 0; i < count; i++) {
-                chain_surface_t *s = wm_get_surface(i);
-                if (!s || s->workspace != ws) continue;
-
-                if (any_visible)
-                    wm_minimize_surface(s->id);
-                else
-                    wm_restore_surface(s->id);
-            }
-        }
+        if (wm_is_desktop_shown())
+            wm_restore_desktop();
+        else
+            wm_show_desktop();
         break;
 
     case ACTION_COMMAND_PALETTE:

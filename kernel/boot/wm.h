@@ -84,6 +84,21 @@ typedef struct {
     int              drag_offset_y;
     int              resize_edge;     /* Bitmask: 1=top, 2=right, 4=bottom, 8=left */
 
+    /* Spring animation state */
+    float          anim_scale;       /* Current scale (0.0–1.0), default 1.0 */
+    float          anim_opacity;     /* Current opacity (0–255), default 255 */
+    int            anim_scale_id;    /* Spring anim ID for scale (-1 = none) */
+    int            anim_opacity_id;  /* Spring anim ID for opacity (-1 = none) */
+    int            anim_x_id;        /* Spring anim ID for x position (-1 = none) */
+    int            anim_y_id;        /* Spring anim ID for y position (-1 = none) */
+    int            anim_w_id;        /* Spring anim ID for width (-1 = none) */
+    int            anim_h_id;        /* Spring anim ID for height (-1 = none) */
+    float          anim_x;           /* Animated x (float for spring precision) */
+    float          anim_y;           /* Animated y */
+    float          anim_w;           /* Animated w */
+    float          anim_h;           /* Animated h */
+    int            closing;          /* 1 = close animation in progress */
+
     /* Content draw callback */
     void           (*draw_content)(int id, int x, int y, int w, int h);
 } chain_surface_t;
@@ -191,6 +206,11 @@ void wm_draw_chrome(chain_surface_t *s);
 
 /* Draw snap ghost preview */
 void wm_draw_ghost(void);
+
+/* ── Show Desktop ── */
+void wm_show_desktop(void);      /* Spring-animate all surfaces to hidden */
+void wm_restore_desktop(void);   /* Spring-animate all surfaces back */
+int  wm_is_desktop_shown(void);  /* 1 if show-desktop mode is active */
 
 /* ── Queries ── */
 chain_surface_t *wm_get_surface(int id);

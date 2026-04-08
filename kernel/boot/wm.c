@@ -14,6 +14,7 @@
 
 /* ── Global state ── */
 static wm_state_t g_wm;
+static int g_desktop_shown;  /* 1 = show-desktop mode active */
 
 /* ── Helpers ── */
 
@@ -40,6 +41,91 @@ static int next_z(void) {
     return max_z + 1;
 }
 
+/* ── Spring animation callbacks ── */
+
+static void surface_scale_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_scale = position;
+
+    /* If closing and animation settled at target, remove the surface */
+    if (s->closing && !anim_is_active(s->anim_scale_id)) {
+        s->visible = 0;
+        s->signal = SIGNAL_DETACHED;
+        s->closing = 0;
+    }
+}
+
+static void surface_opacity_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_opacity = position;
+}
+
+static void surface_x_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_x = position;
+}
+
+static void surface_y_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_y = position;
+}
+
+static void surface_w_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_w = position;
+}
+
+static void surface_h_cb(int anim_id, float position, void *ctx) {
+    (void)anim_id;
+    chain_surface_t *s = (chain_surface_t *)ctx;
+    s->anim_h = position;
+}
+
+/* Cancel all geometry spring anims on a surface */
+static void cancel_geom_anims(chain_surface_t *s) {
+    if (s->anim_x_id >= 0) { anim_cancel(s->anim_x_id); s->anim_x_id = -1; }
+    if (s->anim_y_id >= 0) { anim_cancel(s->anim_y_id); s->anim_y_id = -1; }
+    if (s->anim_w_id >= 0) { anim_cancel(s->anim_w_id); s->anim_w_id = -1; }
+    if (s->anim_h_id >= 0) { anim_cancel(s->anim_h_id); s->anim_h_id = -1; }
+}
+
+/* Start or retarget geometry springs to animate x/y/w/h to targets */
+static void spring_geom_to(chain_surface_t *s, int tx, int ty, int tw, int th,
+                           float stiffness, float damping) {
+    /* X */
+    if (s->anim_x_id >= 0 && anim_is_active(s->anim_x_id))
+        anim_retarget(s->anim_x_id, (float)tx);
+    else
+        s->anim_x_id = anim_spring(s->anim_x, (float)tx, stiffness, damping,
+                                    surface_x_cb, s);
+
+    /* Y */
+    if (s->anim_y_id >= 0 && anim_is_active(s->anim_y_id))
+        anim_retarget(s->anim_y_id, (float)ty);
+    else
+        s->anim_y_id = anim_spring(s->anim_y, (float)ty, stiffness, damping,
+                                    surface_y_cb, s);
+
+    /* W */
+    if (s->anim_w_id >= 0 && anim_is_active(s->anim_w_id))
+        anim_retarget(s->anim_w_id, (float)tw);
+    else
+        s->anim_w_id = anim_spring(s->anim_w, (float)tw, stiffness, damping,
+                                    surface_w_cb, s);
+
+    /* H */
+    if (s->anim_h_id >= 0 && anim_is_active(s->anim_h_id))
+        anim_retarget(s->anim_h_id, (float)th);
+    else
+        s->anim_h_id = anim_spring(s->anim_h, (float)th, stiffness, damping,
+                                    surface_h_cb, s);
+}
+
 /* ── Initialization ── */
 
 void wm_init(int screen_w, int screen_h, int panel_h) {
@@ -53,6 +139,7 @@ void wm_init(int screen_w, int screen_h, int panel_h) {
     g_wm.panel_h = panel_h;
     g_wm.dock_h = 0;  /* Auto-hidden by default */
     g_wm.ghost.active = 0;
+    g_desktop_shown = 0;
 
     for (int i = 0; i < WM_MAX_WORKSPACES; i++)
         g_wm.tiling_enabled[i] = 0;
@@ -105,6 +192,29 @@ int wm_create_surface(const char *title, int chain_id,
     s->resizing = 0;
     s->draw_content = draw_content;
 
+    /* Initialize animation state */
+    s->anim_scale = 0.8f;     /* Start small */
+    s->anim_opacity = 0.0f;   /* Start transparent */
+    s->anim_scale_id = -1;
+    s->anim_opacity_id = -1;
+    s->anim_x_id = -1;
+    s->anim_y_id = -1;
+    s->anim_w_id = -1;
+    s->anim_h_id = -1;
+    s->anim_x = (float)s->x;
+    s->anim_y = (float)s->y;
+    s->anim_w = (float)s->w;
+    s->anim_h = (float)s->h;
+    s->closing = 0;
+
+    /* Open animation: scale 0.8 → 1.0, opacity 0 → 255 */
+    s->anim_scale_id = anim_spring(0.8f, 1.0f,
+                                    SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                    surface_scale_cb, s);
+    s->anim_opacity_id = anim_spring(0.0f, 255.0f,
+                                      SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                      surface_opacity_cb, s);
+
     wm_focus_surface(s->id);
 
     return s->id;
@@ -114,8 +224,22 @@ void wm_detach_surface(int id) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;
 
-    s->visible = 0;
-    s->signal = SIGNAL_DETACHED;
+    /* Start close animation: scale 1.0 → 0.8, opacity 255 → 0 */
+    s->closing = 1;
+
+    if (s->anim_scale_id >= 0 && anim_is_active(s->anim_scale_id))
+        anim_retarget(s->anim_scale_id, 0.8f);
+    else
+        s->anim_scale_id = anim_spring(s->anim_scale, 0.8f,
+                                        SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                        surface_scale_cb, s);
+
+    if (s->anim_opacity_id >= 0 && anim_is_active(s->anim_opacity_id))
+        anim_retarget(s->anim_opacity_id, 0.0f);
+    else
+        s->anim_opacity_id = anim_spring(s->anim_opacity, 0.0f,
+                                          SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                          surface_opacity_cb, s);
 
     /* If focused, focus next visible */
     if (g_wm.focused_id == id) {
@@ -123,7 +247,8 @@ void wm_detach_surface(int id) {
         int best_z = -1;
         for (int i = 0; i < g_wm.surface_count; i++) {
             chain_surface_t *o = &g_wm.surfaces[i];
-            if (o->visible && o->workspace == g_wm.active_workspace &&
+            if (o->visible && !o->closing &&
+                o->workspace == g_wm.active_workspace &&
                 o->z_index > best_z) {
                 best_z = o->z_index;
                 g_wm.focused_id = o->id;
@@ -158,18 +283,24 @@ void wm_maximize_surface(int id) {
     if (!s) return;
 
     if (s->state == SURFACE_MAXIMIZED) {
-        /* Restore */
+        /* Restore — spring-animate back to saved geometry */
+        s->state = SURFACE_NORMAL;
         s->x = s->saved_x; s->y = s->saved_y;
         s->w = s->saved_w; s->h = s->saved_h;
-        s->state = SURFACE_NORMAL;
+        spring_geom_to(s, s->saved_x, s->saved_y, s->saved_w, s->saved_h,
+                        SPRING_SNAPPY_S, SPRING_SNAPPY_D);
     } else {
-        /* Save and maximize */
+        /* Save and maximize — spring-animate to full screen */
         s->saved_x = s->x; s->saved_y = s->y;
         s->saved_w = s->w; s->saved_h = s->h;
-        s->x = 0;
-        s->y = g_wm.panel_h;
-        s->w = g_wm.screen_w;
-        s->h = g_wm.screen_h - g_wm.panel_h;
+
+        int tx = 0;
+        int ty = g_wm.panel_h;
+        int tw = g_wm.screen_w;
+        int th = g_wm.screen_h - g_wm.panel_h;
+
+        s->x = tx; s->y = ty; s->w = tw; s->h = th;
+        spring_geom_to(s, tx, ty, tw, th, SPRING_SNAPPY_S, SPRING_SNAPPY_D);
         s->state = SURFACE_MAXIMIZED;
     }
 }
@@ -226,28 +357,37 @@ void wm_snap_surface(int id, surface_state_t snap) {
     int half_w = g_wm.screen_w / 2;
     int half_h = avail_h / 2;
 
+    int tx = s->x, ty = s->y, tw = s->w, th = s->h;
+
     switch (snap) {
     case SURFACE_SNAPPED_LEFT:
-        s->x = 0; s->y = top; s->w = half_w; s->h = avail_h; break;
+        tx = 0; ty = top; tw = half_w; th = avail_h; break;
     case SURFACE_SNAPPED_RIGHT:
-        s->x = half_w; s->y = top; s->w = half_w; s->h = avail_h; break;
+        tx = half_w; ty = top; tw = half_w; th = avail_h; break;
     case SURFACE_SNAPPED_TL:
-        s->x = 0; s->y = top; s->w = half_w; s->h = half_h; break;
+        tx = 0; ty = top; tw = half_w; th = half_h; break;
     case SURFACE_SNAPPED_TR:
-        s->x = half_w; s->y = top; s->w = half_w; s->h = half_h; break;
+        tx = half_w; ty = top; tw = half_w; th = half_h; break;
     case SURFACE_SNAPPED_BL:
-        s->x = 0; s->y = top + half_h; s->w = half_w; s->h = half_h; break;
+        tx = 0; ty = top + half_h; tw = half_w; th = half_h; break;
     case SURFACE_SNAPPED_BR:
-        s->x = half_w; s->y = top + half_h; s->w = half_w; s->h = half_h; break;
+        tx = half_w; ty = top + half_h; tw = half_w; th = half_h; break;
     case SURFACE_MAXIMIZED:
-        s->x = 0; s->y = top; s->w = g_wm.screen_w; s->h = avail_h; break;
+        tx = 0; ty = top; tw = g_wm.screen_w; th = avail_h; break;
     default:
         /* Unsnap — restore saved */
-        s->x = s->saved_x; s->y = s->saved_y;
-        s->w = s->saved_w; s->h = s->saved_h;
+        tx = s->saved_x; ty = s->saved_y;
+        tw = s->saved_w; th = s->saved_h;
         snap = SURFACE_NORMAL;
         break;
     }
+
+    /* Set final geometry (hit-testing uses these) */
+    s->x = tx; s->y = ty; s->w = tw; s->h = th;
+
+    /* Spring-animate from current rendered position to target */
+    spring_geom_to(s, tx, ty, tw, th,
+                    SPRING_INTERACTIVE_S, SPRING_INTERACTIVE_D);
 
     s->state = snap;
 }
@@ -444,11 +584,23 @@ void wm_mouse_down(int x, int y, int button) {
         s->drag_offset_x = x - s->x;
         s->drag_offset_y = y - s->y;
 
-        /* Unsnap if dragging a snapped window */
+        /* Unsnap if dragging a snapped window — spring resize back */
         if (s->state != SURFACE_NORMAL && s->state != SURFACE_TILED) {
+            int old_w = s->w, old_h = s->h;
             s->w = s->saved_w;
             s->h = s->saved_h;
             s->state = SURFACE_NORMAL;
+
+            /* Spring-animate the size change (position follows mouse) */
+            s->anim_w = (float)old_w;
+            s->anim_h = (float)old_h;
+            cancel_geom_anims(s);
+            s->anim_w_id = anim_spring((float)old_w, (float)s->w,
+                                        SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                        surface_w_cb, s);
+            s->anim_h_id = anim_spring((float)old_h, (float)s->h,
+                                        SPRING_SNAPPY_S, SPRING_SNAPPY_D,
+                                        surface_h_cb, s);
         }
     }
 }
@@ -462,9 +614,14 @@ void wm_mouse_up(int x, int y, int button) {
         if (s->dragging) {
             s->dragging = 0;
 
-            /* Check if we should snap */
+            /* Check if we should snap — spring-animate to snap target */
             surface_state_t snap = detect_snap_zone(x, y);
             if (snap != SURFACE_NORMAL) {
+                /* Sync anim position to current drag position before snapping */
+                s->anim_x = (float)s->x;
+                s->anim_y = (float)s->y;
+                s->anim_w = (float)s->w;
+                s->anim_h = (float)s->h;
                 wm_snap_surface(s->id, snap);
             }
         }
@@ -484,6 +641,9 @@ void wm_mouse_move(int x, int y) {
         if (s->dragging) {
             s->x = x - s->drag_offset_x;
             s->y = y - s->drag_offset_y;
+            /* Keep animated position in sync during drag */
+            s->anim_x = (float)s->x;
+            s->anim_y = (float)s->y;
 
             /* Update snap ghost */
             surface_state_t snap = detect_snap_zone(x, y);
@@ -642,7 +802,8 @@ void wm_draw_all(void) {
 
     for (int i = 0; i < g_wm.surface_count; i++) {
         chain_surface_t *s = &g_wm.surfaces[i];
-        if (s->visible && s->workspace == g_wm.active_workspace)
+        /* Include closing surfaces so their animation renders */
+        if ((s->visible || s->closing) && s->workspace == g_wm.active_workspace)
             visible[vis_count++] = i;
     }
 
@@ -652,30 +813,143 @@ void wm_draw_all(void) {
     /* Draw snap ghost behind everything */
     wm_draw_ghost();
 
-    /* Draw each surface */
+    /* Draw each surface (with spring-animated scale, opacity, geometry) */
     for (int v = 0; v < vis_count; v++) {
         chain_surface_t *s = &g_wm.surfaces[visible[v]];
 
+        /* Skip fully transparent surfaces */
+        if (s->anim_opacity < 1.0f) continue;
+
+        /* Compute rendered geometry from animated values.
+         * Geometry springs (anim_x/y/w/h) are used for snap/maximize/show-desktop.
+         * If no geometry anim is running, use the logical x/y/w/h directly.
+         */
+        int rx, ry, rw, rh;
+        int geom_animating = (s->anim_x_id >= 0 && anim_is_active(s->anim_x_id)) ||
+                             (s->anim_y_id >= 0 && anim_is_active(s->anim_y_id)) ||
+                             (s->anim_w_id >= 0 && anim_is_active(s->anim_w_id)) ||
+                             (s->anim_h_id >= 0 && anim_is_active(s->anim_h_id));
+
+        if (geom_animating) {
+            rx = (int)s->anim_x;
+            ry = (int)s->anim_y;
+            rw = (int)s->anim_w;
+            rh = (int)s->anim_h;
+        } else {
+            rx = s->x;
+            ry = s->y;
+            rw = s->w;
+            rh = s->h;
+            /* Sync anim state to logical state when not animating */
+            s->anim_x = (float)s->x;
+            s->anim_y = (float)s->y;
+            s->anim_w = (float)s->w;
+            s->anim_h = (float)s->h;
+        }
+
+        /* Apply scale: shrink around center */
+        float scale = s->anim_scale;
+        if (scale < 0.01f) scale = 0.01f;
+        if (scale < 1.0f) {
+            int cxc = rx + rw / 2;
+            int cyc = ry + rh / 2;
+            rw = (int)((float)rw * scale);
+            rh = (int)((float)rh * scale);
+            rx = cxc - rw / 2;
+            ry = cyc - rh / 2;
+        }
+
+        /* Compute opacity alpha (0-255) */
+        int alpha = (int)s->anim_opacity;
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+
         /* Shadow (focused windows get stronger shadow) */
         shadow_t shadow = s->focused ? SHADOW_L2 : SHADOW_L1;
-        uint32_t shadow_color = (0x000000) | ((uint32_t)shadow.opacity << 24);
-        fb_rect_blend(s->x + shadow.offset_y, s->y + shadow.offset_y,
-                      s->w, s->h, shadow_color);
+        int so = (int)shadow.opacity * alpha / 255;
+        uint32_t shadow_color = (uint32_t)so << 24;
+        fb_rect_blend(rx + shadow.offset_y, ry + shadow.offset_y,
+                      rw, rh, shadow_color);
 
-        /* Chrome (title bar, controls, border) */
+        /* Chrome — use rendered geometry */
+        /* Temporarily swap geometry for chrome drawing */
+        int ox = s->x, oy = s->y, ow = s->w, oh = s->h;
+        s->x = rx; s->y = ry; s->w = rw; s->h = rh;
         wm_draw_chrome(s);
+        s->x = ox; s->y = oy; s->w = ow; s->h = oh;
 
         /* Content area background */
-        int cx = s->x + 1;
-        int cy = s->y + WM_TITLEBAR_HEIGHT + 1;
-        int cw = s->w - 2;
-        int ch = s->h - WM_TITLEBAR_HEIGHT - 2;
-        fb_rect(cx, cy, cw, ch, COLOR_SURFACE);
+        int cx = rx + 1;
+        int cy = ry + WM_TITLEBAR_HEIGHT + 1;
+        int cw = rw - 2;
+        int ch = rh - WM_TITLEBAR_HEIGHT - 2;
+
+        if (alpha >= 255) {
+            fb_rect(cx, cy, cw, ch, COLOR_SURFACE);
+        } else {
+            /* Blend content background with opacity */
+            uint32_t bg = (COLOR_SURFACE & 0x00FFFFFF) | ((uint32_t)alpha << 24);
+            fb_rect_blend(cx, cy, cw, ch, bg);
+        }
 
         /* Content callback */
         if (s->draw_content)
             s->draw_content(s->id, cx, cy, cw, ch);
     }
+}
+
+/* ── Show Desktop ── */
+
+void wm_show_desktop(void) {
+    g_desktop_shown = 1;
+
+    for (int i = 0; i < g_wm.surface_count; i++) {
+        chain_surface_t *s = &g_wm.surfaces[i];
+        if (!s->visible || s->workspace != g_wm.active_workspace) continue;
+
+        /* Scale to 0.9, opacity to 0 */
+        if (s->anim_scale_id >= 0 && anim_is_active(s->anim_scale_id))
+            anim_retarget(s->anim_scale_id, 0.9f);
+        else
+            s->anim_scale_id = anim_spring(s->anim_scale, 0.9f,
+                                            SPRING_SMOOTH_S, SPRING_SMOOTH_D,
+                                            surface_scale_cb, s);
+
+        if (s->anim_opacity_id >= 0 && anim_is_active(s->anim_opacity_id))
+            anim_retarget(s->anim_opacity_id, 0.0f);
+        else
+            s->anim_opacity_id = anim_spring(s->anim_opacity, 0.0f,
+                                              SPRING_SMOOTH_S, SPRING_SMOOTH_D,
+                                              surface_opacity_cb, s);
+    }
+}
+
+void wm_restore_desktop(void) {
+    g_desktop_shown = 0;
+
+    for (int i = 0; i < g_wm.surface_count; i++) {
+        chain_surface_t *s = &g_wm.surfaces[i];
+        if (!s->visible || s->workspace != g_wm.active_workspace) continue;
+
+        /* Scale back to 1.0, opacity back to 255 */
+        if (s->anim_scale_id >= 0 && anim_is_active(s->anim_scale_id))
+            anim_retarget(s->anim_scale_id, 1.0f);
+        else
+            s->anim_scale_id = anim_spring(s->anim_scale, 1.0f,
+                                            SPRING_SMOOTH_S, SPRING_SMOOTH_D,
+                                            surface_scale_cb, s);
+
+        if (s->anim_opacity_id >= 0 && anim_is_active(s->anim_opacity_id))
+            anim_retarget(s->anim_opacity_id, 255.0f);
+        else
+            s->anim_opacity_id = anim_spring(s->anim_opacity, 255.0f,
+                                              SPRING_SMOOTH_S, SPRING_SMOOTH_D,
+                                              surface_opacity_cb, s);
+    }
+}
+
+int wm_is_desktop_shown(void) {
+    return g_desktop_shown;
 }
 
 /* ── Queries ── */
