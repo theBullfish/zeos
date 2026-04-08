@@ -15,6 +15,7 @@
 
 #include "zplus.h"
 #include "signal.h"
+#include "chain.h"
 #include "kprint.h"
 
 /* ── String utilities ─────────────────────────── */
@@ -354,6 +355,48 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
     /* Must start with identifier */
     if (tok.type != TOK_IDENT)
         return 0;  /* Skip lines we can't parse */
+
+    /* ── Chain definition: chain name { node1 -> node2 -> ... } ── */
+    if (zp_streq(tok.text, "chain")) {
+        if (prog->chain_def_count >= ZP_MAX_CHAINS)
+            return -1;
+
+        struct zp_token t;
+        lexer_token(lex, &t);  /* chain name */
+        if (t.type != TOK_IDENT)
+            return -1;
+
+        struct zp_chain_def *def = &prog->chain_defs[prog->chain_def_count];
+        zp_strcpy(def->name, t.text, ZP_MAX_NAME);
+        def->node_count = 0;
+        def->chain_id = -1;
+
+        lexer_token(lex, &t);  /* { */
+        if (t.type != TOK_LBRACE)
+            return -1;
+
+        /* Skip newlines after { */
+        lexer_token(lex, &t);
+        while (t.type == TOK_NEWLINE)
+            lexer_token(lex, &t);
+
+        /* Parse node1 -> node2 -> node3 ... until } */
+        while (t.type != TOK_RBRACE && t.type != TOK_EOF) {
+            if (t.type == TOK_IDENT) {
+                if (def->node_count < ZP_MAX_CHAIN_NODES) {
+                    zp_strcpy(def->node_names[def->node_count], t.text, ZP_MAX_NAME);
+                    def->node_count++;
+                }
+            }
+            /* Skip arrows and newlines between nodes */
+            lexer_token(lex, &t);
+            while (t.type == TOK_ARROW || t.type == TOK_NEWLINE)
+                lexer_token(lex, &t);
+        }
+
+        prog->chain_def_count++;
+        return 0;
+    }
 
     char first_name[ZP_MAX_NAME];
     zp_strcpy(first_name, tok.text, ZP_MAX_NAME);
@@ -742,6 +785,61 @@ static int zp_proc_print(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
+/* ── Chain node resolve (placeholder for user-defined nodes) ── */
+
+static void zp_chain_node_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)input;
+    (void)output;
+    kputs("  resolved: ");
+    kputs(self->name);
+    kputs("\n");
+}
+
+/*
+ * Compile chain definitions from Z+ source into chain.h chains.
+ * Called from zp_compile after signal chain compilation.
+ */
+static int zp_compile_chains(struct zp_program *prog)
+{
+    for (int i = 0; i < prog->chain_def_count; i++) {
+        struct zp_chain_def *def = &prog->chain_defs[i];
+
+        int cid = chain_create(def->name, -1, MASQ_REFERENCE);
+        if (cid < 0) {
+            kputs("Z+ error: could not create chain '");
+            kputs(def->name);
+            kputs("'\n");
+            return -1;
+        }
+        def->chain_id = cid;
+
+        for (int n = 0; n < def->node_count; n++) {
+            int nid = chain_add_node(cid, def->node_names[n],
+                                     "any", "any",
+                                     zp_chain_node_resolve);
+            if (nid < 0) {
+                kputs("Z+ error: could not add node '");
+                kputs(def->node_names[n]);
+                kputs("' to chain '");
+                kputs(def->name);
+                kputs("'\n");
+                return -1;
+            }
+        }
+
+        kputs("  Chain '");
+        kputs(def->name);
+        kputs("' created (id=");
+        kput_dec((uint64_t)cid);
+        kputs(", ");
+        kput_dec((uint64_t)def->node_count);
+        kputs(" nodes)\n");
+    }
+
+    return 0;
+}
+
 /* ── Public API ───────────────────────────────── */
 
 int zp_parse(const char *source, struct zp_program *prog)
@@ -749,6 +847,7 @@ int zp_parse(const char *source, struct zp_program *prog)
     prog->node_count = 0;
     prog->edge_count = 0;
     prog->chain_id = -1;
+    prog->chain_def_count = 0;
 
     struct zp_lexer lex;
     lexer_init(&lex, source);
@@ -873,6 +972,12 @@ int zp_compile(struct zp_program *prog)
         }
     }
 
+    /* Compile chain definitions (chain.h chains) */
+    if (prog->chain_def_count > 0) {
+        if (zp_compile_chains(prog) < 0)
+            return -1;
+    }
+
     return chain;
 }
 
@@ -898,7 +1003,7 @@ int zp_run(const char *source)
 {
     struct zp_program prog;
 
-    kputs("\n  Z+ interpreter v0.2\n");
+    kputs("\n  Z+ interpreter v0.3\n");
     kputs("  Parsing...\n");
 
     if (zp_parse(source, &prog) < 0) {
@@ -910,7 +1015,13 @@ int zp_run(const char *source)
     kput_dec(prog.node_count);
     kputs(" nodes, ");
     kput_dec(prog.edge_count);
-    kputs(" edges.\n");
+    kputs(" edges");
+    if (prog.chain_def_count > 0) {
+        kputs(", ");
+        kput_dec(prog.chain_def_count);
+        kputs(" chain(s)");
+    }
+    kputs(".\n");
 
     kputs("  Compiling...\n");
 
@@ -947,4 +1058,53 @@ int zp_run(const char *source)
 
     kputs("\n");
     return fired;
+}
+
+void zp_list_chains(void)
+{
+    int count = chain_count();
+    if (count == 0) {
+        kputs("No chains active.\n");
+        return;
+    }
+
+    kputs("\n  Active chains (chain.h):\n\n");
+    for (int i = 0; i < MAX_CHAINS; i++) {
+        chain_t *c = chain_get(i);
+        if (!c) continue;
+
+        kputs("  [");
+        kput_dec((uint64_t)c->id);
+        kputs("] ");
+        kputs(c->name);
+        kputs("  (");
+        kput_dec((uint64_t)c->node_count);
+        kputs(" nodes, status=");
+        switch (c->status) {
+        case CHAIN_LIVE:     kputs("live");     break;
+        case CHAIN_PAUSED:   kputs("paused");   break;
+        case CHAIN_ERROR:    kputs("error");    break;
+        case CHAIN_DETACHED: kputs("detached"); break;
+        }
+        kputs(")\n");
+    }
+    kputs("\n  Total: ");
+    kput_dec((uint64_t)count);
+    kputs(" chain(s)\n");
+    kputs("  Use 'inspect <id>' for details.\n\n");
+}
+
+void zp_inspect_chain(int chain_id)
+{
+    chain_t *c = chain_get(chain_id);
+    if (!c) {
+        kputs("Chain ");
+        kput_dec((uint64_t)chain_id);
+        kputs(" not found.\n");
+        return;
+    }
+
+    kputs("\n");
+    chain_dump(chain_id);
+    kputs("\n");
 }

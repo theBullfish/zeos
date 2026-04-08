@@ -17,12 +17,14 @@
  *   a -> b -> c                       — wiring
  *   a -> {b, c}                       — fork (one source, two sinks)
  *   a ~> b                            — tap (read-only observation)
+ *   chain name { n1 -> n2 -> n3 }     — chain definition (chain.h)
  *   // comments
  *
  * Not yet supported:
  *   knee, temporal t-2+, hardware sense/act, vault, MDE
  *
  * v0.2: gate + fork + tap + delta added.
+ * v0.3: chain definitions added.
  */
 
 #ifndef ZEOS_ZPLUS_H
@@ -36,6 +38,8 @@
 #define ZP_MAX_NAME      32
 #define ZP_MAX_STRING    128
 #define ZP_MAX_SOURCE    2048
+#define ZP_MAX_CHAINS    16
+#define ZP_MAX_CHAIN_NODES 16
 
 /* Node types the interpreter can create */
 enum zp_node_type {
@@ -69,6 +73,14 @@ struct zp_edge {
     char            dst[ZP_MAX_NAME];
 };
 
+/* A parsed chain definition (chain name { node1 -> node2 -> ... }) */
+struct zp_chain_def {
+    char    name[ZP_MAX_NAME];
+    char    node_names[ZP_MAX_CHAIN_NODES][ZP_MAX_NAME];
+    int     node_count;
+    int     chain_id;           /* chain.h chain ID after compilation */
+};
+
 /* The parsed program */
 struct zp_program {
     struct zp_node_decl nodes[ZP_MAX_NODES];
@@ -76,6 +88,8 @@ struct zp_program {
     struct zp_edge      edges[ZP_MAX_EDGES];
     int                 edge_count;
     int                 chain_id;       /* Signal chain ID after compilation */
+    struct zp_chain_def chain_defs[ZP_MAX_CHAINS];
+    int                 chain_def_count;
 };
 
 /*
@@ -102,5 +116,17 @@ int zp_execute(struct zp_program *prog);
  * Returns number of nodes fired, or -1 on error.
  */
 int zp_run(const char *source);
+
+/*
+ * List all chain definitions created by the Z+ interpreter.
+ * Prints name, node count, and chain ID for each.
+ */
+void zp_list_chains(void);
+
+/*
+ * Inspect a chain definition by chain_id (from chain.h).
+ * Prints detailed info via chain_dump().
+ */
+void zp_inspect_chain(int chain_id);
 
 #endif /* ZEOS_ZPLUS_H */

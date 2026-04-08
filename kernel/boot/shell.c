@@ -33,6 +33,7 @@
 #include "net_http.h"
 #include "timer.h"
 #include "signal.h"
+#include "chain.h"
 #include "serial.h"
 
 #define CMD_BUF_SIZE 256
@@ -155,6 +156,7 @@ static void cmd_chains(const char *args);
 static void cmd_trace(const char *args);
 static void cmd_nodes(const char *args);
 static void cmd_inject(const char *args);
+static void cmd_inspect(const char *args);
 
 /* Z+ interpreter */
 static void cmd_run(const char *args);
@@ -199,8 +201,9 @@ static const struct shell_cmd commands[] = {
 
     /* DereZ persona — code/dev */
     {"signal",  "run signal chain demo",          cmd_signal,  VIS_DEREZ},
-    {"chains",  "list active signal chains",      cmd_chains,  VIS_DEREZ},
+    {"chains",  "list all active chains",          cmd_chains,  VIS_DEREZ},
     {"nodes",   "show nodes in a chain",          cmd_nodes,   VIS_DEREZ},
+    {"inspect", "inspect a chain by ID",           cmd_inspect, VIS_DEREZ},
     {"trace",   "trace signal flow with timing",  cmd_trace,   VIS_DEREZ},
     {"inject",  "inject data into a signal node", cmd_inject,  VIS_DEREZ},
     {"tsc",     "read TSC (raw timing)",          cmd_tsc,     VIS_DEREZ},
@@ -738,29 +741,40 @@ static void cmd_build(const char *args)
 static void cmd_chains(const char *args)
 {
     (void)args;
-    int count = sig_chain_count();
-    if (count == 0) {
-        kputs("No signal chains active.\n");
-        kputs("Run 'signal' to create the demo chain.\n");
+    int sig_count = sig_chain_count();
+    int ch_count = chain_count();
+
+    if (sig_count == 0 && ch_count == 0) {
+        kputs("No chains active.\n");
+        kputs("Run 'signal' or 'run' to create chains.\n");
         return;
     }
 
-    kputs("\n  Active signal chains:\n\n");
-    for (int i = 0; i < count; i++) {
-        struct sig_chain *c = sig_get_chain(i);
-        if (!c || !c->active) continue;
+    if (sig_count > 0) {
+        kputs("\n  Signal chains:\n\n");
+        for (int i = 0; i < sig_count; i++) {
+            struct sig_chain *c = sig_get_chain(i);
+            if (!c || !c->active) continue;
 
-        kputs("  [");
-        kput_dec(i);
-        kputs("] ");
-        kputs(c->name);
-        kputs("  (");
-        kput_dec(c->node_count);
-        kputs(" nodes, ");
-        kput_dec(c->resolve_count);
-        kputs(" resolutions)\n");
+            kputs("  [");
+            kput_dec(i);
+            kputs("] ");
+            kputs(c->name);
+            kputs("  (");
+            kput_dec(c->node_count);
+            kputs(" nodes, ");
+            kput_dec(c->resolve_count);
+            kputs(" resolutions)\n");
+        }
+        kputs("\n  Use 'nodes <id>' to inspect a signal chain.\n");
     }
-    kputs("\n  Use 'nodes <id>' to inspect a chain.\n\n");
+
+    if (ch_count > 0) {
+        kputs("\n");
+        zp_list_chains();
+    }
+
+    kputs("\n");
 }
 
 static void cmd_nodes(const char *args)
@@ -820,6 +834,25 @@ static void cmd_nodes(const char *args)
         kputs("\n");
     }
     kputs("\n");
+}
+
+static void cmd_inspect(const char *args)
+{
+    if (!*args || (*args < '0' || *args > '9')) {
+        kputs("  Usage: inspect <chain_id>\n");
+        kputs("  Use 'chains' to see all active chains.\n");
+        return;
+    }
+
+    /* Parse multi-digit chain ID */
+    int chain_id = 0;
+    const char *p = args;
+    while (*p >= '0' && *p <= '9') {
+        chain_id = chain_id * 10 + (*p - '0');
+        p++;
+    }
+
+    zp_inspect_chain(chain_id);
 }
 
 static void cmd_trace(const char *args)
