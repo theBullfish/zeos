@@ -56,7 +56,8 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/panel.c boot/settings.c boot/persona_filter.c \
            boot/chain_registry.c \
            boot/vault_disk.c \
-           boot/nvme.c
+           boot/nvme.c \
+           boot/installer.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output
