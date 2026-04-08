@@ -10,6 +10,7 @@
 #include "net_virtio.h"
 #include "net_arp.h"
 #include "net_ip.h"
+#include "net_dhcp.h"
 #include "kprint.h"
 
 /* Global network config */
@@ -17,7 +18,7 @@ struct net_config g_net;
 
 int net_init(void)
 {
-    /* Set up hardcoded QEMU SLIRP addresses */
+    /* Fallback addresses (QEMU SLIRP defaults) */
     g_net.ip      = (struct ipv4_addr){{10, 0, 2, 15}};
     g_net.gateway = (struct ipv4_addr){{10, 0, 2, 2}};
     g_net.netmask = (struct ipv4_addr){{255, 255, 255, 0}};
@@ -34,6 +35,11 @@ int net_init(void)
     virtio_net_get_mac(&g_net.mac);
 
     g_net.up = 1;
+
+    /* Try DHCP — if it fails, fallback addresses stay in place */
+    if (dhcp_discover() < 0) {
+        kputs("NET: DHCP failed, using fallback config\n");
+    }
 
     kputs("NET: ");
     for (int i = 0; i < 6; i++) {
