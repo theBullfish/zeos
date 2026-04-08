@@ -1,0 +1,200 @@
+/*
+ * Zeos — Window Manager
+ *
+ * Manages chain surfaces: chrome, stacking, drag, resize, snap/tile.
+ * Each "window" is a chain_surface — a visual region bound to a signal chain.
+ *
+ * Window controls: [×] detach  [−] minimize  [□] maximize  [⚡] signal status
+ * Position: Left or Right, user-configurable (first boot + settings).
+ *
+ * Stacking model: floating by default, tiling opt-in per workspace.
+ * Drag-to-edge snapping with ghost preview and spring animation.
+ */
+
+#ifndef ZEOS_WM_H
+#define ZEOS_WM_H
+
+#include <stdint.h>
+#include "theme.h"
+
+/* ── Limits ── */
+#define WM_MAX_SURFACES   32
+#define WM_MAX_WORKSPACES  8
+
+/* ── Window control placement ── */
+typedef enum {
+    WM_CONTROLS_LEFT,
+    WM_CONTROLS_RIGHT,
+} wm_controls_side_t;
+
+/* ── Surface state ── */
+typedef enum {
+    SURFACE_NORMAL,
+    SURFACE_MAXIMIZED,
+    SURFACE_MINIMIZED,
+    SURFACE_SNAPPED_LEFT,
+    SURFACE_SNAPPED_RIGHT,
+    SURFACE_SNAPPED_TL,
+    SURFACE_SNAPPED_TR,
+    SURFACE_SNAPPED_BL,
+    SURFACE_SNAPPED_BR,
+    SURFACE_TILED,
+} surface_state_t;
+
+/* ── Signal health ── */
+typedef enum {
+    SIGNAL_LIVE,       /* Green pulse — chain resolving */
+    SIGNAL_PAUSED,     /* Gray — chain paused */
+    SIGNAL_ERROR,      /* Red pulse — chain has errors */
+    SIGNAL_DETACHED,   /* Not rendering */
+} signal_status_t;
+
+/* ── Chain surface (window) ── */
+typedef struct {
+    /* Identity */
+    int              id;
+    char             title[128];
+    int              chain_id;        /* Signal chain this surface renders */
+    signal_status_t  signal;
+
+    /* Geometry */
+    int              x, y;            /* Position */
+    int              w, h;            /* Dimensions (including chrome) */
+    int              min_w, min_h;    /* Minimum dimensions */
+    surface_state_t  state;
+
+    /* Saved geometry (for restore from maximize/snap) */
+    int              saved_x, saved_y, saved_w, saved_h;
+
+    /* Z-order */
+    int              z_index;         /* Higher = on top */
+
+    /* Workspace */
+    int              workspace;
+
+    /* Rendering */
+    int              visible;
+    int              focused;
+    uint32_t         accent;          /* Persona accent for this surface */
+
+    /* Drag/resize state */
+    int              dragging;
+    int              resizing;
+    int              drag_offset_x;
+    int              drag_offset_y;
+    int              resize_edge;     /* Bitmask: 1=top, 2=right, 4=bottom, 8=left */
+
+    /* Content draw callback */
+    void           (*draw_content)(int id, int x, int y, int w, int h);
+} chain_surface_t;
+
+/* ── Snap zone ghost ── */
+typedef struct {
+    int  active;
+    int  x, y, w, h;
+    surface_state_t target_state;
+} snap_ghost_t;
+
+/* ── Window Manager State ── */
+typedef struct {
+    chain_surface_t  surfaces[WM_MAX_SURFACES];
+    int              surface_count;
+    int              focused_id;       /* Currently focused surface ID */
+    int              next_id;
+
+    /* Settings */
+    wm_controls_side_t controls_side;
+    int              active_workspace;
+    int              tiling_enabled[WM_MAX_WORKSPACES];
+
+    /* Snap preview */
+    snap_ghost_t     ghost;
+
+    /* Screen dimensions */
+    int              screen_w, screen_h;
+    int              panel_h;          /* Top panel height */
+    int              dock_h;           /* Bottom dock height (when visible) */
+} wm_state_t;
+
+/* ── Sizing constants ── */
+#define WM_TITLEBAR_HEIGHT  32
+#define WM_BORDER_WIDTH      1
+#define WM_CONTROL_SIZE     16        /* Window control button size */
+#define WM_CONTROL_SPACING   8
+#define WM_CONTROL_MARGIN    8
+#define WM_SNAP_ZONE        32        /* Edge activation area in pixels */
+#define WM_MIN_SURFACE_W   200
+#define WM_MIN_SURFACE_H   150
+
+/* ── API ── */
+
+/* Initialize the window manager */
+void wm_init(int screen_w, int screen_h, int panel_h);
+
+/* Set window controls side (Left or Right) */
+void wm_set_controls_side(wm_controls_side_t side);
+wm_controls_side_t wm_get_controls_side(void);
+
+/* ── Surface lifecycle ── */
+
+/* Create a new chain surface. Returns surface ID or -1. */
+int wm_create_surface(const char *title, int chain_id,
+                      int x, int y, int w, int h,
+                      void (*draw_content)(int, int, int, int, int));
+
+/* Close (detach) a surface — chain keeps running */
+void wm_detach_surface(int id);
+
+/* Minimize a surface */
+void wm_minimize_surface(int id);
+
+/* Restore a minimized surface */
+void wm_restore_surface(int id);
+
+/* Maximize / restore toggle */
+void wm_maximize_surface(int id);
+
+/* ── Focus ── */
+void wm_focus_surface(int id);
+int  wm_get_focused(void);
+
+/* ── Movement / resize ── */
+void wm_move_surface(int id, int x, int y);
+void wm_resize_surface(int id, int w, int h);
+
+/* ── Snap / tile ── */
+void wm_snap_surface(int id, surface_state_t snap);
+void wm_toggle_tiling(void);
+
+/* ── Workspace ── */
+void wm_switch_workspace(int workspace);
+int  wm_get_workspace(void);
+void wm_move_to_workspace(int id, int workspace);
+
+/* ── Input handling ── */
+
+/* Mouse events — the WM handles drag, resize, button clicks */
+void wm_mouse_down(int x, int y, int button);
+void wm_mouse_up(int x, int y, int button);
+void wm_mouse_move(int x, int y);
+
+/* Keyboard shortcuts */
+void wm_key_event(int keycode, int modifiers);
+
+/* ── Rendering ── */
+
+/* Draw all visible surfaces (called by compositor) */
+void wm_draw_all(void);
+
+/* Draw a single surface's chrome (title bar, controls, border) */
+void wm_draw_chrome(chain_surface_t *s);
+
+/* Draw snap ghost preview */
+void wm_draw_ghost(void);
+
+/* ── Queries ── */
+chain_surface_t *wm_get_surface(int id);
+int wm_surface_count(void);
+int wm_visible_count(void);    /* On current workspace */
+
+#endif /* ZEOS_WM_H */
