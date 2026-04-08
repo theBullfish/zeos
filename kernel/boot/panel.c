@@ -15,6 +15,7 @@
 #include "timer.h"
 #include "palette.h"
 #include "kprint.h"
+#include "persona_filter.h"
 
 /* ── Static state ── */
 static panel_state_t g_panel;
@@ -152,6 +153,9 @@ void panel_update(void) {
         if (!s) continue;
         if (s->workspace != ws) continue;
         if (!s->visible && s->state != SURFACE_MINIMIZED) continue;
+
+        /* MasQ persona filter: skip chains beyond perception */
+        if (s->chain_id >= 0 && !persona_can_see(s->chain_id)) continue;
 
         panel_pill_t *p = &g_panel.pills[pill_idx];
         p->surface_id = s->id;

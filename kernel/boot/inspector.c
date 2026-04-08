@@ -13,6 +13,7 @@
 #include "font.h"
 #include "theme.h"
 #include "sigviz.h"
+#include "persona_filter.h"
 
 /* ── Constants ──────────────────────────────────────────────────── */
 
@@ -426,6 +427,9 @@ void inspector_show(int chain_id)
 {
     chain_t *c = chain_get(chain_id);
     if (!c) return;
+
+    /* MasQ persona filter: don't show chains beyond perception */
+    if (!persona_can_see(chain_id)) return;
 
     state.visible = 1;
     state.target_chain_id = chain_id;

@@ -18,6 +18,7 @@
 #include "keybinds.h"
 #include "chain.h"
 #include "wm.h"
+#include "persona_filter.h"
 
 /* ── String helpers (freestanding, no libc) ─────────────────────── */
 
@@ -192,11 +193,12 @@ static void palette_refresh_chains(void)
     }
     pal.item_count = write;
 
-    /* Add all live chains */
+    /* Add all live chains visible to the current persona */
     int count = chain_count();
     for (int i = 0; i < count && i < MAX_CHAINS; i++) {
         chain_t *c = chain_get(i);
         if (!c || c->status == CHAIN_DETACHED) continue;
+        if (!persona_can_see(i)) continue;
         if (pal.item_count >= PALETTE_MAX_ITEMS) break;
 
         palette_item_t *item = &pal.items[pal.item_count];

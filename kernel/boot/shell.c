@@ -35,6 +35,7 @@
 #include "signal.h"
 #include "chain.h"
 #include "serial.h"
+#include "persona_filter.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -606,6 +607,7 @@ static void cmd_raise(const char *args)
 {
     (void)args;
     g_persona = PERSONA_FULL;
+    persona_set_active(PERSONA_FULL);
     kputs("\n");
     persona_banner_colored();
 }
@@ -614,6 +616,7 @@ static void cmd_zeros(const char *args)
 {
     (void)args;
     g_persona = PERSONA_ZEROS;
+    persona_set_active(PERSONA_ZEROS);
     kputs("\n");
     persona_banner_colored();
 }
@@ -622,6 +625,7 @@ static void cmd_derez(const char *args)
 {
     (void)args;
     g_persona = PERSONA_DEREZ;
+    persona_set_active(PERSONA_DEREZ);
     kputs("\n");
     persona_banner_colored();
 }
@@ -770,8 +774,33 @@ static void cmd_chains(const char *args)
     }
 
     if (ch_count > 0) {
-        kputs("\n");
-        zp_list_chains();
+        int vis = persona_visible_chain_count();
+        kputs("\n  Active chains (chain.h):\n\n");
+        for (int i = 0; i < MAX_CHAINS; i++) {
+            chain_t *c = chain_get(i);
+            if (!c) continue;
+            if (!persona_can_see(i)) continue;
+
+            kputs("  [");
+            kput_dec((uint64_t)c->id);
+            kputs("] ");
+            kputs(c->name);
+            kputs("  (");
+            kput_dec((uint64_t)c->node_count);
+            kputs(" nodes, status=");
+            switch (c->status) {
+            case CHAIN_LIVE:     kputs("live");     break;
+            case CHAIN_PAUSED:   kputs("paused");   break;
+            case CHAIN_ERROR:    kputs("error");    break;
+            case CHAIN_DETACHED: kputs("detached"); break;
+            }
+            kputs(")\n");
+        }
+        kputs("\n  Visible: ");
+        kput_dec((uint64_t)vis);
+        kputs("/");
+        kput_dec((uint64_t)ch_count);
+        kputs(" chain(s)\n");
     }
 
     kputs("\n");
@@ -850,6 +879,13 @@ static void cmd_inspect(const char *args)
     while (*p >= '0' && *p <= '9') {
         chain_id = chain_id * 10 + (*p - '0');
         p++;
+    }
+
+    if (!persona_can_see(chain_id)) {
+        kputs("  Chain ");
+        kput_dec((uint64_t)chain_id);
+        kputs(" is not visible in the current persona.\n");
+        return;
     }
 
     zp_inspect_chain(chain_id);
