@@ -21,6 +21,8 @@
 #include "panel.h"
 #include "persona.h"
 #include "desktop.h"
+#include "hotcorners.h"
+#include "mouse.h"
 
 static compositor_t g_comp;
 
@@ -84,6 +86,7 @@ int compositor_init(int screen_w, int screen_h) {
     kputs("fps\n");
 
     /* Initialize subsystems */
+    hotcorners_init(screen_w, screen_h);
     wm_init(screen_w, screen_h, g_comp.panel_h);
     panel_init(PERSONA_FULL, g_comp.panel_h);
 
@@ -109,6 +112,9 @@ void compositor_frame(void) {
     else
         g_comp.frame_dt = 1.0f / 60.0f;
     g_comp.last_frame_tsc = now;
+
+    /* Tick hot corners (before animations — actions may trigger anim) */
+    hotcorners_tick(mouse_get_x(), mouse_get_y());
 
     /* Tick animations */
     anim_tick(g_comp.frame_dt);

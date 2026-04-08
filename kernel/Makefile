@@ -57,8 +57,28 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/chain_registry.c \
            boot/vault_disk.c \
            boot/nvme.c \
-           boot/installer.c
+           boot/installer.c \
+           boot/hotcorners.c
 OBJS     = $(SRCS:.c=.o)
+
+# ── Embedded fonts (TTF -> ELF via objcopy) ──
+FONT_INTER  = ../assets/fonts/inter/Inter-Regular.ttf
+FONT_JBMONO = ../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
+FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
+
+boot/font_inter.o: $(FONT_INTER)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary____assets_fonts_inter_Inter_Regular_ttf_start=_binary_inter_regular_ttf_start \
+		--redefine-sym _binary____assets_fonts_inter_Inter_Regular_ttf_end=_binary_inter_regular_ttf_end \
+		--redefine-sym _binary____assets_fonts_inter_Inter_Regular_ttf_size=_binary_inter_regular_ttf_size \
+		$< $@
+
+boot/font_jbmono.o: $(FONT_JBMONO)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_start=_binary_jbmono_regular_ttf_start \
+		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_end=_binary_jbmono_regular_ttf_end \
+		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_size=_binary_jbmono_regular_ttf_size \
+		$< $@
 
 # Output
 TARGET   = BOOTZ.EFI
@@ -75,10 +95,10 @@ all: $(BUILDDIR)/$(TARGET)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Link to shared object
-$(BUILDDIR)/zeos.so: $(OBJS)
+# Link to shared object (includes embedded font data)
+$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) -o $@ $(LIBS)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so
@@ -147,4 +167,4 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo ""
 
 clean:
-	rm -rf $(OBJS) $(BUILDDIR)
+	rm -rf $(OBJS) $(FONT_OBJS) $(BUILDDIR)
