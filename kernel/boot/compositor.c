@@ -17,43 +17,18 @@
 #include "heap.h"
 #include "kprint.h"
 #include "dock.h"
+#include "panel.h"
+#include "persona.h"
+#include "desktop.h"
 
 static compositor_t g_comp;
 
-/* ── Panel drawing ── */
+/* ── Panel drawing (delegated to panel module) ── */
 
 static void draw_panel(void) {
     if (!g_comp.panel_visible) return;
-
-    int pw = g_comp.screen_w;
-    int ph = g_comp.panel_h;
-
-    /* Panel background */
-    fb_rect(0, 0, pw, ph, COLOR_SURFACE_HIGH);
-
-    /* Bottom separator */
-    fb_hline(0, ph - 1, pw, COLOR_SEPARATOR);
-
-    /* Left: persona indicator */
-    fb_circle_filled(16, ph / 2, 5, COLOR_PRIMARY);
-
-    /* Center: running chain count */
-    int chain_count = wm_surface_count();
-    char buf[32];
-    int bi = 0;
-    if (chain_count >= 10) buf[bi++] = '0' + (chain_count / 10);
-    buf[bi++] = '0' + (chain_count % 10);
-    buf[bi++] = ' '; buf[bi++] = 'c'; buf[bi++] = 'h';
-    buf[bi++] = 'a'; buf[bi++] = 'i'; buf[bi++] = 'n'; buf[bi++] = 's';
-    buf[bi] = 0;
-
-    int text_w = font_measure(buf, FONT_BOOT, TYPE_LABEL);
-    font_draw(pw / 2 - text_w / 2, 8, buf, FONT_BOOT, TYPE_LABEL, COLOR_ON_SURFACE_2);
-
-    /* Right: workspace indicator */
-    int ws = wm_get_workspace();
-    char ws_buf[4] = { 'W', '0' + (char)ws + 1, 0 };
-    font_draw(pw - 40, 8, ws_buf, FONT_BOOT, TYPE_LABEL, COLOR_ON_SURFACE_3);
+    panel_update();
+    panel_draw();
 }
 
 /* ── Dock drawing ── */
@@ -67,14 +42,8 @@ static void draw_dock(void) {
 /* ── Desktop drawing ── */
 
 static void draw_desktop(void) {
-    fb_rect(0, g_comp.panel_h, g_comp.screen_w,
-            g_comp.screen_h - g_comp.panel_h, g_comp.wallpaper_color);
-
-    /* Subtle persona accent gradient at bottom (5% opacity) */
-    uint32_t accent_faint = (COLOR_PRIMARY & 0x00FFFFFF) | 0x0D000000;
-    int grad_h = 64;
-    int grad_y = g_comp.screen_h - grad_h;
-    fb_rect_blend(0, grad_y, g_comp.screen_w, grad_h, accent_faint);
+    /* Delegate to the desktop icon system — handles wallpaper + icons */
+    desktop_draw();
 }
 
 /* ── Frame composition ── */
@@ -115,6 +84,7 @@ int compositor_init(int screen_w, int screen_h) {
 
     /* Initialize subsystems */
     wm_init(screen_w, screen_h, g_comp.panel_h);
+    panel_init(PERSONA_FULL, g_comp.panel_h);
 
     return 0;
 }
