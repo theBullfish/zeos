@@ -58,7 +58,8 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/vault_disk.c \
            boot/nvme.c \
            boot/installer.c \
-           boot/hotcorners.c
+           boot/hotcorners.c \
+           boot/notify.c
 OBJS     = $(SRCS:.c=.o)
 
 # ── Embedded fonts (TTF -> ELF via objcopy) ──

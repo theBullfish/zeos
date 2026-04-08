@@ -23,6 +23,7 @@
 #include "desktop.h"
 #include "hotcorners.h"
 #include "mouse.h"
+#include "notify.h"
 
 static compositor_t g_comp;
 
@@ -157,6 +158,12 @@ void compositor_frame(void) {
 
     /* Layer 4: Overlays (snap ghost already drawn by WM) */
     /* Inspector and palette are chain-driven now */
+
+    /* Layer 4b: Notifications (overlay — tick + draw) */
+    if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
+        notify_tick();
+        notify_draw();
+    }
 
     /* Layer 5: Cursor (not yet a chain -- direct call) */
     if (g_comp.layer_visible[COMP_LAYER_CURSOR])
