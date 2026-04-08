@@ -7,6 +7,7 @@
  */
 
 #include "compositor.h"
+#include "chain_registry.h"
 #include "fb.h"
 #include "wm.h"
 #include "cursor.h"
@@ -86,6 +87,16 @@ int compositor_init(int screen_w, int screen_h) {
     wm_init(screen_w, screen_h, g_comp.panel_h);
     panel_init(PERSONA_FULL, g_comp.panel_h);
 
+    /* Wire all subsystems into the chain/MDE graph */
+    int chains = chain_registry_init();
+    if (chains < 0)
+        kputs("COMP: WARNING -- chain registry init failed\n");
+    else {
+        kputs("COMP: chain graph wired (");
+        kput_dec((uint64_t)chains);
+        kputs(" chains)\n");
+    }
+
     return 0;
 }
 
@@ -105,28 +116,43 @@ void compositor_frame(void) {
     /* Tick cursor animations */
     cursor_tick(g_comp.frame_dt);
 
+    /*
+     * ── Resolve chain graph ──
+     * MDE resolves all chains in dependency order. This triggers
+     * desktop_draw(), wm_draw_all(), panel_update()+panel_draw(),
+     * dock_update()+dock_draw(), inspector_draw(), palette_draw()
+     * through their chain node resolve functions.
+     *
+     * The chain graph replaces the manual layer calls below.
+     * Layer visibility is still respected -- resolve functions
+     * check the compositor state internally.
+     */
+    chain_registry_tick();
+
     /* ── Compose layers bottom to top ── */
+    /*
+     * NOTE: The chain graph now drives subsystem drawing via resolve
+     * functions. The direct calls below are kept as a FALLBACK for
+     * any layer that isn't yet chain-aware (cursor, snap ghost).
+     * As subsystems move fully into chains, these will disappear.
+     */
 
-    /* Layer 0: Desktop */
-    if (g_comp.layer_visible[COMP_LAYER_DESKTOP])
-        draw_desktop();
+    /* Layer 0: Desktop -- driven by CHAIN_DESKTOP resolve */
+    /* (desktop_draw called by chain resolution) */
 
-    /* Layer 1: Chain surfaces (window manager) */
-    if (g_comp.layer_visible[COMP_LAYER_SURFACES])
-        wm_draw_all();
+    /* Layer 1: Chain surfaces -- driven by CHAIN_COMPOSITOR resolve */
+    /* (wm_draw_all called by chain resolution) */
 
-    /* Layer 2: Panel */
-    if (g_comp.layer_visible[COMP_LAYER_PANEL])
-        draw_panel();
+    /* Layer 2: Panel -- driven by CHAIN_PANEL resolve */
+    /* (panel_update + panel_draw called by chain resolution) */
 
-    /* Layer 3: Dock */
-    if (g_comp.layer_visible[COMP_LAYER_DOCK])
-        draw_dock();
+    /* Layer 3: Dock -- driven by CHAIN_DOCK resolve */
+    /* (dock_update + dock_draw called by chain resolution) */
 
     /* Layer 4: Overlays (snap ghost already drawn by WM) */
-    /* Command palette, notifications, etc. — TODO */
+    /* Inspector and palette are chain-driven now */
 
-    /* Layer 5: Cursor */
+    /* Layer 5: Cursor (not yet a chain -- direct call) */
     if (g_comp.layer_visible[COMP_LAYER_CURSOR])
         cursor_draw();
 
