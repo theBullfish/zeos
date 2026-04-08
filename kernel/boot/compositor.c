@@ -16,6 +16,7 @@
 #include "font.h"
 #include "heap.h"
 #include "kprint.h"
+#include "dock.h"
 
 static compositor_t g_comp;
 
@@ -58,18 +59,9 @@ static void draw_panel(void) {
 /* ── Dock drawing ── */
 
 static void draw_dock(void) {
-    if (!g_comp.dock_visible) return;
-
-    int dw = 300;  /* Dock width (centered) */
-    int dh = g_comp.dock_h;
-    int dx = (g_comp.screen_w - dw) / 2;
-    int dy = g_comp.screen_h - dh;
-
-    /* Dock background with rounded top */
-    fb_rect(dx, dy, dw, dh, COLOR_SURFACE_HIGH);
-    fb_hline(dx, dy, dw, COLOR_SEPARATOR);
-
-    /* TODO: render pinned items + running chain indicators */
+    /* Delegate to the dock module — it handles visibility, animation, rendering */
+    dock_update();
+    dock_draw();
 }
 
 /* ── Desktop drawing ── */
