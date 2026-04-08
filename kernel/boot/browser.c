@@ -231,6 +231,14 @@ dom_node_t *html_parse(const char *html, int len) {
                         read_attr_val(&p, end, node->attr_class, 256);
                     else if (str_eq(attr_name, "style"))
                         read_attr_val(&p, end, node->attr_style, 512);
+                    else if (str_eq(attr_name, "type"))
+                        read_attr_val(&p, end, node->attr_type, 32);
+                    else if (str_eq(attr_name, "value"))
+                        read_attr_val(&p, end, node->attr_value, 256);
+                    else if (str_eq(attr_name, "alt"))
+                        read_attr_val(&p, end, node->attr_alt, 256);
+                    else if (str_eq(attr_name, "placeholder"))
+                        read_attr_val(&p, end, node->attr_placeholder, 256);
                     else {
                         char dummy[512];
                         read_attr_val(&p, end, dummy, 512);
@@ -341,6 +349,27 @@ void css_apply_defaults(dom_node_t *node) {
     } else if (str_eq(node->tag, "ul") || str_eq(node->tag, "ol")) {
         node->style.margin[0] = 8; node->style.margin[2] = 8;
         node->style.padding[3] = 16;
+    } else if (str_eq(node->tag, "input")) {
+        node->style.display = 1;  /* inline (inline-block equivalent) */
+        node->style.margin[1] = 4; node->style.margin[3] = 4;
+        node->style.padding[0] = 4; node->style.padding[1] = 8;
+        node->style.padding[2] = 4; node->style.padding[3] = 8;
+    } else if (str_eq(node->tag, "button")) {
+        node->style.display = 1;  /* inline */
+        node->style.font_weight = 700;
+        node->style.background = COLOR_PRIMARY;
+        node->style.color = COLOR_SURFACE;
+        node->style.margin[1] = 4; node->style.margin[3] = 4;
+        node->style.padding[0] = 6; node->style.padding[1] = 16;
+        node->style.padding[2] = 6; node->style.padding[3] = 16;
+    } else if (str_eq(node->tag, "textarea")) {
+        node->style.display = 0;  /* block */
+        node->style.margin[0] = 4; node->style.margin[2] = 4;
+        node->style.padding[0] = 6; node->style.padding[1] = 8;
+        node->style.padding[2] = 6; node->style.padding[3] = 8;
+    } else if (str_eq(node->tag, "img")) {
+        node->style.display = 0;  /* block */
+        node->style.margin[0] = 4; node->style.margin[2] = 4;
     } else if (str_eq(node->tag, "head") || str_eq(node->tag, "meta") ||
                str_eq(node->tag, "title") || str_eq(node->tag, "link")) {
         node->style.display = 2;  /* none — hide head elements */
@@ -351,9 +380,197 @@ void css_apply_defaults(dom_node_t *node) {
         css_apply_defaults(c);
 }
 
+/* ── CSS inline style parser ── */
+
+/* Parse a hex digit: '0'-'9','a'-'f','A'-'F' → 0-15, else -1 */
+static int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Parse #RRGGBB or #RGB into 0xFFRRGGBB. Returns 0 on failure. */
+static uint32_t parse_hex_color(const char *s) {
+    if (*s != '#') return 0;
+    s++;
+
+    int digits = 0;
+    const char *t = s;
+    while (hex_digit(*t) >= 0) { digits++; t++; }
+
+    if (digits == 6) {
+        int r = (hex_digit(s[0]) << 4) | hex_digit(s[1]);
+        int g = (hex_digit(s[2]) << 4) | hex_digit(s[3]);
+        int b = (hex_digit(s[4]) << 4) | hex_digit(s[5]);
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    } else if (digits == 3) {
+        int r = hex_digit(s[0]); r = (r << 4) | r;
+        int g = hex_digit(s[1]); g = (g << 4) | g;
+        int b = hex_digit(s[2]); b = (b << 4) | b;
+        return 0xFF000000 | (r << 16) | (g << 8) | b;
+    }
+    return 0;
+}
+
+/* Parse integer from string, return value and advance *p past digits */
+static int parse_int(const char **p) {
+    int val = 0;
+    while (**p >= '0' && **p <= '9') {
+        val = val * 10 + (**p - '0');
+        (*p)++;
+    }
+    return val;
+}
+
+/* Skip whitespace in style string */
+static void css_skip_ws(const char **p) {
+    while (**p == ' ' || **p == '\t') (*p)++;
+}
+
+/* Compare a CSS property name (lowercase, up to ':' or end) */
+static int css_prop_eq(const char *prop, const char *name) {
+    while (*name) {
+        if (*prop != *name) return 0;
+        prop++; name++;
+    }
+    return 1;
+}
+
+/* Parse a single CSS property:value pair and apply to node */
+static void css_apply_property(dom_node_t *node, const char *prop,
+                               int prop_len, const char *val, int val_len)
+{
+    /* Null-terminate copies for parsing (on stack, small) */
+    char pbuf[64], vbuf[128];
+    int pi = 0, vi = 0;
+    for (int i = 0; i < prop_len && pi < 63; i++)
+        pbuf[pi++] = to_lower(prop[i]);
+    pbuf[pi] = 0;
+    for (int i = 0; i < val_len && vi < 127; i++)
+        vbuf[vi++] = val[i];
+    vbuf[vi] = 0;
+
+    /* Trim leading/trailing spaces from value */
+    const char *v = vbuf;
+    while (*v == ' ') v++;
+    int vl = str_len(v);
+    while (vl > 0 && v[vl - 1] == ' ') vl--;
+
+    /* color: #RRGGBB */
+    if (css_prop_eq(pbuf, "color")) {
+        uint32_t c = parse_hex_color(v);
+        if (c) node->style.color = c;
+        return;
+    }
+
+    /* background-color: #RRGGBB  or  background: #RRGGBB */
+    if (css_prop_eq(pbuf, "background-color") || css_prop_eq(pbuf, "background")) {
+        uint32_t c = parse_hex_color(v);
+        if (c) node->style.background = c;
+        return;
+    }
+
+    /* font-size: Npx */
+    if (css_prop_eq(pbuf, "font-size")) {
+        const char *vp = v;
+        int sz = parse_int(&vp);
+        if (sz > 0) node->style.font_size = sz;
+        return;
+    }
+
+    /* font-weight: bold|700|normal|400 */
+    if (css_prop_eq(pbuf, "font-weight")) {
+        if (str_starts(v, "bold") || str_starts(v, "700"))
+            node->style.font_weight = 700;
+        else if (str_starts(v, "normal") || str_starts(v, "400"))
+            node->style.font_weight = 400;
+        return;
+    }
+
+    /* text-align: left|center|right */
+    if (css_prop_eq(pbuf, "text-align")) {
+        if (str_starts(v, "left"))   node->style.text_align = 0;
+        if (str_starts(v, "center")) node->style.text_align = 1;
+        if (str_starts(v, "right"))  node->style.text_align = 2;
+        return;
+    }
+
+    /* margin: Npx (single value = all four sides) */
+    if (css_prop_eq(pbuf, "margin")) {
+        const char *vp = v;
+        int m = parse_int(&vp);
+        if (m >= 0) {
+            node->style.margin[0] = m; node->style.margin[1] = m;
+            node->style.margin[2] = m; node->style.margin[3] = m;
+        }
+        return;
+    }
+
+    /* padding: Npx (single value = all four sides) */
+    if (css_prop_eq(pbuf, "padding")) {
+        const char *vp = v;
+        int p = parse_int(&vp);
+        if (p >= 0) {
+            node->style.padding[0] = p; node->style.padding[1] = p;
+            node->style.padding[2] = p; node->style.padding[3] = p;
+        }
+        return;
+    }
+
+    /* display: none|block|inline */
+    if (css_prop_eq(pbuf, "display")) {
+        if (str_starts(v, "block"))  node->style.display = 0;
+        if (str_starts(v, "inline")) node->style.display = 1;
+        if (str_starts(v, "none"))   node->style.display = 2;
+        return;
+    }
+
+    /* Unknown property — skip gracefully */
+}
+
 void css_apply_inline(dom_node_t *node) {
-    /* TODO: parse style="" attributes for color, background, etc. */
     if (!node) return;
+
+    /* Parse style="" if present */
+    if (node->attr_style[0]) {
+        const char *p = node->attr_style;
+        while (*p) {
+            /* Skip whitespace and semicolons */
+            while (*p == ' ' || *p == ';' || *p == '\t') p++;
+            if (!*p) break;
+
+            /* Read property name (up to ':') */
+            const char *prop_start = p;
+            while (*p && *p != ':' && *p != ';') p++;
+            int prop_len = (int)(p - prop_start);
+
+            /* Trim trailing spaces from property */
+            while (prop_len > 0 && prop_start[prop_len - 1] == ' ')
+                prop_len--;
+
+            if (*p != ':') continue;  /* Malformed — skip */
+            p++;  /* skip ':' */
+
+            /* Read value (up to ';' or end) */
+            while (*p == ' ') p++;
+            const char *val_start = p;
+            while (*p && *p != ';') p++;
+            int val_len = (int)(p - val_start);
+
+            /* Trim trailing spaces from value */
+            while (val_len > 0 && val_start[val_len - 1] == ' ')
+                val_len--;
+
+            if (prop_len > 0 && val_len > 0)
+                css_apply_property(node, prop_start, prop_len,
+                                   val_start, val_len);
+
+            if (*p == ';') p++;
+        }
+    }
+
+    /* Recurse into children */
     for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
         css_apply_inline(c);
 }
@@ -413,6 +630,36 @@ void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
                 if (lines < 1) lines = 1;
                 c->box.h = lines * line_h;
             }
+        } else if (str_eq(c->tag, "img")) {
+            /* Image placeholder: default 200x80 if no dimensions known */
+            int iw = 200, ih = 80;
+            /* Future: parse width/height attrs or PNG IHDR for real dims */
+            c->box.w = iw + c->style.padding[1] + c->style.padding[3];
+            c->box.h = ih + c->style.padding[0] + c->style.padding[2];
+        } else if (str_eq(c->tag, "input")) {
+            /* Text input: fixed height, width fills container or 200px min */
+            int line_h = font_line_height(FONT_UI, TYPE_BODY);
+            if (line_h < 1) line_h = TYPE_BODY * 3 / 2;
+            c->box.h = line_h + c->style.padding[0] + c->style.padding[2];
+            if (c->box.w < 200) c->box.w = 200;
+        } else if (str_eq(c->tag, "button")) {
+            /* Button: sized to text content */
+            const char *label = "";
+            if (c->attr_value[0])
+                label = c->attr_value;
+            else if (c->first_child && c->first_child->type == DOM_TEXT)
+                label = c->first_child->text;
+            int tw = font_measure(label, FONT_UI_BOLD, TYPE_BODY);
+            int line_h = font_line_height(FONT_UI_BOLD, TYPE_BODY);
+            if (line_h < 1) line_h = TYPE_BODY * 3 / 2;
+            c->box.w = tw + c->style.padding[1] + c->style.padding[3];
+            c->box.h = line_h + c->style.padding[0] + c->style.padding[2];
+        } else if (str_eq(c->tag, "textarea")) {
+            /* Textarea: full width, minimum 4 lines tall */
+            int line_h = font_line_height(FONT_UI, TYPE_BODY);
+            if (line_h < 1) line_h = TYPE_BODY * 3 / 2;
+            int min_h = line_h * 4 + c->style.padding[0] + c->style.padding[2];
+            c->box.h = min_h;
         } else {
             /* Recurse into children to compute content height */
             layout_compute(c, c->box.w - c->style.padding[1] - c->style.padding[3],
@@ -428,6 +675,171 @@ void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
         }
 
         cursor_y = c->box.y + c->box.h + c->style.margin[2];
+    }
+}
+
+/* ── PNG placeholder ── */
+
+/*
+ * Minimal PNG IHDR parser — extracts width and height from a PNG.
+ * A full PNG decode requires inflate/deflate (zlib), which is too heavy
+ * for Alpha 0.1. Instead we parse the image dimensions from IHDR and
+ * render an accent-tinted placeholder rectangle with "IMG" text.
+ *
+ * Returns 1 if valid PNG header found, 0 otherwise.
+ * Sets *w and *h from IHDR chunk.
+ */
+static int __attribute__((unused))
+png_parse_ihdr(const uint8_t *data, int len, int *w, int *h) {
+    /* PNG signature: 89 50 4E 47 0D 0A 1A 0A */
+    if (len < 24) return 0;
+    if (data[0] != 0x89 || data[1] != 0x50 || data[2] != 0x4E ||
+        data[3] != 0x47 || data[4] != 0x0D || data[5] != 0x0A ||
+        data[6] != 0x1A || data[7] != 0x0A) return 0;
+
+    /* IHDR must be the first chunk (offset 8).
+     * Chunk layout: 4 bytes length, 4 bytes type, data, 4 bytes CRC.
+     * IHDR type = "IHDR" = 0x49484452.
+     * IHDR data: 4 bytes width, 4 bytes height, 1 bit depth, 1 color type,
+     *            1 compression, 1 filter, 1 interlace. */
+    if (data[12] != 'I' || data[13] != 'H' || data[14] != 'D' ||
+        data[15] != 'R') return 0;
+
+    /* Width and height are big-endian 32-bit at offsets 16 and 20 */
+    *w = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | data[19];
+    *h = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | data[23];
+
+    /* Sanity bounds */
+    if (*w <= 0 || *w > 4096 || *h <= 0 || *h > 4096) return 0;
+    return 1;
+}
+
+/*
+ * Draw an image placeholder: accent-tinted rect with "IMG" label and
+ * dimension text. Used when we have an <img> tag but no decoded pixels.
+ *
+ * img_w, img_h: actual image dimensions (0 if unknown).
+ * draw_w, draw_h: layout box dimensions to fill.
+ */
+static void render_img_placeholder(int x, int y, int draw_w, int draw_h,
+                                   int img_w, int img_h, const char *alt)
+{
+    /* Accent-tinted background (primary at ~20% opacity) */
+    uint32_t bg = 0xFF1A2633;  /* dark blue-tinted rect */
+    fb_rect(x, y, draw_w, draw_h, bg);
+    fb_rect_outline(x, y, draw_w, draw_h, COLOR_PRIMARY_DIM, 1);
+
+    /* "IMG" label centered */
+    int label_w = font_measure("IMG", FONT_UI_BOLD, TYPE_LABEL);
+    int lx = x + (draw_w - label_w) / 2;
+    int ly = y + draw_h / 2 - TYPE_LABEL;
+    font_draw(lx, ly, "IMG", FONT_UI_BOLD, TYPE_LABEL, COLOR_PRIMARY);
+
+    /* Show alt text or dimensions below the label */
+    char info[128];
+    int ii = 0;
+    if (alt && alt[0]) {
+        while (alt[ii] && ii < 80) { info[ii] = alt[ii]; ii++; }
+    } else if (img_w > 0 && img_h > 0) {
+        /* Build "WxH" string manually */
+        int tmp = img_w;
+        char digits[12]; int di = 0;
+        if (tmp == 0) digits[di++] = '0';
+        while (tmp > 0) { digits[di++] = '0' + (tmp % 10); tmp /= 10; }
+        for (int j = di - 1; j >= 0; j--) info[ii++] = digits[j];
+        info[ii++] = 'x';
+        tmp = img_h; di = 0;
+        if (tmp == 0) digits[di++] = '0';
+        while (tmp > 0) { digits[di++] = '0' + (tmp % 10); tmp /= 10; }
+        for (int j = di - 1; j >= 0; j--) info[ii++] = digits[j];
+    }
+    info[ii] = 0;
+
+    if (ii > 0) {
+        int info_w = font_measure(info, FONT_UI, TYPE_CAPTION);
+        int ix = x + (draw_w - info_w) / 2;
+        int iy = ly + TYPE_LABEL + 4;
+        if (iy + TYPE_CAPTION < y + draw_h)
+            font_draw(ix, iy, info, FONT_UI, TYPE_CAPTION, COLOR_ON_SURFACE_3);
+    }
+}
+
+/* ── Form element rendering ── */
+
+/*
+ * Render an <input> element: outlined text box with placeholder/value text.
+ * Visual only for Alpha — no text input yet.
+ */
+static void render_input(dom_node_t *node, int x, int y, int w, int h) {
+    /* Input field background */
+    fb_rect(x, y, w, h, COLOR_SURFACE_TOP);
+    fb_rect_outline(x, y, w, h, COLOR_ON_SURFACE_4, 1);
+
+    /* Show value or placeholder text */
+    const char *text = node->attr_value[0] ? node->attr_value :
+                       node->attr_placeholder[0] ? node->attr_placeholder : "";
+    uint32_t text_color = node->attr_value[0] ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_3;
+
+    if (text[0]) {
+        int tx = x + node->style.padding[3];
+        int ty = y + node->style.padding[0];
+        font_draw(tx, ty, text, FONT_UI, TYPE_BODY, text_color);
+    }
+}
+
+/*
+ * Render a <button> element: filled rect with centered text.
+ * Accent-colored background, inverted text.
+ */
+static void render_button(dom_node_t *node, int x, int y, int w, int h) {
+    /* Button background (use node's computed background, or primary) */
+    uint32_t bg = node->style.background ? node->style.background : COLOR_PRIMARY;
+    fb_rect(x, y, w, h, bg);
+
+    /* Slight rounded appearance: darken the 4 corner pixels */
+    fb_pixel(x, y, COLOR_SURFACE);
+    fb_pixel(x + w - 1, y, COLOR_SURFACE);
+    fb_pixel(x, y + h - 1, COLOR_SURFACE);
+    fb_pixel(x + w - 1, y + h - 1, COLOR_SURFACE);
+
+    /* Button text: value attr, or first text child */
+    const char *label = "";
+    if (node->attr_value[0]) {
+        label = node->attr_value;
+    } else if (node->first_child && node->first_child->type == DOM_TEXT) {
+        label = node->first_child->text;
+    }
+
+    if (label[0]) {
+        uint32_t tc = node->style.color ? node->style.color : COLOR_SURFACE;
+        int label_w = font_measure(label, FONT_UI_BOLD, TYPE_BODY);
+        int tx = x + (w - label_w) / 2;
+        int ty = y + node->style.padding[0];
+        font_draw(tx, ty, label, FONT_UI_BOLD, TYPE_BODY, tc);
+    }
+}
+
+/*
+ * Render a <textarea> element: multi-line outlined text box.
+ * Visual only for Alpha.
+ */
+static void render_textarea(dom_node_t *node, int x, int y, int w, int h) {
+    /* Minimum height for textarea: 4 lines */
+    int min_h = TYPE_BODY * 6;
+    if (h < min_h) h = min_h;
+
+    fb_rect(x, y, w, h, COLOR_SURFACE_TOP);
+    fb_rect_outline(x, y, w, h, COLOR_ON_SURFACE_4, 1);
+
+    /* Show placeholder or value text */
+    const char *text = node->attr_value[0] ? node->attr_value :
+                       node->attr_placeholder[0] ? node->attr_placeholder : "";
+    uint32_t text_color = node->attr_value[0] ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_3;
+
+    if (text[0]) {
+        int tx = x + node->style.padding[3];
+        int ty = y + node->style.padding[0];
+        font_draw(tx, ty, text, FONT_UI, TYPE_BODY, text_color);
     }
 }
 
@@ -449,7 +861,7 @@ void render_page(dom_node_t *root, int ox, int oy, int scroll_y,
         if (draw_y > oy + viewport_h) continue;
 
         /* Background */
-        if (c->style.background) {
+        if (c->style.background && !str_eq(c->tag, "button")) {
             fb_rect(draw_x, draw_y, c->box.w, c->box.h, c->style.background);
         }
 
@@ -459,10 +871,64 @@ void render_page(dom_node_t *root, int ox, int oy, int scroll_y,
             continue;
         }
 
-        /* Text — render with TTF font system */
+        /* <img> — render placeholder (future: decoded PNG pixels) */
+        if (str_eq(c->tag, "img")) {
+            int img_w = 0, img_h = 0;
+            /* Image dimensions not available without fetch yet;
+             * use layout box dimensions for placeholder. */
+            int ph_w = c->box.w > 0 ? c->box.w : 200;
+            int ph_h = c->box.h > 0 ? c->box.h : 80;
+            render_img_placeholder(draw_x, draw_y, ph_w, ph_h,
+                                   img_w, img_h, c->attr_alt);
+            continue;
+        }
+
+        /* <input> — render text field */
+        if (str_eq(c->tag, "input")) {
+            int iw = c->box.w > 0 ? c->box.w : 200;
+            int ih = c->box.h > 0 ? c->box.h : TYPE_BODY + 12;
+            render_input(c, draw_x, draw_y, iw, ih);
+            continue;
+        }
+
+        /* <button> — render button */
+        if (str_eq(c->tag, "button")) {
+            int bw = c->box.w > 0 ? c->box.w : 100;
+            int bh = c->box.h > 0 ? c->box.h : TYPE_BODY + 16;
+            render_button(c, draw_x, draw_y, bw, bh);
+            continue;
+        }
+
+        /* <textarea> — render multi-line text box */
+        if (str_eq(c->tag, "textarea")) {
+            int tw = c->box.w > 0 ? c->box.w : 300;
+            int th = c->box.h > 0 ? c->box.h : TYPE_BODY * 6;
+            render_textarea(c, draw_x, draw_y, tw, th);
+            continue;
+        }
+
+        /* Text — render with TTF font system, respecting text-align */
         if (c->type == DOM_TEXT && c->text[0]) {
             font_id_t fid = text_font(c);
-            font_draw(draw_x, draw_y, c->text, fid,
+            int text_x = draw_x;
+
+            /* text-align: check parent's alignment */
+            int align = 0;  /* default left */
+            if (c->parent) align = c->parent->style.text_align;
+
+            if (align == 1) {
+                /* center */
+                int tw = font_measure(c->text, fid, c->style.font_size);
+                int avail = c->box.w > 0 ? c->box.w : viewport_w;
+                text_x = draw_x + (avail - tw) / 2;
+            } else if (align == 2) {
+                /* right */
+                int tw = font_measure(c->text, fid, c->style.font_size);
+                int avail = c->box.w > 0 ? c->box.w : viewport_w;
+                text_x = draw_x + avail - tw;
+            }
+
+            font_draw(text_x, draw_y, c->text, fid,
                       c->style.font_size, c->style.color);
         }
 

@@ -63,6 +63,10 @@ typedef struct dom_node {
     char            attr_src[512];
     char            attr_class[256];
     char            attr_style[512];
+    char            attr_type[32];     /* input type="text|password|..." */
+    char            attr_value[256];   /* input/button value */
+    char            attr_alt[256];     /* img alt text */
+    char            attr_placeholder[256]; /* input placeholder */
 
     /* CSS computed style (simplified) */
     struct {
