@@ -38,12 +38,18 @@ static double stbtt_pow(double x, double y) {
     (void)x; (void)y;
     return 1.0; /* Gamma not needed for grayscale AA */
 }
+/* Forward-declare heap functions so stb_truetype can use them.
+ * Must match heap.h signatures (uint64_t = unsigned long on x86_64). */
+#include <stdint.h>
+void *kmalloc(uint64_t size);
+void  kfree(void *ptr);
 #define STBTT_malloc(x,u)  kmalloc(x)
 #define STBTT_free(x,u)    kfree(x)
 
 #include "../lib/stb/stb_truetype.h"
 
 #include "font.h"
+#include "font_data.h"
 #include "fb.h"
 #include "heap.h"
 #include "theme.h"
@@ -51,12 +57,8 @@ static double stbtt_pow(double x, double y) {
 
 /* ── Embedded font data ──
  *
- * TTF files are linked into the binary as raw byte arrays.
- * These are generated at build time from assets/fonts/ using:
- *   xxd -i Inter-Regular.ttf > font_inter.h
- *
- * For now, we load them at runtime from a fixed memory location.
- * The Makefile will embed them via objcopy.
+ * TTF files are linked into the binary via objcopy (see Makefile).
+ * Symbols _binary_inter_regular_ttf_start etc. are declared in font_data.h.
  */
 
 /* Font data pointers (set during font_init) */
@@ -150,34 +152,28 @@ int font_init(void) {
         font_loaded[i] = 0;
     }
 
-    /*
-     * Font data loading:
-     *
-     * The TTF files need to be embedded in the kernel binary.
-     * Build step (Makefile):
-     *   objcopy -I binary -O elf64-x86-64 Inter-Regular.ttf font_inter_regular.o
-     *
-     * This creates symbols:
-     *   _binary_Inter_Regular_ttf_start
-     *   _binary_Inter_Regular_ttf_end
-     *   _binary_Inter_Regular_ttf_size
-     *
-     * Then link font_inter_regular.o into the kernel.
-     *
-     * For now, log that we're ready and use boot font as fallback.
-     */
-
-    /* Try to initialize each font from embedded data */
-    for (int i = 1; i < FONT_COUNT; i++) {
-        if (font_data[i]) {
-            if (stbtt_InitFont(&font_info[i], font_data[i], 0)) {
-                font_loaded[i] = 1;
-            }
-        }
-    }
-
     /* Boot font is always "loaded" */
     font_loaded[FONT_BOOT] = 1;
+
+    /* ── Load embedded TTF data ── */
+
+    /* Inter Regular -> FONT_UI */
+    font_data[FONT_UI] = _binary_inter_regular_ttf_start;
+    if (stbtt_InitFont(&font_info[FONT_UI], font_data[FONT_UI], 0)) {
+        font_loaded[FONT_UI] = 1;
+        kputs("FONT: Inter Regular loaded\n");
+    } else {
+        kputs("FONT: WARN - Inter Regular failed to parse\n");
+    }
+
+    /* JetBrains Mono Regular -> FONT_CODE */
+    font_data[FONT_CODE] = _binary_jbmono_regular_ttf_start;
+    if (stbtt_InitFont(&font_info[FONT_CODE], font_data[FONT_CODE], 0)) {
+        font_loaded[FONT_CODE] = 1;
+        kputs("FONT: JetBrains Mono Regular loaded\n");
+    } else {
+        kputs("FONT: WARN - JetBrains Mono Regular failed to parse\n");
+    }
 
     kputs("FONT: TTF engine ready (stb_truetype)\n");
     return 0;
