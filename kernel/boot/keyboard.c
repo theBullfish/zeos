@@ -6,6 +6,7 @@
  */
 
 #include "keyboard.h"
+#include "keybinds.h"
 #include "idt.h"
 #include "io.h"
 
@@ -21,6 +22,9 @@ static volatile uint32_t kb_tail;
 /* Modifier state */
 static int shift_held;
 static int caps_lock;
+
+/* Extended scancode prefix tracking */
+static int e0_prefix;
 
 /* Scan code set 1 → ASCII (unshifted) */
 static const char scancode_to_ascii[128] = {
@@ -80,6 +84,13 @@ static void kb_buf_push(char c)
 
 /*
  * Keyboard IRQ handler (IRQ1 = vector 0x21)
+ *
+ * Flow:
+ *   1. Read scancode from port 0x60
+ *   2. Track 0xE0 extended prefix
+ *   3. Pass to keybinds system (modifier tracking + shortcut matching)
+ *   4. If keybinds consumed it (shortcut fired), stop here
+ *   5. Otherwise, translate to ASCII and push to shell buffer
  */
 static void keyboard_isr(uint64_t vector, uint64_t error_code)
 {
@@ -88,7 +99,35 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
 
     uint8_t scancode = inb(KB_DATA_PORT);
 
-    /* Handle modifier keys */
+    /* Handle 0xE0 extended prefix — set flag and wait for next byte */
+    if (scancode == 0xE0) {
+        e0_prefix = 1;
+        return;
+    }
+
+    /* Capture and reset extended flag */
+    int extended = e0_prefix;
+    e0_prefix = 0;
+
+    /*
+     * Pass every scancode to the keybinds system first.
+     * It tracks modifier state (shift/ctrl/alt/super) internally
+     * and matches key combos against the binding table.
+     * If a shortcut fired, consume the key — don't pass to shell.
+     */
+    action_id_t action = keybinds_process(scancode, 0, extended);
+    if (action != ACTION_NONE)
+        return;  /* Shortcut consumed this key */
+
+    /*
+     * Keybinds didn't consume it — update local shift state and
+     * translate to ASCII for the shell buffer.
+     * Extended keys (arrows, etc.) don't produce ASCII, so skip them.
+     */
+    if (extended)
+        return;
+
+    /* Handle shift modifier keys */
     if (scancode == SC_LSHIFT_PRESS || scancode == SC_RSHIFT_PRESS) {
         shift_held = 1;
         return;
@@ -105,6 +144,18 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
     /* Ignore key releases (bit 7 set) */
     if (scancode & 0x80)
         return;
+
+    /*
+     * Don't pass keys to shell when Super/Ctrl/Alt are held —
+     * those combos are for shortcuts, even if unbound.
+     * Only allow Shift through (it modifies ASCII output).
+     */
+    uint8_t mods = keybinds_get_modifiers();
+    if (mods & (MOD_SUPER | MOD_CTRL | MOD_ALT))
+        return;
+
+    /* Keep shift_held in sync with keybinds modifier state */
+    shift_held = (mods & MOD_SHIFT) ? 1 : 0;
 
     /* Translate to ASCII */
     char c;
@@ -130,6 +181,10 @@ void keyboard_init(void)
     kb_tail = 0;
     shift_held = 0;
     caps_lock = 0;
+    e0_prefix = 0;
+
+    /* Initialize keyboard shortcuts before enabling interrupts */
+    keybinds_init();
 
     idt_register(0x21, keyboard_isr);
     pic_unmask(1);  /* Unmask IRQ1 (keyboard) */

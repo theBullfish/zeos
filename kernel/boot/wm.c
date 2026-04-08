@@ -684,6 +684,11 @@ chain_surface_t *wm_get_surface(int id) {
     return find_surface(id);
 }
 
+chain_surface_t *wm_get_surface_by_index(int index) {
+    if (index < 0 || index >= g_wm.surface_count) return 0;
+    return &g_wm.surfaces[index];
+}
+
 int wm_surface_count(void) {
     return g_wm.surface_count;
 }

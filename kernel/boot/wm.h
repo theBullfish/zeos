@@ -194,6 +194,7 @@ void wm_draw_ghost(void);
 
 /* ── Queries ── */
 chain_surface_t *wm_get_surface(int id);
+chain_surface_t *wm_get_surface_by_index(int index);  /* Index into surface array */
 int wm_surface_count(void);
 int wm_visible_count(void);    /* On current workspace */
 
