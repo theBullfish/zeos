@@ -83,4 +83,30 @@ void mde_dump_graph(void);
    Returns 0 on success, -1 on error. */
 int  mde_fuse(int chain_ids[], int count, void *output);
 
+/* ── B3-Informed Routing ───────────────────────────────────────── */
+
+/*
+ * Find the best chain that produces signal_type, using B3 beliefs.
+ *
+ * Evaluates E[f] = alpha / (alpha + beta) for each candidate.
+ * Returns the chain_id with highest E[f] (most reliable).
+ * If predictions are equal (both at prior), round-robins to explore.
+ * With probability mde_explore_factor, picks a random candidate instead.
+ *
+ * Returns chain_id or -1 if no chain produces signal_type.
+ */
+int  mde_best_route(const char *signal_type);
+
+/*
+ * Exploration factor for B3 routing (epsilon-greedy).
+ *
+ * 0.0 = always pick the B3 best.
+ * 1.0 = always pick random.
+ * Default: 0.1 (10% exploration).
+ *
+ * Effective exploration decreases as B3 confidence increases:
+ *   effective_epsilon = explore_factor * (1.0 - confidence)
+ */
+extern float mde_explore_factor;
+
 #endif /* ZEOS_MDE_H */

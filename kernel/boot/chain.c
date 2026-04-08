@@ -258,9 +258,11 @@ int chain_resolve(int id)
         c->last_resolve_ms = (float)(t_end - t_start) * 1000.0f / (float)freq;
     }
 
-    /* Update B3 belief -- successful resolve is a positive observation */
-    c->b3_alpha += 1.0f;
-    c->b3_observations++;
+    /*
+     * B3 belief update is now handled by MDE's routing layer
+     * (mde_resolve_chain / mde_resolve_all), which observes both
+     * success AND failure outcomes. Don't double-count here.
+     */
 
     return 0;
 }

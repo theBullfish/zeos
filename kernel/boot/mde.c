@@ -6,11 +6,26 @@
  */
 
 #include "mde.h"
+#include "b3.h"
 #include "kprint.h"
 
 /* ── Static state ───────────────────────────────────────────────── */
 
 static mde_state_t mde;
+
+/* ── B3 routing state ──────────────────────────────────────────── */
+
+float mde_explore_factor = 0.1f;        /* 10% exploration by default */
+
+static unsigned int mde_rr_counter = 0; /* round-robin tiebreaker */
+static unsigned int mde_rng_state = 42; /* simple LCG for exploration */
+
+static unsigned int mde_rand(void)
+{
+    /* Minimal LCG -- good enough for epsilon-greedy selection */
+    mde_rng_state = mde_rng_state * 1103515245u + 12345u;
+    return (mde_rng_state >> 16) & 0x7FFF;
+}
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -234,6 +249,140 @@ int mde_route_count(void)
     return mde.route_count;
 }
 
+/* ── B3 Best Route ─────────────────────────────────────────────── */
+
+/*
+ * Build a temporary b3_state_t from a chain's inline B3 fields.
+ * The chain stores alpha/beta/observations directly (not a b3_state_t),
+ * so we bridge the gap here.
+ */
+static void mde_chain_to_b3(chain_t *c, b3_state_t *s)
+{
+    s->alpha        = c->b3_alpha;
+    s->beta         = c->b3_beta;
+    s->observations = c->b3_observations;
+    s->successes    = 0;       /* not tracked separately in chain_t */
+    s->prior_dr     = 0.5f;
+    s->confidence_k = 2.0f;
+}
+
+int mde_best_route(const char *signal_type)
+{
+    int candidates[MAX_CHAINS];
+    float predictions[MAX_CHAINS];
+    int count = 0;
+    int i, j;
+    chain_t *c;
+    b3_state_t tmp;
+
+    /* 1. Find all chains that produce signal_type */
+    for (i = 0; i < MAX_CHAINS; i++) {
+        c = chain_get(i);
+        if (!c) continue;
+
+        for (j = 0; j < c->node_count; j++) {
+            if (mde_str_equal(c->nodes[j].output_type, signal_type)) {
+                mde_chain_to_b3(c, &tmp);
+                candidates[count] = i;
+                predictions[count] = b3_predict(&tmp);
+                count++;
+                break;  /* one match per chain is enough */
+            }
+        }
+    }
+
+    if (count == 0)
+        return -1;
+
+    if (count == 1)
+        return candidates[0];
+
+    /* 2. Epsilon-greedy exploration, scaled by confidence */
+    {
+        /*
+         * Effective epsilon = explore_factor * (1 - avg_confidence)
+         * As the system gets more confident, it explores less.
+         */
+        float avg_conf = 0.0f;
+        float eff_epsilon;
+        unsigned int roll;
+
+        for (i = 0; i < count; i++) {
+            c = chain_get(candidates[i]);
+            mde_chain_to_b3(c, &tmp);
+            avg_conf += b3_confidence(&tmp);
+        }
+        avg_conf /= (float)count;
+
+        eff_epsilon = mde_explore_factor * (1.0f - avg_conf);
+        if (eff_epsilon < 0.0f) eff_epsilon = 0.0f;
+        if (eff_epsilon > 1.0f) eff_epsilon = 1.0f;
+
+        /* Roll the dice: explore? */
+        roll = mde_rand() % 1000;
+        if (roll < (unsigned int)(eff_epsilon * 1000.0f)) {
+            /* Explore: pick random candidate */
+            int pick = (int)(mde_rand() % (unsigned int)count);
+
+            kputs("[mde] B3 EXPLORE: ");
+            kputs(signal_type);
+            kputs(" -> chain ");
+            kput_dec((uint64_t)candidates[pick]);
+            kputs(" (random)\n");
+
+            return candidates[pick];
+        }
+    }
+
+    /* 3. Exploit: find the best prediction */
+    {
+        float best_pred = -1.0f;
+        int   best_idx  = 0;
+        int   tied      = 0;
+
+        for (i = 0; i < count; i++) {
+            if (predictions[i] > best_pred) {
+                best_pred = predictions[i];
+                best_idx  = i;
+                tied      = 1;
+            } else if (predictions[i] == best_pred) {
+                tied++;
+            }
+        }
+
+        /* If all tied (e.g. all at prior 0.5), round-robin */
+        if (tied == count) {
+            int pick = (int)(mde_rr_counter % (unsigned int)count);
+            mde_rr_counter++;
+
+            kputs("[mde] B3 round-robin: ");
+            kputs(signal_type);
+            kputs(" -> chain ");
+            kput_dec((uint64_t)candidates[pick]);
+            kputs(" (all equal)\n");
+
+            return candidates[pick];
+        }
+
+        /* Log the B3 decision */
+        {
+            chain_t *winner = chain_get(candidates[best_idx]);
+            int pct = (int)(best_pred * 100.0f);   /* E[f] as percentage */
+
+            kputs("[mde] B3 routing ");
+            kputs(signal_type);
+            kputs(" -> ");
+            if (winner) kputs(winner->name);
+            kputs(" (E[f]=0.");
+            if (pct < 10) kputc('0');
+            kput_dec((uint64_t)pct);
+            kputs(")\n");
+        }
+
+        return candidates[best_idx];
+    }
+}
+
 /* ── Topological Sort (DFS-based) ───────────────────────────────── */
 
 /*
@@ -325,12 +474,36 @@ int mde_resolve_all(void)
 {
     int count, i, id, err;
     int errors = 0;
+    chain_t *c;
+    b3_state_t tmp;
 
     count = topo_sort();
 
     for (i = 0; i < count; i++) {
         id = topo_order[i];
+
+        /*
+         * Before resolving: if multiple chains produce the same type
+         * that feeds into this chain, B3 already selected which upstream
+         * to use (via mde_resolve_chain propagation). Here we just
+         * resolve in order and track B3 outcomes.
+         */
         err = chain_resolve(id);
+
+        /* Update B3 beliefs for this chain */
+        c = chain_get(id);
+        if (c) {
+            mde_chain_to_b3(c, &tmp);
+            if (err == 0) {
+                b3_observe(&tmp, 1);
+            } else {
+                b3_observe(&tmp, 0);
+            }
+            c->b3_alpha        = tmp.alpha;
+            c->b3_beta         = tmp.beta;
+            c->b3_observations = tmp.observations;
+        }
+
         if (err != 0)
             errors++;
     }
@@ -344,19 +517,103 @@ int mde_resolve_chain(int chain_id)
 {
     int err;
     int i;
+    chain_t *c;
+    b3_state_t tmp;
 
     err = chain_resolve(chain_id);
+
+    /* Update B3 beliefs based on resolve outcome */
+    c = chain_get(chain_id);
+    if (c) {
+        mde_chain_to_b3(c, &tmp);
+        if (err == 0) {
+            b3_observe(&tmp, 1);    /* success */
+        } else {
+            b3_observe(&tmp, 0);    /* failure */
+        }
+        /* Write back to chain */
+        c->b3_alpha        = tmp.alpha;
+        c->b3_beta         = tmp.beta;
+        c->b3_observations = tmp.observations;
+    }
+
     if (err != 0)
         return err;
 
     /*
      * After resolving, propagate: resolve all chains
      * that receive output from this chain.
+     *
+     * When multiple routes exist for the same signal type,
+     * use B3 to pick the best downstream chain.
      */
-    for (i = 0; i < MDE_MAX_ROUTES; i++) {
-        if (mde.routes[i].active &&
-            mde.routes[i].from_chain == chain_id) {
-            chain_resolve(mde.routes[i].to_chain);
+    {
+        /*
+         * Collect unique signal types from this chain's outgoing routes,
+         * then for each type, use mde_best_route to pick the winner.
+         * Routes not selected by B3 are skipped this cycle.
+         */
+        char  seen_types[MDE_MAX_FUSE][32];
+        int   seen_best[MDE_MAX_FUSE];     /* best chain_id per type */
+        int   seen_count = 0;
+
+        for (i = 0; i < MDE_MAX_ROUTES; i++) {
+            if (!mde.routes[i].active)
+                continue;
+            if (mde.routes[i].from_chain != chain_id)
+                continue;
+
+            /* Check if we already handled this signal type */
+            {
+                int already = 0;
+                int matched_idx = -1;
+                int s;
+                for (s = 0; s < seen_count; s++) {
+                    if (mde_str_equal(seen_types[s],
+                                       mde.routes[i].signal_type)) {
+                        already = 1;
+                        matched_idx = s;
+                        break;
+                    }
+                }
+                if (already) {
+                    /* Only resolve if this route's target is the B3 winner */
+                    if (matched_idx >= 0 &&
+                        mde.routes[i].to_chain == seen_best[matched_idx])
+                        chain_resolve(mde.routes[i].to_chain);
+                    continue;
+                }
+            }
+
+            /* New signal type -- count how many routes share it */
+            {
+                int same_type = 0;
+                int j2;
+                for (j2 = 0; j2 < MDE_MAX_ROUTES; j2++) {
+                    if (mde.routes[j2].active &&
+                        mde.routes[j2].from_chain == chain_id &&
+                        mde_str_equal(mde.routes[j2].signal_type,
+                                       mde.routes[i].signal_type)) {
+                        same_type++;
+                    }
+                }
+
+                if (same_type > 1 && seen_count < MDE_MAX_FUSE) {
+                    /* Multiple routes for this type -- B3 decides */
+                    int best = mde_best_route(mde.routes[i].signal_type);
+
+                    mde_str_copy(seen_types[seen_count],
+                                 mde.routes[i].signal_type, 32);
+                    seen_best[seen_count] = best;
+                    seen_count++;
+
+                    if (best >= 0)
+                        chain_resolve(best);
+                } else {
+                    /* Only one route -- just resolve it directly */
+                    chain_resolve(mde.routes[i].to_chain);
+                }
+            }
         }
     }
 
