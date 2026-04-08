@@ -50,7 +50,7 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/net_udp.c boot/net_tcp.c boot/net_dns.c boot/net_http.c \
            boot/shell.c boot/anim.c boot/ui.c boot/cursor.c boot/net_dhcp.c boot/net_tls.c boot/browser.c \
            boot/mbedtls_platform.c boot/font.c boot/wm.c boot/compositor.c \
-           boot/b3.c boot/hw_discover.c boot/chain.c boot/mouse.c
+           boot/b3.c boot/hw_discover.c boot/chain.c boot/mouse.c boot/firstboot.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output
