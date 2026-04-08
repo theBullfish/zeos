@@ -10,6 +10,7 @@
 #include "net_virtio.h"
 #include "net_arp.h"
 #include "net_ip.h"
+#include "net_tcp.h"
 #include "net_dhcp.h"
 #include "kprint.h"
 
@@ -80,6 +81,9 @@ void net_poll(void)
         ip_process(frame, (uint16_t)len);
         break;
     }
+
+    /* Check retransmission timers after processing any packet */
+    tcp_retransmit_tick();
 }
 
 void net_poll_wait(uint32_t timeout_ms)

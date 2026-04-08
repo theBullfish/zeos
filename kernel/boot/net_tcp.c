@@ -211,7 +211,7 @@ tcp_handle_t tcp_open(struct ipv4_addr dst, uint16_t port)
 {
     int slot = conn_alloc();
     if (slot < 0) {
-        kprintf("tcp: no free connection slots\n");
+        kputs("tcp: no free connection slots\n");
         return TCP_INVALID_HANDLE;
     }
 
@@ -393,15 +393,21 @@ void tcp_retransmit_tick(void)
 
         conn->retx_count++;
         if (conn->retx_count > TCP_RETX_MAX) {
-            kprintf("tcp: retransmit timeout on port %d (gave up after %d attempts)\n",
-                    conn->local_port, TCP_RETX_MAX);
+            kputs("tcp: retransmit timeout on port ");
+            kput_dec(conn->local_port);
+            kputs(" (gave up after ");
+            kput_dec(TCP_RETX_MAX);
+            kputs(" attempts)\n");
             conn->state = TCP_ERROR;
             retx_clear(conn);
             continue;
         }
 
-        kprintf("tcp: retransmit #%d on port %d\n",
-                conn->retx_count, conn->local_port);
+        kputs("tcp: retransmit #");
+        kput_dec(conn->retx_count);
+        kputs(" on port ");
+        kput_dec(conn->local_port);
+        kputs("\n");
 
         /* Resend: restore seq to the retx_seq, send, then put seq back.
            We need to emit the exact same segment that was originally sent. */
