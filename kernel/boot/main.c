@@ -26,6 +26,7 @@
 #include "idt.h"
 #include "panic.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "pci.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -320,6 +321,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Initialize keyboard */
     kputs("Initializing keyboard... ");
     keyboard_init();
+    kputs("done.\n");
+
+    /* Initialize PS/2 mouse */
+    kputs("Initializing mouse... ");
+    mouse_init();
     kputs("done.\n");
 
     /* Enable interrupts */

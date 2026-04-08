@@ -1,0 +1,378 @@
+/*
+ * Zeos — PS/2 mouse driver
+ *
+ * Uses the 8042 keyboard controller's auxiliary port (port 0x60/0x64)
+ * to communicate with a PS/2 mouse. Decodes standard 3-byte packets
+ * and feeds absolute position + button events to the cursor system.
+ *
+ * PS/2 mouse protocol:
+ *   Byte 0: [Y-ovf][X-ovf][Y-sign][X-sign][1][Middle][Right][Left]
+ *   Byte 1: X movement (unsigned, sign in byte 0 bit 4)
+ *   Byte 2: Y movement (unsigned, sign in byte 0 bit 5)
+ *
+ * Initialization sequence:
+ *   1. Enable auxiliary device on 8042 controller
+ *   2. Send 0xFF (reset) to mouse, wait for 0xAA (self-test pass)
+ *   3. Send 0xF6 (set defaults) — 100 samples/sec, 4 counts/mm
+ *   4. Send 0xF4 (enable data reporting)
+ *   5. Register IRQ12 handler (vector 0x2C)
+ */
+
+#include "mouse.h"
+#include "idt.h"
+#include "io.h"
+#include "fb.h"
+#include "cursor.h"
+
+/* ── 8042 controller ports ── */
+#define PS2_DATA_PORT    0x60
+#define PS2_STATUS_PORT  0x64
+#define PS2_CMD_PORT     0x64
+
+/* ── 8042 status register bits ── */
+#define PS2_STATUS_OBF   (1 << 0)  /* Output buffer full (data ready) */
+#define PS2_STATUS_IBF   (1 << 1)  /* Input buffer full (controller busy) */
+#define PS2_STATUS_AUX   (1 << 5)  /* Aux data (mouse vs keyboard) */
+
+/* ── 8042 controller commands ── */
+#define PS2_CMD_READ_CONFIG   0x20
+#define PS2_CMD_WRITE_CONFIG  0x60
+#define PS2_CMD_DISABLE_AUX   0xA7
+#define PS2_CMD_ENABLE_AUX    0xA8
+#define PS2_CMD_TEST_AUX      0xA9
+#define PS2_CMD_WRITE_AUX     0xD4  /* Next byte goes to mouse */
+
+/* ── Mouse commands (sent via 0xD4) ── */
+#define MOUSE_CMD_RESET       0xFF
+#define MOUSE_CMD_RESEND      0xFE
+#define MOUSE_CMD_SET_DEFAULT  0xF6
+#define MOUSE_CMD_DISABLE     0xF5
+#define MOUSE_CMD_ENABLE      0xF4
+#define MOUSE_CMD_SET_RATE    0xF3
+#define MOUSE_CMD_GET_ID      0xF2
+
+/* ── Mouse responses ── */
+#define MOUSE_ACK             0xFA
+#define MOUSE_SELF_TEST_PASS  0xAA
+
+/* ── Packet state machine ── */
+static volatile int packet_index;
+static uint8_t packet[3];
+
+/* ── Mouse state ── */
+static mouse_state_t g_mouse;
+
+/* ── Forward declarations ── */
+static void mouse_isr(uint64_t vector, uint64_t error_code);
+static void process_packet(void);
+
+/*
+ * Wait until the 8042 input buffer is empty (safe to write).
+ * Timeout after ~100ms worth of port reads.
+ */
+static void ps2_wait_write(void)
+{
+    int timeout = 100000;
+    while (timeout-- > 0) {
+        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_IBF))
+            return;
+    }
+}
+
+/*
+ * Wait until the 8042 output buffer has data (safe to read).
+ * Timeout after ~100ms worth of port reads.
+ */
+static void ps2_wait_read(void)
+{
+    int timeout = 100000;
+    while (timeout-- > 0) {
+        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF)
+            return;
+    }
+}
+
+/*
+ * Send a command byte to the 8042 controller.
+ */
+static void ps2_cmd(uint8_t cmd)
+{
+    ps2_wait_write();
+    outb(PS2_CMD_PORT, cmd);
+}
+
+/*
+ * Send a data byte to the 8042 data port.
+ */
+static void ps2_data_write(uint8_t data)
+{
+    ps2_wait_write();
+    outb(PS2_DATA_PORT, data);
+}
+
+/*
+ * Read a byte from the 8042 data port.
+ */
+static uint8_t ps2_data_read(void)
+{
+    ps2_wait_read();
+    return inb(PS2_DATA_PORT);
+}
+
+/*
+ * Send a command to the mouse (via 8042 auxiliary port).
+ * Waits for ACK (0xFA) from the mouse.
+ */
+static void mouse_write(uint8_t cmd)
+{
+    ps2_cmd(PS2_CMD_WRITE_AUX);
+    ps2_data_write(cmd);
+
+    /* Wait for ACK — mouse responds with 0xFA */
+    int timeout = 100000;
+    while (timeout-- > 0) {
+        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF) {
+            uint8_t resp = inb(PS2_DATA_PORT);
+            if (resp == MOUSE_ACK)
+                return;
+        }
+    }
+}
+
+/*
+ * Flush any pending data from the 8042 output buffer.
+ */
+static void ps2_flush(void)
+{
+    int timeout = 1000;
+    while (timeout-- > 0) {
+        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF)
+            inb(PS2_DATA_PORT);
+        else
+            break;
+    }
+}
+
+/*
+ * Initialize PS/2 mouse.
+ */
+void mouse_init(void)
+{
+    /* Clear state */
+    g_mouse.x = (int)fb_width() / 2;   /* Start at screen center */
+    g_mouse.y = (int)fb_height() / 2;
+    g_mouse.dx = 0;
+    g_mouse.dy = 0;
+    g_mouse.buttons = 0;
+    g_mouse.prev_buttons = 0;
+    packet_index = 0;
+
+    /* Flush any stale data */
+    ps2_flush();
+
+    /* Enable the auxiliary (mouse) port on the 8042 */
+    ps2_cmd(PS2_CMD_ENABLE_AUX);
+
+    /* Read current config byte */
+    ps2_cmd(PS2_CMD_READ_CONFIG);
+    uint8_t config = ps2_data_read();
+
+    /* Enable auxiliary interrupt (bit 1) and auxiliary clock (clear bit 5) */
+    config |= (1 << 1);   /* Enable IRQ12 */
+    config &= ~(1 << 5);  /* Enable auxiliary clock */
+
+    ps2_cmd(PS2_CMD_WRITE_CONFIG);
+    ps2_data_write(config);
+
+    /* Test auxiliary port (optional, for diagnostics) */
+    ps2_cmd(PS2_CMD_TEST_AUX);
+    ps2_data_read();  /* 0x00 = pass */
+
+    /* Reset mouse — sends 0xFF, expects 0xAA then 0x00 (device ID) */
+    mouse_write(MOUSE_CMD_RESET);
+    /* Read self-test result (0xAA) and device ID (0x00) */
+    ps2_data_read();  /* 0xAA self-test pass */
+    ps2_data_read();  /* 0x00 device ID */
+
+    /* Set defaults (100 samples/sec, 4 counts/mm, scaling 1:1) */
+    mouse_write(MOUSE_CMD_SET_DEFAULT);
+
+    /* Set sample rate to 100/sec */
+    mouse_write(MOUSE_CMD_SET_RATE);
+    mouse_write(100);
+
+    /* Enable data reporting — mouse starts sending packets */
+    mouse_write(MOUSE_CMD_ENABLE);
+
+    /* Flush any leftover data from init handshake */
+    ps2_flush();
+
+    /* Register IRQ12 handler (IRQ12 = vector 0x2C on remapped PIC) */
+    idt_register(0x2C, mouse_isr);
+
+    /* Unmask IRQ12 on the slave PIC */
+    pic_unmask(12);
+}
+
+/*
+ * IRQ12 handler — called on every mouse data byte.
+ * Assembles 3-byte packets and processes them.
+ */
+static void mouse_isr(uint64_t vector, uint64_t error_code)
+{
+    (void)vector;
+    (void)error_code;
+
+    uint8_t status = inb(PS2_STATUS_PORT);
+
+    /* Verify data is from auxiliary device (mouse) */
+    if (!(status & PS2_STATUS_AUX))
+        return;
+
+    uint8_t data = inb(PS2_DATA_PORT);
+
+    switch (packet_index) {
+    case 0:
+        /* Byte 0: status byte — bit 3 must always be set */
+        if (data & (1 << 3)) {
+            packet[0] = data;
+            packet_index = 1;
+        }
+        /* If bit 3 is not set, we're out of sync — discard and resync */
+        break;
+
+    case 1:
+        /* Byte 1: X movement */
+        packet[1] = data;
+        packet_index = 2;
+        break;
+
+    case 2:
+        /* Byte 2: Y movement — packet complete */
+        packet[2] = data;
+        packet_index = 0;
+        process_packet();
+        break;
+    }
+
+    /* Send EOI to slave PIC (IRQ >= 8) then master */
+    pic_eoi(12);
+}
+
+/*
+ * Decode a complete 3-byte mouse packet and update state.
+ *
+ * Byte 0 bits:
+ *   [7] Y overflow    [6] X overflow
+ *   [5] Y sign        [4] X sign
+ *   [3] Always 1      [2] Middle btn  [1] Right btn  [0] Left btn
+ *
+ * Byte 1: X delta (unsigned, sign-extended via byte 0 bit 4)
+ * Byte 2: Y delta (unsigned, sign-extended via byte 0 bit 5)
+ */
+static void process_packet(void)
+{
+    uint8_t status = packet[0];
+
+    /* Discard overflow packets */
+    if (status & ((1 << 6) | (1 << 7)))
+        return;
+
+    /* Sign-extend deltas */
+    int dx = (int)packet[1];
+    int dy = (int)packet[2];
+
+    if (status & (1 << 4))
+        dx |= ~0xFF;  /* sign-extend: X is negative */
+    if (status & (1 << 5))
+        dy |= ~0xFF;  /* sign-extend: Y is negative */
+
+    /* PS/2 Y axis is inverted (positive = up), screen Y = down */
+    dy = -dy;
+
+    /* Store deltas */
+    g_mouse.dx = dx;
+    g_mouse.dy = dy;
+
+    /* Accumulate into absolute position */
+    g_mouse.x += dx;
+    g_mouse.y += dy;
+
+    /* Clamp to screen bounds */
+    int w = (int)fb_width();
+    int h = (int)fb_height();
+
+    if (g_mouse.x < 0) g_mouse.x = 0;
+    if (g_mouse.y < 0) g_mouse.y = 0;
+    if (g_mouse.x >= w) g_mouse.x = w - 1;
+    if (g_mouse.y >= h) g_mouse.y = h - 1;
+
+    /* Update button state */
+    g_mouse.prev_buttons = g_mouse.buttons;
+    g_mouse.buttons = status & 0x07;  /* bits [2:0] = middle, right, left */
+
+    /* Feed cursor system */
+    cursor_move(g_mouse.x, g_mouse.y);
+
+    /* Detect button edges and fire cursor press/release */
+    uint8_t changed = g_mouse.buttons ^ g_mouse.prev_buttons;
+
+    if (changed & MOUSE_BTN_LEFT) {
+        if (g_mouse.buttons & MOUSE_BTN_LEFT)
+            cursor_press();
+        else
+            cursor_release();
+    }
+}
+
+/*
+ * Poll for mouse data (non-interrupt fallback).
+ * Call from main loop if IRQ12 is unreliable.
+ */
+void mouse_poll(void)
+{
+    uint8_t status = inb(PS2_STATUS_PORT);
+    if ((status & PS2_STATUS_OBF) && (status & PS2_STATUS_AUX)) {
+        uint8_t data = inb(PS2_DATA_PORT);
+
+        switch (packet_index) {
+        case 0:
+            if (data & (1 << 3)) {
+                packet[0] = data;
+                packet_index = 1;
+            }
+            break;
+        case 1:
+            packet[1] = data;
+            packet_index = 2;
+            break;
+        case 2:
+            packet[2] = data;
+            packet_index = 0;
+            process_packet();
+            break;
+        }
+    }
+}
+
+/* ── Accessors ── */
+
+int mouse_get_x(void)
+{
+    return g_mouse.x;
+}
+
+int mouse_get_y(void)
+{
+    return g_mouse.y;
+}
+
+uint8_t mouse_get_buttons(void)
+{
+    return g_mouse.buttons;
+}
+
+const mouse_state_t *mouse_get_state(void)
+{
+    return &g_mouse;
+}
