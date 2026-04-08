@@ -48,7 +48,7 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c \
            boot/net.c boot/net_virtio.c boot/net_arp.c boot/net_ip.c \
            boot/net_udp.c boot/net_tcp.c boot/net_dns.c boot/net_http.c \
-           boot/shell.c boot/anim.c boot/ui.c
+           boot/shell.c boot/anim.c boot/ui.c boot/cursor.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output

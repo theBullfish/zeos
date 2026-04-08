@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+  <g>
+    <polygon points="11 15 7 15 7 13 11 13 11 7 5 7 5 9 9 9 9 11 5 11 5 17 11 17 11 15"/>
+    <polygon points="17 17 19 17 19 7 17 7 17 11 15 11 15 7 13 7 13 13 17 13 17 17"/>
+    <path d="M2,3V21H22V3ZM20,19H4V5H20Z"/>
+  </g>
+</svg>
