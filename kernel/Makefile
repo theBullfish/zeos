@@ -54,7 +54,8 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/mde.c boot/keybinds.c boot/palette.c boot/inspector.c \
            boot/dock.c boot/access.c boot/desktop.c \
            boot/panel.c boot/settings.c boot/persona_filter.c \
-           boot/chain_registry.c
+           boot/chain_registry.c \
+           boot/vault_disk.c
 OBJS     = $(SRCS:.c=.o)
 
 # Output
