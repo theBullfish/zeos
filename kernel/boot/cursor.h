@@ -114,6 +114,11 @@ void cursor_set_click_anim(click_anim_type_t type);
 /* Set persona colors (called on persona switch) */
 void cursor_set_persona(uint32_t accent, uint32_t accent_dim);
 
+/* Select cursor colorway by persona index (0=zeros, 1=derez, 2=full) */
+void cursor_select_colorway(int index);
+int  cursor_get_colorway(void);
+void cursor_cycle_colorway(void);
+
 /* Tick — call every frame, drives spring animations */
 void cursor_tick(float dt);
 

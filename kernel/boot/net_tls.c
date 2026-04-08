@@ -11,10 +11,6 @@
  *
  * Build: mbedTLS source goes in kernel/lib/mbedtls/
  *        Configure via kernel/lib/mbedtls/mbedtls_config.h
- *
- * Until mbedTLS is integrated, this file compiles but
- * the functions return errors. The API is stable — once
- * mbedTLS drops in, these implementations fill out.
  */
 
 #include "net_tls.h"
@@ -22,23 +18,21 @@
 #include "net_dns.h"
 #include "kprint.h"
 
-/* ── mbedTLS headers (when integrated) ──
- *
- * #include "mbedtls/ssl.h"
- * #include "mbedtls/entropy.h"
- * #include "mbedtls/ctr_drbg.h"
- * #include "mbedtls/x509_crt.h"
- * #include "mbedtls/net_sockets.h"
- */
+/* ── mbedTLS headers ── */
+#include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/x509_crt.h"
+
+/* ── Root CA trust anchors (PEM-encoded) ── */
+#include "ca_bundle.h"
 
 /* ── TLS connection structure ── */
 
 struct tls_conn {
-    /* mbedTLS state (populated when library is integrated)
-     *
-     * mbedtls_ssl_context      ssl;
-     * mbedtls_ssl_config       conf;
-     */
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config  conf;
+    struct tcp_conn     tcp;
     int tcp_connected;
     char hostname[256];
     uint16_t port;
@@ -48,80 +42,80 @@ struct tls_conn {
 /* Single connection (matches TCP limitation) */
 static struct tls_conn g_tls;
 
+/* ── Global mbedTLS state ── */
+static mbedtls_x509_crt      g_ca_certs;
+static mbedtls_ctr_drbg_context g_ctr_drbg;
+static mbedtls_entropy_context  g_entropy;
+static mbedtls_ssl_config       g_ssl_conf;
+
 /* ── Platform callbacks for mbedTLS ── */
 
 /*
  * mbedTLS calls these for network I/O. We route to our TCP stack.
- *
- * int zeos_tls_send(void *ctx, const unsigned char *buf, size_t len) {
- *     (void)ctx;
- *     return tcp_send(buf, (uint16_t)len);
- * }
- *
- * int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len) {
- *     (void)ctx;
- *     return tcp_recv(buf, (uint16_t)len);
- * }
+ * The ctx pointer carries the tcp_conn that owns this TLS session.
  */
+static int zeos_tls_send(void *ctx, const unsigned char *buf, size_t len)
+{
+    struct tcp_conn *tcp = (struct tcp_conn *)ctx;
+    return tcp_send(tcp, buf, (uint16_t)len);
+}
 
-/*
- * Entropy source: TSC provides high-resolution timing jitter.
- * Combined with MAC address for device uniqueness.
- *
- * int zeos_entropy_source(void *data, unsigned char *output,
- *                         size_t len, size_t *olen) {
- *     uint32_t lo, hi;
- *     for (size_t i = 0; i < len; i += 4) {
- *         __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
- *         uint32_t val = lo ^ (hi << 16) ^ g_net.mac.b[i % 6];
- *         size_t remaining = len - i;
- *         size_t chunk = remaining < 4 ? remaining : 4;
- *         for (size_t j = 0; j < chunk; j++)
- *             output[i + j] = (val >> (j * 8)) & 0xFF;
- *     }
- *     *olen = len;
- *     return 0;
- * }
- */
+static int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len)
+{
+    struct tcp_conn *tcp = (struct tcp_conn *)ctx;
+    return tcp_recv(tcp, buf, (uint16_t)len);
+}
 
 /* ── Public API ── */
 
 int tls_init(void)
 {
-    kputs("TLS: subsystem ready (mbedTLS integration pending)\n");
+    /* Initialize all mbedTLS contexts */
+    mbedtls_ssl_config_init(&g_ssl_conf);
+    mbedtls_x509_crt_init(&g_ca_certs);
+    mbedtls_ctr_drbg_init(&g_ctr_drbg);
+    mbedtls_entropy_init(&g_entropy);
 
-    /* When mbedTLS is integrated:
-     *
-     * mbedtls_ssl_config_init(&g_ssl_conf);
-     * mbedtls_x509_crt_init(&g_ca_certs);
-     * mbedtls_ctr_drbg_init(&g_ctr_drbg);
-     * mbedtls_entropy_init(&g_entropy);
-     *
-     * // Add our TSC entropy source
-     * mbedtls_entropy_add_source(&g_entropy, zeos_entropy_source,
-     *                            NULL, 32, MBEDTLS_ENTROPY_SOURCE_STRONG);
-     *
-     * // Seed the DRBG
-     * mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func,
-     *                        &g_entropy, "zeos-tls", 8);
-     *
-     * // Load Mozilla root CAs (embedded in binary)
-     * mbedtls_x509_crt_parse(&g_ca_certs, mozilla_ca_bundle,
-     *                         mozilla_ca_bundle_len);
-     *
-     * // Configure TLS 1.3
-     * mbedtls_ssl_config_defaults(&g_ssl_conf,
-     *     MBEDTLS_SSL_IS_CLIENT,
-     *     MBEDTLS_SSL_TRANSPORT_STREAM,
-     *     MBEDTLS_SSL_PRESET_DEFAULT);
-     * mbedtls_ssl_conf_min_tls_version(&g_ssl_conf,
-     *     MBEDTLS_SSL_VERSION_TLS1_3);
-     * mbedtls_ssl_conf_authmode(&g_ssl_conf,
-     *     MBEDTLS_SSL_VERIFY_REQUIRED);
-     * mbedtls_ssl_conf_ca_chain(&g_ssl_conf, &g_ca_certs, NULL);
-     * mbedtls_ssl_conf_rng(&g_ssl_conf, mbedtls_ctr_drbg_random,
-     *                       &g_ctr_drbg);
-     */
+    /* Seed the DRBG (entropy comes from mbedtls_hardware_poll
+     * via MBEDTLS_ENTROPY_HARDWARE_ALT in mbedtls_platform.c) */
+    int ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func,
+                                     &g_entropy,
+                                     (const unsigned char *)"zeos-tls", 8);
+    if (ret != 0) {
+        kputs("TLS: DRBG seed failed (");
+        kput_dec(-ret);
+        kputs(")\n");
+        return -1;
+    }
+
+    /* Load root CA trust anchors */
+    ret = mbedtls_x509_crt_parse(&g_ca_certs,
+                                  (const unsigned char *)ca_bundle_pem,
+                                  sizeof(ca_bundle_pem));
+    if (ret != 0) {
+        kputs("TLS: CA parse failed (");
+        kput_dec(-ret);
+        kputs(")\n");
+        return -1;
+    }
+
+    /* Configure as TLS 1.2/1.3 client */
+    ret = mbedtls_ssl_config_defaults(&g_ssl_conf,
+              MBEDTLS_SSL_IS_CLIENT,
+              MBEDTLS_SSL_TRANSPORT_STREAM,
+              MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret != 0) {
+        kputs("TLS: config defaults failed\n");
+        return -1;
+    }
+
+    mbedtls_ssl_conf_authmode(&g_ssl_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&g_ssl_conf, &g_ca_certs, NULL);
+    mbedtls_ssl_conf_rng(&g_ssl_conf, mbedtls_ctr_drbg_random, &g_ctr_drbg);
+
+    kputs("TLS: subsystem ready (mbedTLS ");
+    kputs(MBEDTLS_VERSION_STRING);
+    kputs(")\n");
 
     return 0;
 }
@@ -132,80 +126,117 @@ tls_conn_t *tls_connect(const char *hostname, uint16_t port)
     kputs(hostname);
     kputs(":");
     kput_dec(port);
-    kputs(" (mbedTLS not yet integrated)\n");
+    kputs("\n");
 
-    /* When mbedTLS is integrated:
-     *
-     * // DNS resolve
-     * struct ipv4_addr server_ip;
-     * if (dns_resolve(hostname, &server_ip) < 0) return NULL;
-     *
-     * // TCP connect
-     * if (tcp_connect(server_ip, port) < 0) return NULL;
-     *
-     * // Set up SSL context
-     * mbedtls_ssl_init(&g_tls.ssl);
-     * mbedtls_ssl_setup(&g_tls.ssl, &g_ssl_conf);
-     * mbedtls_ssl_set_hostname(&g_tls.ssl, hostname);  // SNI
-     *
-     * // Set I/O callbacks
-     * mbedtls_ssl_set_bio(&g_tls.ssl, NULL,
-     *                      zeos_tls_send, zeos_tls_recv, NULL);
-     *
-     * // TLS handshake
-     * int ret;
-     * while ((ret = mbedtls_ssl_handshake(&g_tls.ssl)) != 0) {
-     *     if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-     *         ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-     *         kputs("TLS: handshake failed\n");
-     *         tcp_close();
-     *         return NULL;
-     *     }
-     * }
-     *
-     * // Verify certificate
-     * if (mbedtls_ssl_get_verify_result(&g_tls.ssl) != 0) {
-     *     kputs("TLS: certificate verification failed\n");
-     *     mbedtls_ssl_close_notify(&g_tls.ssl);
-     *     tcp_close();
-     *     return NULL;
-     * }
-     *
-     * g_tls.active = 1;
-     * return &g_tls;
-     */
+    /* DNS resolve */
+    struct ipv4_addr server_ip;
+    if (dns_resolve(hostname, &server_ip) < 0) {
+        kputs("TLS: DNS failed\n");
+        return NULL;
+    }
 
-    return 0;  /* Not yet available */
+    /* TCP connect */
+    if (tcp_connect(&g_tls.tcp, server_ip, port) < 0) {
+        kputs("TLS: TCP connect failed\n");
+        return NULL;
+    }
+    g_tls.tcp_connected = 1;
+
+    /* Copy hostname for SNI */
+    int i;
+    for (i = 0; hostname[i] && i < 255; i++)
+        g_tls.hostname[i] = hostname[i];
+    g_tls.hostname[i] = 0;
+    g_tls.port = port;
+
+    /* Set up SSL context */
+    mbedtls_ssl_init(&g_tls.ssl);
+
+    int ret = mbedtls_ssl_setup(&g_tls.ssl, &g_ssl_conf);
+    if (ret != 0) {
+        kputs("TLS: ssl_setup failed\n");
+        tcp_close(&g_tls.tcp);
+        return NULL;
+    }
+
+    /* SNI — server name indication */
+    ret = mbedtls_ssl_set_hostname(&g_tls.ssl, g_tls.hostname);
+    if (ret != 0) {
+        kputs("TLS: set_hostname failed\n");
+        mbedtls_ssl_free(&g_tls.ssl);
+        tcp_close(&g_tls.tcp);
+        return NULL;
+    }
+
+    /* Set I/O callbacks — ctx is the tcp_conn */
+    mbedtls_ssl_set_bio(&g_tls.ssl, &g_tls.tcp,
+                         zeos_tls_send, zeos_tls_recv, NULL);
+
+    /* TLS handshake */
+    while ((ret = mbedtls_ssl_handshake(&g_tls.ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+            ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            kputs("TLS: handshake failed (");
+            kput_dec(-ret);
+            kputs(")\n");
+            mbedtls_ssl_free(&g_tls.ssl);
+            tcp_close(&g_tls.tcp);
+            return NULL;
+        }
+    }
+
+    /* Verify certificate */
+    uint32_t flags = mbedtls_ssl_get_verify_result(&g_tls.ssl);
+    if (flags != 0) {
+        kputs("TLS: certificate verification failed (0x");
+        kput_hex(flags);
+        kputs(")\n");
+        mbedtls_ssl_close_notify(&g_tls.ssl);
+        mbedtls_ssl_free(&g_tls.ssl);
+        tcp_close(&g_tls.tcp);
+        return NULL;
+    }
+
+    kputs("TLS: connected, ");
+    kputs(mbedtls_ssl_get_version(&g_tls.ssl));
+    kputs("\n");
+
+    g_tls.active = 1;
+    return &g_tls;
 }
 
 int tls_send(tls_conn_t *conn, const void *data, int len)
 {
     if (!conn || !conn->active) return -1;
 
-    /* return mbedtls_ssl_write(&conn->ssl, data, len); */
-    (void)data; (void)len;
-    return -1;
+    return mbedtls_ssl_write(&conn->ssl, (const unsigned char *)data, len);
 }
 
 int tls_recv(tls_conn_t *conn, void *buf, int max_len)
 {
     if (!conn || !conn->active) return -1;
 
-    /* return mbedtls_ssl_read(&conn->ssl, buf, max_len); */
-    (void)buf; (void)max_len;
-    return -1;
+    int ret = mbedtls_ssl_read(&conn->ssl, (unsigned char *)buf, max_len);
+
+    /* Translate mbedTLS EOF to our convention (0 = EOF) */
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
+        ret == MBEDTLS_ERR_SSL_CONN_EOF)
+        return 0;
+
+    return ret;
 }
 
 void tls_close(tls_conn_t *conn)
 {
     if (!conn || !conn->active) return;
 
-    /* mbedtls_ssl_close_notify(&conn->ssl);
-     * mbedtls_ssl_free(&conn->ssl);
-     * tcp_close();
-     */
+    /* Send close_notify to peer */
+    mbedtls_ssl_close_notify(&conn->ssl);
+    mbedtls_ssl_free(&conn->ssl);
+    tcp_close(&conn->tcp);
 
     conn->active = 0;
+    conn->tcp_connected = 0;
     kputs("TLS: connection closed\n");
 }
 

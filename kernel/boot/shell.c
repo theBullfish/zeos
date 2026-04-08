@@ -36,6 +36,7 @@
 #include "chain.h"
 #include "serial.h"
 #include "persona_filter.h"
+#include "persona_anim.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -57,14 +58,19 @@ static const uint32_t persona_dims[] = {
     COLOR_FULL_DIM,       /* PERSONA_FULL */
 };
 
-/* Get current persona's accent color — used by sigviz and UI */
+/* Get current persona's accent color — used by sigviz and UI.
+ * During a persona transition, returns the spring-interpolated color. */
 uint32_t theme_accent(void)
 {
+    if (persona_transitioning())
+        return persona_current_accent();
     return persona_accents[g_persona];
 }
 
 uint32_t theme_accent_dim(void)
 {
+    if (persona_transitioning())
+        return persona_current_accent_dim();
     return persona_dims[g_persona];
 }
 
@@ -606,8 +612,9 @@ static void persona_banner_colored(void)
 static void cmd_raise(const char *args)
 {
     (void)args;
+    int old = (int)g_persona;
     g_persona = PERSONA_FULL;
-    persona_set_active(PERSONA_FULL);
+    persona_transition(old, PERSONA_FULL);
     kputs("\n");
     persona_banner_colored();
 }
@@ -615,8 +622,9 @@ static void cmd_raise(const char *args)
 static void cmd_zeros(const char *args)
 {
     (void)args;
+    int old = (int)g_persona;
     g_persona = PERSONA_ZEROS;
-    persona_set_active(PERSONA_ZEROS);
+    persona_transition(old, PERSONA_ZEROS);
     kputs("\n");
     persona_banner_colored();
 }
@@ -624,8 +632,9 @@ static void cmd_zeros(const char *args)
 static void cmd_derez(const char *args)
 {
     (void)args;
+    int old = (int)g_persona;
     g_persona = PERSONA_DEREZ;
-    persona_set_active(PERSONA_DEREZ);
+    persona_transition(old, PERSONA_DEREZ);
     kputs("\n");
     persona_banner_colored();
 }

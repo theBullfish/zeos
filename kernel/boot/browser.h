@@ -172,8 +172,23 @@ void browser_home(browser_t *b);
 /* Scroll */
 void browser_scroll(browser_t *b, int delta_y);
 
+/* Keyboard input (scancodes: arrows, pgup/pgdn, home/end) */
+void browser_key(browser_t *b, uint8_t scancode);
+
+/* Mouse wheel scroll (delta: +1 down, -1 up per notch) */
+void browser_mouse_wheel(browser_t *b, int delta);
+
 /* Handle click at viewport coordinates */
 void browser_click(browser_t *b, int x, int y);
+
+/* Scrollbar interaction — returns 1 if click was on scrollbar */
+int browser_scrollbar_click(browser_t *b, int x, int y);
+
+/* Drag scrollbar thumb (call each frame while mouse held) */
+void browser_scrollbar_drag(browser_t *b, int y);
+
+/* Release scrollbar drag */
+void browser_scrollbar_release(void);
 
 /* Render current page into chain surface area */
 void browser_draw(browser_t *b);

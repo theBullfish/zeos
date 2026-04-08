@@ -12,7 +12,9 @@
 #include "net_http.h"
 #include "net_tls.h"
 #include "fb.h"
+#include "font.h"
 #include "theme.h"
+#include "mouse.h"
 #include "kprint.h"
 
 /* ── String helpers (bare-metal, no stdlib) ── */
@@ -356,6 +358,28 @@ void css_apply_inline(dom_node_t *node) {
         css_apply_inline(c);
 }
 
+/* ── Layout helpers ── */
+
+/* Determine the font_id for a DOM node based on its tag */
+static font_id_t node_font(dom_node_t *n) {
+    if (str_eq(n->tag, "code") || str_eq(n->tag, "pre"))
+        return FONT_CODE;
+    if (n->style.font_weight >= 700)
+        return FONT_UI_BOLD;
+    return FONT_UI;
+}
+
+/* Walk parents to inherit font id (e.g. text inside <code>) */
+static font_id_t text_font(dom_node_t *text_node) {
+    for (dom_node_t *p = text_node->parent; p; p = p->parent) {
+        if (str_eq(p->tag, "code") || str_eq(p->tag, "pre"))
+            return FONT_CODE;
+        if (p->style.font_weight >= 700)
+            return FONT_UI_BOLD;
+    }
+    return FONT_UI;
+}
+
 /* ── Layout Engine ── */
 
 void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
@@ -373,15 +397,22 @@ void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
         c->box.w = viewport_w - c->style.margin[1] - c->style.margin[3];
 
         if (c->type == DOM_TEXT) {
-            /* Approximate text height: chars / chars_per_line * line_height */
-            int tlen = str_len(c->text);
-            int char_w = c->style.font_size * 6 / 10;  /* Approximate char width */
-            if (char_w < 1) char_w = 8;
-            int chars_per_line = c->box.w / char_w;
-            if (chars_per_line < 1) chars_per_line = 1;
-            int lines = (tlen + chars_per_line - 1) / chars_per_line;
-            int line_h = c->style.font_size * 3 / 2;  /* 1.5x line height */
-            c->box.h = lines * line_h;
+            /* Use font_measure for accurate text width */
+            font_id_t fid = text_font(c);
+            int size_px = c->style.font_size;
+            int text_w = font_measure(c->text, fid, size_px);
+            int line_h = font_line_height(fid, size_px);
+            if (line_h < 1) line_h = size_px * 3 / 2;
+
+            /* Word-wrap: how many visual lines? */
+            if (text_w <= c->box.w || c->box.w <= 0) {
+                c->box.h = line_h;
+            } else {
+                /* Estimate lines from total width vs available width */
+                int lines = (text_w + c->box.w - 1) / c->box.w;
+                if (lines < 1) lines = 1;
+                c->box.h = lines * line_h;
+            }
         } else {
             /* Recurse into children to compute content height */
             layout_compute(c, c->box.w - c->style.padding[1] - c->style.padding[3],
@@ -428,10 +459,11 @@ void render_page(dom_node_t *root, int ox, int oy, int scroll_y,
             continue;
         }
 
-        /* Text */
+        /* Text — render with TTF font system */
         if (c->type == DOM_TEXT && c->text[0]) {
-            /* Use fb_text with theme color */
-            fb_text(draw_x, draw_y, c->text, c->style.color);
+            font_id_t fid = text_font(c);
+            font_draw(draw_x, draw_y, c->text, fid,
+                      c->style.font_size, c->style.color);
         }
 
         /* Recurse */
@@ -596,6 +628,9 @@ void browser_home(browser_t *b) {
     browser_navigate(b, "http://example.com");
 }
 
+/* Scroll step for arrow keys and mouse wheel */
+#define SCROLL_STEP 32
+
 void browser_scroll(browser_t *b, int delta_y) {
     b->scroll_y += delta_y;
     if (b->scroll_y < 0) b->scroll_y = 0;
@@ -604,10 +639,143 @@ void browser_scroll(browser_t *b, int delta_y) {
     if (b->scroll_y > max_scroll) b->scroll_y = max_scroll;
 }
 
-void browser_click(browser_t *b, int x, int y) {
-    /* TODO: hit-test DOM nodes, follow links */
-    (void)b; (void)x; (void)y;
+/* Handle keyboard input for the browser.
+ * scancode: raw scancode from keyboard driver.
+ * Up arrow = scroll up, Down arrow = scroll down,
+ * Page Up/Down = scroll by viewport height. */
+void browser_key(browser_t *b, uint8_t scancode) {
+    switch (scancode) {
+    case 0x48: browser_scroll(b, -SCROLL_STEP); break;  /* Up arrow */
+    case 0x50: browser_scroll(b, SCROLL_STEP);  break;  /* Down arrow */
+    case 0x49:  /* Page Up */
+        browser_scroll(b, -(b->surface_h - 96));
+        break;
+    case 0x51:  /* Page Down */
+        browser_scroll(b, b->surface_h - 96);
+        break;
+    case 0x47:  /* Home */
+        b->scroll_y = 0;
+        break;
+    case 0x4F:  /* End */
+        browser_scroll(b, b->page_height);
+        break;
+    }
 }
+
+/* Handle mouse wheel scroll. delta > 0 = scroll down, < 0 = scroll up.
+ * Typical: each wheel notch = 3 lines worth of scroll. */
+void browser_mouse_wheel(browser_t *b, int delta) {
+    browser_scroll(b, delta * SCROLL_STEP * 3);
+}
+
+/* ── Link hit-testing ── */
+
+/* Recursively find a link node at (px, py) in page coordinates */
+static dom_node_t *hit_test_link(dom_node_t *node, int px, int py,
+                                  int parent_x, int parent_y)
+{
+    if (!node) return 0;
+
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+
+        int nx = parent_x + c->box.x + c->style.padding[3];
+        int ny = parent_y + c->box.y + c->style.padding[0];
+
+        /* Check if point is inside this node's box */
+        int bx = parent_x + c->box.x;
+        int by = parent_y + c->box.y;
+        if (px >= bx && px < bx + c->box.w &&
+            py >= by && py < by + c->box.h) {
+            /* If this is an <a> tag with href, we found it */
+            if (str_eq(c->tag, "a") && c->attr_href[0])
+                return c;
+        }
+
+        /* Recurse into children */
+        dom_node_t *found = hit_test_link(c, px, py, nx, ny);
+        if (found) return found;
+    }
+    return 0;
+}
+
+/* Resolve a possibly-relative URL against the current page */
+static void resolve_url(browser_t *b, const char *href, char *out, int max) {
+    if (str_starts(href, "http://") || str_starts(href, "https://")) {
+        /* Absolute URL — use as-is */
+        int i = 0;
+        while (href[i] && i < max - 1) { out[i] = href[i]; i++; }
+        out[i] = 0;
+        return;
+    }
+
+    /* Build from current origin */
+    char *p = out;
+    char *end = out + max - 1;
+
+    /* Determine scheme */
+    const char *scheme = "http://";
+    if (str_starts(b->url, "https://")) scheme = "https://";
+
+    while (*scheme && p < end) *p++ = *scheme++;
+    const char *h = b->hostname;
+    while (*h && p < end) *p++ = *h++;
+
+    if (href[0] == '/') {
+        /* Absolute path */
+        while (*href && p < end) *p++ = *href++;
+    } else if (href[0] == '#') {
+        /* Anchor on current page */
+        const char *pa = b->path;
+        while (*pa && p < end) *p++ = *pa++;
+        while (*href && p < end) *p++ = *href++;
+    } else {
+        /* Relative path — append to current directory */
+        const char *pa = b->path;
+        /* Find last '/' in path */
+        int last_slash = 0;
+        for (int i = 0; pa[i]; i++) {
+            if (pa[i] == '/') last_slash = i;
+        }
+        for (int i = 0; i <= last_slash && p < end; i++) *p++ = pa[i];
+        while (*href && p < end) *p++ = *href++;
+    }
+    *p = 0;
+}
+
+void browser_click(browser_t *b, int x, int y) {
+    if (!b->dom) return;
+
+    /* Convert viewport click to page coordinates */
+    int content_x = b->surface_x + 8;
+    int content_y = b->surface_y + 48;
+    int px = x - content_x;
+    int py = y - content_y + b->scroll_y;
+
+    /* Hit-test for links */
+    dom_node_t *link = hit_test_link(b->dom, px, py, 0, 0);
+    if (link && link->attr_href[0]) {
+        /* Handle anchor links: scroll to element (simplified) */
+        if (link->attr_href[0] == '#') {
+            /* For now, just scroll to top on anchor click */
+            b->scroll_y = 0;
+            return;
+        }
+
+        /* Resolve and navigate */
+        char resolved[2048];
+        resolve_url(b, link->attr_href, resolved, 2048);
+        browser_navigate(b, resolved);
+    }
+}
+
+/* ── Scrollbar constants ── */
+#define SCROLLBAR_WIDTH   8
+#define SCROLLBAR_MIN_THUMB 24
+
+/* Scrollbar state for drag tracking */
+static int scrollbar_dragging = 0;
+static int scrollbar_drag_offset = 0;  /* offset from top of thumb to click point */
 
 void browser_draw(browser_t *b) {
     if (!b->dom) return;
@@ -620,8 +788,107 @@ void browser_draw(browser_t *b) {
 
     fb_rect(cx, cy, cw, ch, COLOR_SURFACE);
 
-    /* Render page */
-    render_page(b->dom, cx, cy, b->scroll_y, cw, ch);
+    /* Render page (narrowed to leave room for scrollbar) */
+    int page_w = cw - SCROLLBAR_WIDTH - 2;  /* 2px gap before scrollbar */
+    render_page(b->dom, cx, cy, b->scroll_y, page_w, ch);
+
+    /* ── Scrollbar ── */
+    if (b->page_height > ch) {
+        int track_x = cx + cw - SCROLLBAR_WIDTH;
+        int track_y = cy;
+        int track_h = ch;
+
+        /* Track */
+        fb_rect(track_x, track_y, SCROLLBAR_WIDTH, track_h, COLOR_SURFACE_TOP);
+
+        /* Thumb size: proportional to viewport / page ratio */
+        int thumb_h = (ch * track_h) / b->page_height;
+        if (thumb_h < SCROLLBAR_MIN_THUMB) thumb_h = SCROLLBAR_MIN_THUMB;
+
+        /* Thumb position */
+        int max_scroll = b->page_height - ch;
+        if (max_scroll < 1) max_scroll = 1;
+        int thumb_y = track_y + (b->scroll_y * (track_h - thumb_h)) / max_scroll;
+
+        /* Hover detection — check if mouse is over the thumb */
+        int mx = mouse_get_x();
+        int my = mouse_get_y();
+        int thumb_hover = (mx >= track_x && mx < track_x + SCROLLBAR_WIDTH &&
+                           my >= thumb_y && my < thumb_y + thumb_h);
+
+        uint32_t thumb_color = thumb_hover ? COLOR_ON_SURFACE_3 : COLOR_ON_SURFACE_4;
+        fb_rect(track_x, thumb_y, SCROLLBAR_WIDTH, thumb_h, thumb_color);
+    }
+}
+
+/* Handle scrollbar click/drag. Returns 1 if the click was on the scrollbar. */
+int browser_scrollbar_click(browser_t *b, int x, int y) {
+    int cx = b->surface_x + 8;
+    int cy = b->surface_y + 48;
+    int cw = b->surface_w - 16;
+    int ch = b->surface_h - 96;
+
+    if (b->page_height <= ch) return 0;  /* No scrollbar visible */
+
+    int track_x = cx + cw - SCROLLBAR_WIDTH;
+    int track_y = cy;
+    int track_h = ch;
+
+    /* Check if click is on the scrollbar track */
+    if (x < track_x || x >= track_x + SCROLLBAR_WIDTH) return 0;
+    if (y < track_y || y >= track_y + track_h) return 0;
+
+    /* Compute thumb geometry */
+    int thumb_h = (ch * track_h) / b->page_height;
+    if (thumb_h < SCROLLBAR_MIN_THUMB) thumb_h = SCROLLBAR_MIN_THUMB;
+
+    int max_scroll = b->page_height - ch;
+    if (max_scroll < 1) max_scroll = 1;
+    int thumb_y = track_y + (b->scroll_y * (track_h - thumb_h)) / max_scroll;
+
+    if (y >= thumb_y && y < thumb_y + thumb_h) {
+        /* Click on thumb — start drag */
+        scrollbar_dragging = 1;
+        scrollbar_drag_offset = y - thumb_y;
+    } else if (y < thumb_y) {
+        /* Click above thumb — page up */
+        browser_scroll(b, -ch);
+    } else {
+        /* Click below thumb — page down */
+        browser_scroll(b, ch);
+    }
+    return 1;
+}
+
+/* Handle scrollbar drag (call each frame while mouse is held) */
+void browser_scrollbar_drag(browser_t *b, int y) {
+    if (!scrollbar_dragging) return;
+
+    int cy = b->surface_y + 48;
+    int ch = b->surface_h - 96;
+    int track_y = cy;
+    int track_h = ch;
+
+    int thumb_h = (ch * track_h) / b->page_height;
+    if (thumb_h < SCROLLBAR_MIN_THUMB) thumb_h = SCROLLBAR_MIN_THUMB;
+
+    int max_scroll = b->page_height - ch;
+    if (max_scroll < 1) max_scroll = 1;
+
+    /* Map mouse Y to scroll position */
+    int thumb_top = y - scrollbar_drag_offset;
+    int scroll_range = track_h - thumb_h;
+    if (scroll_range < 1) scroll_range = 1;
+
+    int new_scroll = ((thumb_top - track_y) * max_scroll) / scroll_range;
+    if (new_scroll < 0) new_scroll = 0;
+    if (new_scroll > max_scroll) new_scroll = max_scroll;
+    b->scroll_y = new_scroll;
+}
+
+/* Release scrollbar drag */
+void browser_scrollbar_release(void) {
+    scrollbar_dragging = 0;
 }
 
 void browser_draw_toolbar(browser_t *b) {
@@ -633,13 +900,13 @@ void browser_draw_toolbar(browser_t *b) {
     fb_rect(tx, ty, tw, 48, COLOR_SURFACE_HIGH);
 
     /* Navigation buttons (text placeholders until icon rendering works) */
-    fb_text(tx + 8, ty + 16, "<", COLOR_ON_SURFACE);       /* Back */
-    fb_text(tx + 24, ty + 16, ">", COLOR_ON_SURFACE);      /* Forward */
-    fb_text(tx + 40, ty + 16, "R", COLOR_ON_SURFACE);      /* Refresh */
+    font_draw(tx + 8, ty + 14, "<", FONT_UI, TYPE_LABEL, COLOR_ON_SURFACE);
+    font_draw(tx + 24, ty + 14, ">", FONT_UI, TYPE_LABEL, COLOR_ON_SURFACE);
+    font_draw(tx + 40, ty + 14, "R", FONT_UI, TYPE_LABEL, COLOR_ON_SURFACE);
 
     /* URL bar */
     fb_rect(tx + 64, ty + 8, tw - 128, 32, COLOR_SURFACE_TOP);
-    fb_text(tx + 72, ty + 16, b->url, COLOR_ON_SURFACE_2);
+    font_draw(tx + 72, ty + 14, b->url, FONT_UI, TYPE_LABEL, COLOR_ON_SURFACE_2);
 
     /* Separator */
     fb_hline(tx, ty + 47, tw, COLOR_SEPARATOR);
@@ -682,5 +949,5 @@ void browser_draw_status(browser_t *b) {
 
     *p = 0;
 
-    fb_text(sx + 8, sy + 4, status, COLOR_ON_SURFACE_3);
+    font_draw(sx + 8, sy + 4, status, FONT_UI, TYPE_CAPTION, COLOR_ON_SURFACE_3);
 }
