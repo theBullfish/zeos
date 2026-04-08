@@ -205,4 +205,81 @@ void vault_stat(uint32_t *total_blocks, uint32_t *free_blocks,
  */
 void vault_sync(void);
 
+/* ── Chain Persistence ──────────────────────────── */
+
+/*
+ * Serialized chain state header.
+ * Stored at /chains/[chain_name].state
+ *
+ * Binary format:
+ *   vault_chain_header_t
+ *   [name_len bytes of chain name]
+ *   [node_count entries of vault_chain_node_t]
+ */
+#define VAULT_CHAIN_MAGIC   0x5A434853  /* 'ZCHS' */
+
+typedef struct {
+    uint32_t magic;             /* VAULT_CHAIN_MAGIC */
+    uint32_t version;           /* Incremented on each save */
+    float    b3_alpha;          /* B3 posterior alpha */
+    float    b3_beta;           /* B3 posterior beta */
+    int32_t  b3_observations;   /* Total B3 observations */
+    uint8_t  tier;              /* MasQ tier */
+    uint8_t  node_count;        /* Number of processing nodes */
+    uint16_t name_len;          /* Length of chain name */
+    uint64_t last_resolve_tsc;  /* TSC of last resolve */
+    uint32_t cfa_segments[8];   /* CFA address segments */
+    uint8_t  cfa_depth;         /* CFA depth */
+    uint8_t  _pad[3];           /* Alignment padding */
+} vault_chain_header_t;
+
+/*
+ * Serialized chain node (name + types only, no function pointers).
+ */
+typedef struct {
+    char name[32];
+    char input_type[32];
+    char output_type[32];
+} vault_chain_node_t;
+
+/* Forward declare chain_t (defined in chain.h) */
+struct chain;
+
+/*
+ * Save a chain's critical state to VAULT.
+ * Stores at /chains/[chain_name].state
+ * Increments vault_version in the chain on each save.
+ * Returns 0 on success, -1 on error.
+ */
+int vault_save_chain_state(int chain_id);
+
+/*
+ * Load chain state from VAULT by name.
+ * Restores B3 priors, CFA, MasQ tier, node info.
+ * Returns 0 on success, -1 if not found.
+ */
+int vault_load_chain_state(const char *chain_name, struct chain *out);
+
+/* ── Config Persistence ─────────────────────────── */
+
+/*
+ * Save a config value to VAULT.
+ * Stores at /config/[key]
+ * Returns bytes written, or -1 on error.
+ */
+int vault_save_config(const char *key, const void *value, uint32_t len);
+
+/*
+ * Load a config value from VAULT.
+ * Returns bytes read, or -1 if not found.
+ */
+int vault_load_config(const char *key, void *value, uint32_t max_len);
+
+/*
+ * Check if a config key exists.
+ * Returns 1 if exists, 0 if not.
+ * Useful for first-boot detection.
+ */
+int vault_has_config(const char *key);
+
 #endif /* ZEOS_VAULT_H */

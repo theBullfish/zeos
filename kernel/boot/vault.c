@@ -10,6 +10,7 @@
  */
 
 #include "vault.h"
+#include "chain.h"
 #include "kprint.h"
 #include "heap.h"
 
@@ -698,4 +699,218 @@ void vault_sync(void)
     if (g_vault.mounted) {
         v_memcpy(g_base, &g_vault.super, sizeof(struct vault_super));
     }
+}
+
+/* ── Chain Persistence ───────────────────────────── */
+
+/*
+ * Build a VAULT path for a chain state file.
+ * Result: /chains/[name].state
+ */
+static void build_chain_path(char *buf, int buflen, const char *name)
+{
+    const char *prefix = "/chains/";
+    const char *suffix = ".state";
+    int i = 0;
+
+    /* Copy prefix */
+    while (*prefix && i < buflen - 1)
+        buf[i++] = *prefix++;
+
+    /* Copy chain name */
+    while (*name && i < buflen - 8)  /* leave room for .state\0 */
+        buf[i++] = *name++;
+
+    /* Copy suffix */
+    while (*suffix && i < buflen - 1)
+        buf[i++] = *suffix++;
+
+    buf[i] = '\0';
+}
+
+/*
+ * Build a VAULT path for a config key.
+ * Result: /config/[key]
+ */
+static void build_config_path(char *buf, int buflen, const char *key)
+{
+    const char *prefix = "/config/";
+    int i = 0;
+
+    while (*prefix && i < buflen - 1)
+        buf[i++] = *prefix++;
+
+    while (*key && i < buflen - 1)
+        buf[i++] = *key++;
+
+    buf[i] = '\0';
+}
+
+int vault_save_chain_state(int chain_id)
+{
+    if (!g_vault.mounted) return -1;
+
+    chain_t *ch = chain_get(chain_id);
+    if (!ch) return -1;
+
+    /* Build path: /chains/[name].state */
+    char path[VAULT_MAX_PATH];
+    build_chain_path(path, VAULT_MAX_PATH, ch->name);
+
+    /* Ensure /chains directory exists */
+    vault_mkdir("/chains", VAULT_TIER_INTERNAL);
+
+    /* Calculate serialization size */
+    uint16_t name_len = (uint16_t)v_strlen(ch->name);
+    uint32_t total_size = sizeof(vault_chain_header_t)
+                        + name_len
+                        + (uint32_t)ch->node_count * sizeof(vault_chain_node_t);
+
+    /* Serialize into a stack buffer (max ~4K for reasonable chains) */
+    uint8_t buf[4096];
+    if (total_size > sizeof(buf)) return -1;  /* Chain too large */
+
+    v_memset(buf, 0, total_size);
+
+    /* Increment vault version */
+    ch->vault_version++;
+
+    /* Fill header */
+    vault_chain_header_t *hdr = (vault_chain_header_t *)buf;
+    hdr->magic            = VAULT_CHAIN_MAGIC;
+    hdr->version          = (uint32_t)ch->vault_version;
+    hdr->b3_alpha         = ch->b3_alpha;
+    hdr->b3_beta          = ch->b3_beta;
+    hdr->b3_observations  = ch->b3_observations;
+    hdr->tier             = (uint8_t)ch->tier;
+    hdr->node_count       = (uint8_t)ch->node_count;
+    hdr->name_len         = name_len;
+    hdr->last_resolve_tsc = ch->last_resolve_tsc;
+    hdr->cfa_depth        = ch->addr.depth;
+
+    for (int i = 0; i < 8; i++)
+        hdr->cfa_segments[i] = ch->addr.segments[i];
+
+    /* Copy chain name after header */
+    uint8_t *cursor = buf + sizeof(vault_chain_header_t);
+    v_memcpy(cursor, ch->name, name_len);
+    cursor += name_len;
+
+    /* Copy node names and types */
+    for (int i = 0; i < ch->node_count; i++) {
+        vault_chain_node_t *sn = (vault_chain_node_t *)cursor;
+        v_strcpy(sn->name, ch->nodes[i].name, 32);
+        v_strcpy(sn->input_type, ch->nodes[i].input_type, 32);
+        v_strcpy(sn->output_type, ch->nodes[i].output_type, 32);
+        cursor += sizeof(vault_chain_node_t);
+    }
+
+    /* Write to VAULT (creates new temporal version) */
+    int written = vault_write(path, buf, total_size);
+    if (written < 0) return -1;
+
+    return 0;
+}
+
+int vault_load_chain_state(const char *chain_name, struct chain *out)
+{
+    if (!g_vault.mounted || !chain_name || !out) return -1;
+
+    /* Build path: /chains/[name].state */
+    char path[VAULT_MAX_PATH];
+    build_chain_path(path, VAULT_MAX_PATH, chain_name);
+
+    /* Check existence */
+    if (!vault_exists(path)) return -1;
+
+    /* Read into buffer */
+    uint8_t buf[4096];
+    int bytes = vault_read(path, buf, sizeof(buf));
+    if (bytes < (int)sizeof(vault_chain_header_t)) return -1;
+
+    /* Validate header */
+    vault_chain_header_t *hdr = (vault_chain_header_t *)buf;
+    if (hdr->magic != VAULT_CHAIN_MAGIC) return -1;
+
+    /* Check we have enough data */
+    uint32_t expected = sizeof(vault_chain_header_t)
+                      + hdr->name_len
+                      + (uint32_t)hdr->node_count * sizeof(vault_chain_node_t);
+    if ((uint32_t)bytes < expected) return -1;
+
+    /* Restore B3 state -- this is how the OS learns across boots */
+    out->b3_alpha        = hdr->b3_alpha;
+    out->b3_beta         = hdr->b3_beta;
+    out->b3_observations = hdr->b3_observations;
+
+    /* Restore MasQ tier */
+    out->tier = (masq_tier_t)hdr->tier;
+
+    /* Restore CFA address */
+    out->addr.depth = hdr->cfa_depth;
+    for (int i = 0; i < 8; i++)
+        out->addr.segments[i] = hdr->cfa_segments[i];
+
+    /* Restore timing */
+    out->last_resolve_tsc = hdr->last_resolve_tsc;
+
+    /* Restore vault version */
+    out->vault_version = (int)hdr->version;
+
+    /* Restore chain name */
+    uint8_t *cursor = buf + sizeof(vault_chain_header_t);
+    int name_copy = hdr->name_len;
+    if (name_copy > 63) name_copy = 63;
+    v_memcpy(out->name, cursor, (uint32_t)name_copy);
+    out->name[name_copy] = '\0';
+    cursor += hdr->name_len;
+
+    /* Restore node metadata (names and types, no function pointers) */
+    out->node_count = hdr->node_count;
+    for (int i = 0; i < hdr->node_count && i < MAX_CHAIN_NODES; i++) {
+        vault_chain_node_t *sn = (vault_chain_node_t *)cursor;
+        v_strcpy(out->nodes[i].name, sn->name, 32);
+        v_strcpy(out->nodes[i].input_type, sn->input_type, 32);
+        v_strcpy(out->nodes[i].output_type, sn->output_type, 32);
+        out->nodes[i].resolve = 0;  /* Function pointers must be re-bound */
+        out->nodes[i].state = 0;
+        cursor += sizeof(vault_chain_node_t);
+    }
+
+    return 0;
+}
+
+/* ── Config Persistence ──────────────────────────── */
+
+int vault_save_config(const char *key, const void *value, uint32_t len)
+{
+    if (!g_vault.mounted || !key || !value) return -1;
+
+    char path[VAULT_MAX_PATH];
+    build_config_path(path, VAULT_MAX_PATH, key);
+
+    /* Ensure /config directory exists */
+    vault_mkdir("/config", VAULT_TIER_INTERNAL);
+
+    return vault_write(path, value, len);
+}
+
+int vault_load_config(const char *key, void *value, uint32_t max_len)
+{
+    if (!g_vault.mounted || !key || !value) return -1;
+
+    char path[VAULT_MAX_PATH];
+    build_config_path(path, VAULT_MAX_PATH, key);
+
+    return vault_read(path, value, max_len);
+}
+
+int vault_has_config(const char *key)
+{
+    if (!g_vault.mounted || !key) return 0;
+
+    char path[VAULT_MAX_PATH];
+    build_config_path(path, VAULT_MAX_PATH, key);
+
+    return vault_exists(path);
 }
