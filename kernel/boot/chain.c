@@ -1,0 +1,421 @@
+/*
+ * Zeos -- Chain Primitive (implementation)
+ *
+ * Static registry, no malloc, bare-metal.
+ */
+
+#include "chain.h"
+#include "kprint.h"
+#include "timer.h"
+
+/* ── Static registry ─────────────────────────────────────────────── */
+
+static chain_t  registry[MAX_CHAINS];
+static int      registry_used[MAX_CHAINS];  /* 0 = free, 1 = occupied */
+static int      chain_total;                /* live count */
+static int      next_child_index[MAX_CHAINS]; /* per-chain child counter for CFA */
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+
+static void str_copy(char *dst, const char *src, int max)
+{
+    int i = 0;
+    while (i < max - 1 && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static int str_equal(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+/* ── CFA ─────────────────────────────────────────────────────────── */
+
+cfa_addr_t cfa_derive(const cfa_addr_t *parent, uint32_t child_index)
+{
+    cfa_addr_t child;
+    int i;
+
+    for (i = 0; i < 8; i++)
+        child.segments[i] = parent->segments[i];
+
+    if (parent->depth < 8)
+        child.segments[parent->depth] = child_index;
+
+    child.depth = parent->depth + 1;
+    if (child.depth > 8) child.depth = 8;
+
+    child.birth_tsc = timer_read_tsc();
+    return child;
+}
+
+static cfa_addr_t cfa_root(uint32_t root_index)
+{
+    cfa_addr_t addr;
+    int i;
+    for (i = 0; i < 8; i++)
+        addr.segments[i] = 0;
+    addr.segments[0] = root_index;
+    addr.depth = 1;
+    addr.birth_tsc = timer_read_tsc();
+    return addr;
+}
+
+/* ── Init ────────────────────────────────────────────────────────── */
+
+void chain_init(void)
+{
+    int i, j;
+
+    for (i = 0; i < MAX_CHAINS; i++) {
+        registry_used[i] = 0;
+        next_child_index[i] = 0;
+        registry[i].id = -1;
+        registry[i].name[0] = '\0';
+        registry[i].node_count = 0;
+        registry[i].status = CHAIN_DETACHED;
+        registry[i].tier = MASQ_REFERENCE;
+        registry[i].b3_alpha = 1.0f;
+        registry[i].b3_beta = 1.0f;
+        registry[i].b3_observations = 0;
+        registry[i].created_tsc = 0;
+        registry[i].last_resolve_tsc = 0;
+        registry[i].last_resolve_ms = 0.0f;
+        registry[i].parent_id = -1;
+        registry[i].vault_version = 0;
+        registry[i].addr.depth = 0;
+        registry[i].addr.birth_tsc = 0;
+        for (j = 0; j < 8; j++)
+            registry[i].addr.segments[j] = 0;
+    }
+
+    chain_total = 0;
+    kputs("[chain] registry initialized (");
+    kput_dec(MAX_CHAINS);
+    kputs(" slots)\n");
+}
+
+/* ── Create ──────────────────────────────────────────────────────── */
+
+int chain_create(const char *name, int parent_id, masq_tier_t tier)
+{
+    int slot = -1;
+    int i;
+    uint32_t child_idx;
+
+    /* Find free slot */
+    for (i = 0; i < MAX_CHAINS; i++) {
+        if (!registry_used[i]) {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0) {
+        kputs("[chain] ERROR: registry full\n");
+        return -1;
+    }
+
+    /* Derive CFA address */
+    if (parent_id >= 0 && parent_id < MAX_CHAINS && registry_used[parent_id]) {
+        child_idx = (uint32_t)next_child_index[parent_id];
+        next_child_index[parent_id]++;
+        registry[slot].addr = cfa_derive(&registry[parent_id].addr, child_idx);
+    } else {
+        /* Root chain -- use slot as root index */
+        registry[slot].addr = cfa_root((uint32_t)slot);
+        parent_id = -1;
+    }
+
+    registry[slot].id = slot;
+    str_copy(registry[slot].name, name, 64);
+    registry[slot].tier = tier;
+    registry[slot].status = CHAIN_LIVE;
+    registry[slot].node_count = 0;
+    registry[slot].b3_alpha = 1.0f;
+    registry[slot].b3_beta = 1.0f;
+    registry[slot].b3_observations = 0;
+    registry[slot].created_tsc = timer_read_tsc();
+    registry[slot].last_resolve_tsc = 0;
+    registry[slot].last_resolve_ms = 0.0f;
+    registry[slot].parent_id = parent_id;
+    registry[slot].vault_version = 1;
+
+    registry_used[slot] = 1;
+    chain_total++;
+
+    kputs("[chain] created \"");
+    kputs(registry[slot].name);
+    kputs("\" id=");
+    kput_dec((uint64_t)slot);
+    kputs(" depth=");
+    kput_dec((uint64_t)registry[slot].addr.depth);
+    kputc('\n');
+
+    return slot;
+}
+
+/* ── Destroy ─────────────────────────────────────────────────────── */
+
+void chain_destroy(int id)
+{
+    if (id < 0 || id >= MAX_CHAINS || !registry_used[id])
+        return;
+
+    kputs("[chain] destroyed \"");
+    kputs(registry[id].name);
+    kputs("\" id=");
+    kput_dec((uint64_t)id);
+    kputc('\n');
+
+    registry_used[id] = 0;
+    registry[id].id = -1;
+    registry[id].name[0] = '\0';
+    registry[id].status = CHAIN_DETACHED;
+    registry[id].node_count = 0;
+    chain_total--;
+}
+
+/* ── Add Node ────────────────────────────────────────────────────── */
+
+int chain_add_node(int chain_id, const char *name,
+                   const char *input_type, const char *output_type,
+                   void (*resolve_fn)(chain_node_t *self, void *input, void *output))
+{
+    chain_t *c;
+    int idx;
+
+    if (chain_id < 0 || chain_id >= MAX_CHAINS || !registry_used[chain_id])
+        return -1;
+
+    c = &registry[chain_id];
+    if (c->node_count >= MAX_CHAIN_NODES)
+        return -1;
+
+    idx = c->node_count;
+    str_copy(c->nodes[idx].name, name, 32);
+    str_copy(c->nodes[idx].input_type, input_type, 32);
+    str_copy(c->nodes[idx].output_type, output_type, 32);
+    c->nodes[idx].resolve = resolve_fn;
+    c->nodes[idx].state = (void *)0;
+    c->node_count++;
+
+    return idx;
+}
+
+/* ── Resolve ─────────────────────────────────────────────────────── */
+
+int chain_resolve(int id)
+{
+    chain_t *c;
+    uint64_t t_start, t_end, freq;
+    int i;
+    /* Shared scratch buffer for passing data between nodes */
+    static uint8_t scratch_a[4096];
+    static uint8_t scratch_b[4096];
+    void *input;
+    void *output;
+
+    if (id < 0 || id >= MAX_CHAINS || !registry_used[id])
+        return -1;
+
+    c = &registry[id];
+
+    if (c->status != CHAIN_LIVE) {
+        kputs("[chain] resolve skipped (not live) id=");
+        kput_dec((uint64_t)id);
+        kputc('\n');
+        return -1;
+    }
+
+    if (c->node_count == 0)
+        return 0;  /* Nothing to resolve, not an error */
+
+    t_start = timer_read_tsc();
+
+    /* Run nodes in sequence, alternating scratch buffers */
+    input = (void *)scratch_a;
+    for (i = 0; i < c->node_count; i++) {
+        output = (i % 2 == 0) ? (void *)scratch_b : (void *)scratch_a;
+        if (c->nodes[i].resolve)
+            c->nodes[i].resolve(&c->nodes[i], input, output);
+        input = output;
+    }
+
+    t_end = timer_read_tsc();
+
+    /* Update timing */
+    c->last_resolve_tsc = t_end;
+    freq = timer_tsc_freq();
+    if (freq > 0) {
+        c->last_resolve_ms = (float)(t_end - t_start) * 1000.0f / (float)freq;
+    }
+
+    /* Update B3 belief -- successful resolve is a positive observation */
+    c->b3_alpha += 1.0f;
+    c->b3_observations++;
+
+    return 0;
+}
+
+/* ── Get ─────────────────────────────────────────────────────────── */
+
+chain_t *chain_get(int id)
+{
+    if (id < 0 || id >= MAX_CHAINS || !registry_used[id])
+        return (chain_t *)0;
+    return &registry[id];
+}
+
+/* ── Find by Type ────────────────────────────────────────────────── */
+
+int chain_find_by_type(const char *output_type)
+{
+    int i, j;
+    chain_t *c;
+
+    for (i = 0; i < MAX_CHAINS; i++) {
+        if (!registry_used[i]) continue;
+        c = &registry[i];
+        for (j = 0; j < c->node_count; j++) {
+            if (str_equal(c->nodes[j].output_type, output_type))
+                return i;
+        }
+    }
+    return -1;
+}
+
+/* ── MasQ Perception ─────────────────────────────────────────────── */
+
+int chain_can_perceive(int observer_id, int target_id)
+{
+    chain_t *observer, *target;
+
+    observer = chain_get(observer_id);
+    target = chain_get(target_id);
+
+    if (!observer || !target)
+        return 0;
+
+    /*
+     * Perception rules:
+     *   Sovereign  -> Sovereign + Internal + Reference
+     *   Internal   -> Internal + Reference
+     *   Reference  -> Reference only
+     */
+    switch (observer->tier) {
+    case MASQ_SOVEREIGN:
+        return 1;  /* Sovereign sees everything */
+    case MASQ_INTERNAL:
+        return (target->tier == MASQ_INTERNAL || target->tier == MASQ_REFERENCE);
+    case MASQ_REFERENCE:
+        return (target->tier == MASQ_REFERENCE);
+    }
+
+    return 0;
+}
+
+/* ── Count ───────────────────────────────────────────────────────── */
+
+int chain_count(void)
+{
+    return chain_total;
+}
+
+/* ── Dump ────────────────────────────────────────────────────────── */
+
+void chain_dump(int id)
+{
+    chain_t *c;
+    int i;
+
+    c = chain_get(id);
+    if (!c) {
+        kputs("[chain] dump: invalid id ");
+        kput_dec((uint64_t)id);
+        kputc('\n');
+        return;
+    }
+
+    kputs("── chain ");
+    kput_dec((uint64_t)c->id);
+    kputs(": \"");
+    kputs(c->name);
+    kputs("\" ──\n");
+
+    /* CFA address */
+    kputs("  cfa: ");
+    for (i = 0; i < (int)c->addr.depth; i++) {
+        if (i > 0) kputc('.');
+        kput_dec((uint64_t)c->addr.segments[i]);
+    }
+    kputs("  depth=");
+    kput_dec((uint64_t)c->addr.depth);
+    kputc('\n');
+
+    /* MasQ */
+    kputs("  masq: ");
+    switch (c->tier) {
+    case MASQ_SOVEREIGN:  kputs("SOVEREIGN");  break;
+    case MASQ_INTERNAL:   kputs("INTERNAL");   break;
+    case MASQ_REFERENCE:  kputs("REFERENCE");  break;
+    }
+    kputc('\n');
+
+    /* Status */
+    kputs("  status: ");
+    switch (c->status) {
+    case CHAIN_LIVE:      kputs("LIVE");      break;
+    case CHAIN_PAUSED:    kputs("PAUSED");    break;
+    case CHAIN_ERROR:     kputs("ERROR");     break;
+    case CHAIN_DETACHED:  kputs("DETACHED");  break;
+    }
+    kputc('\n');
+
+    /* Tree */
+    kputs("  parent: ");
+    if (c->parent_id >= 0)
+        kput_dec((uint64_t)c->parent_id);
+    else
+        kputs("(root)");
+    kputc('\n');
+
+    /* Nodes */
+    kputs("  nodes: ");
+    kput_dec((uint64_t)c->node_count);
+    kputc('\n');
+    for (i = 0; i < c->node_count; i++) {
+        kputs("    [");
+        kput_dec((uint64_t)i);
+        kputs("] ");
+        kputs(c->nodes[i].name);
+        kputs("  ");
+        kputs(c->nodes[i].input_type);
+        kputs(" -> ");
+        kputs(c->nodes[i].output_type);
+        kputc('\n');
+    }
+
+    /* B3 */
+    kputs("  b3: alpha=");
+    kput_dec((uint64_t)c->b3_alpha);
+    kputs(" beta=");
+    kput_dec((uint64_t)c->b3_beta);
+    kputs(" n=");
+    kput_dec((uint64_t)c->b3_observations);
+    kputc('\n');
+
+    /* Timing */
+    kputs("  resolve_ms=");
+    kput_dec((uint64_t)c->last_resolve_ms);
+    kputs("  vault_v=");
+    kput_dec((uint64_t)c->vault_version);
+    kputc('\n');
+}
