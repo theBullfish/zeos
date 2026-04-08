@@ -24,6 +24,8 @@
 #include "hotcorners.h"
 #include "mouse.h"
 #include "notify.h"
+#include "theme_runtime.h"
+#include "persona_anim.h"
 
 static compositor_t g_comp;
 
@@ -123,6 +125,9 @@ void compositor_frame(void) {
     /* Tick cursor animations */
     cursor_tick(g_comp.frame_dt);
 
+    /* Tick persona transition animation */
+    persona_anim_tick();
+
     /*
      * ── Resolve chain graph ──
      * MDE resolves all chains in dependency order. This triggers
@@ -164,6 +169,9 @@ void compositor_frame(void) {
         notify_tick();
         notify_draw();
     }
+
+    /* Night shift: warm tint over all rendered content, before cursor */
+    theme_apply_night_shift();
 
     /* Layer 5: Cursor (not yet a chain -- direct call) */
     if (g_comp.layer_visible[COMP_LAYER_CURSOR])

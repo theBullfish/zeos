@@ -53,13 +53,14 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/b3.c boot/hw_discover.c boot/chain.c boot/mouse.c boot/firstboot.c \
            boot/mde.c boot/keybinds.c boot/palette.c boot/inspector.c \
            boot/dock.c boot/access.c boot/desktop.c \
-           boot/panel.c boot/settings.c boot/persona_filter.c \
+           boot/panel.c boot/settings.c boot/persona_filter.c boot/persona_anim.c \
            boot/chain_registry.c \
            boot/vault_disk.c \
            boot/nvme.c \
            boot/installer.c \
            boot/hotcorners.c \
-           boot/notify.c
+           boot/notify.c \
+           boot/theme_runtime.c
 OBJS     = $(SRCS:.c=.o)
 
 # ── Embedded fonts (TTF -> ELF via objcopy) ──

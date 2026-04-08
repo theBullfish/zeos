@@ -139,6 +139,20 @@ static const shadow_t SHADOW_L5    = {10, 40, 89};  /* notifications */
 #define COLOR_SUCCESS        0xFF09BC8A   /* uses Zeros teal — confirmation */
 #define COLOR_SEPARATOR      0xFF21262D   /* matches surface_top */
 
+/* ── Light Theme Surfaces ── */
+#define COLOR_LIGHT_SURFACE       0xFFFAFAF8   /* warm off-white */
+#define COLOR_LIGHT_SURFACE_HIGH  0xFFEFEFED   /* slightly darker */
+#define COLOR_LIGHT_SURFACE_TOP   0xFFE4E4E2   /* highest elevation */
+
+/* ── Light Theme Text ── */
+#define COLOR_LIGHT_ON_SURFACE    0xFF333333   /* primary text — dark gray */
+#define COLOR_LIGHT_ON_SURFACE_2  0xFF666666   /* secondary */
+#define COLOR_LIGHT_ON_SURFACE_3  0xFF999999   /* tertiary */
+#define COLOR_LIGHT_ON_SURFACE_4  0xFFBBBBBB   /* quaternary */
+
+/* ── Light Theme Semantic ── */
+#define COLOR_LIGHT_SEPARATOR     0xFFE4E4E2
+
 /* ── TRISA decision (universal, never change) ── */
 #define COLOR_TRISA_IS       0xFF09BC8A   /* signal green (Zeros teal) */
 #define COLOR_TRISA_ISNT     0xFF484F58   /* signal gray */
