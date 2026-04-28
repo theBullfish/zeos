@@ -1,0 +1,383 @@
+// zindex_studio.zp — Zeos Camera & Broadcast Studio
+// The production tool. Camera control, stabilization,
+// color grading, streaming, recording. One signal chain.
+//
+// Codex Labs LLC — 2026
+
+// ══════════════════════════════════════════════
+// CAMERA INPUT
+// ══════════════════════════════════════════════
+
+camera : sense(camera, device: 0, resolution: 1920x1080, fps: 24, codec: mjpeg)
+
+// PTZ control — the OBSBOT or any PTZ camera
+ptz : act(ptz, device: camera) -> {pan, tilt, zoom, speed}
+
+// Personality movement engine
+personality : {
+    mode: "idle",       // idle, curious, chill, presenter, sentry, fidget, dramatic
+    speed: 1.0,
+    active: false
+}
+
+keyboard -> {
+    gate(key: "F1") -> personality.set(mode: "curious"),
+    gate(key: "F2") -> personality.set(mode: "chill"),
+    gate(key: "F3") -> personality.set(mode: "presenter"),
+    gate(key: "F4") -> personality.set(mode: "sentry"),
+    gate(key: "F5") -> personality.set(mode: "fidget"),
+    gate(key: "F6") -> personality.set(mode: "dramatic"),
+    gate(key: "F7") -> personality.set(active: toggle),
+    gate(key: "F8") -> ptz.home
+}
+
+personality -> gate(active) -> movement_engine(ptz, personality.mode, personality.speed)
+
+// ══════════════════════════════════════════════
+// STABILIZATION
+// ══════════════════════════════════════════════
+
+// Frequency-selective: kills buzz, passes flow
+camera -> stabilizer : {
+    optical_flow(features: 200, quality: 0.01) -> motion_vectors,
+    motion_vectors -> frequency_split -> {
+        gate(freq: high) -> suppress(strength: buzz_kill),   // kill vibration
+        gate(freq: low)  -> pass                              // keep intentional
+    } -> correction,
+    correction -> clamp(margin: crop_margin) -> warp_affine -> stabilized
+}
+
+// Stabilizer controls
+stab_controls : {
+    buzz_kill: 0.85,        // 0-1, how hard to kill vibration
+    flow: 0.15,             // 0-1, how much intentional motion passes
+    crop: 0.85,             // crop factor for correction room
+    enabled: true
+}
+
+keyboard -> {
+    gate(key: "s") -> stab_controls.enabled.toggle,
+    gate(key: "[") -> stab_controls.buzz_kill.add(-0.05),
+    gate(key: "]") -> stab_controls.buzz_kill.add(0.05)
+}
+
+// ══════════════════════════════════════════════
+// COLOR GRADING — LUT SYSTEM
+// ══════════════════════════════════════════════
+
+// Every LUT is a signal transform node.
+// Stack them, reorder them, blend between them.
+// Like a mixing desk for color.
+
+stabilized -> grade_chain -> graded
+
+// The grade chain is a dynamic pipeline of LUT nodes
+grade_chain : pipeline(nodes: active_luts)
+
+// ── Built-in LUTs ────────────────────────────
+
+lut_raw : {
+    name: "Raw",
+    transform: identity     // no change — what the sensor sees
+}
+
+lut_workshop : {
+    name: "Workshop Raw",
+    transform: {
+        exposure: +0.5,             // lift the shadows
+        contrast: +10,
+        white_balance: auto         // trust the camera
+    }
+}
+
+lut_warm_analog : {
+    name: "Warm Analog",
+    transform: {
+        exposure: +0.3,
+        shadows: lift(warmth: 0.3, color: #2A1A0A),    // warm shadow lift
+        highlights: rolloff(knee: 0.85, warmth: 0.1),   // soft highlight roll
+        saturation: 0.85,                                // slightly desaturated
+        grain: 0.15,                                     // subtle film grain
+        curve: s_curve(contrast: 0.3)                    // gentle S-curve
+    }
+}
+
+lut_clean_tech : {
+    name: "Clean Tech",
+    transform: {
+        exposure: +0.2,
+        shadows: cool(tint: #0A1520),
+        midtones: neutral,
+        highlights: clean,
+        sharpness: +1,
+        saturation: 0.9,
+        curve: linear(contrast: +15)
+    }
+}
+
+lut_codex_brand : {
+    name: "Codex",
+    transform: {
+        // Matches the Zeos dark UI: #1A1A1A bg, #E0D8D0 text
+        black_point: lift(to: #1A1A1A),                  // crushed but not clipped
+        shadows: warm(color: #2A2018),
+        midtones: neutral(warmth: 0.1),
+        highlights: tint(color: #E0D8D0),                // warm cream highlights
+        saturation: 0.7,                                  // subdued
+        curve: s_curve(contrast: 0.4, pivot: 0.35)       // contrast biased dark
+    }
+}
+
+lut_night_shift : {
+    name: "Night Shift",
+    transform: {
+        shadows: tint(color: #0A2030),                   // teal shadows
+        highlights: warm(color: #FFD8A0),                // warm highlights
+        contrast: -10,                                    // low contrast
+        saturation: 0.75,
+        curve: flat(lift_shadows: 0.1)
+    }
+}
+
+lut_broadcast : {
+    name: "Broadcast",
+    transform: {
+        // Clean, professional, rec709-ish
+        exposure: +0.3,
+        white_balance: 5600,            // daylight
+        saturation: 1.1,               // slightly vivid
+        contrast: +5,
+        skin_tone_protect: true,        // don't shift skin
+        curve: broadcast_legal(black: 16, white: 235)   // legal levels
+    }
+}
+
+lut_cyberpunk : {
+    name: "Cyberpunk",
+    transform: {
+        shadows: deep(color: #0D0015),
+        midtones: tint(color: #1A0A30),
+        highlights: neon(color: #FF00FF, blend: 0.1),
+        saturation: 1.3,
+        contrast: +20,
+        bloom: 0.1,                     // subtle glow on highlights
+        curve: harsh(blacks_crushed: true)
+    }
+}
+
+lut_golden_hour : {
+    name: "Golden Hour",
+    transform: {
+        temperature: +2000,             // push very warm
+        shadows: amber(color: #3A2510),
+        highlights: gold(color: #FFE0A0),
+        saturation: 1.15,
+        haze: 0.05,                     // subtle atmospheric
+        curve: s_curve(contrast: 0.2, warm_bias: true)
+    }
+}
+
+// ── LUT Management ───────────────────────────
+
+available_luts : [
+    lut_raw, lut_workshop, lut_warm_analog, lut_clean_tech,
+    lut_codex_brand, lut_night_shift, lut_broadcast,
+    lut_cyberpunk, lut_golden_hour
+]
+
+active_luts : [lut_workshop]    // default
+
+// Keyboard shortcuts to switch LUT
+keyboard -> {
+    gate(key: "1") -> active_luts.set([lut_raw]),
+    gate(key: "2") -> active_luts.set([lut_workshop]),
+    gate(key: "3") -> active_luts.set([lut_warm_analog]),
+    gate(key: "4") -> active_luts.set([lut_clean_tech]),
+    gate(key: "5") -> active_luts.set([lut_codex_brand]),
+    gate(key: "6") -> active_luts.set([lut_night_shift]),
+    gate(key: "7") -> active_luts.set([lut_broadcast]),
+    gate(key: "8") -> active_luts.set([lut_cyberpunk]),
+    gate(key: "9") -> active_luts.set([lut_golden_hour])
+}
+
+// Blend between two LUTs
+keyboard -> gate(key: "b") -> blend_mode.toggle
+blend_mode -> {
+    lut_a : active_luts[0],
+    lut_b : active_luts[1],
+    blend_slider : sense(knob) | mouse.x -> map(0..screen.width, 0..1),
+    stabilized -> {
+        lut_a.apply -> frame_a,
+        lut_b.apply -> frame_b,
+        {frame_a, frame_b} -> mix(blend_slider) -> graded
+    }
+}
+
+// ══════════════════════════════════════════════
+// SCOPES
+// ══════════════════════════════════════════════
+
+// Waveform, vectorscope, histogram — for proper grading
+
+graded -> {
+    waveform_scope   -> scope_display[0],
+    vectorscope      -> scope_display[1],
+    histogram_rgb    -> scope_display[2]
+}
+
+keyboard -> gate(key: "w") -> scope_display.toggle
+
+// ══════════════════════════════════════════════
+// OUTPUT
+// ══════════════════════════════════════════════
+
+// One signal, multiple destinations
+graded -> {
+    // Local preview
+    display,
+
+    // Record to VAULT
+    gate(recording) -> encoder(codec: h264, quality: high) -> vault.write("recordings/{timestamp}.mp4"),
+
+    // Stream to WatchdogLive
+    gate(streaming) -> encoder(codec: h264, bitrate: 6000) -> rtmp(url: watchdoglive_url),
+
+    // NDI output (local network)
+    gate(ndi_enabled) -> ndi_send(name: "Zindex Studio")
+}
+
+// ── Recording ────────────────────────────────
+
+recording : false
+keyboard -> gate(key: "r") -> recording.toggle
+
+gate(recording) -> {
+    status_bar.indicator(label: "REC", color: red, blink: true),
+    timer.start -> status_bar.timer(format: "HH:MM:SS")
+}
+
+// ── Streaming ────────────────────────────────
+
+streaming : false
+watchdoglive_url : config("watchdoglive.rtmp_url")
+
+keyboard -> gate(key: "g") -> streaming.toggle    // go live
+
+gate(streaming) -> {
+    status_bar.indicator(label: "LIVE", color: green),
+    graded ~> bitrate_monitor -> status_bar.value("bitrate", unit: "kbps")
+}
+
+// ══════════════════════════════════════════════
+// DISPLAY LAYOUT
+// ══════════════════════════════════════════════
+
+screen : display(width: 1920, height: 1080, background: #0D0D0D)
+
+// Main preview — center, large
+preview : screen.region(x: 200, y: 0, w: 1520, h: 855)
+graded -> preview
+
+// Left panel — camera controls
+left_panel : screen.region(x: 0, y: 0, w: 200, h: 1080, background: #111111)
+
+left_panel -> stack(spacing: 4) {
+    text("CAMERA", color: #666, size: 10),
+    value(ptz.pan, label: "Pan"),
+    value(ptz.tilt, label: "Tilt"),
+    value(ptz.zoom, label: "Zoom"),
+    divider,
+    text("PERSONALITY", color: #666, size: 10),
+    select(personality.mode, options: modes),
+    slider(personality.speed, label: "Speed", range: {0.1, 3.0}),
+    toggle(personality.active, label: "Active"),
+    divider,
+    text("STABILIZER", color: #666, size: 10),
+    toggle(stab_controls.enabled, label: "Enabled"),
+    slider(stab_controls.buzz_kill, label: "Buzz Kill", range: {0, 1}),
+    slider(stab_controls.crop, label: "Crop", range: {0.7, 0.95}),
+}
+
+// Bottom bar — LUT selector + status
+bottom_bar : screen.region(x: 200, y: 855, w: 1520, h: 225, background: #111111)
+
+// LUT thumbnails in a row
+bottom_bar -> lut_strip(y: 8) {
+    available_luts -> each(lut) {
+        thumbnail(
+            preview: graded -> lut.apply -> resize(160, 90),
+            label: lut.name,
+            selected: active_luts.contains(lut),
+            on_click: active_luts.set([lut])
+        )
+    }
+}
+
+// Scopes below LUT strip (when enabled)
+gate(scope_display.visible) -> {
+    bottom_bar.region(y: 110) -> row(spacing: 4) {
+        scope_display[0],    // waveform
+        scope_display[1],    // vectorscope
+        scope_display[2]     // histogram
+    }
+}
+
+// Status bar — very bottom
+status_bar : screen.region(x: 0, y: 1060, w: 1920, h: 20, background: #0A0A0A)
+
+status_bar -> row {
+    gate(recording) -> text("REC", color: red, blink: true),
+    gate(streaming) -> text("LIVE", color: green),
+    text(active_luts[0].name, color: #666),
+    spacer,
+    text("{fps}fps", color: #444),
+    text(stab_controls.enabled ? "STAB" : "", color: #29ADFF),
+    text(personality.active ? personality.mode : "", color: #FF6B35),
+    gate(recording) -> timer(format: "HH:MM:SS", color: red)
+}
+
+// ══════════════════════════════════════════════
+// KEYBOARD REFERENCE
+// ══════════════════════════════════════════════
+//
+// 1-9        Select LUT
+// S          Toggle stabilization
+// [ ]        Adjust buzz kill strength
+// R          Toggle recording
+// G          Go live (stream)
+// W          Toggle scopes
+// B          Blend mode (mix two LUTs)
+// F1-F6      Camera personality mode
+// F7         Toggle personality active
+// F8         Camera home (center)
+// Q          Quit
+
+
+// ══════════════════════════════════════════════
+// TELEMETRY
+// ══════════════════════════════════════════════
+
+camera          ~> rate(per: 1s) ~> actual_fps
+stabilizer      ~> timing("stab_ms")
+grade_chain     ~> timing("grade_ms")
+encoder         ~> timing("encode_ms")
+graded          ~> bitrate_monitor
+
+
+// ══════════════════════════════════════════════
+// THE ARCHITECTURE
+// ══════════════════════════════════════════════
+//
+// camera -> stabilize -> grade -> {display, record, stream}
+//
+// That's it. One signal chain. Every feature is a node.
+// Swap the stabilizer? Change one node.
+// Add a new LUT? Add one node to the grade chain.
+// Stream to a different service? Change the sink.
+//
+// Premiere Pro: 50 million lines of C++.
+// DaVinci Resolve: 20 million lines.
+// Zindex Studio: signal chains.
+//
+// Because video production IS signal processing.
+// It always was. The software just forgot.

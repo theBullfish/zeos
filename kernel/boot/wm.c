@@ -713,7 +713,7 @@ void wm_draw_chrome(chain_surface_t *s) {
     uint32_t border = s->focused ? s->accent : COLOR_SEPARATOR;
 
     /* Border */
-    fb_rect_outline(s->x, s->y, s->w, s->h, border);
+    fb_rect_outline(s->x, s->y, s->w, s->h, border, 1);
 
     /* Title bar background */
     fb_rect(s->x + 1, s->y + 1, s->w - 2, WM_TITLEBAR_HEIGHT - 1, title_bg);
@@ -778,7 +778,7 @@ void wm_draw_ghost(void) {
 
     /* Outline */
     fb_rect_outline(g_wm.ghost.x, g_wm.ghost.y,
-                    g_wm.ghost.w, g_wm.ghost.h, COLOR_PRIMARY);
+                    g_wm.ghost.w, g_wm.ghost.h, COLOR_PRIMARY, 1);
 }
 
 /* Sort surfaces by z-index for draw order */

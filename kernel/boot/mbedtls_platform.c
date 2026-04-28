@@ -140,14 +140,14 @@ mbedtls_time_t mbedtls_time(mbedtls_time_t *timer) {
  * In freestanding mode these may not exist. Provide them.
  */
 
-void *memcpy(void *dst, const void *src, size_t n) {
+__attribute__((weak)) void *memcpy(void *dst, const void *src, size_t n) {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;
     for (size_t i = 0; i < n; i++) d[i] = s[i];
     return dst;
 }
 
-void *memset(void *s, int c, size_t n) {
+__attribute__((weak)) void *memset(void *s, int c, size_t n) {
     uint8_t *p = (uint8_t *)s;
     for (size_t i = 0; i < n; i++) p[i] = (uint8_t)c;
     return s;

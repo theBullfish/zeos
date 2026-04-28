@@ -27,6 +27,7 @@ CFLAGS   = -ffreestanding \
            -I$(EFI_INC) \
            -I$(EFI_INC2) \
            -Iboot \
+           -Ilib/mbedtls/include \
            -DGNU_EFI_USE_MS_ABI \
            -DHAVE_USE_MS_ABI
 

@@ -9,7 +9,8 @@
 #   zeos build        Build the kernel
 #   zeos run          Build and launch in QEMU
 #   zeos clean        Clean build artifacts
-#   zeos flash <dev>  Flash to USB drive for real hardware
+#   zeos usb          Build USB boot image (GPT + EFI)
+#   zeos flash <dev>  Flash USB image to a drive
 #   zeos status       Show what's built, what's changed
 #   zeos doctor       Check that all build dependencies are installed
 #   zeos help         This message
@@ -60,6 +61,14 @@ cmd_clean() {
     msg "Clean."
 }
 
+cmd_usb() {
+    msg "Building USB boot image..."
+    make -C "$KERNEL_DIR" usb
+    if [ $? -eq 0 ]; then
+        msg "Done. Image at: ${CYAN}$BUILD_DIR/zeos-usb.img${RESET}"
+    fi
+}
+
 cmd_flash() {
     local device="${1:-}"
     if [ -z "$device" ]; then
@@ -72,9 +81,14 @@ cmd_flash() {
         return 1
     fi
 
-    if [ ! -f "$BUILD_DIR/BOOTZ.EFI" ]; then
-        err "No kernel built yet. Run 'zeos build' first."
-        return 1
+    local img="$BUILD_DIR/zeos-usb.img"
+    if [ ! -f "$img" ]; then
+        msg "No USB image yet. Building one first..."
+        make -C "$KERNEL_DIR" usb
+        if [ $? -ne 0 ]; then
+            err "Failed to build USB image."
+            return 1
+        fi
     fi
 
     # Safety check
@@ -83,7 +97,11 @@ cmd_flash() {
         return 1
     fi
 
-    warn "This will create an EFI boot partition on $device"
+    warn "This will OVERWRITE $device with the Zeos USB boot image."
+    echo ""
+    echo "  Image: $img"
+    echo "  Target: $device"
+    echo ""
     echo -n "  Type YES to confirm: "
     read -r confirm
     if [ "$confirm" != "YES" ]; then
@@ -91,27 +109,9 @@ cmd_flash() {
         return 0
     fi
 
-    msg "Creating EFI partition on $device..."
-
-    # Create GPT partition table with EFI system partition
-    sudo parted -s "$device" mklabel gpt
-    sudo parted -s "$device" mkpart ESP fat32 1MiB 100MiB
-    sudo parted -s "$device" set 1 esp on
-
-    # Determine partition name
-    local part="${device}1"
-    if [[ "$device" == *"nvme"* || "$device" == *"mmcblk"* ]]; then
-        part="${device}p1"
-    fi
-
-    # Format and copy
-    sudo mkfs.fat -F32 "$part"
-    local mnt=$(mktemp -d)
-    sudo mount "$part" "$mnt"
-    sudo mkdir -p "$mnt/EFI/BOOT"
-    sudo cp "$BUILD_DIR/BOOTZ.EFI" "$mnt/EFI/BOOT/BOOTX64.EFI"
-    sudo umount "$mnt"
-    rmdir "$mnt"
+    msg "Flashing to $device..."
+    sudo dd if="$img" of="$device" bs=4M status=progress conv=fsync
+    sync
 
     msg "Flashed to $device. Boot from USB to run Zeos."
 }
@@ -127,6 +127,14 @@ cmd_status() {
         echo -e "  Kernel:  ${GREEN}built${RESET} ($size bytes, $date)"
     else
         echo -e "  Kernel:  ${RED}not built${RESET} — run 'zeos build'"
+    fi
+
+    if [ -f "$BUILD_DIR/zeos-usb.img" ]; then
+        local usize=$(stat -c%s "$BUILD_DIR/zeos-usb.img" 2>/dev/null || echo "?")
+        local udate=$(stat -c%y "$BUILD_DIR/zeos-usb.img" 2>/dev/null | cut -d. -f1 || echo "?")
+        echo -e "  USB img: ${GREEN}built${RESET} ($((usize / 1048576)) MB, $udate)"
+    else
+        echo -e "  USB img: ${YELLOW}not built${RESET} — run 'zeos usb'"
     fi
 
     # Check for uncommitted changes
@@ -167,6 +175,8 @@ cmd_doctor() {
     check_dep "Object copy"         objcopy     binutils
     check_dep "Make"                make
     check_dep "QEMU (x86_64)"       qemu-system-x86_64 qemu-system-x86
+    check_dep "mtools (USB image)"  mformat     mtools
+    check_dep "sgdisk (GPT)"        sgdisk      gdisk
 
     # Check GNU-EFI headers
     if [ -f /usr/include/efi/efi.h ]; then
@@ -202,7 +212,8 @@ cmd_help() {
     echo -e "  ${CYAN}zeos build${RESET}          Build the kernel"
     echo -e "  ${CYAN}zeos run${RESET}            Build and launch in QEMU"
     echo -e "  ${CYAN}zeos clean${RESET}          Clean build artifacts"
-    echo -e "  ${CYAN}zeos flash <dev>${RESET}    Flash to USB for real hardware"
+    echo -e "  ${CYAN}zeos usb${RESET}            Build USB boot image (GPT + EFI)"
+    echo -e "  ${CYAN}zeos flash <dev>${RESET}    Flash USB image to a drive"
     echo -e "  ${CYAN}zeos status${RESET}         What's built, what's changed"
     echo -e "  ${CYAN}zeos doctor${RESET}         Check build dependencies"
     echo -e "  ${CYAN}zeos help${RESET}           This message"
@@ -217,6 +228,7 @@ case "${1:-help}" in
     build)    cmd_build ;;
     run)      cmd_run ;;
     clean)    cmd_clean ;;
+    usb)      cmd_usb ;;
     flash)    cmd_flash "${2:-}" ;;
     status)   cmd_status ;;
     doctor)   cmd_doctor ;;
