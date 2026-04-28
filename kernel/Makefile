@@ -28,6 +28,7 @@ CFLAGS   = -ffreestanding \
            -I$(EFI_INC2) \
            -Iboot \
            -Ilib/mbedtls/include \
+           -MMD -MP \
            -DGNU_EFI_USE_MS_ABI \
            -DHAVE_USE_MS_ABI
 
@@ -64,7 +65,11 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/theme_runtime.c \
            boot/icon_render.c \
            boot/updater.c
-OBJS     = $(SRCS:.c=.o)
+
+# mbedTLS library sources (3.6 LTS, vendored at lib/mbedtls/)
+MBEDTLS_SRCS = $(wildcard lib/mbedtls/library/*.c)
+
+OBJS     = $(SRCS:.c=.o) $(MBEDTLS_SRCS:.c=.o)
 
 # ── Embedded fonts (TTF -> ELF via objcopy) ──
 FONT_INTER  = ../assets/fonts/inter/Inter-Regular.ttf
@@ -99,6 +104,9 @@ all: $(BUILDDIR)/$(TARGET)
 # Compile C to object files
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Auto-generated header dependencies (-MMD -MP in CFLAGS)
+-include $(OBJS:.o=.d)
 
 # Link to shared object (includes embedded font data)
 $(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS)
@@ -172,4 +180,4 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo ""
 
 clean:
-	rm -rf $(OBJS) $(FONT_OBJS) $(BUILDDIR)
+	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(BUILDDIR)

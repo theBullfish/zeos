@@ -11,3 +11,7 @@ dist/
 __pycache__/
 .vscode/
 .idea/
+
+# Auto-generated header dependencies (-MMD -MP)
+kernel/boot/*.d
+kernel/lib/mbedtls/library/*.d

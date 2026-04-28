@@ -73,6 +73,12 @@ int net_init(void)
     kput_dec(g_net.ip.b[3]);
     kputs("\n");
 
+    /* Bring up TLS subsystem (mbedTLS init + PSA + DRBG seed + CA load).
+     * On failure HTTPS is unavailable; HTTP and the rest of the kernel
+     * keep working. */
+    extern int tls_init(void);
+    tls_init();
+
     return 0;
 }
 

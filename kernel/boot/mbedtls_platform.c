@@ -206,11 +206,80 @@ char *strncpy(char *dst, const char *src, size_t n) {
     return dst;
 }
 
-/* snprintf stub — mbedTLS debug uses this, we don't need debug output */
+/* snprintf/vsnprintf stubs — mbedTLS debug+x509 use these, we don't need
+ * the formatted output, but the buffer must be NUL-terminated and the
+ * return value must look sane. */
 int snprintf(char *buf, size_t size, const char *fmt, ...) {
     (void)fmt;
     if (size > 0) buf[0] = 0;
     return 0;
+}
+
+int vsnprintf(char *buf, size_t size, const char *fmt, __builtin_va_list ap) {
+    (void)fmt; (void)ap;
+    if (size > 0) buf[0] = 0;
+    return 0;
+}
+
+/* String functions used by x509 / pem code paths */
+
+char *strchr(const char *s, int c) {
+    char ch = (char)c;
+    while (*s) {
+        if (*s == ch) return (char *)s;
+        s++;
+    }
+    return ch == 0 ? (char *)s : (void *)0;
+}
+
+char *strstr(const char *haystack, const char *needle) {
+    if (!*needle) return (char *)haystack;
+    for (; *haystack; haystack++) {
+        const char *h = haystack, *n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char *)haystack;
+    }
+    return (void *)0;
+}
+
+/* Securely zero memory — used by mbedtls platform_util */
+void *explicit_bzero(void *s, size_t n) {
+    volatile uint8_t *p = (volatile uint8_t *)s;
+    for (size_t i = 0; i < n; i++) p[i] = 0;
+    return s;
+}
+
+/* IPv4/IPv6 textual to binary — mbedtls x509 uses this for SAN IP matching.
+ * Stub: report "no parse" so cert IP-SAN matching is skipped. Hostname-SAN
+ * (the common path) is handled by mbedtls's own ASCII compare. */
+int inet_pton(int af, const char *src, void *dst) {
+    (void)af; (void)src; (void)dst;
+    return 0;  /* 0 = invalid input per inet_pton(3) */
+}
+
+/* 128-bit unsigned division — referenced by bignum.c on x86_64.
+ * Standard binary long division; only invoked occasionally during
+ * handshake bignum ops. */
+typedef unsigned __int128 zeos_u128_t;
+
+zeos_u128_t __udivti3(zeos_u128_t n, zeos_u128_t d) {
+    if (d == 0) return ~(zeos_u128_t)0;
+    zeos_u128_t q = 0, r = 0;
+    for (int i = 127; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1);
+        if (r >= d) { r -= d; q |= ((zeos_u128_t)1 << i); }
+    }
+    return q;
+}
+
+zeos_u128_t __umodti3(zeos_u128_t n, zeos_u128_t d) {
+    if (d == 0) return n;
+    zeos_u128_t r = 0;
+    for (int i = 127; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1);
+        if (r >= d) r -= d;
+    }
+    return r;
 }
 
 /* ══════════════════════════════════════════════════════
