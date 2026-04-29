@@ -20,6 +20,9 @@
 #define MBEDTLS_PLATFORM_C
 #define MBEDTLS_PLATFORM_MEMORY        /* Custom malloc/free */
 #define MBEDTLS_PLATFORM_NO_STD_FUNCTIONS
+#define MBEDTLS_HAVE_TIME               /* enables time-of-day calls */
+#define MBEDTLS_HAVE_TIME_DATE          /* enable cert validity checks */
+#define MBEDTLS_PLATFORM_TIME_ALT        /* registered via set_time() at init */
 #define MBEDTLS_PLATFORM_SNPRINTF_ALT     /* Registered at runtime via mbedtls_platform_set_snprintf() */
 #define MBEDTLS_PLATFORM_VSNPRINTF_ALT
 

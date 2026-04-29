@@ -31,6 +31,7 @@ extern void *zeos_calloc(size_t n, size_t size);
 extern void  zeos_free(void *ptr);
 extern int   snprintf(char *buf, size_t size, const char *fmt, ...);
 extern int   vsnprintf(char *buf, size_t size, const char *fmt, __builtin_va_list ap);
+extern long  zeos_time(long *timer);
 
 /* ── Root CA trust anchors (PEM-encoded) ── */
 #include "ca_bundle.h"
@@ -82,6 +83,7 @@ int tls_init(void)
     mbedtls_platform_set_calloc_free(zeos_calloc, zeos_free);
     mbedtls_platform_set_snprintf(snprintf);
     mbedtls_platform_set_vsnprintf(vsnprintf);
+    mbedtls_platform_set_time((mbedtls_time_t (*)(mbedtls_time_t *))zeos_time);
 
     /* PSA crypto — required by TLS 1.3 in mbedTLS 3.6 */
     psa_status_t pst = psa_crypto_init();

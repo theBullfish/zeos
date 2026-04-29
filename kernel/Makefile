@@ -101,7 +101,18 @@ ESP      = $(BUILDDIR)/esp
 
 all: $(BUILDDIR)/$(TARGET)
 
-# Compile C to object files
+# Compile C to object files. mbedtls sources get a quieter flag set so
+# upstream warnings don't drown ours; -Wno-array-bounds avoids a known
+# false-positive in psa_crypto.c on GCC 13+.
+MBEDTLS_CFLAGS = $(CFLAGS) -Wno-unused-parameter -Wno-unused-variable \
+                 -Wno-unused-but-set-variable -Wno-sign-compare \
+                 -Wno-array-bounds -Wno-stringop-overflow \
+                 -Wno-implicit-fallthrough -Wno-maybe-uninitialized \
+                 -Wno-cast-function-type
+
+lib/mbedtls/library/%.o: lib/mbedtls/library/%.c
+	$(CC) $(MBEDTLS_CFLAGS) -c $< -o $@
+
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 

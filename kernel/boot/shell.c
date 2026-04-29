@@ -183,6 +183,7 @@ static void cmd_df(const char *args);
 static void cmd_ping(const char *args);
 static void cmd_dns_cmd(const char *args);
 static void cmd_fetch(const char *args);
+static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 
 /* ── Command table ──────────────────────────────── */
@@ -225,6 +226,7 @@ static const struct shell_cmd commands[] = {
     {"ping",    "ping an IP address",              cmd_ping,    VIS_ALWAYS},
     {"dns",     "resolve a hostname",              cmd_dns_cmd, VIS_DEREZ},
     {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
+    {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
@@ -1369,6 +1371,62 @@ static void cmd_fetch(const char *args)
         }
     } else {
         kputs("  Fetch failed.\n");
+    }
+    kputs("\n");
+}
+
+extern int https_get(const char *hostname, const char *path,
+                     char *resp_buf, int resp_max, int *body_len);
+
+static void cmd_https(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: https <host> [path]\n");
+        kputs("  Example: https example.com /\n");
+        return;
+    }
+
+    char host[128];
+    const char *path = "/";
+    int hi = 0;
+    const char *p = args;
+
+    if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p' &&
+        p[4] == 's' && p[5] == ':' && p[6] == '/' && p[7] == '/')
+        p += 8;
+    else if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p' &&
+             p[4] == ':' && p[5] == '/' && p[6] == '/')
+        p += 7;
+
+    while (*p && *p != ' ' && *p != '/' && hi < 127)
+        host[hi++] = *p++;
+    host[hi] = '\0';
+
+    if (*p == '/') path = p;
+    else if (*p == ' ') { p++; if (*p) path = p; }
+
+    kputs("\n  Fetching https://");
+    kputs(host);
+    kputs(path);
+    kputs("\n\n");
+
+    static char resp[8192];
+    int body_len = 0;
+    int status = https_get(host, path, resp, sizeof(resp), &body_len);
+    if (status > 0) {
+        kputs("  Status: ");
+        kput_dec(status);
+        kputs("\n  Body:   ");
+        kput_dec(body_len);
+        kputs(" bytes\n\n");
+        if (body_len > 0) {
+            int limit = body_len > 1024 ? 1024 : body_len;
+            for (int i = 0; i < limit; i++) kputc(resp[i]);
+            if (body_len > 1024) kputs("\n  ... (truncated)\n");
+            else kputs("\n");
+        }
+    } else {
+        kputs("  HTTPS fetch failed.\n");
     }
     kputs("\n");
 }
