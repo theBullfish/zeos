@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zeos-optane"
+version = "0.1.0"
+description = "Detect Intel Optane devices and integrate them into the Zeos memory tier."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "../../LICENSE" }
+authors = [
+    { name = "Codex Labs LLC" },
+]
+keywords = ["zeos", "optane", "pmem", "nvme", "memory-tier"]
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Operating System Kernels",
+]
+dependencies = []
+
+[project.scripts]
+zeos-optane = "zeos_optane.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["zeos_optane*"]

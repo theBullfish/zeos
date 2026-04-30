@@ -136,12 +136,12 @@ def apply_plan(
         print("  (dry-run — no changes will be made)")
 
     for step in plan.steps:
-        if step.destructive:
+        if step.destructive and not dry_run:
             if not assume_yes:
                 raise ApplyError(
                     "destructive step encountered; pass --yes to proceed"
                 )
-            if not dry_run and not _confirm_destructive(
+            if not _confirm_destructive(
                 step, plan.device.path, assume_yes=assume_yes
             ):
                 raise ApplyError("destructive step not confirmed; aborting")

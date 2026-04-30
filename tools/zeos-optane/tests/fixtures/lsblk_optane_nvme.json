@@ -1,0 +1,52 @@
+{
+  "blockdevices": [
+    {
+      "name": "nvme0n1",
+      "model": "Samsung SSD 980 PRO 1TB",
+      "serial": "S5GXNX0R000001",
+      "size": 1000204886016,
+      "tran": "nvme",
+      "fstype": "ext4",
+      "mountpoint": "/",
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "label": "root",
+      "wwn": "eui.0025385701400001"
+    },
+    {
+      "name": "nvme1n1",
+      "model": "INTEL SSDPED1K375GA",
+      "serial": "PHKE000000000",
+      "size": 375083606016,
+      "tran": "nvme",
+      "fstype": null,
+      "mountpoint": null,
+      "uuid": null,
+      "label": null,
+      "wwn": "eui.01000000010000005CD2E4F1F4F40000"
+    },
+    {
+      "name": "nvme2n1",
+      "model": "INTEL MEMPEK1J032GA",
+      "serial": "PHBT000000000",
+      "size": 32017047552,
+      "tran": "nvme",
+      "fstype": null,
+      "mountpoint": null,
+      "uuid": null,
+      "label": null,
+      "wwn": ""
+    },
+    {
+      "name": "sda",
+      "model": "ATA WDC WD10EZEX",
+      "serial": "WD-WCC2E0000000",
+      "size": 1000204886016,
+      "tran": "sata",
+      "fstype": "ntfs",
+      "mountpoint": null,
+      "uuid": "22222222-2222-2222-2222-222222222222",
+      "label": "Data",
+      "wwn": "0x50014ee20000000a"
+    }
+  ]
+}

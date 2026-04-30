@@ -1,0 +1,25 @@
+[
+  {
+    "dev": "namespace0.0",
+    "mode": "fsdax",
+    "map": "dev",
+    "size": 137170518016,
+    "uuid": "33333333-3333-3333-3333-333333333333",
+    "sector_size": 512,
+    "blockdev": "pmem0",
+    "region": "region0"
+  },
+  {
+    "dev": "namespace1.0",
+    "mode": "devdax",
+    "map": "dev",
+    "size": 137170518016,
+    "uuid": "44444444-4444-4444-4444-444444444444",
+    "chardev": "dax1.0",
+    "daxregion": {
+      "id": 1,
+      "size": 137170518016
+    },
+    "region": "region1"
+  }
+]
