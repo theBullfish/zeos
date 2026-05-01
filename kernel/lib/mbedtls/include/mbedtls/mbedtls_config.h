@@ -55,6 +55,8 @@
 #define MBEDTLS_RSA_C
 #define MBEDTLS_PKCS1_V15
 #define MBEDTLS_PKCS1_V21
+#define MBEDTLS_X509_RSASSA_PSS_SUPPORT     /* enables rsa_pss_rsae_sha* in sig_algs */
+#define MBEDTLS_KEY_EXCHANGE_ECDSA_CERT_REQ_ALLOWED_ENABLED   /* TLS 1.2 ECDSA sigs */
 
 /* ── Public key infrastructure ── */
 #define MBEDTLS_PK_C
@@ -103,6 +105,7 @@
 #define MBEDTLS_SSL_PROTO_TLS1_2      /* TLS 1.2 fallback */
 #define MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL_ENABLED
 #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+#define MBEDTLS_SSL_SERVER_NAME_INDICATION   /* SNI — required by virtual-host CDNs */
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_RSA_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
 

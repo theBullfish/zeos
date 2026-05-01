@@ -24,6 +24,7 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/platform.h"
+#include "mbedtls/net_sockets.h"
 #include "psa/crypto.h"
 
 /* Platform shims provided by mbedtls_platform.c */
@@ -60,19 +61,32 @@ static mbedtls_ssl_config       g_ssl_conf;
 /* ── Platform callbacks for mbedTLS ── */
 
 /*
- * mbedTLS calls these for network I/O. We route to our TCP stack.
- * The ctx pointer carries the tcp_conn that owns this TLS session.
+ * mbedTLS calls these for network I/O. We route to our TCP stack and
+ * translate Zeos return semantics into mbedtls's expected sentinel
+ * values so the handshake state machine can differentiate "no data
+ * yet, retry" from "peer closed" from "fatal error".
  */
 static int zeos_tls_send(void *ctx, const unsigned char *buf, size_t len)
 {
     struct tcp_conn *tcp = (struct tcp_conn *)ctx;
-    return tcp_send(tcp, buf, (uint16_t)len);
+    /* Cap to uint16_t; mbedtls will call again for the rest. */
+    uint16_t chunk = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
+    int n = tcp_send(tcp, buf, chunk);
+    if (n > 0)              return n;
+    if (tcp->remote_closed) return MBEDTLS_ERR_NET_CONN_RESET;
+    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_WRITE;
+    return MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
 static int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len)
 {
     struct tcp_conn *tcp = (struct tcp_conn *)ctx;
-    return tcp_recv(tcp, buf, (uint16_t)len);
+    uint16_t chunk = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
+    int n = tcp_recv(tcp, buf, chunk);
+    if (n > 0)              return n;
+    if (tcp->remote_closed) return 0;  /* clean EOF */
+    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_READ;  /* poll timeout, retry */
+    return MBEDTLS_ERR_NET_RECV_FAILED;
 }
 
 /* ── Public API ── */
@@ -202,7 +216,13 @@ tls_conn_t *tls_connect(const char *hostname, uint16_t port)
             ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             kputs("TLS: handshake failed (");
             kput_dec(-ret);
-            kputs(")\n");
+            kputs(")");
+            if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+                uint32_t f = mbedtls_ssl_get_verify_result(&g_tls.ssl);
+                kputs(" verify_flags=0x");
+                kput_hex(f);
+            }
+            kputs("\n");
             mbedtls_ssl_free(&g_tls.ssl);
             tcp_close(&g_tls.tcp);
             return NULL;
@@ -309,7 +329,9 @@ int https_get(const char *hostname, const char *path,
     int total = 0;
     while (total < resp_max - 1) {
         int n = tls_recv(conn, resp_buf + total, resp_max - 1 - total);
-        if (n <= 0) break;
+        if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+            n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;  /* retry */
+        if (n <= 0) break;  /* 0 = clean EOF, < 0 = fatal */
         total += n;
     }
     resp_buf[total] = 0;
