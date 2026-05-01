@@ -126,15 +126,23 @@ int tls_init(void)
         return -1;
     }
 
-    /* Load root CA trust anchors */
+    /* Load root CA trust anchors. mbedtls_x509_crt_parse returns 0 on
+     * full success, a positive count if SOME certs in the PEM bundle
+     * failed to parse but others succeeded (still useful), or a negative
+     * error if nothing parsed. Only the last is fatal. */
     ret = mbedtls_x509_crt_parse(&g_ca_certs,
                                   (const unsigned char *)ca_bundle_pem,
                                   sizeof(ca_bundle_pem));
-    if (ret != 0) {
+    if (ret < 0) {
         kputs("TLS: CA parse failed (");
-        kput_dec(-ret);
+        kput_dec((unsigned long)-ret);
         kputs(")\n");
         return -1;
+    }
+    if (ret > 0) {
+        kputs("TLS: ");
+        kput_dec((unsigned long)ret);
+        kputs(" cert(s) in bundle failed to parse — others ok\n");
     }
 
     /* Configure as TLS 1.2/1.3 client */
@@ -153,7 +161,9 @@ int tls_init(void)
 
     kputs("TLS: subsystem ready (mbedTLS ");
     kputs(MBEDTLS_VERSION_STRING);
-    kputs(")\n");
+    kputs("), epoch=");
+    kput_dec((unsigned long)zeos_time(0));
+    kputs("\n");
 
     return 0;
 }
