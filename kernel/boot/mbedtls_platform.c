@@ -150,14 +150,60 @@ void zeos_free(void *ptr) {
  * This satisfies MBEDTLS_ENTROPY_HARDWARE_ALT.
  */
 
+/* RDRAND: NIST SP 800-90B-compliant DRNG present on Ivy Bridge+ Intel and
+ * Excavator+ AMD x86_64. Detected via CPUID.01:ECX bit 30. When available,
+ * we use it as the primary entropy source and mix in TSC jitter as
+ * defense-in-depth against silicon-level attacks. */
+
+static int rdrand_supported(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid"
+                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                     : "a"(1), "c"(0));
+    cached = (ecx & (1u << 30)) ? 1 : 0;
+    return cached;
+}
+
+static int rdrand64(uint64_t *out) {
+    /* RDRAND can transiently fail under load; spec says retry up to 10 times. */
+    for (int i = 0; i < 10; i++) {
+        uint64_t v;
+        unsigned char ok;
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+        if (ok) { *out = v; return 0; }
+    }
+    return -1;
+}
+
 int mbedtls_hardware_poll(void *data,
                           unsigned char *output, size_t len,
                           size_t *olen)
 {
     (void)data;
 
+    /* Fast path: RDRAND, with TSC jitter mixed in for defense-in-depth. */
+    if (rdrand_supported()) {
+        size_t i = 0;
+        while (i < len) {
+            uint64_t r;
+            if (rdrand64(&r) != 0) break;
+            r ^= timer_read_tsc();
+            size_t chunk = len - i < 8 ? len - i : 8;
+            for (size_t j = 0; j < chunk; j++)
+                output[i + j] = (unsigned char)((r >> (j * 8)) & 0xFF);
+            i += chunk;
+        }
+        if (i == len) {
+            *olen = len;
+            return 0;
+        }
+        /* RDRAND mid-stream failure: fall through to TSC-only path. */
+    }
+
     /*
-     * Mix strategy: read TSC twice per 4 bytes with a volatile
+     * TSC-jitter fallback: read TSC twice per 4 bytes with a volatile
      * memory access between reads (forces pipeline stall = jitter).
      * XOR with MAC bytes for device uniqueness.
      */
