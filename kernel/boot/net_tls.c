@@ -166,12 +166,38 @@ tls_conn_t *tls_connect(const char *hostname, uint16_t port)
     kput_dec(port);
     kputs("\n");
 
-    /* DNS resolve */
+    /* If hostname is an IPv4 dotted-quad, skip DNS. */
     struct ipv4_addr server_ip;
+    {
+        unsigned a, b, c, d;
+        const char *p = hostname;
+        int parsed = 0;
+        a = 0; while (*p >= '0' && *p <= '9') { a = a*10 + (unsigned)(*p - '0'); p++; parsed++; }
+        if (parsed && *p == '.' && a < 256) {
+            p++; parsed = 0; b = 0;
+            while (*p >= '0' && *p <= '9') { b = b*10 + (unsigned)(*p - '0'); p++; parsed++; }
+            if (parsed && *p == '.' && b < 256) {
+                p++; parsed = 0; c = 0;
+                while (*p >= '0' && *p <= '9') { c = c*10 + (unsigned)(*p - '0'); p++; parsed++; }
+                if (parsed && *p == '.' && c < 256) {
+                    p++; parsed = 0; d = 0;
+                    while (*p >= '0' && *p <= '9') { d = d*10 + (unsigned)(*p - '0'); p++; parsed++; }
+                    if (parsed && *p == 0 && d < 256) {
+                        server_ip.b[0] = (uint8_t)a;
+                        server_ip.b[1] = (uint8_t)b;
+                        server_ip.b[2] = (uint8_t)c;
+                        server_ip.b[3] = (uint8_t)d;
+                        goto have_ip;
+                    }
+                }
+            }
+        }
+    }
     if (dns_resolve(hostname, &server_ip) < 0) {
         kputs("TLS: DNS failed\n");
         return NULL;
     }
+have_ip:;
 
     /* TCP connect */
     if (tcp_connect(&g_tls.tcp, server_ip, port) < 0) {
