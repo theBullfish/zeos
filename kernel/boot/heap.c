@@ -74,11 +74,15 @@ static struct block_header *find_free(uint64_t size)
  */
 static void split_block(struct block_header *block, uint64_t size)
 {
-    uint64_t remaining = block->size - size - HEADER_SIZE;
-
-    /* Only split if the remainder can hold at least 16 bytes of data */
-    if (remaining < 16)
+    /* Need at least HEADER_SIZE + 16 bytes of slack to make a viable second
+     * block. Compare BEFORE subtracting so we don't underflow when block->size
+     * is at or barely above `size` — that previously wrapped to ~2^64 and
+     * passed the `< 16` guard, then wrote a bogus header into invalid memory
+     * and broke the freelist. */
+    if (block->size < size + HEADER_SIZE + 16)
         return;
+
+    uint64_t remaining = block->size - size - HEADER_SIZE;
 
     struct block_header *new_block =
         (struct block_header *)((uint8_t *)block + HEADER_SIZE + size);
