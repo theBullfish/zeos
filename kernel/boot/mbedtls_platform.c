@@ -26,116 +26,26 @@
  * during tls_init(), or define them directly.
  */
 
-/* Dedicated mbedTLS heap.
- *
- * The shared kernel heap (heap.c) has a chain-corruption issue under heavy
- * mixed alloc/free patterns that mbedtls produces (PSA + handshake + cert
- * verify all churn the freelist). Rather than block TLS on that, mbedtls
- * gets its own 4 MB region with a simple first-fit allocator that's used
- * exclusively for zeos_calloc/zeos_free. The kernel heap is unaffected.
- *
- * Layout: each allocation is preceded by an 8-byte tag holding (size,
- * MTLS_MAGIC). Free blocks live on a singly-linked freelist anchored at
- * mtls_freelist; coalescing happens on free with the trailing block. */
-
-#define MTLS_REGION_PAGES 1024     /* 4 MB */
-#define MTLS_PAGE_SIZE    4096
-#define MTLS_MAGIC_USED   0x4D544C53UL   /* 'MTLS' */
-#define MTLS_MAGIC_FREE   0x46524545UL   /* 'FREE' */
-#define MTLS_ALIGN(x)     (((x) + 15) & ~15ULL)
-
-struct mtls_block {
-    uint32_t magic;
-    uint32_t _pad;
-    uint64_t size;             /* size of payload (not including this header) */
-    struct mtls_block *next;   /* freelist link (only valid when free) */
-};
-
-static struct mtls_block *mtls_freelist = 0;
-static uint8_t           *mtls_region   = 0;
-static size_t             mtls_region_size = 0;
-
-extern uint64_t pmm_alloc_contiguous(uint64_t count);
-
-static void mtls_init(void) {
-    if (mtls_region) return;
-    uint64_t phys = pmm_alloc_contiguous(MTLS_REGION_PAGES);
-    if (!phys) return;
-    mtls_region      = (uint8_t *)phys;
-    mtls_region_size = MTLS_REGION_PAGES * MTLS_PAGE_SIZE;
-    mtls_freelist = (struct mtls_block *)mtls_region;
-    mtls_freelist->magic = MTLS_MAGIC_FREE;
-    mtls_freelist->size  = mtls_region_size - sizeof(struct mtls_block);
-    mtls_freelist->next  = 0;
-}
+/* mbedTLS allocator hooks. Routes to the shared kernel heap (heap.c).
+ * Earlier in the integration we used a dedicated 4 MB region here because
+ * the kernel heap had a split_block underflow bug that corrupted its
+ * freelist under mbedtls's mixed alloc/free pattern. With heap.c fixed
+ * (commit 1df9b0f), the dedicated region is no longer needed. */
 
 void *zeos_calloc(size_t n, size_t size) {
     size_t total = n * size;
     if (total == 0) return 0;
     if (n != 0 && total / n != size) return 0;  /* overflow */
-    if (!mtls_region) mtls_init();
-    if (!mtls_region) return 0;
-
-    size_t need = MTLS_ALIGN(total);
-
-    struct mtls_block **pp = &mtls_freelist;
-    while (*pp) {
-        struct mtls_block *b = *pp;
-        if (b->size >= need) {
-            /* Split if the leftover can hold a future allocation. */
-            if (b->size >= need + sizeof(struct mtls_block) + 16) {
-                struct mtls_block *rest =
-                    (struct mtls_block *)((uint8_t *)(b + 1) + need);
-                rest->magic = MTLS_MAGIC_FREE;
-                rest->size  = b->size - need - sizeof(struct mtls_block);
-                rest->next  = b->next;
-                b->size = need;
-                *pp = rest;
-            } else {
-                *pp = b->next;
-            }
-            b->magic = MTLS_MAGIC_USED;
-            uint8_t *payload = (uint8_t *)(b + 1);
-            for (size_t i = 0; i < total; i++) payload[i] = 0;
-            return payload;
-        }
-        pp = &b->next;
+    void *p = kmalloc(total);
+    if (p) {
+        uint8_t *b = (uint8_t *)p;
+        for (size_t i = 0; i < total; i++) b[i] = 0;
     }
-    return 0;
+    return p;
 }
 
 void zeos_free(void *ptr) {
-    if (!ptr) return;
-    struct mtls_block *b = ((struct mtls_block *)ptr) - 1;
-    if (b->magic != MTLS_MAGIC_USED) return;  /* not ours / double-free */
-    b->magic = MTLS_MAGIC_FREE;
-
-    /* Insert into freelist sorted by address so coalescing can be linear. */
-    struct mtls_block **pp = &mtls_freelist;
-    while (*pp && *pp < b) pp = &(*pp)->next;
-    b->next = *pp;
-    *pp = b;
-
-    /* Coalesce with next if physically adjacent. */
-    if (b->next) {
-        uint8_t *end = (uint8_t *)(b + 1) + b->size;
-        if (end == (uint8_t *)b->next) {
-            b->size += sizeof(struct mtls_block) + b->next->size;
-            b->next = b->next->next;
-        }
-    }
-    /* Coalesce with prev if physically adjacent. */
-    struct mtls_block *prev = mtls_freelist;
-    if (prev != b) {
-        while (prev && prev->next != b) prev = prev->next;
-        if (prev) {
-            uint8_t *prev_end = (uint8_t *)(prev + 1) + prev->size;
-            if (prev_end == (uint8_t *)b) {
-                prev->size += sizeof(struct mtls_block) + b->size;
-                prev->next = b->next;
-            }
-        }
-    }
+    if (ptr) kfree(ptr);
 }
 
 /* ══════════════════════════════════════════════════════

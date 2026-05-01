@@ -290,7 +290,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Initialize kernel heap */
     kputs("Initializing heap... ");
-    heap_init(64);  /* 64 pages = 256KB initial heap */
+    heap_init(512);  /* 2 MB initial heap (TLS handshake peak ~50 KB) */
     if (heap_total_bytes() == 0)
         panic("Heap init failed — cannot allocate initial pages");
     kput_dec(heap_total_bytes() / 1024);
