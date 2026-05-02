@@ -185,6 +185,7 @@ static void cmd_dns_cmd(const char *args);
 static void cmd_fetch(const char *args);
 static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
+static void cmd_selftest(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -227,6 +228,7 @@ static const struct shell_cmd commands[] = {
     {"dns",     "resolve a hostname",              cmd_dns_cmd, VIS_DEREZ},
     {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
+    {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
@@ -1429,6 +1431,83 @@ static void cmd_https(const char *args)
         kputs("  HTTPS fetch failed.\n");
     }
     kputs("\n");
+}
+
+extern int vault_create(const char *path, uint32_t tier);
+extern int vault_mkdir(const char *path, uint32_t tier);
+extern int vault_write(const char *path, const void *data, uint32_t size);
+extern int vault_read(const char *path, void *buf, uint32_t size);
+extern int vault_delete(const char *path);
+extern int dns_resolve(const char *hostname, struct ipv4_addr *out);
+
+static void cmd_selftest(const char *args)
+{
+    (void)args;
+    int passes = 0, fails = 0;
+    kputs("\n  Zeos self-test\n  ──────────────\n");
+
+    /* VAULT: write+read+delete round-trip at root */
+    kputs("  VAULT round-trip ...... ");
+    {
+        const char *path = "/selftest";
+        const char *msg = "hello, zeos";
+        char buf[32];
+        vault_delete(path);  /* clean any prior run */
+        int rc = vault_create(path, 0);  /* returns inode # on success, <0 on err */
+        if (rc < 0) { kputs("CREATE FAIL\n"); fails++; goto vault_done; }
+        rc = vault_write(path, msg, 11);
+        if (rc < 0) { kputs("WRITE FAIL\n"); vault_delete(path); fails++; goto vault_done; }
+        rc = vault_read(path, buf, sizeof(buf));
+        if (rc < 11) { kputs("READ FAIL\n"); vault_delete(path); fails++; goto vault_done; }
+        for (int i = 0; i < 11; i++) {
+            if (buf[i] != msg[i]) { kputs("COMPARE FAIL\n"); vault_delete(path); fails++; goto vault_done; }
+        }
+        vault_delete(path);
+        kputs("PASS\n"); passes++;
+    }
+vault_done:
+
+    /* DNS: resolve a known host (if network is up) */
+    kputs("  DNS resolve ........... ");
+    if (!g_net.up) {
+        kputs("SKIP (no network)\n");
+    } else {
+        struct ipv4_addr ip;
+        if (dns_resolve("example.com", &ip) == 0) {
+            kputs("PASS (");
+            kput_dec(ip.b[0]); kputs(".");
+            kput_dec(ip.b[1]); kputs(".");
+            kput_dec(ip.b[2]); kputs(".");
+            kput_dec(ip.b[3]); kputs(")\n");
+            passes++;
+        } else {
+            kputs("FAIL\n"); fails++;
+        }
+    }
+
+    /* HTTPS: full TLS handshake + GET against a known-good host */
+    kputs("  HTTPS fetch ........... ");
+    if (!g_net.up) {
+        kputs("SKIP (no network)\n");
+    } else {
+        static char resp[4096];
+        int body_len = 0;
+        int status = https_get("letsencrypt.org", "/", resp, sizeof(resp), &body_len);
+        if (status == 200 && body_len > 0) {
+            kputs("PASS (");
+            kput_dec(status); kputs(", ");
+            kput_dec(body_len); kputs(" bytes)\n");
+            passes++;
+        } else {
+            kputs("FAIL (status=");
+            kput_dec(status); kputs(")\n");
+            fails++;
+        }
+    }
+
+    kputs("  ──────────────\n  ");
+    kput_dec(passes); kputs(" passed, ");
+    kput_dec(fails); kputs(" failed\n\n");
 }
 
 /* ── VAULT filesystem commands ──────────────────── */
