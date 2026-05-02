@@ -16,6 +16,7 @@
 #include "updater.h"
 #include "net_http.h"
 #include "net_tls.h"
+#include "mbedtls/ssl.h"  /* for MBEDTLS_ERR_SSL_WANT_READ/WRITE */
 #include "nvme.h"
 #include "fb.h"
 #include "font.h"
@@ -583,12 +584,22 @@ int updater_download(void)
         str_append(req, hostname, sizeof(req));
         str_append(req, "\r\nConnection: close\r\n\r\n", sizeof(req));
 
-        if (tls_send(conn, req, str_len(req)) < 0) {
-            set_error("TLS send failed");
-            tls_close(conn);
-            kfree(dl_buf);
-            dl_buf = 0;
-            return -1;
+        /* Send request — retry on WANT_READ/WRITE, accept partial writes */
+        {
+            int rl = str_len(req), sent = 0;
+            while (sent < rl) {
+                int n = tls_send(conn, req + sent, rl - sent);
+                if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+                    n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+                if (n < 0) {
+                    set_error("TLS send failed");
+                    tls_close(conn);
+                    kfree(dl_buf);
+                    dl_buf = 0;
+                    return -1;
+                }
+                sent += n;
+            }
         }
 
         /* Receive response (skip HTTP headers) */
@@ -599,6 +610,8 @@ int updater_download(void)
 
         while (total < UPDATE_BUF_MAX) {
             int n = tls_recv(conn, tmp, sizeof(tmp));
+            if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+                n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
             if (n <= 0) break;
 
             int start = 0;
