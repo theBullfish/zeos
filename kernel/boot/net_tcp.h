@@ -121,6 +121,12 @@ int tcp_send(struct tcp_conn *conn, const void *data, uint16_t len);
 int tcp_recv(struct tcp_conn *conn, void *buf, uint16_t max_len);
 int tcp_close(struct tcp_conn *conn);
 
+/* Non-blocking recv: returns immediately. Returns:
+ *   > 0  bytes copied
+ *   = 0  no data and not closed (caller should poll & retry)
+ *   < 0  error or remote closed (check conn->remote_closed) */
+int tcp_recv_nb(struct tcp_conn *conn, void *buf, uint16_t max_len);
+
 /* ── Incoming packet handler ─────────────────── */
 
 /* Process incoming TCP segment (called by ip_process). */

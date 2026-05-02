@@ -143,6 +143,12 @@ int tls_init(void)
         kputs("TLS: ");
         kput_dec((unsigned long)ret);
         kputs(" cert(s) in bundle failed to parse — others ok\n");
+        /* Sanity: refuse to come up if half the bundle failed — almost
+         * certainly a corrupted bundle, not just the usual SHA-1 misses. */
+        if (ret > 50) {
+            kputs("TLS: bundle health check FAILED — too many parse errors\n");
+            return -1;
+        }
     }
 
     /* Configure as TLS 1.2/1.3 client */
@@ -170,29 +176,47 @@ int tls_init(void)
 
 tls_conn_t *tls_connect(const char *hostname, uint16_t port)
 {
+    /* Single-connection model: refuse a second connect while one is live
+     * rather than silently overwriting the global ssl context. */
+    if (g_tls.active) {
+        kputs("TLS: refused — connection already active\n");
+        return NULL;
+    }
+
+    /* Reject overlong hostnames before SNI truncation could mask cert
+     * mismatches. SNI buffer is 256 bytes; cert SAN matching also needs
+     * the full name to be meaningful. */
+    size_t hlen = 0;
+    while (hostname[hlen] && hlen < 512) hlen++;
+    if (hlen == 0 || hlen >= 256) {
+        kputs("TLS: hostname length out of range\n");
+        return NULL;
+    }
+
     kputs("TLS: connect ");
     kputs(hostname);
     kputs(":");
     kput_dec(port);
     kputs("\n");
 
-    /* If hostname is an IPv4 dotted-quad, skip DNS. */
+    /* If hostname is an IPv4 dotted-quad, skip DNS. Cap each octet's
+     * digit count at 3 so the unsigned accumulator can't wrap. */
     struct ipv4_addr server_ip;
     {
         unsigned a, b, c, d;
         const char *p = hostname;
         int parsed = 0;
-        a = 0; while (*p >= '0' && *p <= '9') { a = a*10 + (unsigned)(*p - '0'); p++; parsed++; }
-        if (parsed && *p == '.' && a < 256) {
+        a = 0; while (*p >= '0' && *p <= '9' && parsed < 4) { a = a*10 + (unsigned)(*p - '0'); p++; parsed++; }
+        if (parsed && parsed < 4 && *p == '.' && a < 256) {
             p++; parsed = 0; b = 0;
-            while (*p >= '0' && *p <= '9') { b = b*10 + (unsigned)(*p - '0'); p++; parsed++; }
-            if (parsed && *p == '.' && b < 256) {
+            while (*p >= '0' && *p <= '9' && parsed < 4) { b = b*10 + (unsigned)(*p - '0'); p++; parsed++; }
+            if (parsed && parsed < 4 && *p == '.' && b < 256) {
                 p++; parsed = 0; c = 0;
-                while (*p >= '0' && *p <= '9') { c = c*10 + (unsigned)(*p - '0'); p++; parsed++; }
-                if (parsed && *p == '.' && c < 256) {
+                while (*p >= '0' && *p <= '9' && parsed < 4) { c = c*10 + (unsigned)(*p - '0'); p++; parsed++; }
+                if (parsed && parsed < 4 && *p == '.' && c < 256) {
                     p++; parsed = 0; d = 0;
-                    while (*p >= '0' && *p <= '9') { d = d*10 + (unsigned)(*p - '0'); p++; parsed++; }
-                    if (parsed && *p == 0 && d < 256) {
+                    while (*p >= '0' && *p <= '9' && parsed < 4) { d = d*10 + (unsigned)(*p - '0'); p++; parsed++; }
+                    if (parsed && parsed < 4 && *p == 0 && d < 256) {
                         server_ip.b[0] = (uint8_t)a;
                         server_ip.b[1] = (uint8_t)b;
                         server_ip.b[2] = (uint8_t)c;
@@ -355,10 +379,18 @@ int https_get(const char *hostname, const char *path,
     str_append(req, "\r\nConnection: close\r\n"
                     "User-Agent: Zeos/0.1\r\n\r\n");
 
+    /* Send: retry on WANT_READ/WRITE, accept partial writes. */
     int req_len = str_len(req);
-    if (tls_send(conn, req, req_len) < 0) {
-        tls_close(conn);
-        return -1;
+    int sent = 0;
+    while (sent < req_len) {
+        int n = tls_send(conn, req + sent, req_len - sent);
+        if (n == MBEDTLS_ERR_SSL_WANT_READ ||
+            n == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+        if (n < 0) {
+            tls_close(conn);
+            return -1;
+        }
+        sent += n;
     }
 
     /* Read response */
@@ -374,9 +406,13 @@ int https_get(const char *hostname, const char *path,
 
     tls_close(conn);
 
-    /* Parse status code */
+    /* Parse status code: require "HTTP/x.y NNN" minimum (12 chars + space)
+     * and validate that bytes 9-11 are decimal digits before parsing. */
     int status = -1;
-    if (total > 12 && resp_buf[0] == 'H') {
+    if (total >= 12 && resp_buf[0] == 'H' &&
+        resp_buf[9]  >= '0' && resp_buf[9]  <= '9' &&
+        resp_buf[10] >= '0' && resp_buf[10] <= '9' &&
+        resp_buf[11] >= '0' && resp_buf[11] <= '9') {
         status = (resp_buf[9] - '0') * 100 +
                  (resp_buf[10] - '0') * 10 +
                  (resp_buf[11] - '0');

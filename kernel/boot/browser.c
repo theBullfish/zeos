@@ -1091,7 +1091,7 @@ void browser_refresh(browser_t *b) {
 }
 
 void browser_home(browser_t *b) {
-    browser_navigate(b, "http://example.com");
+    browser_navigate(b, "https://example.com");
 }
 
 /* Scroll step for arrow keys and mouse wheel */

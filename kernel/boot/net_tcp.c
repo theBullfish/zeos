@@ -488,6 +488,42 @@ int tcp_recv(struct tcp_conn *conn, void *buf, uint16_t max_len)
     return rc;
 }
 
+/* Non-blocking variant: do a single net_poll to drain pending packets,
+ * then return whatever is in the rx buffer. No 5-second wait. mbedtls's
+ * BIO callback drives the retry loop via MBEDTLS_ERR_SSL_WANT_READ. */
+int tcp_recv_nb(struct tcp_conn *conn, void *buf, uint16_t max_len)
+{
+    (void)conn;
+    struct tcp_conn *slot0 = &connections[0];
+    if (!slot0) return -1;
+
+    /* One poll pass to absorb any packet that just arrived. */
+    extern void net_poll(void);
+    extern void tcp_retransmit_tick(void);
+    net_poll();
+    tcp_retransmit_tick();
+
+    /* Return data already in the buffer */
+    if (slot0->rx_read < slot0->rx_len) {
+        uint16_t avail = slot0->rx_len - slot0->rx_read;
+        uint16_t to_copy = avail > max_len ? max_len : avail;
+        uint8_t *dst = (uint8_t *)buf;
+        for (uint16_t i = 0; i < to_copy; i++)
+            dst[i] = slot0->rx_buf[slot0->rx_read + i];
+        slot0->rx_read += to_copy;
+        conn->remote_closed = slot0->remote_closed;
+        conn->state = slot0->state;
+        return to_copy;
+    }
+
+    /* Buffer empty — reset window so future packets land at offset 0. */
+    slot0->rx_len = 0;
+    slot0->rx_read = 0;
+    conn->remote_closed = slot0->remote_closed;
+    conn->state = slot0->state;
+    return 0;  /* caller polls and retries */
+}
+
 int tcp_close(struct tcp_conn *conn)
 {
     (void)conn;

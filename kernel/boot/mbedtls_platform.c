@@ -174,15 +174,23 @@ static inline uint8_t cmos_in(uint8_t reg) {
 static int bcd2bin(uint8_t v) { return (v & 0x0F) + ((v >> 4) * 10); }
 
 static uint64_t cmos_unix_epoch(void) {
-    /* Wait until Update-In-Progress clears, then read consistent values. */
-    while (cmos_in(0x0A) & 0x80) { /* spin */ }
-    uint8_t s  = cmos_in(0x00);
-    uint8_t mn = cmos_in(0x02);
-    uint8_t h  = cmos_in(0x04);
-    uint8_t d  = cmos_in(0x07);
-    uint8_t mo = cmos_in(0x08);
-    uint8_t y  = cmos_in(0x09);
-    uint8_t status_b = cmos_in(0x0B);
+    /* Read all fields twice with UIP-clear gate around each read; accept
+     * only when both reads agree. Without this, an RTC update can begin
+     * between the UIP check and the field reads, returning e.g.
+     * seconds=59 with minutes=N+1. */
+    uint8_t s, mn, h, d, mo, y, status_b;
+    uint8_t s2, mn2, h2, d2, mo2, y2;
+    int attempts = 0;
+    do {
+        if (++attempts > 8) break;  /* CMOS broken / VM weirdness — accept last read */
+        while (cmos_in(0x0A) & 0x80) { }
+        s  = cmos_in(0x00); mn = cmos_in(0x02); h  = cmos_in(0x04);
+        d  = cmos_in(0x07); mo = cmos_in(0x08); y  = cmos_in(0x09);
+        while (cmos_in(0x0A) & 0x80) { }
+        s2 = cmos_in(0x00); mn2 = cmos_in(0x02); h2 = cmos_in(0x04);
+        d2 = cmos_in(0x07); mo2 = cmos_in(0x08); y2 = cmos_in(0x09);
+    } while (s != s2 || mn != mn2 || h != h2 || d != d2 || mo != mo2 || y != y2);
+    status_b = cmos_in(0x0B);
 
     if (!(status_b & 0x04)) {  /* values are BCD */
         s  = bcd2bin(s);
@@ -413,9 +421,10 @@ static void z_putu(char *buf, size_t size, size_t *pos,
         tmp[n++] = (char)(d < 10 ? '0' + d : (upper ? 'A' : 'a') + d - 10);
         v /= base;
     }
-    if (!left) for (int i = n; i < width; i++) z_putc(buf, size, pos, pad);
+    int width_used = n;
+    if (!left) for (int i = n; i < width; i++) { z_putc(buf, size, pos, pad); width_used++; }
     while (n--) z_putc(buf, size, pos, tmp[n]);
-    /* Note: left-align pad-after needs the original n. Recompute. */
+    if (left) for (int i = width_used; i < width; i++) z_putc(buf, size, pos, ' ');
 }
 
 int vsnprintf(char *buf, size_t size, const char *fmt, zeos_va_list ap) {
@@ -650,14 +659,18 @@ static double zeos_sin(double x) {
 double acos(double x) {
     if (x >= 1.0)  return 0.0;
     if (x <= -1.0) return 3.141592653589793;
-    /* initial guess: Abramowitz & Stegun approximation */
+    /* initial guess: Abramowitz & Stegun approximation (~1e-5 accurate) */
     double ax = x < 0 ? -x : x;
     double t = 1.5707963267948966 - ax * (1.5707288 + ax * (-0.2121144 + ax * (0.0742610 + ax * -0.0187293)));
-    /* Newton refinement: t -= (cos(t)-x) / -sin(t) */
-    for (int i = 0; i < 4; i++) {
-        double s = zeos_sin(t);
-        if (s == 0.0) break;
-        t -= (cos(t) - ax) / -s;
+    /* Newton refinement: t -= (cos(t)-x) / -sin(t).
+     * Skip near |x|=1 where sin(t)→0 makes Newton diverge — the A&S
+     * initial guess is already accurate enough there. */
+    if (ax < 0.999) {
+        for (int i = 0; i < 4; i++) {
+            double s = zeos_sin(t);
+            if (s < 1e-9 && s > -1e-9) break;
+            t -= (cos(t) - ax) / -s;
+        }
     }
     return x < 0 ? 3.141592653589793 - t : t;
 }
