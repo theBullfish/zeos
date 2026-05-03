@@ -82,10 +82,12 @@ static int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len)
 {
     struct tcp_conn *tcp = (struct tcp_conn *)ctx;
     uint16_t chunk = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
-    int n = tcp_recv(tcp, buf, chunk);
+    /* Non-blocking: single net_poll pass, return whatever's available.
+     * mbedtls's WANT_READ retry loop drives the wait — no 5-sec inline poll. */
+    int n = tcp_recv_nb(tcp, buf, chunk);
     if (n > 0)              return n;
     if (tcp->remote_closed) return 0;  /* clean EOF */
-    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_READ;  /* poll timeout, retry */
+    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_READ;  /* no data yet, retry */
     return MBEDTLS_ERR_NET_RECV_FAILED;
 }
 

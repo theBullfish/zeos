@@ -113,13 +113,17 @@ int http_get(const char *host, const char *path, struct http_response *resp)
     kputs("  HTTP: sending request...\n");
     tcp_send(&conn, request, (uint16_t)rpos);
 
-    /* Receive response */
+    /* Receive response — keep buffer in BSS (256 KB+ won't fit on UEFI stack).
+     * Chunk reads to a uint16_t-bounded size since tcp_recv's len arg is u16. */
     kputs("  HTTP: receiving...\n");
-    char raw[HTTP_MAX_BODY + 2048];  /* Headers + body */
+    static char raw[HTTP_MAX_BODY + 2048];
     int total = 0;
+    int cap = (int)sizeof(raw) - 1;
 
-    while (total < (int)sizeof(raw) - 1) {
-        int got = tcp_recv(&conn, raw + total, (uint16_t)(sizeof(raw) - 1 - total));
+    while (total < cap) {
+        int remaining = cap - total;
+        uint16_t chunk = remaining > 0xF000 ? 0xF000 : (uint16_t)remaining;
+        int got = tcp_recv(&conn, raw + total, chunk);
         if (got <= 0) break;
         total += got;
     }
@@ -132,9 +136,11 @@ int http_get(const char *host, const char *path, struct http_response *resp)
         return -1;
     }
 
-    /* Parse status code */
-    /* HTTP/1.x NNN */
-    if (total > 12 && raw[0] == 'H' && raw[1] == 'T' && raw[2] == 'T' && raw[3] == 'P') {
+    /* Parse status code: require "HTTP/x.y NNN" with digits at 9-11. */
+    if (total >= 12 && raw[0] == 'H' && raw[1] == 'T' && raw[2] == 'T' && raw[3] == 'P' &&
+        raw[9]  >= '0' && raw[9]  <= '9' &&
+        raw[10] >= '0' && raw[10] <= '9' &&
+        raw[11] >= '0' && raw[11] <= '9') {
         resp->status_code = (raw[9] - '0') * 100 + (raw[10] - '0') * 10 + (raw[11] - '0');
     }
 
@@ -156,7 +162,7 @@ int http_get(const char *host, const char *path, struct http_response *resp)
         for (int i = 0; i < body_len; i++)
             resp->body[i] = raw[body_start + i];
         resp->body[body_len] = '\0';
-        resp->body_len = (uint16_t)body_len;
+        resp->body_len = (uint32_t)body_len;
     }
 
     kputs("  HTTP: ");

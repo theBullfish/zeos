@@ -46,7 +46,10 @@ static void mem_zero(void *p, int len) {
 
 /* ── DOM allocator (static pool, no malloc) ── */
 
-#define DOM_POOL_SIZE 512
+/* Each dom_node_t is ~3.7 KB (text+attr buffers inline). 2048 nodes = ~7.5 MB.
+ * Real fix would be separate text/attr pools, but bumping the count is the
+ * lowest-effort way to stop truncating real-world pages. */
+#define DOM_POOL_SIZE 2048
 static dom_node_t dom_pool[DOM_POOL_SIZE];
 static int dom_pool_next = 0;
 
@@ -997,8 +1000,9 @@ int browser_navigate(browser_t *b, const char *url)
         b->dom = 0;
     }
 
-    /* Fetch page */
-    static char page_buf[16384];
+    /* Fetch page — 256 KB allows medium articles (Wikipedia ~80 KB,
+     * news sites ~200 KB) without silent truncation. */
+    static char page_buf[262144];
     int status = -1;
 
     if (use_tls) {

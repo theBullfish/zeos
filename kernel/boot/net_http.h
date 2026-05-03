@@ -10,13 +10,13 @@
 
 #include "net.h"
 
-#define HTTP_MAX_BODY  16384
+#define HTTP_MAX_BODY  262144   /* 256 KB — fits real-world pages */
 
 struct http_response {
     int      status_code;
     char     content_type[64];
     char     body[HTTP_MAX_BODY];
-    uint16_t body_len;
+    uint32_t body_len;            /* uint16 was too narrow at 256 KB */
 };
 
 /*
