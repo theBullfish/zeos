@@ -63,6 +63,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/nvme.c \
            boot/ahci.c \
            boot/usb_xhci.c \
+           boot/net_rtl8188eu.c \
            boot/block.c \
            boot/installer.c \
            boot/hotcorners.c \

@@ -28,6 +28,7 @@
 #include "sigviz.h"
 #include "vault.h"
 #include "net.h"
+#include "net_rtl8188eu.h"
 #include "net_ip.h"
 #include "net_dns.h"
 #include "net_tcp.h"
@@ -195,6 +196,7 @@ static void cmd_portscan(const char *args);
 static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
+static void cmd_wifi(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -247,6 +249,7 @@ static const struct shell_cmd commands[] = {
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
+    {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
     {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
@@ -2266,4 +2269,28 @@ void shell_run(struct zeos_boot_info *boot)
             kputs("  (type 'help')\n");
         }
     }
+}
+
+/* ── wifi: RTL8188EU USB dongle (detection-stage only) ────────── */
+static void cmd_wifi(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == '\0' || streq(args, "status")) {
+        rtl8188eu_print_status();
+        return;
+    }
+
+    if (args[0] == 's' && args[1] == 'c' && args[2] == 'a' && args[3] == 'n') {
+        rtl8188eu_scan();
+        return;
+    }
+    if (args[0] == 'c' && args[1] == 'o' && args[2] == 'n') {
+        /* Args after "connect ": ssid [psk]. We'd parse them here, but
+         * rtl8188eu_connect honestly refuses regardless of input. */
+        rtl8188eu_connect(0, 0);
+        return;
+    }
+
+    kputs("usage: wifi [status|scan|connect <ssid> [psk]]\n");
 }

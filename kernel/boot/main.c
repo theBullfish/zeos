@@ -37,6 +37,7 @@
 #include "kprint.h"
 #include "shell.h"
 #include "usb_xhci.h"
+#include "net_rtl8188eu.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
@@ -326,6 +327,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         kputs("USB xHCI: ready (");
         kput_dec(xhci_device_count());
         kputs(" device(s))\n");
+
+        /* Probe enumerated USB devices for an RTL8188EU WiFi dongle.
+         * Detection-only at this stage: see net_rtl8188eu.c for the
+         * honest accounting of what's missing for a working link. */
+        rtl8188eu_probe();
     } else {
         kputs("USB xHCI: not available\n");
     }
