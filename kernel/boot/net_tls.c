@@ -16,6 +16,7 @@
 #include "net_tls.h"
 #include "net_tcp.h"
 #include "net_dns.h"
+#include "net_http.h"
 #include "kprint.h"
 
 /* ── mbedTLS headers ── */
@@ -365,9 +366,103 @@ static void str_append(char *dst, const char *src) {
     *dst = 0;
 }
 
-int https_get(const char *hostname, const char *path,
-              char *resp_buf, int resp_max, int *body_len)
+#define HTTPS_MAX_REDIRECTS 5
+
+static int str_starts_ci_t(const char *s, const char *prefix) {
+    while (*prefix) {
+        char a = *s++, b = *prefix++;
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+static int find_substr_ci(const char *buf, int len, const char *name,
+                          const char **out_end)
 {
+    int nlen = 0; while (name[nlen]) nlen++;
+    for (int i = 0; i < len - nlen; i++) {
+        int match = 1;
+        for (int j = 0; j < nlen; j++) {
+            char a = buf[i + j], b = name[j];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) { match = 0; break; }
+        }
+        if (match) {
+            if (out_end) *out_end = buf + i + nlen;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void tls_resolve_location(int base_use_tls, const char *base_host,
+                                 const char *base_path, const char *loc,
+                                 char *out_url, int max)
+{
+    int o = 0;
+    if (str_starts_ci_t(loc, "http://") || str_starts_ci_t(loc, "https://")) {
+        while (*loc && o < max - 1) out_url[o++] = *loc++;
+        out_url[o] = 0;
+        return;
+    }
+    const char *scheme = base_use_tls ? "https://" : "http://";
+    while (*scheme && o < max - 1) out_url[o++] = *scheme++;
+
+    if (loc[0] == '/' && loc[1] == '/') {
+        loc += 2;
+        while (*loc && o < max - 1) out_url[o++] = *loc++;
+        out_url[o] = 0;
+        return;
+    }
+
+    while (*base_host && o < max - 1) out_url[o++] = *base_host++;
+    if (loc[0] == '/') {
+        while (*loc && o < max - 1) out_url[o++] = *loc++;
+    } else {
+        int last_slash = 0;
+        for (int i = 0; base_path[i]; i++) if (base_path[i] == '/') last_slash = i;
+        for (int i = 0; i <= last_slash && o < max - 1; i++) out_url[o++] = base_path[i];
+        while (*loc && o < max - 1) out_url[o++] = *loc++;
+    }
+    out_url[o] = 0;
+}
+
+static void tls_split_url(const char *url, int *use_tls,
+                          char *host, int hmax, char *path, int pmax)
+{
+    *use_tls = 0;
+    const char *p = url;
+    if (str_starts_ci_t(p, "https://")) { *use_tls = 1; p += 8; }
+    else if (str_starts_ci_t(p, "http://")) { p += 7; }
+
+    int hi = 0;
+    while (*p && *p != '/' && *p != ':' && hi < hmax - 1) host[hi++] = *p++;
+    host[hi] = 0;
+    if (*p == ':') { while (*p && *p != '/') p++; }
+    if (*p == '/') {
+        int pi = 0;
+        while (*p && pi < pmax - 1) path[pi++] = *p++;
+        path[pi] = 0;
+    } else {
+        path[0] = '/'; path[1] = 0;
+    }
+}
+
+/*
+ * Single-hop HTTPS GET. body_len receives the body length.
+ * On a 3xx response, redir_loc receives the raw Location value
+ * (NUL-terminated, may be relative). Returns status or -1.
+ */
+int https_get_once(const char *hostname, const char *path,
+                   char *resp_buf, int resp_max, int *body_len,
+                   char *redir_loc, int redir_max)
+{
+    if (redir_max > 0) redir_loc[0] = 0;
+    if (body_len) *body_len = 0;
+
     tls_conn_t *conn = tls_connect(hostname, 443);
     if (!conn) return -1;
 
@@ -420,6 +515,22 @@ int https_get(const char *hostname, const char *path,
                  (resp_buf[11] - '0');
     }
 
+    /* Extract Location header from raw response (before we shift the body) */
+    if (redir_max > 0) {
+        const char *after = 0;
+        int idx = find_substr_ci(resp_buf, total, "\nlocation: ", &after);
+        if (idx >= 0 && after) {
+            const char *p = after;
+            while (*p == ' ' || *p == '\t') p++;
+            int li = 0;
+            while (p < resp_buf + total && *p != '\r' && *p != '\n' &&
+                   li < redir_max - 1) {
+                redir_loc[li++] = *p++;
+            }
+            redir_loc[li] = 0;
+        }
+    }
+
     /* Find body */
     if (body_len) {
         *body_len = 0;
@@ -438,4 +549,70 @@ int https_get(const char *hostname, const char *path,
     }
 
     return status;
+}
+
+/* Forward decl from net_http.c */
+extern int http_get_once_loc(const char *host, const char *path,
+                             struct http_response *resp,
+                             char *redir_loc, int redir_max);
+
+int https_get(const char *hostname, const char *path,
+              char *resp_buf, int resp_max, int *body_len)
+{
+    static char cur_host[256];
+    static char cur_path[1024];
+    int  cur_tls = 1;
+
+    int i = 0;
+    while (hostname[i] && i < 255) { cur_host[i] = hostname[i]; i++; }
+    cur_host[i] = 0;
+    i = 0;
+    while (path[i] && i < 1023) { cur_path[i] = path[i]; i++; }
+    cur_path[i] = 0;
+
+    for (int hop = 0; hop <= HTTPS_MAX_REDIRECTS; hop++) {
+        static char redir[2048]; redir[0] = 0;
+
+        if (cur_tls) {
+            int status = https_get_once(cur_host, cur_path, resp_buf, resp_max,
+                                         body_len, redir, sizeof(redir));
+            if (status < 0) return -1;
+
+            if ((status == 301 || status == 302 || status == 307 || status == 308) &&
+                redir[0] && hop < HTTPS_MAX_REDIRECTS) {
+                static char absu[2048];
+                tls_resolve_location(1, cur_host, cur_path, redir, absu, sizeof(absu));
+                kputs("HTTPS: redirect -> "); kputs(absu); kputs("\n");
+                tls_split_url(absu, &cur_tls, cur_host, 256, cur_path, 1024);
+                continue;
+            }
+            return status;
+        }
+
+        /* Cross-scheme: HTTPS → HTTP. Dispatch via http_get_once_loc and copy.
+         * http_response is HTTP_MAX_BODY (256 KB) — must not live on the stack. */
+        static struct http_response hresp;
+        int rc = http_get_once_loc(cur_host, cur_path, &hresp, redir, sizeof(redir));
+        if (rc < 0) return -1;
+        int sc = hresp.status_code;
+
+        if ((sc == 301 || sc == 302 || sc == 307 || sc == 308) &&
+            redir[0] && hop < HTTPS_MAX_REDIRECTS) {
+            static char absu[2048];
+            tls_resolve_location(0, cur_host, cur_path, redir, absu, sizeof(absu));
+            kputs("HTTPS: redirect -> "); kputs(absu); kputs("\n");
+            tls_split_url(absu, &cur_tls, cur_host, 256, cur_path, 1024);
+            continue;
+        }
+
+        int copy = (int)hresp.body_len;
+        if (copy > resp_max - 1) copy = resp_max - 1;
+        for (int k = 0; k < copy; k++) resp_buf[k] = hresp.body[k];
+        resp_buf[copy] = 0;
+        if (body_len) *body_len = copy;
+        return sc;
+    }
+
+    kputs("HTTPS: redirect limit reached\n");
+    return -1;
 }

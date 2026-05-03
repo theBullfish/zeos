@@ -74,4 +74,14 @@ int tls_init(void);
 int https_get(const char *hostname, const char *path,
               char *resp_buf, int resp_max, int *body_len);
 
+/*
+ * Single-hop HTTPS GET. body_len receives the body length.
+ * On a 3xx response, redir_loc receives the raw Location value
+ * (NUL-terminated, may be relative). Used internally to drive
+ * cross-scheme redirect chains.
+ */
+int https_get_once(const char *hostname, const char *path,
+                   char *resp_buf, int resp_max, int *body_len,
+                   char *redir_loc, int redir_max);
+
 #endif /* ZEOS_NET_TLS_H */

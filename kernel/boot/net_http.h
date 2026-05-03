@@ -28,4 +28,14 @@ struct http_response {
  */
 int http_get(const char *host, const char *path, struct http_response *resp);
 
+/*
+ * Single-hop HTTP GET. On a 3xx response, redir_loc receives the raw
+ * Location header value (NUL-terminated, may be relative). resp still
+ * contains the 3xx body. Used internally by http_get to drive redirect
+ * chains across schemes.
+ */
+int http_get_once_loc(const char *host, const char *path,
+                      struct http_response *resp,
+                      char *redir_loc, int redir_max);
+
 #endif /* ZEOS_NET_HTTP_H */
