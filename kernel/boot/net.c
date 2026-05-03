@@ -9,6 +9,7 @@
 #include "net.h"
 #include "net_virtio.h"
 #include "net_e1000.h"
+#include "net_rtl8169.h"
 #include "net_rtl8139.h"
 #include "net_arp.h"
 #include "net_ip.h"
@@ -49,6 +50,11 @@ int net_init(void)
         net_drv_recv    = e1000_recv;
         net_drv_get_mac = e1000_get_mac;
         kputs("NET: using e1000 driver\n");
+    } else if (rtl8169_init() == 0) {
+        net_drv_send    = rtl8169_send;
+        net_drv_recv    = rtl8169_recv;
+        net_drv_get_mac = rtl8169_get_mac;
+        kputs("NET: using rtl8169 driver\n");
     } else if (rtl8139_init() == 0) {
         net_drv_send    = rtl8139_send;
         net_drv_recv    = rtl8139_recv;
