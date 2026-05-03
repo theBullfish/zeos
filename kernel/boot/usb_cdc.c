@@ -258,12 +258,19 @@ static int cdc_bind(struct xhci_device *xdev)
     if (cdc_count >= USB_CDC_MAX_DEVICES) return -1;
     struct usb_cdc_device *cd = &cdc_devs[cdc_count];
 
+    /* Reject USB-Ethernet flavors of CDC — those belong to usb_eth.
+     * Check device descriptor first (some devices set subclass at the
+     * device level), then walk interface descriptors.
+     *   0x06 = ECM, 0x0D = NCM, 0x0E = MBIM (also networky) */
+    if (xdev->dev_class == USB_CLASS_CDC &&
+        (xdev->dev_subclass == 0x06 || xdev->dev_subclass == 0x0D ||
+         xdev->dev_subclass == 0x0E)) {
+        return -1;
+    }
+
     /* Read config descriptor (full hierarchy). */
     uint8_t cfg[256];
     int got = xhci_get_config_descriptor(xdev, cfg, sizeof(cfg));
-    /* Reject CDC-ECM (subclass 0x06) and CDC-NCM (0x0D) — those are
-     * USB-Ethernet devices owned by the usb_eth class driver, not us.
-     * If we don't bail here we'd grab the same bulk endpoints. */
     if (got >= 9) {
         int wp = cfg[0];
         while (wp + 2 <= got) {
@@ -273,7 +280,9 @@ static int cdc_bind(struct xhci_device *xdev)
             if (dt == DT_INTERFACE && dl >= 9) {
                 uint8_t icl = cfg[wp + 5];
                 uint8_t isc = cfg[wp + 6];
-                if (icl == USB_CLASS_CDC && (isc == 0x06 || isc == 0x0D))
+                /* Defer USB-Ethernet (ECM/NCM/MBIM) to usb_eth. */
+                if (icl == USB_CLASS_CDC &&
+                    (isc == 0x06 || isc == 0x0D || isc == 0x0E))
                     return -1;
             }
             wp += dl;
