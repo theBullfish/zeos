@@ -331,3 +331,174 @@ int ecam_available_check(void)
 {
     return ecam_available;
 }
+
+/* ─── PCIe capability walking ──────────────────────────── */
+
+uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id)
+{
+    if (!dev) return 0;
+    /* Status register bit 4 (Capabilities List) must be set. */
+    uint32_t status_cmd = pci_config_read32(dev->bus, dev->dev, dev->func, 0x04);
+    if (!((status_cmd >> 16) & (1u << 4))) return 0;
+
+    /* Capabilities Pointer at offset 0x34 (header type 0) or 0x14 (type 1).
+     * Top 2 bits of header_type encode multifunction; lower 7 bits the type. */
+    uint8_t htype = dev->header_type & 0x7f;
+    uint8_t cap_off_reg = (htype == 0x01 || htype == 0x02) ? 0x14 : 0x34;
+    uint32_t pp = pci_config_read32(dev->bus, dev->dev, dev->func, cap_off_reg);
+    uint8_t off = (uint8_t)(pp & 0xfc);  /* low 2 bits reserved */
+
+    int hops = 0;
+    while (off && off != 0xff && hops < 48) {
+        uint32_t cap = pci_config_read32(dev->bus, dev->dev, dev->func, off);
+        uint8_t this_id = (uint8_t)(cap & 0xff);
+        if (this_id == cap_id) return off;
+        off = (uint8_t)((cap >> 8) & 0xfc);
+        hops++;
+    }
+    return 0;
+}
+
+int pci_has_msi(struct pci_device *dev)  { return pci_find_capability(dev, 0x05) != 0; }
+int pci_has_msix(struct pci_device *dev) { return pci_find_capability(dev, 0x11) != 0; }
+
+int pci_link_speed(struct pci_device *dev)
+{
+    uint8_t pcie = pci_find_capability(dev, 0x10);
+    if (!pcie) return 0;
+    /* Link Status register at cap_offset + 0x12 (16 bits) */
+    uint32_t lc = pci_config_read32(dev->bus, dev->dev, dev->func, pcie + 0x10);
+    uint32_t lstatus = (lc >> 16) & 0xffff;
+    return (int)(lstatus & 0xf);
+}
+
+int pci_link_width(struct pci_device *dev)
+{
+    uint8_t pcie = pci_find_capability(dev, 0x10);
+    if (!pcie) return 0;
+    uint32_t lc = pci_config_read32(dev->bus, dev->dev, dev->func, pcie + 0x10);
+    uint32_t lstatus = (lc >> 16) & 0xffff;
+    return (int)((lstatus >> 4) & 0x3f);
+}
+
+const char *pci_link_speed_name(int speed_code)
+{
+    switch (speed_code) {
+        case 1: return "Gen1 (2.5 GT/s)";
+        case 2: return "Gen2 (5 GT/s)";
+        case 3: return "Gen3 (8 GT/s)";
+        case 4: return "Gen4 (16 GT/s)";
+        case 5: return "Gen5 (32 GT/s)";
+        case 6: return "Gen6 (64 GT/s)";
+        default: return "?";
+    }
+}
+
+uint64_t pci_bar_size(struct pci_device *dev, int bar_idx)
+{
+    if (!dev || bar_idx < 0 || bar_idx > 5) return 0;
+    uint8_t off = (uint8_t)(0x10 + bar_idx * 4);
+
+    /* Save the original BAR. */
+    uint32_t orig = pci_config_read32(dev->bus, dev->dev, dev->func, off);
+    if (orig == 0) return 0;
+
+    /* Write all-ones, read back the size mask, restore. */
+    pci_config_write32(dev->bus, dev->dev, dev->func, off, 0xffffffffu);
+    uint32_t sz_lo = pci_config_read32(dev->bus, dev->dev, dev->func, off);
+    pci_config_write32(dev->bus, dev->dev, dev->func, off, orig);
+
+    /* I/O BAR: bit 0 set, mask is ~3. Mem BAR: bit 0 clear, mask is ~F. */
+    uint32_t mask = (orig & 1u) ? (sz_lo & ~0x3u) : (sz_lo & ~0xfu);
+    if (mask == 0) return 0;
+
+    /* For 64-bit memory BARs (type bits [2:1] == 10), include the upper. */
+    uint32_t high_mask = 0;
+    int is_64 = !(orig & 1u) && ((orig & 0x6u) == 0x4u);
+    if (is_64 && bar_idx < 5) {
+        uint32_t high_off = (uint8_t)(off + 4);
+        uint32_t hi_orig = pci_config_read32(dev->bus, dev->dev, dev->func, high_off);
+        pci_config_write32(dev->bus, dev->dev, dev->func, high_off, 0xffffffffu);
+        high_mask = pci_config_read32(dev->bus, dev->dev, dev->func, high_off);
+        pci_config_write32(dev->bus, dev->dev, dev->func, high_off, hi_orig);
+    }
+
+    /* Size is one more than the inverse of the writable bits. */
+    uint64_t size_mask = ((uint64_t)high_mask << 32) | mask;
+    /* sign-extend low 32 bits if no high portion */
+    if (!is_64) size_mask = (uint64_t)mask | 0xffffffff00000000ull;
+    return (~size_mask) + 1;
+}
+
+/* ─── Vendor / device name database (best effort) ─────── */
+
+const char *pci_vendor_name(uint16_t vid)
+{
+    switch (vid) {
+        case 0x8086: return "Intel";
+        case 0x1022: return "AMD";
+        case 0x10DE: return "NVIDIA";
+        case 0x1002: return "AMD/ATI";
+        case 0x10EC: return "Realtek";
+        case 0x14E4: return "Broadcom";
+        case 0x168C: return "Qualcomm Atheros";
+        case 0x10DF: return "Emulex";
+        case 0x15B3: return "Mellanox";
+        case 0x144D: return "Samsung";
+        case 0x1B36: return "Red Hat (virtio)";
+        case 0x1AF4: return "Red Hat (virtio)";
+        case 0x1234: return "QEMU/Bochs VGA";
+        case 0x1DA3: return "Habana Labs";
+        case 0x10A9: return "Solarflare";
+        case 0x12D8: return "Pericom";
+        case 0x10B5: return "PLX/Avago bridge";
+        case 0x1077: return "QLogic";
+        case 0x14C1: return "Myricom";
+        case 0x18A1: return "Xilinx";
+        case 0x10EE: return "Xilinx (alt)";
+        case 0x1957: return "Freescale/NXP";
+        case 0x12B7: return "Cirrus Logic";
+        default:     return "Unknown";
+    }
+}
+
+const char *pci_device_name(uint16_t vid, uint16_t did)
+{
+    if (vid == 0x8086) {
+        switch (did) {
+            case 0x100E: return "82540EM Gigabit (e1000)";
+            case 0x10D3: return "82574L Gigabit";
+            case 0x153A: return "I217-LM";
+            case 0x15A0: return "I218-LM";
+            case 0x15A3: return "I219-LM";
+            case 0x1570: return "I219-V";
+            case 0x9D2F: return "Sunrise Point USB 3.0";
+            case 0x15D4: return "Alpine Ridge Thunderbolt 3";
+            case 0x15EB: return "Titan Ridge Thunderbolt 3";
+            case 0x1137: return "Maple Ridge Thunderbolt 4";
+            case 0x9DED: return "Sunrise Point AHCI";
+            case 0x2922: return "ICH9 AHCI";
+            default: break;
+        }
+    } else if (vid == 0x10EC) {
+        switch (did) {
+            case 0x8139: return "RTL8139 Fast Ethernet";
+            case 0x8169: return "RTL8169 Gigabit";
+            case 0x8168: return "RTL8168 Gigabit";
+            case 0x8161: return "RTL8161 Gigabit";
+            case 0x8136: return "RTL8101E Fast Ethernet";
+            default: break;
+        }
+    } else if (vid == 0x1AF4) {
+        switch (did) {
+            case 0x1000: return "virtio-net (legacy)";
+            case 0x1001: return "virtio-block (legacy)";
+            case 0x1041: return "virtio-net";
+            case 0x1042: return "virtio-block";
+            default: break;
+        }
+    } else if (vid == 0x1DA3) {
+        if (did == 0x0001) return "Goya HL-1000";
+    }
+    return "";
+}

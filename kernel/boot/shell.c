@@ -415,9 +415,16 @@ static void cmd_heap(const char *args)
     kputs(" free)\n");
 }
 
+/* Knows-what's-plugged-in is the prime directive. lspci prints every
+ * PCI/PCIe device, names vendor and product where we know them, and
+ * — when run with "-v" — walks the capability chain to show link
+ * speed/width, BARs with sizes, MSI/MSI-X presence. */
 static void cmd_lspci(const char *args)
 {
-    (void)args;
+    int verbose = 0;
+    while (*args == ' ') args++;
+    if (args[0] == '-' && args[1] == 'v') verbose = 1;
+
     int count = pci_device_count();
     if (count == 0) {
         kputs("No PCI devices found.\n");
@@ -428,44 +435,69 @@ static void cmd_lspci(const char *args)
         struct pci_device *d = pci_get_device(i);
         if (!d) continue;
 
-        /* Bus:Dev.Func */
-        fb_put_hex8(d->bus);
-        kputs(":");
-        fb_put_hex8(d->dev);
-        kputs(".");
-        kputc('0' + d->func);
-        kputs("  ");
-
-        /* Vendor:Device */
-        fb_put_hex16(d->vendor_id);
-        kputs(":");
-        fb_put_hex16(d->device_id);
-        kputs("  ");
-
-        /* Class name */
+        /* Bus:Dev.Func   Vendor:Device   Class — Vendor Product */
+        fb_put_hex8(d->bus);  kputs(":");
+        fb_put_hex8(d->dev);  kputs(".");
+        kputc('0' + d->func); kputs("  ");
+        fb_put_hex16(d->vendor_id); kputs(":");
+        fb_put_hex16(d->device_id); kputs("  ");
         kputs(pci_class_name(d->class_code, d->subclass));
-
-        /* Flag known devices */
-        if (d->vendor_id == 0x1da3 && d->device_id == 0x0001)
-            kputs("  ** GOYA HL-1000 **");
-        else if (d->vendor_id == 0x1002)
-            kputs("  [AMD/ATI]");
-        else if (d->vendor_id == 0x8086)
-            kputs("  [Intel]");
-        else if (d->vendor_id == 0x10ee)
-            kputs("  [Xilinx]");
-        else if (d->vendor_id == 0x15b3)
-            kputs("  [Mellanox]");
-        else if (d->vendor_id == 0x10de)
-            kputs("  [NVIDIA]");
-        else if (d->vendor_id == 0x1022)
-            kputs("  [AMD]");
-
+        kputs(" — ");
+        kputs(pci_vendor_name(d->vendor_id));
+        const char *prod = pci_device_name(d->vendor_id, d->device_id);
+        if (prod && *prod) { kputs(" "); kputs(prod); }
+        if (d->vendor_id == 0x1DA3 && d->device_id == 0x0001)
+            kputs("  ** GOYA **");
         kputs("\n");
+
+        if (!verbose) continue;
+
+        /* PCIe link */
+        int speed = pci_link_speed(d);
+        int width = pci_link_width(d);
+        if (speed > 0) {
+            kputs("           link: ");
+            kputs(pci_link_speed_name(speed));
+            kputs(" x"); kput_dec((unsigned)width); kputs("\n");
+        }
+
+        /* MSI / MSI-X */
+        if (pci_has_msi(d) || pci_has_msix(d)) {
+            kputs("           irq:  ");
+            if (pci_has_msi(d))  kputs("MSI ");
+            if (pci_has_msix(d)) kputs("MSI-X ");
+            kputs("\n");
+        }
+
+        /* BARs with sizes */
+        for (int b = 0; b < 6; b++) {
+            if (d->bar[b] == 0) continue;
+            uint64_t sz = pci_bar_size(d, b);
+            kputs("           bar"); kputc('0' + b);
+            kputs(": ");
+            if (d->bar[b] & 1) kputs("io  ");
+            else               kputs("mem ");
+            fb_put_hex16((uint16_t)((d->bar[b] & ~0xFu) >> 16));
+            fb_put_hex16((uint16_t)(d->bar[b] & 0xFFFFu));
+            kputs("  size=");
+            if (sz >= (1ull << 30))      { kput_dec((unsigned)(sz >> 30)); kputs("G"); }
+            else if (sz >= (1ull << 20)) { kput_dec((unsigned)(sz >> 20)); kputs("M"); }
+            else if (sz >= (1ull << 10)) { kput_dec((unsigned)(sz >> 10)); kputs("K"); }
+            else                          { kput_dec((unsigned)sz); kputs("B"); }
+            /* skip BAR slot taken by 64-bit upper half */
+            if (!(d->bar[b] & 1) && (d->bar[b] & 0x6) == 0x4 && b < 5) {
+                kputs(" [64-bit]");
+                b++;
+            }
+            kputs("\n");
+        }
     }
 
+    kputs("\n");
     kput_dec(count);
-    kputs(" devices total.\n");
+    kputs(" device(s) total.");
+    if (!verbose) kputs("  Use 'lspci -v' for link speed, BARs, IRQ caps.");
+    kputs("\n");
 }
 
 static void cmd_clear(const char *args)

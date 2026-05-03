@@ -50,4 +50,16 @@ const char *pci_class_name(uint8_t class_code, uint8_t subclass);
 /* Check if ECAM (PCIe MMIO config) is available */
 int ecam_available_check(void);
 
+/* ── PCIe capability walking ─────────────────────────────── */
+
+uint8_t pci_find_capability(struct pci_device *dev, uint8_t cap_id);
+int pci_has_msi(struct pci_device *dev);
+int pci_has_msix(struct pci_device *dev);
+int pci_link_speed(struct pci_device *dev);   /* 1=Gen1 ... 6=Gen6, 0=N/A */
+int pci_link_width(struct pci_device *dev);   /* x1, x4, x8, x16 ... */
+const char *pci_link_speed_name(int speed_code);
+uint64_t pci_bar_size(struct pci_device *dev, int bar_idx);
+const char *pci_vendor_name(uint16_t vendor_id);
+const char *pci_device_name(uint16_t vendor_id, uint16_t device_id);
+
 #endif /* ZEOS_PCI_H */
