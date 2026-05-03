@@ -235,13 +235,19 @@ int rtl8139_recv(void *frame, uint16_t max_len)
     uint16_t payload = pkt_len - 4;  /* strip CRC */
     uint16_t copy = payload > max_len ? max_len : payload;
     uint8_t *dst = (uint8_t *)frame;
-    for (uint16_t i = 0; i < copy; i++) {
-        dst[i] = rx_buf[(capr + 4 + i) % RX_BUF_SIZE];
-    }
 
-    /* Advance cursor (4-byte aligned), wrap modulo RX_BUF_SIZE. */
-    capr = (uint16_t)((capr + pkt_len + 4 + 3) & ~3);
-    capr %= RX_BUF_SIZE;
+    /* Read payload LINEARLY from rx_buf+capr+4. With WRAP=1 the chip
+     * writes packets that straddle end-of-buffer into the slack region
+     * past RX_BUF_SIZE (up to MTU-sized slack). Modulo'ing here would
+     * read wrong bytes for those wrap-spanning packets and the body
+     * would silently corrupt — that was the rtl8139 body=0 bug. */
+    const uint8_t *src = rx_buf + capr + 4;
+    for (uint16_t i = 0; i < copy; i++) dst[i] = src[i];
+
+    /* Advance cursor (4-byte aligned), wrap modulo RX_BUF_SIZE so the
+     * NEXT packet's header gets read from the right place. */
+    uint32_t next = (capr + pkt_len + 4 + 3) & ~3u;
+    capr = (uint16_t)(next % RX_BUF_SIZE);
 
     /* Tell chip our new read pointer. CAPR is "current address of
      * packet read", chip wants it at (capr - 16) mod RX_BUF_SIZE. */
