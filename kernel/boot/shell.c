@@ -192,6 +192,9 @@ static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
 static void cmd_wc(const char *args);
 static void cmd_portscan(const char *args);
+static void cmd_sweep(const char *args);
+static void cmd_sha256(const char *args);
+static void cmd_nc(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -240,6 +243,9 @@ static const struct shell_cmd commands[] = {
     {"cp",      "copy a file (cp src dst)",       cmd_cp,      VIS_ALWAYS},
     {"wc",      "byte and line count of a file",  cmd_wc,      VIS_ALWAYS},
     {"portscan","scan TCP ports (portscan host start end)", cmd_portscan, VIS_DEREZ},
+    {"sweep",   "ping-sweep a /24 subnet to find live hosts", cmd_sweep,    VIS_DEREZ},
+    {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
+    {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
@@ -1496,6 +1502,186 @@ static void cmd_portscan(const char *args)
     kputs("  done — ");
     kput_dec(open_count);
     kputs(" open\n");
+}
+
+static int parse_ip(const char *s, struct ipv4_addr *out);  /* forward */
+
+/* Ping-sweep a /24 subnet. Args: "192.168.1" or "192.168.1.0" — we
+ * scan .1 through .254. Reports each host that replies to ICMP echo. */
+static void cmd_sweep(const char *args)
+{
+    if (!g_net.up) { kputs("  Network not up.\n"); return; }
+    char buf[32];
+    int bi = 0;
+    const char *p = args;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && bi < 31) buf[bi++] = *p++;
+    buf[bi] = 0;
+    if (!buf[0]) {
+        kputs("  Usage: sweep <subnet>   (e.g. sweep 192.168.1)\n");
+        return;
+    }
+    /* Trim trailing ".0" if present */
+    int len = bi;
+    if (len >= 2 && buf[len-2] == '.' && buf[len-1] == '0') buf[len-2] = 0;
+
+    struct ipv4_addr base;
+    /* Parse three octets — append ".0" so parse_ip works as a/b/c/0 */
+    char tmp[40];
+    int ti = 0;
+    for (int i = 0; buf[i] && ti < 36; i++) tmp[ti++] = buf[i];
+    tmp[ti++] = '.'; tmp[ti++] = '0'; tmp[ti] = 0;
+    if (parse_ip(tmp, &base) < 0) {
+        kputs("  Invalid subnet.\n");
+        return;
+    }
+
+    kputs("  Sweeping ");
+    kput_dec(base.b[0]); kputs(".");
+    kput_dec(base.b[1]); kputs(".");
+    kput_dec(base.b[2]); kputs(".0/24\n");
+
+    int alive = 0;
+    for (int host = 1; host < 255; host++) {
+        struct ipv4_addr t = base;
+        t.b[3] = (uint8_t)host;
+        uint64_t rtt = icmp_ping(t);
+        if (rtt > 0) {
+            kputs("  alive: ");
+            kput_dec(t.b[0]); kputs(".");
+            kput_dec(t.b[1]); kputs(".");
+            kput_dec(t.b[2]); kputs(".");
+            kput_dec(t.b[3]);
+            kputs("\n");
+            alive++;
+        }
+    }
+    kputs("  done — ");
+    kput_dec(alive);
+    kputs(" alive\n");
+}
+
+extern int mbedtls_sha256(const unsigned char *input, unsigned long ilen,
+                          unsigned char *output, int is224);
+
+static void cmd_sha256(const char *args)
+{
+    const char *path = args;
+    while (*path == ' ') path++;
+    if (!*path) { kputs("  Usage: sha256 <file>\n"); return; }
+
+    int sz = vault_size(path);
+    if (sz < 0) { kputs("  No such file.\n"); return; }
+
+    /* For Alpha: cap at 64 KB so we keep the buffer reasonable. */
+    if (sz > 65536) {
+        kputs("  File too large for inline hash (>64 KB).\n");
+        return;
+    }
+    static uint8_t buf[65536];
+    int got = vault_read(path, buf, (uint32_t)sz);
+    if (got < 0) { kputs("  Read error.\n"); return; }
+
+    uint8_t hash[32];
+    if (mbedtls_sha256(buf, (unsigned long)got, hash, 0) != 0) {
+        kputs("  Hash error.\n");
+        return;
+    }
+    kputs("  ");
+    for (int i = 0; i < 32; i++) hex_byte(hash[i]);
+    kputs("  ");
+    kputs(path);
+    kputs("\n");
+}
+
+/* nc-lite: connect to <host> <port>, send the rest of the line as
+ * payload (or nothing), poll for response, print as text + hex. */
+static void cmd_nc(const char *args)
+{
+    if (!g_net.up) { kputs("  Network not up.\n"); return; }
+
+    char host[128];
+    int hi = 0;
+    const char *p = args;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && hi < 127) host[hi++] = *p++;
+    host[hi] = 0;
+    while (*p == ' ') p++;
+    int port = 0;
+    while (*p >= '0' && *p <= '9') { port = port * 10 + (*p - '0'); p++; }
+    while (*p == ' ') p++;
+    /* Rest of line = payload (optional). May contain spaces. */
+    const char *payload = p;
+    int payload_len = 0;
+    while (payload[payload_len]) payload_len++;
+
+    if (!host[0] || port <= 0 || port > 65535) {
+        kputs("  Usage: nc <host> <port> [payload]\n");
+        kputs("  Example: nc 10.0.2.2 22\n");
+        kputs("  Example: nc httpbin.org 80 GET / HTTP/1.0\\r\\n\\r\\n\n");
+        return;
+    }
+
+    struct ipv4_addr ip;
+    int parsed = 0;
+    {
+        unsigned a, b, c, d;
+        const char *q = host;
+        int n = 0;
+        a = 0; while (*q >= '0' && *q <= '9' && n < 4) { a = a*10 + (unsigned)(*q - '0'); q++; n++; }
+        if (n && n < 4 && *q == '.' && a < 256) {
+            q++; n = 0; b = 0;
+            while (*q >= '0' && *q <= '9' && n < 4) { b = b*10 + (unsigned)(*q - '0'); q++; n++; }
+            if (n && n < 4 && *q == '.' && b < 256) {
+                q++; n = 0; c = 0;
+                while (*q >= '0' && *q <= '9' && n < 4) { c = c*10 + (unsigned)(*q - '0'); q++; n++; }
+                if (n && n < 4 && *q == '.' && c < 256) {
+                    q++; n = 0; d = 0;
+                    while (*q >= '0' && *q <= '9' && n < 4) { d = d*10 + (unsigned)(*q - '0'); q++; n++; }
+                    if (n && n < 4 && *q == 0 && d < 256) {
+                        ip.b[0]=a; ip.b[1]=b; ip.b[2]=c; ip.b[3]=d; parsed = 1;
+                    }
+                }
+            }
+        }
+    }
+    if (!parsed) {
+        if (dns_resolve(host, &ip) < 0) { kputs("  DNS failed.\n"); return; }
+    }
+
+    struct tcp_conn conn;
+    if (tcp_connect(&conn, ip, (uint16_t)port) < 0) {
+        kputs("  Connect failed.\n");
+        return;
+    }
+
+    if (payload_len > 0) {
+        if (tcp_send(&conn, payload, (uint16_t)payload_len) < 0) {
+            kputs("  Send failed.\n");
+            tcp_close(&conn);
+            return;
+        }
+    }
+
+    static uint8_t resp[8192];
+    int total = 0;
+    while (total < (int)sizeof(resp) - 1) {
+        int n = tcp_recv(&conn, resp + total,
+                          (uint16_t)((sizeof(resp) - 1 - total) > 0xF000 ? 0xF000 :
+                                     (sizeof(resp) - 1 - total)));
+        if (n <= 0) break;
+        total += n;
+    }
+    tcp_close(&conn);
+
+    kputs("  Got ");
+    kput_dec((unsigned)total);
+    kputs(" bytes:\n");
+    for (int i = 0; i < total; i++) {
+        uint8_t c = resp[i];
+        kputc((c >= 32 && c < 127) || c == '\n' || c == '\r' || c == '\t' ? (char)c : '.');
+    }
+    kputs("\n");
 }
 
 static int parse_ip(const char *s, struct ipv4_addr *out)
