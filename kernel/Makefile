@@ -48,7 +48,7 @@ SRCS     = boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/panic.c boot/gdt.c boot/idt.c \
            boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c \
            boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c \
-           boot/net.c boot/net_virtio.c boot/net_e1000.c boot/net_arp.c boot/net_ip.c \
+           boot/net.c boot/net_virtio.c boot/net_e1000.c boot/net_rtl8139.c boot/net_arp.c boot/net_ip.c \
            boot/net_udp.c boot/net_tcp.c boot/net_dns.c boot/net_http.c \
            boot/shell.c boot/anim.c boot/ui.c boot/cursor.c boot/net_dhcp.c boot/net_tls.c boot/browser.c \
            boot/mbedtls_platform.c boot/font.c boot/wm.c boot/compositor.c \

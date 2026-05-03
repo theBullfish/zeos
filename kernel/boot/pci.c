@@ -71,18 +71,7 @@ static int device_count;
 #define PCI_CONFIG_ADDR  0xCF8
 #define PCI_CONFIG_DATA  0xCFC
 
-static inline void outl(uint16_t port, uint32_t val)
-{
-    __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint32_t inl(uint16_t port)
-{
-    uint32_t val;
-    __asm__ volatile("inl %1, %0" : "=a"(val) : "Nd"(port));
-    return val;
-}
-
+/* outl/inl now provided by io.h */
 static uint32_t pci_legacy_read32(uint8_t bus, uint8_t dev, uint8_t func,
                                    uint8_t offset)
 {

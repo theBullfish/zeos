@@ -9,6 +9,7 @@
 #include "net.h"
 #include "net_virtio.h"
 #include "net_e1000.h"
+#include "net_rtl8139.h"
 #include "net_arp.h"
 #include "net_ip.h"
 #include "net_tcp.h"
@@ -32,7 +33,9 @@ int net_init(void)
     g_net.dns     = (struct ipv4_addr){{10, 0, 2, 3}};
     g_net.up = 0;
 
-    /* Try virtio-net first (QEMU), then e1000 (real hardware) */
+    /* Driver probe order: virtio-net (QEMU/cloud), e1000/e1000e (Intel
+     * laptops/desktops 2005+), rtl8139 (cheap consumer 2002-2010).
+     * First success wins. */
     if (virtio_net_init() == 0) {
         net_drv_send    = virtio_net_send;
         net_drv_recv    = virtio_net_recv;
@@ -43,6 +46,11 @@ int net_init(void)
         net_drv_recv    = e1000_recv;
         net_drv_get_mac = e1000_get_mac;
         kputs("NET: using e1000 driver\n");
+    } else if (rtl8139_init() == 0) {
+        net_drv_send    = rtl8139_send;
+        net_drv_recv    = rtl8139_recv;
+        net_drv_get_mac = rtl8139_get_mac;
+        kputs("NET: using rtl8139 driver\n");
     } else {
         kputs("NET: no network device found\n");
         return -1;
