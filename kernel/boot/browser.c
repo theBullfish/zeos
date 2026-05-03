@@ -16,6 +16,47 @@
 #include "theme.h"
 #include "mouse.h"
 #include "kprint.h"
+#include "heap.h"
+#include "lodepng/lodepng.h"
+
+/* ── lodepng allocator shims ──
+ * lodepng was compiled with -DLODEPNG_NO_COMPILE_ALLOCATORS, so it expects
+ * us to provide these. Route to the kernel heap. lodepng_realloc must be
+ * a real realloc: copy old contents and free the old block.
+ *
+ * The kernel heap exposes kmalloc(size) / kfree(ptr) but not a sized header
+ * for realloc, so we prefix every allocation with a size_t length. */
+
+typedef struct { uint64_t size; } lp_hdr_t;
+
+void *lodepng_malloc(size_t size);
+void *lodepng_realloc(void *ptr, size_t new_size);
+void  lodepng_free(void *ptr);
+
+void *lodepng_malloc(size_t size) {
+    uint8_t *raw = (uint8_t *)kmalloc(size + sizeof(lp_hdr_t));
+    if (!raw) return 0;
+    ((lp_hdr_t *)raw)->size = size;
+    return raw + sizeof(lp_hdr_t);
+}
+
+void lodepng_free(void *ptr) {
+    if (!ptr) return;
+    kfree((uint8_t *)ptr - sizeof(lp_hdr_t));
+}
+
+void *lodepng_realloc(void *ptr, size_t new_size) {
+    if (!ptr) return lodepng_malloc(new_size);
+    uint64_t old_size = ((lp_hdr_t *)((uint8_t *)ptr - sizeof(lp_hdr_t)))->size;
+    void *np = lodepng_malloc(new_size);
+    if (!np) return 0;
+    uint64_t copy = old_size < new_size ? old_size : new_size;
+    uint8_t *d = (uint8_t *)np;
+    uint8_t *s = (uint8_t *)ptr;
+    for (uint64_t i = 0; i < copy; i++) d[i] = s[i];
+    lodepng_free(ptr);
+    return np;
+}
 
 /* ── String helpers (bare-metal, no stdlib) ── */
 
@@ -62,6 +103,15 @@ static dom_node_t *dom_alloc(void) {
 
 void dom_free(dom_node_t *root) {
     (void)root;
+    /* Free any decoded image buffers before resetting the pool */
+    for (int i = 0; i < dom_pool_next; i++) {
+        if (dom_pool[i].img_pixels) {
+            lodepng_free(dom_pool[i].img_pixels);
+            dom_pool[i].img_pixels = 0;
+            dom_pool[i].img_w = 0;
+            dom_pool[i].img_h = 0;
+        }
+    }
     dom_pool_next = 0;  /* Reset pool */
 }
 
@@ -304,6 +354,130 @@ dom_node_t *html_parse(const char *html, int len) {
     }
 
     return root;
+}
+
+/* ── HTML Entity Decoder ──
+ * Operates in-place over each text-node buffer. Output is always <= input
+ * length: every entity decodes to at most 4 UTF-8 bytes. */
+
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int utf8_encode(uint32_t cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    if (cp < 0x110000) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    return 0;
+}
+
+static int ent_name_eq(const char *buf, int n, const char *name) {
+    int i = 0;
+    while (i < n && name[i]) {
+        if (buf[i] != name[i]) return 0;
+        i++;
+    }
+    return i == n && name[i] == 0;
+}
+
+static uint32_t lookup_named_entity(const char *name, int n) {
+    if (ent_name_eq(name, n, "amp"))    return 0x26;
+    if (ent_name_eq(name, n, "lt"))     return 0x3C;
+    if (ent_name_eq(name, n, "gt"))     return 0x3E;
+    if (ent_name_eq(name, n, "quot"))   return 0x22;
+    if (ent_name_eq(name, n, "apos"))   return 0x27;
+    if (ent_name_eq(name, n, "nbsp"))   return 0xA0;
+    if (ent_name_eq(name, n, "copy"))   return 0xA9;
+    if (ent_name_eq(name, n, "reg"))    return 0xAE;
+    if (ent_name_eq(name, n, "trade"))  return 0x2122;
+    if (ent_name_eq(name, n, "hellip")) return 0x2026;
+    if (ent_name_eq(name, n, "mdash"))  return 0x2014;
+    if (ent_name_eq(name, n, "ndash"))  return 0x2013;
+    if (ent_name_eq(name, n, "lsquo"))  return 0x2018;
+    if (ent_name_eq(name, n, "rsquo"))  return 0x2019;
+    if (ent_name_eq(name, n, "ldquo"))  return 0x201C;
+    if (ent_name_eq(name, n, "rdquo"))  return 0x201D;
+    return 0;
+}
+
+static void decode_entities_str(char *s) {
+    const char *r = s;
+    char *w = s;
+    while (*r) {
+        if (*r != '&') { *w++ = *r++; continue; }
+        const char *semi = 0;
+        for (int i = 1; i <= 10 && r[i]; i++) {
+            char c = r[i];
+            if (c == ';') { semi = r + i; break; }
+            if (c == '&' || c == ' ' || c == '<' || c == '>') break;
+        }
+        if (!semi) { *w++ = *r++; continue; }
+
+        uint32_t cp = 0;
+        int matched = 0;
+
+        if (r[1] == '#') {
+            if (r[2] == 'x' || r[2] == 'X') {
+                long v = 0; int ok = (semi > r + 3);
+                for (const char *p = r + 3; ok && p < semi; p++) {
+                    int d = hex_val(*p);
+                    if (d < 0) { ok = 0; break; }
+                    v = (v << 4) | d;
+                    if (v > 0x10FFFF) { ok = 0; break; }
+                }
+                if (ok) { cp = (uint32_t)v; matched = 1; }
+            } else {
+                long v = 0; int ok = (semi > r + 2);
+                for (const char *p = r + 2; ok && p < semi; p++) {
+                    if (*p < '0' || *p > '9') { ok = 0; break; }
+                    v = v * 10 + (*p - '0');
+                    if (v > 0x10FFFF) { ok = 0; break; }
+                }
+                if (ok) { cp = (uint32_t)v; matched = 1; }
+            }
+        } else {
+            int nlen = (int)(semi - (r + 1));
+            cp = lookup_named_entity(r + 1, nlen);
+            if (cp) matched = 1;
+        }
+
+        if (matched && cp != 0) {
+            char tmp[4];
+            int n = utf8_encode(cp, tmp);
+            for (int i = 0; i < n; i++) *w++ = tmp[i];
+            r = semi + 1;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = 0;
+}
+
+/* Walk the DOM, decoding entities in every text node. */
+static void decode_entities(dom_node_t *node) {
+    if (!node) return;
+    if (node->type == DOM_TEXT) decode_entities_str(node->text);
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
+        decode_entities(c);
 }
 
 /* ── Default Styles ── */
@@ -634,9 +808,19 @@ void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
                 c->box.h = lines * line_h;
             }
         } else if (str_eq(c->tag, "img")) {
-            /* Image placeholder: default 200x80 if no dimensions known */
-            int iw = 200, ih = 80;
-            /* Future: parse width/height attrs or PNG IHDR for real dims */
+            /* If we already decoded the PNG, use real dimensions.
+             * Otherwise fall back to a 200x80 placeholder slot. */
+            int iw = (c->img_pixels && c->img_w > 0) ? c->img_w : 200;
+            int ih = (c->img_pixels && c->img_h > 0) ? c->img_h : 80;
+            /* Clamp to viewport width so huge images don't blow layout */
+            int avail = viewport_w - c->style.padding[1] - c->style.padding[3];
+            if (avail > 0 && iw > avail) {
+                /* Scale height proportionally so aspect ratio survives. */
+                if (c->img_pixels && c->img_w > 0) {
+                    ih = (ih * avail) / iw;
+                }
+                iw = avail;
+            }
             c->box.w = iw + c->style.padding[1] + c->style.padding[3];
             c->box.h = ih + c->style.padding[0] + c->style.padding[2];
         } else if (str_eq(c->tag, "input")) {
@@ -874,15 +1058,41 @@ void render_page(dom_node_t *root, int ox, int oy, int scroll_y,
             continue;
         }
 
-        /* <img> — render placeholder (future: decoded PNG pixels) */
+        /* <img> — blit decoded RGBA pixels if we have them, else placeholder */
         if (str_eq(c->tag, "img")) {
-            int img_w = 0, img_h = 0;
-            /* Image dimensions not available without fetch yet;
-             * use layout box dimensions for placeholder. */
-            int ph_w = c->box.w > 0 ? c->box.w : 200;
-            int ph_h = c->box.h > 0 ? c->box.h : 80;
-            render_img_placeholder(draw_x, draw_y, ph_w, ph_h,
-                                   img_w, img_h, c->attr_alt);
+            if (c->img_pixels && c->img_w > 0 && c->img_h > 0) {
+                /* Nearest-neighbor scale from native dims to layout box.
+                 * lodepng_decode32 returns RGBA, row-major, 8 bits/channel. */
+                int dw = c->box.w - c->style.padding[1] - c->style.padding[3];
+                int dh = c->box.h - c->style.padding[0] - c->style.padding[2];
+                if (dw < 1) dw = c->img_w;
+                if (dh < 1) dh = c->img_h;
+                int dx0 = draw_x + c->style.padding[3];
+                int dy0 = draw_y + c->style.padding[0];
+
+                for (int y = 0; y < dh; y++) {
+                    int sy = (y * c->img_h) / dh;
+                    if (sy < 0) sy = 0;
+                    if (sy >= c->img_h) sy = c->img_h - 1;
+                    const uint8_t *row = c->img_pixels + sy * c->img_w * 4;
+                    for (int x = 0; x < dw; x++) {
+                        int sx = (x * c->img_w) / dw;
+                        if (sx < 0) sx = 0;
+                        if (sx >= c->img_w) sx = c->img_w - 1;
+                        const uint8_t *p = row + sx * 4;
+                        uint32_t argb = ((uint32_t)p[3] << 24) |
+                                        ((uint32_t)p[0] << 16) |
+                                        ((uint32_t)p[1] <<  8) |
+                                        ((uint32_t)p[2]);
+                        fb_pixel_blend(dx0 + x, dy0 + y, argb);
+                    }
+                }
+            } else {
+                int ph_w = c->box.w > 0 ? c->box.w : 200;
+                int ph_h = c->box.h > 0 ? c->box.h : 80;
+                render_img_placeholder(draw_x, draw_y, ph_w, ph_h,
+                                       c->img_w, c->img_h, c->attr_alt);
+            }
             continue;
         }
 
@@ -980,6 +1190,89 @@ static void parse_url(const char *url, char *hostname, int hmax,
     }
 }
 
+/* Forward declarations for image fetch helpers used during navigation */
+static void resolve_url(browser_t *b, const char *href, char *out, int max);
+
+/* Fetch URL into a kmalloc'd buffer. Caller must kfree(*out_buf).
+ * Sets *out_len. Returns HTTP status (>=0) or -1 on failure.
+ * Supports http:// and https://. */
+#define IMG_FETCH_MAX 524288  /* 512 KB cap per image */
+
+static int fetch_url(const char *url, uint8_t **out_buf, int *out_len)
+{
+    *out_buf = 0;
+    *out_len = 0;
+
+    char hostname[256], path[1024];
+    int use_tls = 0;
+    parse_url(url, hostname, 256, path, 1024, &use_tls);
+    if (!hostname[0]) return -1;
+
+    char *buf = (char *)kmalloc(IMG_FETCH_MAX);
+    if (!buf) return -1;
+
+    int status = -1;
+    int body_len = 0;
+
+    if (use_tls) {
+        status = https_get(hostname, path, buf, IMG_FETCH_MAX, &body_len);
+    } else {
+        struct http_response resp;
+        status = http_get(hostname, path, &resp);
+        if (status >= 0) {
+            body_len = resp.body_len;
+            if (body_len > IMG_FETCH_MAX) body_len = IMG_FETCH_MAX;
+            for (int i = 0; i < body_len; i++) buf[i] = resp.body[i];
+        }
+    }
+
+    if (status < 0 || body_len <= 0) {
+        kfree(buf);
+        return -1;
+    }
+
+    *out_buf = (uint8_t *)buf;
+    *out_len = body_len;
+    return status;
+}
+
+/* Walk the DOM and, for every <img src="...">, fetch + decode the PNG.
+ * Caches RGBA pixels in node->img_pixels and dimensions in img_w/img_h.
+ * On any failure the node remains un-decoded and renders as a placeholder. */
+static void decode_images(browser_t *b, dom_node_t *node)
+{
+    if (!node) return;
+
+    if (node->type == DOM_ELEMENT && str_eq(node->tag, "img") &&
+        node->attr_src[0] && !node->img_pixels)
+    {
+        char abs_url[2048];
+        resolve_url(b, node->attr_src, abs_url, sizeof(abs_url));
+
+        uint8_t *body = 0;
+        int body_len = 0;
+        int status = fetch_url(abs_url, &body, &body_len);
+        if (status >= 200 && status < 300 && body && body_len > 0) {
+            unsigned char *pixels = 0;
+            unsigned w = 0, h = 0;
+            unsigned err = lodepng_decode32(&pixels, &w, &h,
+                                            body, (size_t)body_len);
+            if (!err && pixels && w > 0 && h > 0 &&
+                w <= 4096 && h <= 4096) {
+                node->img_pixels = pixels;
+                node->img_w = (int)w;
+                node->img_h = (int)h;
+            } else if (pixels) {
+                lodepng_free(pixels);
+            }
+        }
+        if (body) kfree(body);
+    }
+
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling)
+        decode_images(b, c);
+}
+
 int browser_navigate(browser_t *b, const char *url)
 {
     str_copy(b->url, url);
@@ -1038,9 +1331,16 @@ int browser_navigate(browser_t *b, const char *url)
         return -1;
     }
 
+    /* Decode HTML entities in text nodes (in-place; output ≤ input) */
+    decode_entities(b->dom);
+
     /* Apply styles */
     css_apply_defaults(b->dom);
     css_apply_inline(b->dom);
+
+    /* Fetch + decode all <img> tags BEFORE layout so the layout pass
+     * picks up real image dimensions instead of the 200x80 default. */
+    decode_images(b, b->dom);
 
     /* Compute layout */
     int content_w = b->surface_w - 16;  /* 8px padding each side */

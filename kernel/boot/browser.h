@@ -90,6 +90,12 @@ typedef struct dom_node {
     struct dom_node *parent;
     struct dom_node *first_child;
     struct dom_node *next_sibling;
+
+    /* Decoded image cache (for <img>). NULL if not fetched/decoded.
+     * img_pixels is a kmalloc'd RGBA buffer (4 * img_w * img_h bytes). */
+    uint8_t        *img_pixels;
+    int             img_w;
+    int             img_h;
 } dom_node_t;
 
 /* ── HTML Parser ── */
