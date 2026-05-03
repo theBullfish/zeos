@@ -186,6 +186,7 @@ static void cmd_fetch(const char *args);
 static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
+static void cmd_static_ip(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -229,6 +230,7 @@ static const struct shell_cmd commands[] = {
     {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
+    {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
@@ -1239,6 +1241,68 @@ static void cmd_netinfo(const char *args)
     kput_dec(g_net.dns.b[2]); kputs(".");
     kput_dec(g_net.dns.b[3]);
     kputs("\n\n");
+}
+
+static const char *skip_ws(const char *p) {
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+static const char *parse_one_ip(const char *p, struct ipv4_addr *out, int *ok);
+static const char *parse_one_ip(const char *p, struct ipv4_addr *out, int *ok)
+{
+    int octet = 0, val = 0, digits = 0;
+    *ok = 0;
+    while (*p) {
+        if (*p >= '0' && *p <= '9') {
+            val = val * 10 + (*p - '0');
+            digits++;
+            if (digits > 3 || val > 255) return p;
+        } else if (*p == '.') {
+            if (octet >= 4 || digits == 0) return p;
+            out->b[octet++] = (uint8_t)val;
+            val = 0; digits = 0;
+        } else {
+            break;
+        }
+        p++;
+    }
+    if (octet == 3 && digits > 0 && val <= 255) {
+        out->b[3] = (uint8_t)val;
+        *ok = 1;
+    }
+    return p;
+}
+
+static void cmd_static_ip(const char *args)
+{
+    /* static-ip <ip> <gateway> <dns> [netmask] */
+    struct ipv4_addr ip, gw, dns, mask = (struct ipv4_addr){{255,255,255,0}};
+    int ok;
+    args = skip_ws(args);
+    args = parse_one_ip(args, &ip, &ok);
+    if (!ok) goto usage;
+    args = skip_ws(args);
+    args = parse_one_ip(args, &gw, &ok);
+    if (!ok) goto usage;
+    args = skip_ws(args);
+    args = parse_one_ip(args, &dns, &ok);
+    if (!ok) goto usage;
+    args = skip_ws(args);
+    if (*args) {
+        parse_one_ip(args, &mask, &ok);
+        if (!ok) goto usage;
+    }
+    g_net.ip      = ip;
+    g_net.gateway = gw;
+    g_net.dns     = dns;
+    g_net.netmask = mask;
+    g_net.up      = 1;  /* override DHCP-failed state */
+    kputs("  Static IP configured.\n");
+    return;
+usage:
+    kputs("  Usage: static-ip <ip> <gateway> <dns> [netmask]\n");
+    kputs("  Example: static-ip 192.168.1.50 192.168.1.1 1.1.1.1\n");
 }
 
 static int parse_ip(const char *s, struct ipv4_addr *out)

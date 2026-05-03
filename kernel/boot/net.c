@@ -26,11 +26,14 @@ void (*net_drv_get_mac)(struct mac_addr *mac);
 
 int net_init(void)
 {
-    /* Fallback addresses (QEMU SLIRP defaults) */
-    g_net.ip      = (struct ipv4_addr){{10, 0, 2, 15}};
-    g_net.gateway = (struct ipv4_addr){{10, 0, 2, 2}};
-    g_net.netmask = (struct ipv4_addr){{255, 255, 255, 0}};
-    g_net.dns     = (struct ipv4_addr){{10, 0, 2, 3}};
+    /* Start with everything zero. We try DHCP after driver init; if DHCP
+     * fails we leave the addresses zero and any DNS / TCP / TLS attempt
+     * will surface a clean failure rather than send packets to QEMU's
+     * default subnet from a real-hardware boot. */
+    g_net.ip      = (struct ipv4_addr){{0, 0, 0, 0}};
+    g_net.gateway = (struct ipv4_addr){{0, 0, 0, 0}};
+    g_net.netmask = (struct ipv4_addr){{0, 0, 0, 0}};
+    g_net.dns     = (struct ipv4_addr){{0, 0, 0, 0}};
     g_net.up = 0;
 
     /* Driver probe order: virtio-net (QEMU/cloud), e1000/e1000e (Intel
@@ -61,9 +64,13 @@ int net_init(void)
 
     g_net.up = 1;
 
-    /* Try DHCP — if it fails, fallback addresses stay in place */
+    /* Try DHCP. If it fails, downstream calls (DNS, TCP, TLS) will
+     * fail cleanly because addresses are zero. The 'static-ip' shell
+     * command can be used to set things by hand for diagnostic
+     * sessions on networks without DHCP. */
     if (dhcp_discover() < 0) {
-        kputs("NET: DHCP failed, using fallback config\n");
+        kputs("NET: DHCP failed — no IP. Use 'static-ip' to configure manually.\n");
+        g_net.up = 0;  /* mark down so https_get/etc skip cleanly */
     }
 
     kputs("NET: ");
