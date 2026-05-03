@@ -30,6 +30,7 @@
 #include "net.h"
 #include "net_ip.h"
 #include "net_dns.h"
+#include "net_tcp.h"
 #include "net_http.h"
 #include "timer.h"
 #include "signal.h"
@@ -187,6 +188,10 @@ static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
 static void cmd_static_ip(const char *args);
+static void cmd_xxd(const char *args);
+static void cmd_cp(const char *args);
+static void cmd_wc(const char *args);
+static void cmd_portscan(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -231,6 +236,10 @@ static const struct shell_cmd commands[] = {
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
+    {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
+    {"cp",      "copy a file (cp src dst)",       cmd_cp,      VIS_ALWAYS},
+    {"wc",      "byte and line count of a file",  cmd_wc,      VIS_ALWAYS},
+    {"portscan","scan TCP ports (portscan host start end)", cmd_portscan, VIS_DEREZ},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
 
     /* VAULT filesystem — always visible */
@@ -1303,6 +1312,190 @@ static void cmd_static_ip(const char *args)
 usage:
     kputs("  Usage: static-ip <ip> <gateway> <dns> [netmask]\n");
     kputs("  Example: static-ip 192.168.1.50 192.168.1.1 1.1.1.1\n");
+}
+
+/* ── universal shell tools ────────────────────────────────── */
+
+extern int vault_size(const char *path);
+extern int vault_exists(const char *path);
+
+static void hex_byte(uint8_t b) {
+    static const char hx[] = "0123456789abcdef";
+    kputc(hx[(b >> 4) & 0xf]); kputc(hx[b & 0xf]);
+}
+
+static void cmd_xxd(const char *args)
+{
+    const char *path = args;
+    while (*path == ' ') path++;
+    if (!*path) { kputs("  Usage: xxd <file>\n"); return; }
+
+    int sz = vault_size(path);
+    if (sz < 0) { kputs("  No such file.\n"); return; }
+    if (sz == 0) { kputs("  (empty)\n"); return; }
+
+    static uint8_t buf[8192];
+    int read_len = sz > (int)sizeof(buf) ? (int)sizeof(buf) : sz;
+    int got = vault_read(path, buf, (uint32_t)read_len);
+    if (got < 0) { kputs("  Read error.\n"); return; }
+
+    /* xxd-style: 8 hex digit offset, 16 bytes hex (split 8/8), then ASCII */
+    for (int off = 0; off < got; off += 16) {
+        for (int s = 28, i = 0; i < 8; i++, s -= 4) hex_byte((uint8_t)((off >> s) & 0xff));
+        kputs("  ");
+        for (int i = 0; i < 16; i++) {
+            if (off + i < got) hex_byte(buf[off + i]);
+            else                kputs("  ");
+            if (i == 7) kputc(' ');
+            kputc(' ');
+        }
+        kputs(" |");
+        for (int i = 0; i < 16 && off + i < got; i++) {
+            uint8_t c = buf[off + i];
+            kputc((c >= 32 && c < 127) ? (char)c : '.');
+        }
+        kputs("|\n");
+    }
+    if (sz > read_len) {
+        kputs("  ... (truncated, ");
+        kput_dec((unsigned)(sz - read_len));
+        kputs(" bytes more)\n");
+    }
+}
+
+static void cmd_wc(const char *args)
+{
+    const char *path = args;
+    while (*path == ' ') path++;
+    if (!*path) { kputs("  Usage: wc <file>\n"); return; }
+    int sz = vault_size(path);
+    if (sz < 0) { kputs("  No such file.\n"); return; }
+    if (sz == 0) { kputs("  0 lines, 0 bytes\n"); return; }
+
+    static uint8_t buf[16384];
+    int read_len = sz > (int)sizeof(buf) ? (int)sizeof(buf) : sz;
+    int got = vault_read(path, buf, (uint32_t)read_len);
+    if (got < 0) { kputs("  Read error.\n"); return; }
+    int lines = 0;
+    for (int i = 0; i < got; i++) if (buf[i] == '\n') lines++;
+    /* If file doesn't end in \n, count the final partial line */
+    if (got > 0 && buf[got - 1] != '\n') lines++;
+    kputs("  ");
+    kput_dec((unsigned)lines); kputs(" lines, ");
+    kput_dec((unsigned)sz);    kputs(" bytes");
+    if (sz > read_len) kputs(" (line count from first 16 KB only)");
+    kputs("\n");
+}
+
+static void cmd_cp(const char *args)
+{
+    /* cp <src> <dst> */
+    char src[128], dst[128];
+    int si = 0, di = 0;
+    const char *p = args;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && si < 127) src[si++] = *p++;
+    src[si] = 0;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && di < 127) dst[di++] = *p++;
+    dst[di] = 0;
+    if (!src[0] || !dst[0]) { kputs("  Usage: cp <src> <dst>\n"); return; }
+
+    int sz = vault_size(src);
+    if (sz < 0) { kputs("  Source not found.\n"); return; }
+
+    static uint8_t buf[65536];
+    if (sz > (int)sizeof(buf)) {
+        kputs("  Source too large (");
+        kput_dec((unsigned)sz);
+        kputs(" bytes; cp limited to 64 KB).\n");
+        return;
+    }
+    int got = vault_read(src, buf, (uint32_t)sz);
+    if (got < 0) { kputs("  Read error.\n"); return; }
+
+    /* Create dst (delete first if it existed) */
+    if (vault_exists(dst)) vault_delete(dst);
+    if (vault_create(dst, 0) < 0) { kputs("  Create dst failed.\n"); return; }
+    if (vault_write(dst, buf, (uint32_t)got) < 0) {
+        kputs("  Write dst failed.\n");
+        vault_delete(dst);
+        return;
+    }
+    kputs("  Copied "); kput_dec((unsigned)got); kputs(" bytes.\n");
+}
+
+static void cmd_portscan(const char *args)
+{
+    /* portscan <host_or_ip> <start> <end> */
+    char host[128];
+    int hi = 0;
+    const char *p = args;
+    while (*p == ' ') p++;
+    while (*p && *p != ' ' && hi < 127) host[hi++] = *p++;
+    host[hi] = 0;
+    while (*p == ' ') p++;
+    int start = 0;
+    while (*p >= '0' && *p <= '9') { start = start * 10 + (*p - '0'); p++; }
+    while (*p == ' ') p++;
+    int end = 0;
+    while (*p >= '0' && *p <= '9') { end = end * 10 + (*p - '0'); p++; }
+
+    if (!host[0] || start <= 0 || end <= 0 || end < start || end > 65535) {
+        kputs("  Usage: portscan <host> <start-port> <end-port>\n");
+        kputs("  Example: portscan 10.0.2.2 22 100\n");
+        return;
+    }
+    if (!g_net.up) { kputs("  Network not up.\n"); return; }
+
+    /* Resolve host (or accept dotted quad) */
+    struct ipv4_addr ip;
+    int ok = 0;
+    {
+        unsigned a, b, c, d;
+        const char *q = host;
+        int parsed = 0;
+        a = 0; while (*q >= '0' && *q <= '9' && parsed < 4) { a = a*10 + (unsigned)(*q - '0'); q++; parsed++; }
+        if (parsed && parsed < 4 && *q == '.' && a < 256) {
+            q++; parsed = 0; b = 0;
+            while (*q >= '0' && *q <= '9' && parsed < 4) { b = b*10 + (unsigned)(*q - '0'); q++; parsed++; }
+            if (parsed && parsed < 4 && *q == '.' && b < 256) {
+                q++; parsed = 0; c = 0;
+                while (*q >= '0' && *q <= '9' && parsed < 4) { c = c*10 + (unsigned)(*q - '0'); q++; parsed++; }
+                if (parsed && parsed < 4 && *q == '.' && c < 256) {
+                    q++; parsed = 0; d = 0;
+                    while (*q >= '0' && *q <= '9' && parsed < 4) { d = d*10 + (unsigned)(*q - '0'); q++; parsed++; }
+                    if (parsed && parsed < 4 && *q == 0 && d < 256) {
+                        ip.b[0]=a; ip.b[1]=b; ip.b[2]=c; ip.b[3]=d; ok = 1;
+                    }
+                }
+            }
+        }
+    }
+    if (!ok) {
+        if (dns_resolve(host, &ip) < 0) { kputs("  DNS failed.\n"); return; }
+    }
+
+    kputs("  Scanning ");
+    kput_dec(ip.b[0]); kputs(".");
+    kput_dec(ip.b[1]); kputs(".");
+    kput_dec(ip.b[2]); kputs(".");
+    kput_dec(ip.b[3]);
+    kputs(" ports "); kput_dec(start);
+    kputs("-"); kput_dec(end); kputs("\n");
+
+    int open_count = 0;
+    for (int port = start; port <= end; port++) {
+        struct tcp_conn c;
+        if (tcp_connect(&c, ip, (uint16_t)port) == 0) {
+            kputs("  open: "); kput_dec(port); kputs("\n");
+            open_count++;
+            tcp_close(&c);
+        }
+    }
+    kputs("  done — ");
+    kput_dec(open_count);
+    kputs(" open\n");
 }
 
 static int parse_ip(const char *s, struct ipv4_addr *out)
