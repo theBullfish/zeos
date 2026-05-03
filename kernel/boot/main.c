@@ -36,6 +36,7 @@
 #include "serial.h"
 #include "kprint.h"
 #include "shell.h"
+#include "usb_xhci.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
@@ -317,6 +318,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     int pci_count = pci_enumerate();
     kput_dec(pci_count);
     kputs(" devices found.\n");
+
+    /* Initialize xHCI (USB 3.x) host controller. Polling-based; safe
+     * even before timer/IDT IRQs are wired. Enumerates root-hub ports
+     * and reads the device descriptor of any attached device. */
+    if (xhci_init() == 0) {
+        kputs("USB xHCI: ready (");
+        kput_dec(xhci_device_count());
+        kputs(" device(s))\n");
+    } else {
+        kputs("USB xHCI: not available\n");
+    }
 
     /* Initialize keyboard */
     kputs("Initializing keyboard... ");
