@@ -16,6 +16,7 @@
  */
 
 #include "shell.h"
+#include "usb_msc.h"
 #include "persona.h"
 #include "theme.h"
 #include "kprint.h"
@@ -39,6 +40,7 @@
 #include "serial.h"
 #include "persona_filter.h"
 #include "persona_anim.h"
+#include "usb_cdc.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -196,6 +198,11 @@ static void cmd_portscan(const char *args);
 static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
+
+/* USB CDC ACM (Arduino/ESP32/Pico serial) */
+static void cmd_usb_serial(const char *args);
+static void cmd_cdc_send(const char *args);
+static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 
 /* ── Command table ──────────────────────────────── */
@@ -248,6 +255,11 @@ static const struct shell_cmd commands[] = {
     {"sweep",   "ping-sweep a /24 subnet to find live hosts", cmd_sweep,    VIS_DEREZ},
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
+
+    /* USB CDC ACM (Arduino, ESP32, Pi Pico, generic USB serial) */
+    {"usb-serial","list detected USB serial devices",   cmd_usb_serial, VIS_ALWAYS},
+    {"cdc-send","send text to USB serial (cdc-send <idx> <text>)", cmd_cdc_send, VIS_ALWAYS},
+    {"cdc-recv","read pending bytes from USB serial (cdc-recv <idx>)", cmd_cdc_recv, VIS_ALWAYS},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
@@ -1983,6 +1995,20 @@ vault_done:
         }
     }
 
+    /* USB MSC: report presence + size in MB. */
+    kputs("  USB MSC ............... ");
+    if (usb_msc_ready()) {
+        uint64_t sectors = usb_msc_sector_count();
+        uint32_t bs = usb_msc_block_size();
+        uint64_t mb = (sectors * bs) / (1024ULL * 1024ULL);
+        kputs("present (");
+        kput_dec(mb);
+        kputs(" MB)\n");
+        passes++;
+    } else {
+        kputs("SKIP (no device)\n");
+    }
+
     kputs("  ──────────────\n  ");
     kput_dec(passes); kputs(" passed, ");
     kput_dec(fails); kputs(" failed\n\n");
@@ -2293,4 +2319,108 @@ static void cmd_wifi(const char *args)
     }
 
     kputs("usage: wifi [status|scan|connect <ssid> [psk]]\n");
+}
+
+/* ── USB CDC ACM ──────────────────────────────────────────────── */
+
+static int parse_int_cdc(const char **pp)
+{
+    const char *p = *pp;
+    while (*p == ' ') p++;
+    int n = 0, any = 0;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10 + (*p - '0');
+        p++;
+        any = 1;
+    }
+    *pp = p;
+    return any ? n : -1;
+}
+
+static void cmd_usb_serial(const char *args)
+{
+    (void)args;
+    int n = usb_cdc_count();
+    if (n == 0) {
+        kputs("  no USB serial devices detected\n");
+        return;
+    }
+    kputs("  USB serial devices:\n");
+    for (int i = 0; i < n; i++) {
+        struct usb_cdc_device *d = usb_cdc_get(i);
+        if (!d) continue;
+        kputs("  ["); kput_dec(i); kputs("] /dev/");
+        kputs(d->name);
+        kputs(" vid=");  kput_hex(d->xdev->vendor_id);
+        kputs(" pid=");  kput_hex(d->xdev->product_id);
+        kputs(" iface="); kput_dec(d->iface_data);
+        kputs(" ep_in="); kput_hex(d->ep_in);
+        kputs(" ep_out="); kput_hex(d->ep_out);
+        kputs(" mps=");  kput_dec(d->max_packet_in);
+        kputs("\n");
+    }
+}
+
+static void cmd_cdc_send(const char *args)
+{
+    const char *p = args;
+    int idx = parse_int_cdc(&p);
+    if (idx < 0) {
+        kputs("usage: cdc-send <idx> <text>\n");
+        return;
+    }
+    while (*p == ' ') p++;
+    if (*p == 0) {
+        kputs("usage: cdc-send <idx> <text>\n");
+        return;
+    }
+    struct usb_cdc_device *d = usb_cdc_get(idx);
+    if (!d) {
+        kputs("  no such device. try 'usb-serial'.\n");
+        return;
+    }
+    int len = 0;
+    while (p[len]) len++;
+    int r = usb_cdc_send(d, p, len);
+    if (r < 0) {
+        kputs("  send failed\n");
+        return;
+    }
+    char nl = '\n';
+    usb_cdc_send(d, &nl, 1);
+    kputs("  sent ");
+    kput_dec((uint64_t)r);
+    kputs(" bytes\n");
+}
+
+static void cmd_cdc_recv(const char *args)
+{
+    const char *p = args;
+    int idx = parse_int_cdc(&p);
+    if (idx < 0) idx = 0;
+    struct usb_cdc_device *d = usb_cdc_get(idx);
+    if (!d) {
+        kputs("  no such device. try 'usb-serial'.\n");
+        return;
+    }
+    char buf[128];
+    int total = 0;
+    for (int attempts = 0; attempts < 8; attempts++) {
+        int got = usb_cdc_recv(d, buf, sizeof(buf) - 1);
+        if (got <= 0) {
+            if (total) break;
+            for (volatile int s = 0; s < 200000; s++) ;
+            continue;
+        }
+        buf[got] = 0;
+        kputs(buf);
+        total += got;
+    }
+    if (total == 0) {
+        kputs("  (no data)\n");
+    } else {
+        kputs("\n  ");
+        kput_dec((uint64_t)total);
+        kputs(" bytes received\n");
+    }
 }

@@ -7,9 +7,8 @@
  *  - Allocates DCBAA, command ring, event ring + ERST
  *  - Detects connected devices on root-hub ports
  *  - Performs Enable Slot + Address Device + GET_DESCRIPTOR(Device)
- *
- * Out of scope: hubs (beyond root hub), isochronous, MSI-X, USB class
- * drivers (HID/MSC/CDC). Those will be follow-up commits.
+ *  - Bulk + Interrupt-IN endpoint configuration for class drivers
+ *    (CDC ACM, HID, Mass Storage, USB-Ethernet)
  */
 
 #ifndef ZEOS_USB_XHCI_H
@@ -20,51 +19,85 @@
 
 #define XHCI_MAX_DEVICES 8
 
+/* Per-device interrupt-IN endpoint state (HID). */
+struct xhci_int_ep {
+    int      configured;
+    uint8_t  ep_addr;
+    uint8_t  dci;
+    uint16_t max_packet;
+    uint8_t  interval;
+    void    *ring;
+    uint64_t ring_phys;
+    uint32_t enqueue;
+    uint32_t cycle;
+    uint64_t pending_trb_phys;
+    void    *pending_buf;
+    int      pending_len;
+};
+
+/* Bulk endpoint state (CDC, MSC, USB-Ethernet). */
+struct xhci_bulk_ep {
+    int      configured;
+    uint8_t  ep_addr;
+    uint8_t  dci;
+    uint16_t max_packet;
+    void    *ring;
+    uint64_t ring_phys;
+    uint32_t enqueue;
+    uint32_t cycle;
+    uint64_t pending_trb_phys;
+    void    *pending_buf;
+    int      pending_len;
+};
+
+#define XHCI_MAX_BULK_EPS 4
+
 struct xhci_device {
-    int      slot_id;       /* xHCI slot ID, 0 = unused */
-    int      port;          /* root-hub port (1-based) */
-    int      speed;         /* USB_SPEED_* */
-    uint8_t  address;       /* assigned USB address */
+    int      slot_id;
+    int      port;
+    int      speed;
+    uint8_t  address;
     uint16_t vendor_id;
     uint16_t product_id;
     uint16_t bcd_usb;
+    uint8_t  dev_class;
+    uint8_t  dev_subclass;
+    uint8_t  dev_protocol;
     uint8_t  max_packet_size0;
-    /* Per-device structures (allocated at slot enable) */
-    void    *input_ctx;     /* Input Context (page-aligned) */
-    void    *device_ctx;    /* Output / Device Context (page-aligned) */
-    void    *ep0_ring;      /* EP0 transfer ring (page-aligned) */
-    uint32_t ep0_enqueue;   /* enqueue index into ep0_ring */
-    uint32_t ep0_cycle;     /* producer cycle bit */
+    uint8_t  configuration;
+    void    *input_ctx;
+    void    *device_ctx;
+    void    *ep0_ring;
+    uint32_t ep0_enqueue;
+    uint32_t ep0_cycle;
+    struct xhci_int_ep int_in;
+    struct xhci_bulk_ep bulk[XHCI_MAX_BULK_EPS];
 };
 
-/*
- * Discover and initialize the first xHCI controller.
- * Returns 0 on success, negative on failure or when no controller present.
- */
 int xhci_init(void);
-
-/* Lookup a previously enumerated device by VID/PID (0/0 = wildcard). */
 struct xhci_device *xhci_find_device(uint16_t vid, uint16_t pid);
 
-/*
- * Issue a control transfer on EP0.
- * Returns number of data bytes transferred (>=0) on success, negative on error.
- */
 int xhci_control_transfer(struct xhci_device *dev,
                           struct usb_setup_packet *setup,
                           void *buf, int max_len);
 
-/*
- * Bulk transfer stub. Currently returns -1 (no bulk endpoint setup yet).
- * Kept in the public API so class drivers can compile against the final
- * shape; real implementation arrives with the HID/MSC commits.
- */
-int xhci_bulk_transfer(struct xhci_device *dev, int ep, void *buf, int len, int in);
+int xhci_get_config_descriptor(struct xhci_device *dev, void *out, int max);
+int xhci_set_configuration(struct xhci_device *dev, uint8_t config_value);
 
-/* Number of xHCI devices currently tracked. */
+int xhci_setup_bulk_endpoint(struct xhci_device *dev,
+                             uint8_t ep_addr, uint16_t max_packet);
+int xhci_bulk_transfer(struct xhci_device *dev, int ep_addr,
+                       void *buf, int len, int in);
+int xhci_bulk_poll_in(struct xhci_device *dev, int ep_addr,
+                      void *buf, int len);
+
+int xhci_setup_interrupt_in(struct xhci_device *dev,
+                            uint8_t ep_addr, uint16_t max_packet,
+                            uint8_t interval);
+int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len);
+int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len);
+
 int xhci_device_count(void);
-
-/* Get device by index (0..count-1), or NULL. */
 struct xhci_device *xhci_get_device(int index);
 
 #endif /* ZEOS_USB_XHCI_H */

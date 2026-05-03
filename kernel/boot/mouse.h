@@ -44,4 +44,11 @@ uint8_t mouse_get_buttons(void);
 /* Get pointer to full mouse state (read-only) */
 const mouse_state_t *mouse_get_state(void);
 
+/* Inject a relative-motion event from an alternate input source -- e.g.
+ * a USB HID boot mouse. dx/dy are signed pixel deltas already in screen
+ * coordinates (positive y = down). buttons is a MOUSE_BTN_* bitmask of
+ * the current state. Updates absolute position, clamps to screen, and
+ * fires cursor_move/press/release exactly like the PS/2 IRQ path. */
+void mouse_inject(int dx, int dy, uint8_t buttons);
+
 #endif /* ZEOS_MOUSE_H */

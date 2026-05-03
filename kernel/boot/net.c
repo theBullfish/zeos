@@ -11,6 +11,7 @@
 #include "net_e1000.h"
 #include "net_rtl8169.h"
 #include "net_rtl8139.h"
+#include "usb_eth.h"
 #include "net_arp.h"
 #include "net_ip.h"
 #include "net_tcp.h"
@@ -60,6 +61,11 @@ int net_init(void)
         net_drv_recv    = rtl8139_recv;
         net_drv_get_mac = rtl8139_get_mac;
         kputs("NET: using rtl8139 driver\n");
+    } else if (usb_eth_init() == 0) {
+        net_drv_send    = usb_eth_send;
+        net_drv_recv    = usb_eth_recv;
+        net_drv_get_mac = usb_eth_get_mac;
+        kputs("NET: using usb_eth driver\n");
     } else {
         kputs("NET: no network device found\n");
         return -1;

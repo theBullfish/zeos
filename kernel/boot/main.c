@@ -37,6 +37,10 @@
 #include "kprint.h"
 #include "shell.h"
 #include "usb_xhci.h"
+#include "usb_hid.h"
+#include "usb_cdc.h"
+#include "usb_msc.h"
+#include "block.h"
 #include "net_rtl8188eu.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -332,9 +336,28 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
          * Detection-only at this stage: see net_rtl8188eu.c for the
          * honest accounting of what's missing for a working link. */
         rtl8188eu_probe();
+
+        /* Bind USB HID boot devices (mouse + keyboard). Issues
+         * SET_CONFIGURATION/SET_PROTOCOL/SET_IDLE on each, configures
+         * the interrupt-IN endpoint, and arms it for polling. Reports
+         * are dispatched to the same input pipeline the PS/2 drivers
+         * feed (keyboard_inject_scancode, mouse_inject). */
+        usb_hid_init();
+
+        /* USB CDC ACM class driver — Arduino, ESP32, Pi Pico, etc.
+         * Walks every enumerated xHCI device and binds CDC-ACM serial
+         * endpoints. Safe even with zero serial devices present. */
+        usb_cdc_init();
+
+        /* USB Mass Storage class driver (BBB / SCSI). Brings up the
+         * first thumb drive found and prints sector count. */
+        usb_msc_init();
     } else {
         kputs("USB xHCI: not available\n");
     }
+
+    /* Block device dispatcher — picks NVMe, AHCI, or USB-MSC. */
+    block_init();
 
     /* Initialize keyboard */
     kputs("Initializing keyboard... ");

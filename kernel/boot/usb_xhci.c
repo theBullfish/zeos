@@ -697,11 +697,435 @@ int xhci_control_transfer(struct xhci_device *dev,
     return xferred;
 }
 
-int xhci_bulk_transfer(struct xhci_device *dev, int ep, void *buf, int len, int in)
+/* ── Configuration descriptor + SET_CONFIGURATION ────────────── */
+int xhci_get_config_descriptor(struct xhci_device *dev, void *out, int max)
 {
-    (void)dev; (void)ep; (void)buf; (void)len; (void)in;
-    /* No bulk endpoint context configured yet; class drivers not in this
-     * commit. Returning failure honestly so callers can detect. */
+    if (!dev || !out || max <= 0) return -1;
+    uint8_t hdr[9];
+    struct usb_setup_packet sp;
+    sp.bmRequestType = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+    sp.bRequest = USB_REQ_GET_DESCRIPTOR;
+    sp.wValue = (USB_DT_CONFIG << 8) | 0;
+    sp.wIndex = 0;
+    sp.wLength = 9;
+    int g = xhci_control_transfer(dev, &sp, hdr, 9);
+    if (g < 9) return -1;
+    int total = hdr[2] | ((int)hdr[3] << 8);
+    if (total > max) total = max;
+    sp.wLength = (uint16_t)total;
+    int got = xhci_control_transfer(dev, &sp, out, total);
+    return got;
+}
+
+int xhci_set_configuration(struct xhci_device *dev, uint8_t config_value)
+{
+    if (!dev) return -1;
+    struct usb_setup_packet sp;
+    sp.bmRequestType = USB_DIR_OUT | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+    sp.bRequest = USB_REQ_SET_CONFIGURATION;
+    sp.wValue = config_value;
+    sp.wIndex = 0;
+    sp.wLength = 0;
+    int r = xhci_control_transfer(dev, &sp, 0, 0);
+    if (r < 0) return -1;
+    dev->configuration = config_value;
+    return 0;
+}
+
+/* ── Bulk endpoint support ───────────────────────────────────── */
+static struct xhci_bulk_ep *bulk_lookup(struct xhci_device *dev, uint8_t ep_addr)
+{
+    for (int i = 0; i < XHCI_MAX_BULK_EPS; i++) {
+        if (dev->bulk[i].configured && dev->bulk[i].ep_addr == ep_addr)
+            return &dev->bulk[i];
+    }
+    return 0;
+}
+
+static struct xhci_bulk_ep *bulk_alloc(struct xhci_device *dev)
+{
+    for (int i = 0; i < XHCI_MAX_BULK_EPS; i++) {
+        if (!dev->bulk[i].configured) return &dev->bulk[i];
+    }
+    return 0;
+}
+
+static uint64_t bulk_ring_enqueue(struct xhci_bulk_ep *be,
+                                  uint32_t p_lo, uint32_t p_hi,
+                                  uint32_t status, uint32_t control)
+{
+    xhci_trb_t *ring = (xhci_trb_t *)be->ring;
+    if (be->enqueue == TRBS_PER_RING - 1) {
+        xhci_trb_t *link = &ring[TRBS_PER_RING - 1];
+        link->control = (TRB_TYPE(TRB_LINK) | TRB_TC) | (be->cycle ? TRB_C : 0);
+        be->enqueue = 0;
+        be->cycle ^= 1;
+    }
+    xhci_trb_t *slot = &ring[be->enqueue];
+    slot->param_lo = p_lo;
+    slot->param_hi = p_hi;
+    slot->status = status;
+    __asm__ volatile("" ::: "memory");
+    slot->control = (control & ~TRB_C) | (be->cycle ? TRB_C : 0);
+    __asm__ volatile("" ::: "memory");
+    uint64_t phys = be->ring_phys + (uint64_t)be->enqueue * sizeof(xhci_trb_t);
+    be->enqueue++;
+    return phys;
+}
+
+int xhci_setup_bulk_endpoint(struct xhci_device *dev,
+                             uint8_t ep_addr, uint16_t max_packet)
+{
+    if (!dev || dev->slot_id == 0 || max_packet == 0) return -1;
+    if (bulk_lookup(dev, ep_addr)) return 0;
+
+    int is_in = (ep_addr & 0x80) ? 1 : 0;
+    int epnum = ep_addr & 0x0F;
+    if (epnum == 0 || epnum > 15) return -1;
+    int dci = epnum * 2 + (is_in ? 1 : 0);
+    if (dci >= 32) return -1;
+
+    struct xhci_bulk_ep *be = bulk_alloc(dev);
+    if (!be) return -1;
+
+    uint64_t ring_phys;
+    void *ring = xfer_ring_init(&ring_phys);
+    if (!ring) return -1;
+    be->ring = ring;
+    be->ring_phys = ring_phys;
+    be->enqueue = 0;
+    be->cycle = 1;
+    be->ep_addr = ep_addr;
+    be->dci = (uint8_t)dci;
+    be->max_packet = max_packet;
+    be->pending_trb_phys = 0;
+    be->pending_buf = 0;
+    be->pending_len = 0;
+
+    int max_dci = 1;
+    if (dev->int_in.configured && dev->int_in.dci > max_dci) max_dci = dev->int_in.dci;
+    for (int i = 0; i < XHCI_MAX_BULK_EPS; i++) {
+        if (dev->bulk[i].configured && dev->bulk[i].dci > max_dci)
+            max_dci = dev->bulk[i].dci;
+    }
+    if (dci > max_dci) max_dci = dci;
+
+    xhci_input_ctrl_ctx_t *icc = input_ctrl_of(dev->input_ctx);
+    icc->drop_flags = 0;
+    icc->add_flags = (1U << 0) | (1U << dci);
+
+    xhci_slot_ctx_t *slot = input_slot_of(dev->input_ctx);
+    slot->dword0 = ((uint32_t)dev->speed << 20) | ((uint32_t)max_dci << 27);
+    slot->dword1 = ((uint32_t)dev->port << 16);
+    slot->dword2 = 0;
+    slot->dword3 = 0;
+
+    int ep_index = dci - 1;
+    xhci_ep_ctx_t *epc = input_ep_of(dev->input_ctx, ep_index);
+    memset(epc, 0, sizeof(*epc));
+    uint32_t ep_type = is_in ? 6 : 2;  /* Bulk IN=6, Bulk OUT=2 */
+    epc->dword1 = (3U << 1) | (ep_type << 3) | ((uint32_t)max_packet << 16);
+    epc->dword2 = (uint32_t)(ring_phys & 0xFFFFFFF0U) | 1U;
+    epc->dword3 = (uint32_t)(ring_phys >> 32);
+    epc->dword4 = max_packet;
+
+    uint64_t in_phys = (uint64_t)(uintptr_t)dev->input_ctx;
+    uint32_t cctrl = TRB_TYPE(TRB_CONFIGURE_ENDPOINT) |
+                     ((uint32_t)dev->slot_id << 24);
+    uint64_t cmd_phys = cmd_issue((uint32_t)(in_phys & 0xFFFFFFFFU),
+                                  (uint32_t)(in_phys >> 32),
+                                  0, cctrl);
+    int code = cmd_wait(cmd_phys, 0);
+    if (code != 1) {
+        kputs("[xhci] Configure Endpoint (bulk) failed code=");
+        kput_hex(code);
+        kputs(" ep=");
+        kput_hex(ep_addr);
+        kputs("\n");
+        return -1;
+    }
+    be->configured = 1;
+    return 0;
+}
+
+int xhci_bulk_transfer(struct xhci_device *dev, int ep_addr,
+                       void *buf, int len, int in)
+{
+    if (!dev || dev->slot_id == 0 || len < 0) return -1;
+    int is_in = ((uint8_t)ep_addr & 0x80) ? 1 : 0;
+    if (is_in != (in ? 1 : 0)) return -1;
+
+    struct xhci_bulk_ep *be = bulk_lookup(dev, (uint8_t)ep_addr);
+    if (!be) return -1;
+    if (len > 0 && !buf) return -1;
+
+    if (be->pending_trb_phys) {
+        xhci_trb_t evt;
+        if (wait_event(TRB_TRANSFER_EVENT, be->pending_trb_phys, &evt) == 0)
+            be->pending_trb_phys = 0;
+    }
+
+    if (len == 0) {
+        uint64_t trb_phys = bulk_ring_enqueue(be, 0, 0, 0,
+                                              TRB_TYPE(TRB_NORMAL) | TRB_IOC);
+        db_ring(dev->slot_id, be->dci);
+        xhci_trb_t evt;
+        if (wait_event(TRB_TRANSFER_EVENT, trb_phys, &evt) != 0) return -1;
+        int code = (evt.status >> 24) & 0xFF;
+        return (code == 1 || code == 13) ? 0 : -1;
+    }
+
+    uint64_t buf_phys = (uint64_t)(uintptr_t)buf;
+    int remaining = len;
+    uint64_t last_trb_phys = 0;
+    const int CHUNK_MAX = 65536;
+    while (remaining > 0) {
+        int this_chunk = remaining > CHUNK_MAX ? CHUNK_MAX : remaining;
+        int is_last = (remaining - this_chunk == 0);
+        uint32_t status = (uint32_t)this_chunk;
+        uint32_t ctrl = TRB_TYPE(TRB_NORMAL);
+        if (is_last) ctrl |= TRB_IOC;
+        else         ctrl |= TRB_CH;
+        uint64_t trb_phys = bulk_ring_enqueue(be,
+                                              (uint32_t)(buf_phys & 0xFFFFFFFFU),
+                                              (uint32_t)(buf_phys >> 32),
+                                              status, ctrl);
+        if (is_last) last_trb_phys = trb_phys;
+        buf_phys += this_chunk;
+        remaining -= this_chunk;
+    }
+
+    db_ring(dev->slot_id, be->dci);
+
+    xhci_trb_t evt;
+    if (wait_event(TRB_TRANSFER_EVENT, last_trb_phys, &evt) != 0) {
+        kputs("[xhci] bulk transfer timeout ep=");
+        kput_hex(ep_addr);
+        kputs("\n");
+        return -1;
+    }
+    int code = (evt.status >> 24) & 0xFF;
+    if (code != 1 && code != 13) return -1;
+    int residual = (int)(evt.status & 0xFFFFFF);
+    int xferred = len - residual;
+    if (xferred < 0) xferred = 0;
+    return xferred;
+}
+
+int xhci_bulk_poll_in(struct xhci_device *dev, int ep_addr, void *buf, int len)
+{
+    if (!dev || !buf || len <= 0) return -1;
+    if (!((uint8_t)ep_addr & 0x80)) return -1;
+    struct xhci_bulk_ep *be = bulk_lookup(dev, (uint8_t)ep_addr);
+    if (!be) return -1;
+
+    if (!be->pending_trb_phys) {
+        uint64_t bp = (uint64_t)(uintptr_t)buf;
+        uint32_t status = (uint32_t)len;
+        uint32_t ctrl = TRB_TYPE(TRB_NORMAL) | TRB_IOC;
+        be->pending_trb_phys = bulk_ring_enqueue(be,
+                                                 (uint32_t)(bp & 0xFFFFFFFFU),
+                                                 (uint32_t)(bp >> 32),
+                                                 status, ctrl);
+        be->pending_buf = buf;
+        be->pending_len = len;
+        db_ring(dev->slot_id, be->dci);
+        return 0;
+    }
+
+    for (int i = 0; i < 64; i++) {
+        xhci_trb_t *e = event_pop();
+        if (!e) return 0;
+        if (TRB_TYPE_OF(e->control) != TRB_TRANSFER_EVENT) continue;
+        uint64_t evt_ptr = ((uint64_t)e->param_hi << 32) | e->param_lo;
+        if (evt_ptr != be->pending_trb_phys) continue;
+        int code = (e->status >> 24) & 0xFF;
+        int residual = (int)(e->status & 0xFFFFFF);
+        int armed = be->pending_len ? be->pending_len : len;
+        be->pending_trb_phys = 0;
+        be->pending_buf = 0;
+        be->pending_len = 0;
+        if (code != 1 && code != 13) return -1;
+        int x = armed - residual;
+        if (x < 0) x = 0;
+        if (x > len) x = len;
+        return x;
+    }
+    return 0;
+}
+
+/* Interrupt-IN endpoint stubs — HID driver provides real impls. */
+/* ── Interrupt-IN endpoint support ───────────────────────────── */
+
+static uint64_t int_ring_enqueue(struct xhci_device *dev,
+                                 uint32_t p_lo, uint32_t p_hi,
+                                 uint32_t status, uint32_t control)
+{
+    struct xhci_int_ep *ie = &dev->int_in;
+    xhci_trb_t *ring = (xhci_trb_t *)ie->ring;
+    if (ie->enqueue == TRBS_PER_RING - 1) {
+        xhci_trb_t *link = &ring[TRBS_PER_RING - 1];
+        link->control = (TRB_TYPE(TRB_LINK) | TRB_TC) | (ie->cycle ? TRB_C : 0);
+        ie->enqueue = 0;
+        ie->cycle ^= 1;
+    }
+    xhci_trb_t *slot = &ring[ie->enqueue];
+    slot->param_lo = p_lo;
+    slot->param_hi = p_hi;
+    slot->status = status;
+    __asm__ volatile("" ::: "memory");
+    slot->control = (control & ~TRB_C) | (ie->cycle ? TRB_C : 0);
+    __asm__ volatile("" ::: "memory");
+    uint64_t phys = ie->ring_phys + (uint64_t)ie->enqueue * sizeof(xhci_trb_t);
+    ie->enqueue++;
+    return phys;
+}
+
+static void int_ep_arm(struct xhci_device *dev)
+{
+    struct xhci_int_ep *ie = &dev->int_in;
+    uint64_t buf_phys = (uint64_t)(uintptr_t)ie->pending_buf;
+    uint32_t status = (uint32_t)ie->pending_len;
+    uint32_t ctrl = TRB_TYPE(TRB_NORMAL) | TRB_IOC;
+    uint64_t trb_phys = int_ring_enqueue(dev,
+                                         (uint32_t)(buf_phys & 0xFFFFFFFFU),
+                                         (uint32_t)(buf_phys >> 32),
+                                         status, ctrl);
+    ie->pending_trb_phys = trb_phys;
+    db_ring(dev->slot_id, ie->dci);
+}
+
+int xhci_setup_interrupt_in(struct xhci_device *dev,
+                            uint8_t ep_addr, uint16_t max_packet,
+                            uint8_t interval)
+{
+    if (!dev || dev->slot_id == 0) {
+        kputs("[xhci] int_in: bad dev/slot\n");
+        return -1;
+    }
+    if (!(ep_addr & 0x80)) {
+        kputs("[xhci] int_in: ep not IN\n");
+        return -1;
+    }
+    int epnum = ep_addr & 0x0F;
+    int dci = epnum * 2 + 1;
+    if (dci >= 32) return -1;
+
+    struct xhci_int_ep *ie = &dev->int_in;
+    if (ie->configured) {
+        kputs("[xhci] int_in: already configured\n");
+        return -1;
+    }
+
+    uint64_t ring_phys;
+    void *ring = xfer_ring_init(&ring_phys);
+    if (!ring) {
+        kputs("[xhci] int_in: ring alloc failed\n");
+        return -1;
+    }
+    ie->ring = ring;
+    ie->ring_phys = ring_phys;
+    ie->enqueue = 0;
+    ie->cycle = 1;
+    ie->ep_addr = ep_addr;
+    ie->dci = (uint8_t)dci;
+    ie->max_packet = max_packet;
+    ie->interval = interval;
+    ie->pending_trb_phys = 0;
+    ie->pending_buf = 0;
+    ie->pending_len = 0;
+
+    /* Compute highest DCI in use across this device's EPs. */
+    int max_dci = dci;
+    for (int i = 0; i < XHCI_MAX_BULK_EPS; i++) {
+        if (dev->bulk[i].configured && dev->bulk[i].dci > max_dci)
+            max_dci = dev->bulk[i].dci;
+    }
+
+    xhci_input_ctrl_ctx_t *icc = input_ctrl_of(dev->input_ctx);
+    icc->drop_flags = 0;
+    icc->add_flags = (1U << 0) | (1U << dci);
+
+    xhci_slot_ctx_t *slot = input_slot_of(dev->input_ctx);
+    slot->dword0 = ((uint32_t)dev->speed << 20) | ((uint32_t)max_dci << 27);
+    slot->dword1 = ((uint32_t)dev->port << 16);
+    slot->dword2 = 0;
+    slot->dword3 = 0;
+
+    int ep_index = dci - 1;
+    xhci_ep_ctx_t *ep = input_ep_of(dev->input_ctx, ep_index);
+    memset(ep, 0, sizeof(*ep));
+    /* Interrupt IN: EP Type = 7 */
+    ep->dword0 = ((uint32_t)interval << 16);
+    ep->dword1 = (3U << 1) | (7U << 3) | ((uint32_t)max_packet << 16);
+    ep->dword2 = (uint32_t)(ring_phys & 0xFFFFFFF0U) | 1U;
+    ep->dword3 = (uint32_t)(ring_phys >> 32);
+    ep->dword4 = max_packet;
+
+    uint64_t in_phys = (uint64_t)(uintptr_t)dev->input_ctx;
+    uint32_t cctrl = TRB_TYPE(TRB_CONFIGURE_ENDPOINT) |
+                     ((uint32_t)dev->slot_id << 24);
+    uint64_t cmd_phys = cmd_issue((uint32_t)(in_phys & 0xFFFFFFFFU),
+                                  (uint32_t)(in_phys >> 32),
+                                  0, cctrl);
+    int code = cmd_wait(cmd_phys, 0);
+    if (code != 1) {
+        kputs("[xhci] Configure Endpoint (int) failed code=");
+        kput_hex(code);
+        kputs(" ep=");
+        kput_hex(ep_addr);
+        kputs("\n");
+        return -1;
+    }
+    ie->configured = 1;
+    return 0;
+}
+
+int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len)
+{
+    if (!dev || !buf || len <= 0) return -1;
+    struct xhci_int_ep *ie = &dev->int_in;
+    if (!ie->configured) return -1;
+
+    if (ie->pending_trb_phys == 0) {
+        ie->pending_buf = buf;
+        ie->pending_len = len;
+        int_ep_arm(dev);
+        return 0;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        xhci_trb_t *e = event_pop();
+        if (!e) return 0;
+        if (TRB_TYPE_OF(e->control) != TRB_TRANSFER_EVENT) continue;
+        uint64_t evt_ptr = ((uint64_t)e->param_hi << 32) | e->param_lo;
+        if (evt_ptr != ie->pending_trb_phys) continue;
+        int code = (e->status >> 24) & 0xFF;
+        if (code != 1 && code != 13) {
+            ie->pending_trb_phys = 0;
+            return -1;
+        }
+        int residual = (int)(e->status & 0xFFFFFF);
+        int xferred = ie->pending_len - residual;
+        if (xferred < 0) xferred = 0;
+        if (xferred > len) xferred = len;
+        if (ie->pending_buf != buf && xferred > 0)
+            memcpy(buf, ie->pending_buf, xferred);
+        ie->pending_buf = buf;
+        ie->pending_len = len;
+        ie->pending_trb_phys = 0;
+        int_ep_arm(dev);
+        return xferred;
+    }
+    return 0;
+}
+
+int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len)
+{
+    for (uint32_t i = 0; i < XHCI_POLL_LIMIT; i++) {
+        int r = xhci_interrupt_poll(dev, buf, len);
+        if (r != 0) return r;
+    }
     return -1;
 }
 
@@ -867,9 +1291,12 @@ static void enumerate_root_ports(void)
         memset(&desc, 0, sizeof(desc));
         int got = read_device_descriptor(dev, &desc, 18);
         if (got >= 18) {
-            dev->vendor_id  = desc.idVendor;
-            dev->product_id = desc.idProduct;
-            dev->bcd_usb    = desc.bcdUSB;
+            dev->vendor_id    = desc.idVendor;
+            dev->product_id   = desc.idProduct;
+            dev->bcd_usb      = desc.bcdUSB;
+            dev->dev_class    = desc.bDeviceClass;
+            dev->dev_subclass = desc.bDeviceSubClass;
+            dev->dev_protocol = desc.bDeviceProtocol;
             kputs("[xhci]   VID=");
             kput_hex(desc.idVendor);
             kputs(" PID=");

@@ -19,4 +19,10 @@ char keyboard_getc(void);
 /* Check if a character is available (non-blocking) */
 int keyboard_has_char(void);
 
+/* Inject a scancode (set 1) from an alternate input source -- e.g. a
+ * USB HID boot keyboard. Behaves exactly as if the byte arrived on
+ * port 0x60: routes through the keybinds layer, updates shift/caps
+ * state, and pushes ASCII into the shell buffer. */
+void keyboard_inject_scancode(uint8_t scancode, int extended);
+
 #endif /* ZEOS_KEYBOARD_H */

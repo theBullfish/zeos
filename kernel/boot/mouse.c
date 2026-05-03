@@ -376,3 +376,33 @@ const mouse_state_t *mouse_get_state(void)
 {
     return &g_mouse;
 }
+
+void mouse_inject(int dx, int dy, uint8_t buttons)
+{
+    /* USB HID boot mice already give us signed screen-coord deltas, so
+     * skip the PS/2 sign-extension and Y inversion. */
+    g_mouse.dx = dx;
+    g_mouse.dy = dy;
+    g_mouse.x += dx;
+    g_mouse.y += dy;
+
+    int w = (int)fb_width();
+    int h = (int)fb_height();
+    if (g_mouse.x < 0) g_mouse.x = 0;
+    if (g_mouse.y < 0) g_mouse.y = 0;
+    if (g_mouse.x >= w) g_mouse.x = w - 1;
+    if (g_mouse.y >= h) g_mouse.y = h - 1;
+
+    g_mouse.prev_buttons = g_mouse.buttons;
+    g_mouse.buttons = buttons & 0x07;
+
+    cursor_move(g_mouse.x, g_mouse.y);
+
+    uint8_t changed = g_mouse.buttons ^ g_mouse.prev_buttons;
+    if (changed & MOUSE_BTN_LEFT) {
+        if (g_mouse.buttons & MOUSE_BTN_LEFT)
+            cursor_press();
+        else
+            cursor_release();
+    }
+}

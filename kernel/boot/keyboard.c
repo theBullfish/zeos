@@ -83,32 +83,13 @@ static void kb_buf_push(char c)
 }
 
 /*
- * Keyboard IRQ handler (IRQ1 = vector 0x21)
- *
- * Flow:
- *   1. Read scancode from port 0x60
- *   2. Track 0xE0 extended prefix
- *   3. Pass to keybinds system (modifier tracking + shortcut matching)
- *   4. If keybinds consumed it (shortcut fired), stop here
- *   5. Otherwise, translate to ASCII and push to shell buffer
+ * Process one scancode byte through the full keybinds + ASCII pipeline.
+ * Shared between the PS/2 IRQ path (which reads from port 0x60) and the
+ * USB HID boot-keyboard path (which translates HID usage codes to set-1
+ * scancodes and feeds them through here).
  */
-static void keyboard_isr(uint64_t vector, uint64_t error_code)
+static void process_scancode(uint8_t scancode, int extended)
 {
-    (void)vector;
-    (void)error_code;
-
-    uint8_t scancode = inb(KB_DATA_PORT);
-
-    /* Handle 0xE0 extended prefix — set flag and wait for next byte */
-    if (scancode == 0xE0) {
-        e0_prefix = 1;
-        return;
-    }
-
-    /* Capture and reset extended flag */
-    int extended = e0_prefix;
-    e0_prefix = 0;
-
     /*
      * Pass every scancode to the keybinds system first.
      * It tracks modifier state (shift/ctrl/alt/super) internally
@@ -175,6 +156,35 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
         kb_buf_push(c);
 }
 
+/*
+ * Keyboard IRQ handler (IRQ1 = vector 0x21).
+ * Reads a scancode from the PS/2 port, tracks the 0xE0 extended prefix,
+ * then hands off to the shared process_scancode() pipeline.
+ */
+static void keyboard_isr(uint64_t vector, uint64_t error_code)
+{
+    (void)vector;
+    (void)error_code;
+
+    uint8_t scancode = inb(KB_DATA_PORT);
+    if (scancode == 0xE0) {
+        e0_prefix = 1;
+        return;
+    }
+    int extended = e0_prefix;
+    e0_prefix = 0;
+    process_scancode(scancode, extended);
+}
+
+void keyboard_inject_scancode(uint8_t scancode, int extended)
+{
+    /* USB HID boot keyboards translate HID usage codes to set-1
+     * scancodes and feed them here, so the rest of the keyboard
+     * subsystem (keybinds, shift/caps state, shell buffer) works
+     * identically across PS/2 and USB inputs. */
+    process_scancode(scancode, extended);
+}
+
 void keyboard_init(void)
 {
     kb_head = 0;
@@ -195,11 +205,21 @@ int keyboard_has_char(void)
     return kb_head != kb_tail;
 }
 
+/* Forward decl -- pulled from usb_hid.h. We avoid the include to keep
+ * keyboard.c independent; the symbol is provided by usb_hid.c (or stays
+ * unresolved if HID isn't linked in, but in this build it always is). */
+extern void usb_hid_poll(void);
+
 char keyboard_getc(void)
 {
-    /* Busy-wait for a character */
-    while (kb_head == kb_tail)
-        __asm__ volatile("hlt");  /* Sleep until interrupt */
+    /* Drain USB HID interrupt-IN reports while we wait. The PS/2 IRQ
+     * path can still wake us via the kb_buf interrupt, but USB HID is
+     * polling-only and needs us to consume the event ring. We spin
+     * cheaply with `pause` so an interrupt can preempt us. */
+    while (kb_head == kb_tail) {
+        usb_hid_poll();
+        __asm__ volatile("pause");
+    }
 
     char c = kb_buf[kb_tail];
     kb_tail = (kb_tail + 1) % KB_BUF_SIZE;
