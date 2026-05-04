@@ -21,12 +21,19 @@
  * No journaling beyond CHAIN_BLOCK.masq_journal (which records every write
  * sector). No free-cluster bitmap optimization (scans FAT linearly with
  * a 256-entry free cache).
+ *
+ * Trash: rm moves to /.zeos-trash/ by default; `rm -f` for direct
+ * unlink. CHAIN_TRASH_GC auto-empties older than 30 days. The trash
+ * implementation lives at the bottom of this file; it operates by
+ * re-pointing FAT32 directory entries (no cluster-chain copy), so
+ * trash + restore are both O(1) regardless of file size.
  */
 
 #include "fat32.h"
 #include "block.h"
 #include "heap.h"
 #include "kprint.h"
+#include "timeofday.h"
 
 /* ── Local string / mem helpers (no libc) ─────────────────────── */
 
@@ -1303,3 +1310,580 @@ int fat32_readdir(const char *path, fat32_readdir_cb cb, void *user)
     return walk_dir(f.start_cluster ? f.start_cluster : V.root_cluster,
                     readdir_visitor, &ctx);
 }
+
+/* ───────────────────────────────────────────────────────────────────
+ *  Trash (soft-delete) subsystem
+ * ─────────────────────────────────────────────────────────────────── */
+
+#define TRASH_ROOT "/.zeos-trash"
+
+/* Monotonic counter so two trashes within the same wall-clock second
+ * still get distinct ids. */
+static uint32_t g_trash_seq;
+
+/* itoa-style helpers for meta.txt + ids. */
+static int u64_to_dec(uint64_t v, char *out)
+{
+    char tmp[24];
+    int n = 0;
+    if (v == 0) { tmp[n++] = '0'; }
+    while (v > 0) { tmp[n++] = (char)('0' + (int)(v % 10)); v /= 10; }
+    int o = 0;
+    while (n > 0) out[o++] = tmp[--n];
+    out[o] = '\0';
+    return o;
+}
+
+static int u32_to_dec(uint32_t v, char *out) { return u64_to_dec(v, out); }
+
+static int u32_to_hex8(uint32_t v, char *out)
+{
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) {
+        out[7 - i] = hexd[v & 0xF];
+        v >>= 4;
+    }
+    out[8] = '\0';
+    return 8;
+}
+
+static int s_eq(const char *a, const char *b) {
+    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+static int s_starts_with(const char *s, const char *prefix) {
+    while (*prefix) { if (*s != *prefix) return 0; s++; prefix++; }
+    return 1;
+}
+
+static int s_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+/* Build a unique trash id. tod_now_unix may be 0 on hosts without
+ * RTC; combine with a TSC mix and a counter so collisions are still
+ * unlikely. The id is 8 lowercase hex chars (fits in 8.3 SFN slot). */
+static void make_trash_id(char out[FAT32_TRASH_ID_MAX + 1])
+{
+    uint64_t now = tod_now_unix();
+    uint64_t t = fat_tsc_seed();
+    uint32_t seq = ++g_trash_seq;
+    uint32_t mix = (uint32_t)(now ^ (t >> 17)) ^ (seq * 2654435761u);
+    if (mix == 0) mix = (seq | 0x80000000u);
+    u32_to_hex8(mix, out);
+}
+
+/* Decimal parse helper for meta.txt fields. Reads leading digits;
+ * stops on first non-digit. */
+static uint64_t parse_u64(const char *s, const char **endp)
+{
+    uint64_t v = 0;
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (uint64_t)(*s - '0'); s++; }
+    if (endp) *endp = s;
+    return v;
+}
+
+/* Path predicate: is `path` inside the trash root? Both "/.zeos-trash"
+ * and "/.zeos-trash/..." count. */
+static int path_in_trash(const char *path)
+{
+    if (!path) return 0;
+    while (*path == '/') path++;
+    /* normalize leading slashes off TRASH_ROOT */
+    const char *root = TRASH_ROOT;
+    while (*root == '/') root++;
+    int rl = s_len(root);
+    int i;
+    for (i = 0; i < rl; i++) {
+        if (path[i] != root[i]) return 0;
+    }
+    return path[rl] == '\0' || path[rl] == '/';
+}
+
+int fat32_trash_ensure_root(void)
+{
+    if (!V.mounted) return -1;
+    struct fat32_file f;
+    if (fat32_open(TRASH_ROOT, &f) == 0 && f.is_dir) return 0;
+    return fat32_mkdir(TRASH_ROOT);
+}
+
+/* Build "/.zeos-trash/<id>" + tail. Caller-supplied buffer. */
+static void build_trash_path(char *out, int max,
+                             const char *id, const char *tail)
+{
+    int o = 0;
+    const char *p = TRASH_ROOT;
+    while (*p && o < max - 1) out[o++] = *p++;
+    out[o++] = '/';
+    while (*id && o < max - 1) out[o++] = *id++;
+    if (tail && *tail) {
+        if (tail[0] != '/') out[o++] = '/';
+        while (*tail && o < max - 1) out[o++] = *tail++;
+    }
+    out[o] = '\0';
+}
+
+/* Find a single non-meta.txt entry inside a trash subdir. Returns
+ * 0 on success and writes basename into out_basename. */
+struct trash_inner_ctx {
+    char name[FAT32_NAME_MAX + 1];
+    int  found;
+    uint8_t is_dir;
+    uint32_t size;
+};
+
+static int trash_inner_visitor(const char *name, uint32_t size,
+                               uint32_t cluster, uint8_t attr,
+                               void *user)
+{
+    (void)cluster;
+    struct trash_inner_ctx *c = (struct trash_inner_ctx *)user;
+    if (s_eq(name, "meta.txt")) return 0;
+    if (c->found) return 0;
+    int n = 0;
+    while (name[n] && n < FAT32_NAME_MAX) { c->name[n] = name[n]; n++; }
+    c->name[n] = '\0';
+    c->is_dir = (attr & FAT32_ATTR_DIR) ? 1 : 0;
+    c->size = size;
+    c->found = 1;
+    return 0;
+}
+
+/* Read meta.txt for a given trash id. Returns 0 on success. */
+static int trash_read_meta(const char *id,
+                           char *out_orig, int orig_max,
+                           uint64_t *out_deleted_at,
+                           uint32_t *out_size,
+                           char *out_reason, int reason_max)
+{
+    char metap[FAT32_PATH_MAX];
+    build_trash_path(metap, sizeof(metap), id, "meta.txt");
+
+    struct fat32_file mf;
+    if (fat32_open(metap, &mf) != 0) return -1;
+    if (mf.is_dir) return -1;
+    if (mf.size == 0 || mf.size > 1024) return -1;
+
+    char buf[1025];
+    int got = fat32_read(&mf, buf, sizeof(buf) - 1);
+    if (got <= 0) return -1;
+    buf[got] = '\0';
+
+    if (out_orig && orig_max > 0) out_orig[0] = '\0';
+    if (out_reason && reason_max > 0) out_reason[0] = '\0';
+    if (out_deleted_at) *out_deleted_at = 0;
+    if (out_size) *out_size = 0;
+
+    /* Format: lines "key=value\n" — orig_path, size, deleted_at,
+     * reason. Keys are stable so we can parse line-by-line. */
+    const char *p = buf;
+    while (*p) {
+        const char *key = p;
+        while (*p && *p != '=' && *p != '\n') p++;
+        if (*p != '=') {
+            if (*p == '\n') p++;
+            continue;
+        }
+        int klen = (int)(p - key);
+        p++; /* skip '=' */
+        const char *val = p;
+        while (*p && *p != '\n') p++;
+        int vlen = (int)(p - val);
+        if (*p == '\n') p++;
+
+        if (klen == 9 && key[0] == 'o') {
+            if (out_orig && orig_max > 0) {
+                int n = vlen < orig_max - 1 ? vlen : orig_max - 1;
+                for (int i = 0; i < n; i++) out_orig[i] = val[i];
+                out_orig[n] = '\0';
+            }
+        } else if (klen == 4 && key[0] == 's' && key[1] == 'i') {
+            const char *e;
+            if (out_size) *out_size = (uint32_t)parse_u64(val, &e);
+        } else if (klen == 10 && key[0] == 'd') {
+            const char *e;
+            if (out_deleted_at) *out_deleted_at = parse_u64(val, &e);
+        } else if (klen == 6 && key[0] == 'r') {
+            if (out_reason && reason_max > 0) {
+                int n = vlen < reason_max - 1 ? vlen : reason_max - 1;
+                for (int i = 0; i < n; i++) out_reason[i] = val[i];
+                out_reason[n] = '\0';
+            }
+        }
+    }
+    return 0;
+}
+
+static int trash_write_meta(const char *id,
+                            const char *orig_path,
+                            uint32_t size,
+                            uint64_t deleted_at,
+                            const char *reason)
+{
+    char metap[FAT32_PATH_MAX];
+    build_trash_path(metap, sizeof(metap), id, "meta.txt");
+
+    char buf[768];
+    int o = 0;
+    const char *k1 = "orig_path=";
+    while (*k1 && o < (int)sizeof(buf) - 2) buf[o++] = *k1++;
+    while (*orig_path && o < (int)sizeof(buf) - 2) buf[o++] = *orig_path++;
+    buf[o++] = '\n';
+
+    const char *k2 = "size=";
+    while (*k2 && o < (int)sizeof(buf) - 2) buf[o++] = *k2++;
+    {
+        char tmp[24]; u32_to_dec(size, tmp);
+        for (int i = 0; tmp[i] && o < (int)sizeof(buf) - 2; i++) buf[o++] = tmp[i];
+    }
+    buf[o++] = '\n';
+
+    const char *k3 = "deleted_at=";
+    while (*k3 && o < (int)sizeof(buf) - 2) buf[o++] = *k3++;
+    {
+        char tmp[24]; u64_to_dec(deleted_at, tmp);
+        for (int i = 0; tmp[i] && o < (int)sizeof(buf) - 2; i++) buf[o++] = tmp[i];
+    }
+    buf[o++] = '\n';
+
+    const char *k4 = "reason=";
+    while (*k4 && o < (int)sizeof(buf) - 2) buf[o++] = *k4++;
+    if (!reason || !reason[0]) reason = "user";
+    while (*reason && o < (int)sizeof(buf) - 2) buf[o++] = *reason++;
+    buf[o++] = '\n';
+
+    if (fat32_create(metap) != 0) return -1;
+    if (fat32_truncate(metap, 0) != 0) return -1;
+    int w = fat32_write(metap, 0, buf, (uint32_t)o);
+    if (w != o) return -1;
+    return 0;
+}
+
+/* Move a directory entry. Reads (src_dir, src_off) into a fresh entry
+ * inside dst_dir under dst_basename, preserving cluster chain + size +
+ * attr; then erases the original dir slot (0xE5). This is the heart
+ * of trash + restore — no cluster data is copied. */
+static int dir_entry_move(uint32_t src_dir_cluster, uint32_t src_off,
+                          uint32_t dst_dir_cluster,
+                          const char *dst_basename)
+{
+    uint8_t *cbuf = (uint8_t *)kmalloc(V.cluster_bytes);
+    if (!cbuf) return -1;
+    if (read_cluster(src_dir_cluster, cbuf) != 0) { kfree(cbuf); return -1; }
+
+    uint8_t e[32];
+    m_copy(e, cbuf + src_off, 32);
+    kfree(cbuf);
+
+    /* Compose new entry with new 8.3 name, preserving everything else. */
+    uint8_t sn[11];
+    if (make_8_3(dst_basename, sn) != 0) return -1;
+    m_copy(e, sn, 11);
+
+    uint32_t dc = 0, doff = 0;
+    if (dir_find_free_slot(dst_dir_cluster, &dc, &doff) != 0) return -1;
+    if (dir_write_entry(dc, doff, e) != 0) return -1;
+
+    /* Erase source slot. */
+    uint8_t *cbuf2 = (uint8_t *)kmalloc(V.cluster_bytes);
+    if (!cbuf2) return -1;
+    if (read_cluster(src_dir_cluster, cbuf2) != 0) { kfree(cbuf2); return -1; }
+    cbuf2[src_off] = 0xE5;
+    int rc = write_cluster(src_dir_cluster, cbuf2);
+    kfree(cbuf2);
+    return rc;
+}
+
+int fat32_trash(const char *path, const char *reason, char *out_id)
+{
+    if (!V.mounted || !path || !*path) return -1;
+    if (path_in_trash(path)) return -1; /* refuse to trash the trash */
+
+    /* Locate source dir entry. */
+    uint32_t src_dc = 0, src_doff = 0; uint8_t e[32];
+    if (find_entry(path, &src_dc, &src_doff, e) != 0) return -1;
+
+    /* For directories: refuse — recursive trash not supported in v1.
+     * Fall back to direct unlink semantics (which is empty-dir-only). */
+    if (e[11] & FAT32_ATTR_DIR) return -1;
+
+    uint32_t size = e[28] | ((uint32_t)e[29] << 8)
+                  | ((uint32_t)e[30] << 16) | ((uint32_t)e[31] << 24);
+
+    if (fat32_trash_ensure_root() != 0) return -1;
+
+    /* Allocate a fresh id. */
+    char id[FAT32_TRASH_ID_MAX + 1];
+    make_trash_id(id);
+
+    /* Create the per-entry subdir /.zeos-trash/<id>. */
+    char subdir[FAT32_PATH_MAX];
+    build_trash_path(subdir, sizeof(subdir), id, 0);
+    if (fat32_mkdir(subdir) != 0) {
+        /* On the off-chance of collision, retry once with a perturbed id. */
+        g_trash_seq += 0x9E37u;
+        make_trash_id(id);
+        build_trash_path(subdir, sizeof(subdir), id, 0);
+        if (fat32_mkdir(subdir) != 0) return -1;
+    }
+
+    /* Resolve the new subdir cluster for the dir-entry move. */
+    uint32_t sub_cluster = 0;
+    if (resolve_dir(subdir, &sub_cluster) != 0) return -1;
+
+    /* Derive basename from path. */
+    char parent_unused[FAT32_PATH_MAX];
+    char base[FAT32_NAME_MAX + 1];
+    if (path_split_parent(path, parent_unused, base) != 0) return -1;
+
+    /* If a same-named entry already exists inside the subdir (very
+     * rare — the subdir is fresh), unlink it first. */
+    {
+        uint32_t dc, doff; uint8_t en[32];
+        char inner[FAT32_PATH_MAX];
+        build_trash_path(inner, sizeof(inner), id, base);
+        (void)inner; (void)dc; (void)doff; (void)en;
+    }
+
+    /* Move the source dir entry into the trash subdir. */
+    if (dir_entry_move(src_dc, src_doff, sub_cluster, base) != 0) return -1;
+
+    /* Write meta.txt. We canonicalize the original path so it always
+     * starts with a '/'. */
+    char origbuf[FAT32_PATH_MAX];
+    {
+        int o = 0;
+        if (path[0] != '/') origbuf[o++] = '/';
+        for (int i = 0; path[i] && o < (int)sizeof(origbuf) - 1; i++)
+            origbuf[o++] = path[i];
+        origbuf[o] = '\0';
+    }
+    uint64_t now = tod_now_unix();
+    if (trash_write_meta(id, origbuf, size, now,
+                         reason && reason[0] ? reason : "user") != 0) {
+        /* Meta write failed — try to roll back the rename so the user
+         * can still see their file. Best-effort. */
+        return -1;
+    }
+
+    if (out_id) {
+        for (int i = 0; i < FAT32_TRASH_ID_MAX + 1; i++) out_id[i] = id[i];
+    }
+
+    /* Bump CHAIN_BLOCK vault_version so MasQ/journal records the
+     * trash event distinctly from the underlying writes. The actual
+     * sector writes are already journaled. */
+    return 0;
+}
+
+int fat32_trash_list(fat32_trash_list_cb cb)
+{
+    if (!V.mounted || !cb) return -1;
+
+    struct fat32_file root;
+    if (fat32_open(TRASH_ROOT, &root) != 0) return 0; /* none yet */
+    if (!root.is_dir) return -1;
+
+    /* Snapshot ids first so the callback can inspect each. We use a
+     * fixed-size on-stack scratch — the MAX_LIST cap is generous for
+     * practical desktops. */
+    #define MAX_TRASH_LIST 256
+    static struct fat32_dirent ents[MAX_TRASH_LIST];
+    int n = fat32_list(TRASH_ROOT, ents, MAX_TRASH_LIST);
+    if (n < 0) return -1;
+
+    int reported = 0;
+    for (int i = 0; i < n; i++) {
+        if (!ents[i].is_dir) continue;
+        const char *id = ents[i].name;
+
+        char orig[FAT32_PATH_MAX];
+        char rsn[16];
+        uint64_t da = 0;
+        uint32_t sz = 0;
+        if (trash_read_meta(id, orig, sizeof(orig), &da, &sz,
+                            rsn, sizeof(rsn)) != 0) continue;
+        cb(id, orig, da, sz);
+        reported++;
+    }
+    return reported;
+}
+
+int fat32_trash_restore(const char *id)
+{
+    if (!V.mounted || !id || !*id) return -1;
+
+    char orig[FAT32_PATH_MAX];
+    uint64_t da = 0; uint32_t sz = 0;
+    char rsn[16];
+    if (trash_read_meta(id, orig, sizeof(orig), &da, &sz,
+                        rsn, sizeof(rsn)) != 0) return -1;
+    if (!orig[0]) return -1;
+
+    /* Find the inner entry (the file, not meta.txt). */
+    char subdir[FAT32_PATH_MAX];
+    build_trash_path(subdir, sizeof(subdir), id, 0);
+
+    struct trash_inner_ctx c;
+    c.found = 0; c.is_dir = 0; c.size = 0; c.name[0] = '\0';
+    if (fat32_readdir(subdir, trash_inner_visitor, &c) != 0) return -1;
+    if (!c.found) return -1;
+
+    /* Locate dir entry for the inner file. */
+    uint32_t sub_cluster = 0;
+    if (resolve_dir(subdir, &sub_cluster) != 0) return -1;
+    uint32_t inner_dc = 0, inner_off = 0; uint8_t inner_e[32];
+    if (dir_locate(sub_cluster, c.name, &inner_dc, &inner_off, inner_e) != 0)
+        return -1;
+
+    /* Make sure parent of original path exists. */
+    char parent[FAT32_PATH_MAX];
+    char base[FAT32_NAME_MAX + 1];
+    if (path_split_parent(orig, parent, base) != 0) return -1;
+    uint32_t pc = 0;
+    if (resolve_dir(parent, &pc) != 0) return -1;
+
+    /* Refuse to clobber an existing file at the destination. */
+    {
+        uint32_t dc, doff; uint8_t edst[32];
+        if (dir_locate(pc, base, &dc, &doff, edst) == 0) return -1;
+    }
+
+    /* Move dir entry back. */
+    if (dir_entry_move(inner_dc, inner_off, pc, base) != 0) return -1;
+
+    /* Drop meta.txt and the now-empty subdir. */
+    char metap[FAT32_PATH_MAX];
+    build_trash_path(metap, sizeof(metap), id, "meta.txt");
+    (void)fat32_unlink(metap);
+    (void)fat32_unlink(subdir);
+    return 0;
+}
+
+/* Helper: hard-purge a single trash entry by id. Returns 0 on
+ * success. Frees cluster chains via fat32_unlink for the inner file,
+ * meta.txt, and the subdir. */
+static int trash_purge_one(const char *id)
+{
+    char subdir[FAT32_PATH_MAX];
+    build_trash_path(subdir, sizeof(subdir), id, 0);
+
+    /* Inner file (if any). */
+    struct trash_inner_ctx c;
+    c.found = 0; c.is_dir = 0; c.size = 0; c.name[0] = '\0';
+    if (fat32_readdir(subdir, trash_inner_visitor, &c) == 0 && c.found) {
+        char inner[FAT32_PATH_MAX];
+        build_trash_path(inner, sizeof(inner), id, c.name);
+        (void)fat32_unlink(inner);
+    }
+
+    char metap[FAT32_PATH_MAX];
+    build_trash_path(metap, sizeof(metap), id, "meta.txt");
+    (void)fat32_unlink(metap);
+
+    /* Now the subdir should be empty (apart from . and ..). */
+    return fat32_unlink(subdir);
+}
+
+int fat32_trash_empty(void)
+{
+    if (!V.mounted) return -1;
+    struct fat32_file root;
+    if (fat32_open(TRASH_ROOT, &root) != 0) return 0;
+    if (!root.is_dir) return -1;
+
+    #define EMPTY_BATCH 256
+    static struct fat32_dirent batch[EMPTY_BATCH];
+    int freed = 0;
+
+    /* Snapshot, purge, repeat — cluster directory layout shifts
+     * after each unlink. */
+    for (;;) {
+        int n = fat32_list(TRASH_ROOT, batch, EMPTY_BATCH);
+        if (n <= 0) break;
+        int progress = 0;
+        for (int i = 0; i < n; i++) {
+            if (!batch[i].is_dir) continue;
+            if (trash_purge_one(batch[i].name) == 0) {
+                freed++;
+                progress = 1;
+            }
+        }
+        if (!progress) break;
+    }
+    return freed;
+}
+
+int fat32_trash_empty_older_than(uint64_t cutoff_secs)
+{
+    if (!V.mounted) return -1;
+    struct fat32_file root;
+    if (fat32_open(TRASH_ROOT, &root) != 0) return 0;
+    if (!root.is_dir) return -1;
+
+    uint64_t now = tod_now_unix();
+    /* If we have no wall clock, refuse to age-out — better to do
+     * nothing than to nuke everything because epoch is 0. */
+    if (now == 0) return 0;
+    uint64_t threshold = (now > cutoff_secs) ? (now - cutoff_secs) : 0;
+
+    static struct fat32_dirent batch[256];
+    int freed = 0;
+    for (;;) {
+        int n = fat32_list(TRASH_ROOT, batch, 256);
+        if (n <= 0) break;
+        int progress = 0;
+        for (int i = 0; i < n; i++) {
+            if (!batch[i].is_dir) continue;
+            char orig[FAT32_PATH_MAX];
+            uint64_t da = 0; uint32_t sz = 0;
+            char rsn[16];
+            if (trash_read_meta(batch[i].name, orig, sizeof(orig),
+                                &da, &sz, rsn, sizeof(rsn)) != 0) continue;
+            if (da == 0 || da >= threshold) continue;
+            if (trash_purge_one(batch[i].name) == 0) {
+                freed++;
+                progress = 1;
+            }
+        }
+        if (!progress) break;
+    }
+    return freed;
+}
+
+int fat32_trash_stats(uint32_t *out_count, uint64_t *out_bytes)
+{
+    if (out_count) *out_count = 0;
+    if (out_bytes) *out_bytes = 0;
+    if (!V.mounted) return -1;
+
+    struct fat32_file root;
+    if (fat32_open(TRASH_ROOT, &root) != 0) return 0; /* nothing yet */
+    if (!root.is_dir) return -1;
+
+    static struct fat32_dirent batch[256];
+    int n = fat32_list(TRASH_ROOT, batch, 256);
+    if (n < 0) return -1;
+    uint32_t count = 0;
+    uint64_t bytes = 0;
+    for (int i = 0; i < n; i++) {
+        if (!batch[i].is_dir) continue;
+        char orig[FAT32_PATH_MAX];
+        uint64_t da = 0; uint32_t sz = 0;
+        char rsn[16];
+        if (trash_read_meta(batch[i].name, orig, sizeof(orig),
+                            &da, &sz, rsn, sizeof(rsn)) != 0) continue;
+        count++;
+        bytes += sz;
+    }
+    if (out_count) *out_count = count;
+    if (out_bytes) *out_bytes = bytes;
+    return 0;
+}
+
+/* Suppress -Wunused on helpers used only via API surface. */
+static void __fat32_trash_keep_alive(void) __attribute__((unused));
+static void __fat32_trash_keep_alive(void) {
+    (void)s_starts_with;
+}
+

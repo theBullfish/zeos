@@ -746,6 +746,25 @@ int chain_registry_init(void)
         if (cb) cb->resolve_interval_ticks = 240;
     }
 
+    /* Trash garbage collector. Wired BEFORE auto-route so MDE can
+     * discover the (trivial) typed pipeline.
+     *
+     * Cadence: ~1 hour. With measured 432-800 tps this lands at
+     * 432*3600 ≈ 1.55M ticks for the slow case and ~2.88M for the
+     * fast case; the chain doesn't need to be precise — just rare.
+     * 1_500_000 ticks is the floor we use.
+     *
+     * The default age threshold is 30 days, configurable in VAULT
+     * key /trash/auto-empty-days (uint32_t, days). */
+    CHAIN_TRASH_GC = chain_create("trash_gc", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_TRASH_GC >= 0) {
+        chain_add_node(CHAIN_TRASH_GC, "auto_empty",
+                       "trash_tick", "trash_gc_freed",
+                       trash_gc_resolve);
+        chain_t *ct = chain_get(CHAIN_TRASH_GC);
+        if (ct) ct->resolve_interval_ticks = 1500000u;
+    }
+
     /* ── Step 5: Auto-route by type matching ────────────────────── */
     /*
      * MDE scans all chains, finds output_type == input_type matches,
