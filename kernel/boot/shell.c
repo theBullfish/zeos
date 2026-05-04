@@ -44,6 +44,7 @@
 #include "persona_filter.h"
 #include "persona_anim.h"
 #include "usb_cdc.h"
+#include "hda.h"
 #include "fat32.h"
 
 #define CMD_BUF_SIZE 256
@@ -194,6 +195,7 @@ static void cmd_fetch(const char *args);
 static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
+static void cmd_beep(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
@@ -284,6 +286,7 @@ static const struct shell_cmd commands[] = {
 
     /* Full only — deep system commands */
     {"lspci",   "list PCI/PCIe devices (raw)",    cmd_lspci,   VIS_FULL},
+    {"beep",    "play a 440 Hz tone via HDA audio", cmd_beep,   VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
     /* FAT32 (USB / SD / ESP) read-only */
@@ -1947,6 +1950,54 @@ extern int vault_read(const char *path, void *buf, uint32_t size);
 extern int vault_delete(const char *path);
 extern int dns_resolve(const char *hostname, struct ipv4_addr *out);
 
+/* Play 200 ms of 440 Hz triangle-approximated sine through HDA audio.
+ * Triangle (4 line segments per period) sounds tonal at 440 Hz and
+ * avoids needing a sin LUT. 5 ms attack/release ramp kills the click. */
+static void cmd_beep(const char *args)
+{
+    (void)args;
+    if (!hda_ready()) {
+        kputs("hda: not ready (");
+        kputs(hda_status());
+        kputs(")\n");
+        return;
+    }
+
+    const int sr     = 48000;
+    const int frames = sr / 5;     /* 200 ms */
+    const int freq   = 440;
+
+    static int16_t buf[9600 * 2]; /* 38 KB; not on stack */
+
+    uint32_t step  = ((uint64_t)freq * 4096ULL * 65536ULL) / (uint32_t)sr;
+    uint32_t phase = 0;
+    int env_frames = sr / 200;     /* 5 ms */
+
+    for (int i = 0; i < frames; i++) {
+        uint32_t p = (phase >> 16) & 4095;
+        int32_t s;
+        if (p < 1024)        s =  (int32_t)(p) * 24;
+        else if (p < 2048)   s =  (int32_t)(2047 - p) * 24;
+        else if (p < 3072)   s = -(int32_t)(p - 2048) * 24;
+        else                 s = -(int32_t)(4095 - p) * 24;
+
+        int amp = 256;
+        if (i < env_frames)               amp = (256 * i) / env_frames;
+        else if (i > frames - env_frames) amp = (256 * (frames - i)) / env_frames;
+        int32_t v = (s * amp) >> 8;
+        if (v > 32767)  v =  32767;
+        if (v < -32768) v = -32768;
+        buf[i*2 + 0] = (int16_t)v;
+        buf[i*2 + 1] = (int16_t)v;
+        phase += step;
+    }
+
+    kputs("hda: playing 440 Hz, 200 ms ...");
+    int rc = hda_play_pcm(buf, frames, sr);
+    if (rc == 0) kputs(" done\n");
+    else { kputs(" error rc="); kput_dec((uint64_t)(int64_t)rc); kputs("\n"); }
+}
+
 static void cmd_selftest(const char *args)
 {
     (void)args;
@@ -2033,6 +2084,11 @@ vault_done:
             fails++;
         }
     }
+
+    /* HDA audio */
+    kputs("  Audio (HDA) ........... ");
+    if (hda_ready()) { kputs("HDA detected\n"); passes++; }
+    else             { kputs("not available ("); kputs(hda_status()); kputs(")\n"); }
 
     /* USB MSC: report presence + size in MB. */
     kputs("  USB MSC ............... ");

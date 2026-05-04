@@ -360,6 +360,16 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Block device dispatcher — picks NVMe, AHCI, or USB-MSC. */
     block_init();
 
+    /* Intel HD Audio -- minimum-viable controller + one output stream.
+     * Walks PCI class 0x04 sub 0x03, brings up CORB/RIRB, locates an
+     * analog output path on the first responding codec, programs SD0.
+     * Failure is non-fatal: the OS just stays silent. */
+    {
+        extern int hda_init(void);
+        if (hda_init() == 0) kputs("Audio: HDA ready\n");
+        else                 kputs("Audio: HDA not available\n");
+    }
+
     /* Try to auto-mount a FAT32 volume on the active block device.
      * USB sticks usually have no partition table (whole-disk FAT32);
      * NVMe/AHCI installs use GPT with the ESP as partition 1. The
