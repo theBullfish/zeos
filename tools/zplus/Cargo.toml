@@ -1,0 +1,16 @@
+[package]
+name = "zplus"
+version = "0.0.1"
+edition = "2021"
+description = "Z+ language compiler — bootstrap frontend"
+publish = false
+
+[lib]
+name = "zplus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zplus-lex"
+path = "src/bin/zplus_lex.rs"
+
+[dev-dependencies]
