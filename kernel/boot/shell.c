@@ -17,6 +17,9 @@
 
 #include "shell.h"
 #include "usb_msc.h"
+#include "block.h"
+#include "nvme.h"
+#include "ahci.h"
 #include "persona.h"
 #include "theme.h"
 #include "kprint.h"
@@ -205,6 +208,8 @@ static void cmd_usb_serial(const char *args);
 static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
+static void cmd_lsdrives(const char *args);
+static const char *drive_kind_label(int k);
 
 /* FAT32 read-only */
 static void cmd_fat_mount(const char *args);
@@ -267,6 +272,7 @@ static const struct shell_cmd commands[] = {
     {"cdc-send","send text to USB serial (cdc-send <idx> <text>)", cmd_cdc_send, VIS_ALWAYS},
     {"cdc-recv","read pending bytes from USB serial (cdc-recv <idx>)", cmd_cdc_recv, VIS_ALWAYS},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
+    {"lsdrives","list storage drives (NVMe / AHCI / USB MSC)", cmd_lsdrives, VIS_ALWAYS},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
@@ -1946,6 +1952,28 @@ static void cmd_selftest(const char *args)
     (void)args;
     int passes = 0, fails = 0;
     kputs("\n  Zeos self-test\n  ──────────────\n");
+
+    /* Storage census before any disk operation */
+    {
+        int n = block_drive_count();
+        kputs("  Storage: ");
+        kput_dec(n);
+        kputs(" drive(s)\n");
+        for (int i = 0; i < n; i++) {
+            block_drive_info_t info;
+            if (block_drive_info(i, &info) != 0) continue;
+            uint64_t mb = (info.sectors * (uint64_t)info.sector_size) / (1024ULL * 1024ULL);
+            kputs("    [");
+            kput_dec(i);
+            kputs("] ");
+            kputs(drive_kind_label(info.kind));
+            kputs(" ");
+            kput_dec(mb);
+            kputs(" MB");
+            if (info.model[0]) { kputs(" "); kputs(info.model); }
+            kputs("\n");
+        }
+    }
 
     /* VAULT: write+read+delete round-trip at root */
     kputs("  VAULT round-trip ...... ");
