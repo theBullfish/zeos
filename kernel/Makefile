@@ -123,6 +123,9 @@ FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
 FW_RTL8188EU = lib/firmware/rtl8188eufw.bin
 FW_OBJS      = lib/firmware/rtl8188eufw.o
 
+# AP bring-up trampoline (assembled flat binary embedded as ELF object).
+SMP_OBJS    = boot/smp_trampoline.o
+
 boot/font_inter.o: $(FONT_INTER)
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
 		--redefine-sym _binary____assets_fonts_inter_Inter_Regular_ttf_start=_binary_inter_regular_ttf_start \
@@ -144,6 +147,18 @@ lib/firmware/rtl8188eufw.o: $(FW_RTL8188EU)
 		--output-target=elf64-x86-64 \
 		--binary-architecture=i386:x86-64 \
 		rtl8188eufw.bin rtl8188eufw.o
+
+# AP bring-up trampoline. NASM assembles the 16->32->64 trampoline
+# to a flat 4 KiB binary; objcopy embeds it as an ELF section so the
+# kernel can copy it verbatim to physical 0x8000 before SIPI.
+boot/smp_trampoline.bin: boot/smp_trampoline.asm
+	nasm -f bin -o $@ $<
+
+boot/smp_trampoline.o: boot/smp_trampoline.bin
+	cd boot && $(OBJCOPY) --input-target=binary \
+		--output-target=elf64-x86-64 \
+		--binary-architecture=i386:x86-64 \
+		smp_trampoline.bin smp_trampoline.o
 
 # Output
 TARGET   = BOOTZ.EFI
@@ -189,9 +204,9 @@ lib/lodepng/lodepng.o: lib/lodepng/lodepng.c
 -include $(OBJS:.o=.d)
 
 # Link to shared object (includes embedded font and firmware blobs)
-$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS)
+$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) -o $@ $(LIBS)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so
@@ -299,4 +314,5 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo ""
 
 clean:
-	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(FW_OBJS) $(BUILDDIR)
+	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) \
+	       boot/smp_trampoline.bin $(BUILDDIR)

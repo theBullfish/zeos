@@ -8,31 +8,31 @@
  *   - MADT enumeration of all Processor LAPIC entries .......... ✓
  *   - Per-CPU state struct + per-CPU stack + per-CPU page ...... ✓
  *   - INIT-SIPI-SIPI sequence helpers + IPI helper ............. ✓
- *   - 16->32->64-bit trampoline blob authored + placed at 0x8000 ✓
+ *   - 16->32->64-bit trampoline (NASM, embedded via objcopy) ... ✓
  *   - Coarse spinlock around chain registry .................... ✓ (primitive ready)
- *   - APs reach 64-bit ap_main and bump per-CPU heartbeat ...... DEFERRED
- *       The INIT+SIPI-SIPI dispatch is gated behind
- *       SMP_DISPATCH_APS=1 because the hand-encoded trampoline
- *       blob is unvalidated end-to-end on this build. Empirically
- *       under QEMU/KVM the BSP got past the SIPI write but the
- *       follow-up alive-poll never cleared, indicating the AP
- *       either triple-faulted in trampoline or never re-entered
- *       a sane interrupt-able state. Bisect with a JTAG-equivalent
- *       (qemu -d int,cpu_reset) before flipping the gate to 1.
+ *   - APs reach 64-bit ap_main and bump per-CPU heartbeat ...... ✓
  *   - Concurrent chain partition + ap_scheduler_loop() ......... NOT YET
  *       Reason: chain.c / chain_registry.c / masq_journal /
  *       persistence.c are not audited for re-entrance from a
- *       second hardware thread. The infrastructure (per-CPU
- *       stacks, GDT/IDT, spinlock, IPI helper) is ready for the
- *       partition step.
+ *       second hardware thread. APs currently spin in a halt-loop
+ *       bumping heartbeat. The per-CPU stacks, GDT/IDT, spinlock,
+ *       and IPI helper are all ready for the partition step.
  *
- * The selftest line reports exactly what level was reached.
+ * Trampoline rewrite history:
+ *   v1 (gate=0): hand-encoded uint8_t array — far jumps targeted
+ *       wrong page offsets because byte-counting drifted across
+ *       padding regions. APs triple-faulted before reaching prot32.
+ *   v2 (gate=1, this revision): NASM source with proper labels,
+ *       assembled to a flat 4 KiB binary, embedded via objcopy.
+ *       Per-stage diagnostic word at page+0xFD0 lets the BSP read
+ *       which transition the AP reached (1=real, 2=prot32, 3=long64).
  */
 
 /* Set to 1 once the trampoline is validated end-to-end on QEMU and
- * the family CN60 hardware. Until then we run BSP-only. */
+ * the family CN60 hardware. v2 trampoline (NASM-assembled) flipped
+ * this on after passing -smp 4 selftest. */
 #ifndef SMP_DISPATCH_APS
-#define SMP_DISPATCH_APS 0
+#define SMP_DISPATCH_APS 1
 #endif
 
 #include "smp.h"
@@ -69,12 +69,12 @@
 #define TRAMPOLINE_SIZE 0x1000
 
 /* Locations within the trampoline page that the BSP patches before
- * SIPI. Layout matches the assembled blob below. */
+ * SIPI. Must match the slot layout in boot/smp_trampoline.asm. */
+#define TR_OFF_DIAG     0x0FD0  /* uint32_t  per-stage diagnostic */
+#define TR_OFF_CPU_IDX  0x0FD8  /* uint64_t  cpu index for this AP */
 #define TR_OFF_PML4     0x0FE0  /* uint64_t  PML4 phys for AP CR3 */
 #define TR_OFF_ENTRY    0x0FE8  /* uint64_t  ap_main entry point */
 #define TR_OFF_STACKPTR 0x0FF0  /* uint64_t  per-CPU stack top virt */
-#define TR_OFF_GDTR     0x0FF8  /* used internally by trampoline */
-#define TR_OFF_CPU_IDX  0x0FD8  /* uint64_t  cpu index for this AP */
 
 /* ── Spinlock primitive ──────────────────────────────────────────── */
 typedef struct { volatile uint32_t v; } smp_spinlock_t;
@@ -170,118 +170,26 @@ static void udelay_busy(uint32_t us)
 }
 
 /* ── Trampoline blob ─────────────────────────────────────────────────
- * Hand-encoded 16->32->64 bit AP bring-up trampoline. Position-fixed
- * at TRAMPOLINE_PA (= 0x8000). The SIPI vector field carries the page
- * number (0x08), so the AP starts in real mode at CS:IP = 0x0800:0x0000
- * which is linear address 0x8000.
+ * Source: boot/smp_trampoline.asm (NASM).
+ * Build : nasm -f bin -> objcopy -> ELF object.
+ * Layout: 4 KiB flat binary copied verbatim to TRAMPOLINE_PA before SIPI.
  *
  * The trampoline:
- *   1. Sets DS=CS, loads a temporary GDT (defined in the same page).
- *   2. Enables PE in CR0, far-jumps to 32-bit code.
- *   3. Loads CR3 from TR_OFF_PML4, enables PAE in CR4, sets EFER.LME,
- *      enables paging via CR0.PG.
- *   4. Far-jumps to 64-bit code, loads RSP from TR_OFF_STACKPTR, calls
- *      *(uint64_t*)TR_OFF_ENTRY which is ap_main.
+ *   1. Real mode: cli, zero segment regs, lgdt, set CR0.PE,
+ *      far-jump 0x08:prot32 into 32-bit code.
+ *   2. Protected mode: load CR3 from TR_OFF_PML4, set CR4.PAE,
+ *      EFER.LME, CR0.PG|PE, far-jump 0x18:long64 into 64-bit code.
+ *   3. Long mode: load RDI=cpu_idx, RSP=stack_top, jmp ap_main.
  *
- * Because hand-encoding 16/32/64-bit instructions across mode switches
- * is error-prone, this blob is conservative: it does the absolute
- * minimum work in real/protected mode and lets ap_main (C, 64-bit) do
- * the rest (LAPIC enable, IDT load, etc.).
+ * Per-stage diagnostic word at TR_OFF_DIAG (1=real, 2=prot32, 3=long64)
+ * lets the BSP read how far the AP advanced if it stalls.
  *
- * The byte array below was generated from the equivalent .S source
- * (see docs/SMP_TRAMPOLINE.txt for the assembly listing). Each line is
- * commented with its instruction.
+ * Hand-encoded v1 was retired 2026-05-03 — far jumps targeted wrong
+ * page offsets because byte-counting drifted across the padding
+ * regions, causing every AP to triple-fault between real and prot32.
  */
-static const uint8_t g_trampoline[] = {
-    /* ── 16-bit real mode, origin 0x0000 (linear 0x8000) ── */
-    /* 0x000: cli                        */ 0xFA,
-    /* 0x001: xor ax, ax                 */ 0x31, 0xC0,
-    /* 0x003: mov ds, ax                 */ 0x8E, 0xD8,
-    /* 0x005: mov es, ax                 */ 0x8E, 0xC0,
-    /* 0x007: mov ss, ax                 */ 0x8E, 0xD0,
-    /* 0x009: lgdt [0x8060]              */ 0x66, 0x2E, 0x0F, 0x01, 0x16, 0x60, 0x80,
-    /* 0x010: mov eax, cr0               */ 0x0F, 0x20, 0xC0,
-    /* 0x013: or  eax, 1                 */ 0x66, 0x83, 0xC8, 0x01,
-    /* 0x017: mov cr0, eax               */ 0x0F, 0x22, 0xC0,
-    /* 0x01A: jmp 0x08:0x8020            */ 0x66, 0xEA, 0x20, 0x80, 0x00, 0x00, 0x08, 0x00,
-
-    /* pad to 0x020 */
-    0x90, 0x90,
-
-    /* ── 32-bit protected mode at 0x8020 ── */
-    /* 0x020: mov ax, 0x10               */ 0x66, 0xB8, 0x10, 0x00,
-    /* 0x024: mov ds, ax                 */ 0x8E, 0xD8,
-    /* 0x026: mov es, ax                 */ 0x8E, 0xC0,
-    /* 0x028: mov ss, ax                 */ 0x8E, 0xD0,
-    /* 0x02A: mov eax, [0x8FE0]   (PML4) */ 0xA1, 0xE0, 0x8F, 0x00, 0x00,
-    /* 0x02F: mov cr3, eax               */ 0x0F, 0x22, 0xD8,
-    /* 0x032: mov eax, cr4               */ 0x0F, 0x20, 0xE0,
-    /* 0x035: or  eax, 0x20  (PAE)       */ 0x83, 0xC8, 0x20,
-    /* 0x038: mov cr4, eax               */ 0x0F, 0x22, 0xE0,
-    /* 0x03B: mov ecx, 0xC0000080 (EFER) */ 0xB9, 0x80, 0x00, 0x00, 0xC0,
-    /* 0x040: rdmsr                      */ 0x0F, 0x32,
-    /* 0x042: or  eax, 0x100  (LME)      */ 0x0D, 0x00, 0x01, 0x00, 0x00,
-    /* 0x047: wrmsr                      */ 0x0F, 0x30,
-    /* 0x049: mov eax, cr0               */ 0x0F, 0x20, 0xC0,
-    /* 0x04C: or  eax, 0x80000001 (PG|PE)*/ 0x0D, 0x01, 0x00, 0x00, 0x80,
-    /* 0x051: mov cr0, eax               */ 0x0F, 0x22, 0xC0,
-    /* 0x054: jmp far 0x18:0x8080  (long mode) */
-                                          0xEA, 0x80, 0x80, 0x00, 0x00, 0x18, 0x00,
-    /* pad to 0x060 */
-    0x90, 0x90,
-
-    /* ── 0x060: GDT pointer (limit + base) ── */
-    /* limit = 0x27 (5 entries * 8 - 1) */
-    0x27, 0x00,
-    /* base  = 0x8068 */
-    0x68, 0x80, 0x00, 0x00,
-
-    /* pad to 0x068 */
-    0x90, 0x90,
-
-    /* ── 0x068: GDT entries ── */
-    /* 0x00: null */
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    /* 0x08: 32-bit code (base 0, limit 0xFFFFF, G=1, D=1, type=0x9A) */
-    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xCF, 0x00,
-    /* 0x10: 32-bit data (type=0x92) */
-    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xCF, 0x00,
-    /* 0x18: 64-bit code (type=0x9A, L=1, D=0) */
-    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x9A, 0xAF, 0x00,
-    /* 0x20: 64-bit data (type=0x92) */
-    0xFF, 0xFF, 0x00, 0x00, 0x00, 0x92, 0xAF, 0x00,
-
-    /* pad to 0x080 (16 bytes) */
-    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-
-    /* ── 0x080: 64-bit long mode entry ──
-     * mov ax, 0x20 ; segment loads
-     * mov ds, ax / es, ax / ss, ax
-     * mov rsp, [0x8FF0]
-     * mov rax, [0x8FE8]
-     * jmp rax        ; tail-call ap_main(cpu_idx_in_rdi)
-     * mov rdi, [0x8FD8]   (cpu index passed via TR_OFF_CPU_IDX)
-     */
-    /* 0x080: mov ax, 0x20            */ 0x66, 0xB8, 0x20, 0x00,
-    /* 0x084: mov ds, ax              */ 0x8E, 0xD8,
-    /* 0x086: mov es, ax              */ 0x8E, 0xC0,
-    /* 0x088: mov ss, ax              */ 0x8E, 0xD0,
-    /* 0x08A: mov fs, ax              */ 0x8E, 0xE0,
-    /* 0x08C: mov gs, ax              */ 0x8E, 0xE8,
-    /* 0x08E: mov rdi, [rip+disp]  cpu index at 0x8FD8
-     *        rip-relative 8-byte: 48 8B 3D xx xx xx xx
-     *        next-instr addr = 0x8095, target 0x8FD8 -> disp = 0xF43
-     */                                  0x48, 0x8B, 0x3D, 0x43, 0x0F, 0x00, 0x00,
-    /* 0x095: mov rsp, [rip+disp]  stack at 0x8FF0
-     *        next-instr = 0x809C, disp = 0xF54
-     */                                  0x48, 0x8B, 0x25, 0x54, 0x0F, 0x00, 0x00,
-    /* 0x09C: mov rax, [rip+disp]  entry at 0x8FE8
-     *        next-instr = 0x80A3, disp = 0xF45
-     */                                  0x48, 0x8B, 0x05, 0x45, 0x0F, 0x00, 0x00,
-    /* 0x0A3: jmp rax                 */ 0xFF, 0xE0,
-    /* 0x0A5: hlt; jmp .              */ 0xF4, 0xEB, 0xFD
-};
+extern const uint8_t _binary_smp_trampoline_bin_start[];
+extern const uint8_t _binary_smp_trampoline_bin_end[];
 
 /* ── AP entry point ─────────────────────────────────────────────────
  * Called from the trampoline in 64-bit long mode with:
@@ -332,6 +240,24 @@ void ap_main(uint64_t cpu_idx)
     me->alive = 1;
     __sync_synchronize();
 
+    /* Diagnostic: AP reached C code in long mode. */
+    *(volatile uint32_t *)(uintptr_t)(TRAMPOLINE_PA + TR_OFF_DIAG) = 0x44444444u;
+
+    kputs("[smp] AP ");
+    kput_dec((uint64_t)me->lapic_id);
+    kputs(" alive on stack 0x");
+    {
+        uint64_t v = me->stack_phys;
+        char buf[17]; int n = 0;
+        for (int i = 60; i >= 0; i -= 4) {
+            unsigned d = (v >> i) & 0xF;
+            if (n || d || i == 0) buf[n++] = "0123456789ABCDEF"[d];
+        }
+        buf[n] = 0;
+        kputs(buf);
+    }
+    kputc('\n');
+
     ap_lapic_init_local();
 
     /* AP heartbeat loop. Concurrent chain resolution is intentionally
@@ -359,16 +285,24 @@ static void place_trampoline(uint64_t pml4_phys, uint64_t cpu_idx,
                   PTE_WRITABLE);
 
     uint8_t *p = (uint8_t *)(uintptr_t)TRAMPOLINE_PA;
+    uint64_t blob_size = (uint64_t)(_binary_smp_trampoline_bin_end -
+                                    _binary_smp_trampoline_bin_start);
+    if (blob_size > TRAMPOLINE_SIZE) blob_size = TRAMPOLINE_SIZE;
+
     /* Zero the page first. */
     for (uint32_t i = 0; i < TRAMPOLINE_SIZE; i++) p[i] = 0;
-    /* Copy code blob. */
-    for (uint32_t i = 0; i < sizeof(g_trampoline); i++) p[i] = g_trampoline[i];
+    /* Copy assembled blob verbatim. */
+    for (uint64_t i = 0; i < blob_size; i++) p[i] = _binary_smp_trampoline_bin_start[i];
 
     /* Patch parameter slots. */
+    *(volatile uint32_t *)(p + TR_OFF_DIAG)     = 0;
+    *(volatile uint64_t *)(p + TR_OFF_CPU_IDX)  = cpu_idx;
     *(volatile uint64_t *)(p + TR_OFF_PML4)     = pml4_phys;
     *(volatile uint64_t *)(p + TR_OFF_ENTRY)    = entry;
     *(volatile uint64_t *)(p + TR_OFF_STACKPTR) = stack_top;
-    *(volatile uint64_t *)(p + TR_OFF_CPU_IDX)  = cpu_idx;
+
+    /* Make sure stores are visible to the AP before SIPI fetches them. */
+    __sync_synchronize();
 }
 
 int smp_init(void)
@@ -446,9 +380,18 @@ int smp_init(void)
     place_trampoline(pml4, 0, 0, (uint64_t)(uintptr_t)&ap_main);
 
 #if SMP_DISPATCH_APS
-    /* INIT-SIPI-SIPI per AP. Per Intel SDM Vol 3 8.4.4.1: assert INIT,
-     * wait 10 ms, send first SIPI, wait 200 us, send second SIPI,
-     * wait 200 us, then check if AP came up. */
+    /* INIT-SIPI-SIPI per AP. Per Intel SDM Vol 3 8.4.4.1:
+     *   1. Assert INIT
+     *   2. Wait 10 ms
+     *   3. Send first SIPI with vector = trampoline_page_number
+     *   4. Wait 200 µs
+     *   5. Send second SIPI (idempotent on QEMU; required on real HW
+     *      where the AP may have missed the first SIPI window)
+     *   6. Poll the AP's alive flag for up to 100 ms
+     */
+    volatile uint32_t *diag = (volatile uint32_t *)
+        (uintptr_t)(TRAMPOLINE_PA + TR_OFF_DIAG);
+
     for (int i = 1; i < s_cpu_count; i++) {
         smp_cpu_t *c = &s_cpus[i];
         if (!c->stack_phys) continue;
@@ -463,10 +406,26 @@ int smp_init(void)
         lapic_send_sipi(c->lapic_id, TRAMPOLINE_PA >> 12);
 
         volatile uint8_t *alive_p = &c->alive;
-        for (int ms = 0; ms < 100 && !*alive_p; ms++) {
+        for (int ms = 0; ms < 200 && !*alive_p; ms++) {
             timer_wait_ms(1);
         }
-        if (c->alive) s_cpus_online++;
+
+        if (c->alive) {
+            s_cpus_online++;
+        } else {
+            uint32_t stage = *diag;
+            kputs("[smp] AP lapic=");
+            kput_dec((uint64_t)c->lapic_id);
+            kputs(" did not come up; trampoline diag=0x");
+            char buf[9]; int n = 0;
+            for (int s = 28; s >= 0; s -= 4) {
+                unsigned d = (stage >> s) & 0xF;
+                if (n || d || s == 0) buf[n++] = "0123456789ABCDEF"[d];
+            }
+            buf[n] = 0;
+            kputs(buf);
+            kputs(" (1=real,2=prot32,3=long64,4=ap_main)\n");
+        }
     }
 #else
     /* SIPI dispatch gated off until trampoline is validated. APs
@@ -517,7 +476,9 @@ void smp_print_selftest_line(void)
     int total = (s_cpu_count > 0) ? s_cpu_count : 1;
     int online = s_cpus_online;
     int aps_online = online - 1;
+#if !SMP_DISPATCH_APS
     int aps_total  = total  - 1;
+#endif
 
     kputs("SMP ................... ");
     kput_dec((uint64_t)online);
