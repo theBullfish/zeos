@@ -261,6 +261,7 @@ static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
 static void cmd_preempt_test(const char *args);
+static void cmd_cores(const char *args);
 static void cmd_persistence(const char *args);
 static void cmd_hotplug(const char *args);
 
@@ -619,6 +620,15 @@ static void cmd_preempt_test(const char *args)
     chain_destroy(id);
 }
 
+/* cores: list SMP cores with role/alive/heartbeat. Just delegates to
+ * smp.c so the print formatting stays in one place. */
+static void cmd_cores(const char *args)
+{
+    (void)args;
+    extern void smp_cmd_cores(void);
+    smp_cmd_cores();
+}
+
 /* FAT32 read-only */
 static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
@@ -711,6 +721,7 @@ static const struct shell_cmd commands[] = {
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
     {"preempt-test","verify LAPIC-timer preemption kills a hung chain_resolve", cmd_preempt_test, VIS_DEREZ},
+    {"cores",   "list SMP cores: lapic_id, role, alive, heartbeat",  cmd_cores,    VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|list|connect|forget", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
 

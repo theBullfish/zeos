@@ -657,6 +657,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     kput_dec(timer_tsc_freq() / 1000000);
     kputs(" MHz.\n");
 
+    /* SMP: enumerate APs from MADT, place AP trampoline, INIT-SIPI-SIPI.
+     * BSP-safe: if smp_init returns 1 (single core or AP failure) the
+     * system continues on the BSP. APs reach a 64-bit alive-loop;
+     * concurrent chain resolution is staged but not enabled (see
+     * smp.c top-of-file scope note). */
+    {
+        extern int  smp_init(void);
+        extern void smp_print_selftest_line(void);
+        smp_init();
+        smp_print_selftest_line();
+    }
+
     /* Wall clock: read CMOS RTC and bind to TSC for fractional seconds.
      * If CMOS is absent (some hypervisors) we'll print a TSC-only line
      * here, then persistence_init() will try to load /time/last-known.bin

@@ -91,6 +91,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/gpu_virtio.c \
            boot/gpu_compute.c \
            boot/scheduler.c \
+           boot/smp.c \
            boot/persistence.c \
            boot/hotplug.c \
            boot/suspend.c \
