@@ -41,6 +41,7 @@
 #include "usb_cdc.h"
 #include "usb_msc.h"
 #include "block.h"
+#include "fat32.h"
 #include "net_rtl8188eu.h"
 
 /* Boot info passed from UEFI to kernel */
@@ -358,6 +359,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Block device dispatcher — picks NVMe, AHCI, or USB-MSC. */
     block_init();
+
+    /* Try to auto-mount a FAT32 volume on the active block device.
+     * USB sticks usually have no partition table (whole-disk FAT32);
+     * NVMe/AHCI installs use GPT with the ESP as partition 1. The
+     * automount tries whole-disk first, then walks GPT entries until
+     * one mounts. Failure is non-fatal — `fat-mount` works manually. */
+    if (fat32_automount() == 0) {
+        kputs("FAT32: volume mounted (read-only)\n");
+    } else {
+        kputs("FAT32: no volume auto-mounted\n");
+    }
 
     /* Initialize keyboard */
     kputs("Initializing keyboard... ");

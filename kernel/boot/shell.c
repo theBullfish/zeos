@@ -41,6 +41,7 @@
 #include "persona_filter.h"
 #include "persona_anim.h"
 #include "usb_cdc.h"
+#include "fat32.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -205,6 +206,11 @@ static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 
+/* FAT32 read-only */
+static void cmd_fat_mount(const char *args);
+static void cmd_fat_ls(const char *args);
+static void cmd_fat_cat(const char *args);
+
 /* ── Command table ──────────────────────────────── */
 
 static const struct shell_cmd commands[] = {
@@ -273,6 +279,11 @@ static const struct shell_cmd commands[] = {
     /* Full only — deep system commands */
     {"lspci",   "list PCI/PCIe devices (raw)",    cmd_lspci,   VIS_FULL},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
+
+    /* FAT32 (USB / SD / ESP) read-only */
+    {"fat-mount","mount FAT32 (fat-mount [<drive> <part-lba>])", cmd_fat_mount, VIS_ALWAYS},
+    {"fat-ls",  "list FAT32 directory (fat-ls <path>)", cmd_fat_ls, VIS_ALWAYS},
+    {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -2422,5 +2433,133 @@ static void cmd_cdc_recv(const char *args)
         kputs("\n  ");
         kput_dec((uint64_t)total);
         kputs(" bytes received\n");
+    }
+}
+
+
+/* ── FAT32 read-only commands ────────────────────────────────── */
+
+static uint64_t fat_parse_u64_dec(const char **p)
+{
+    uint64_t v = 0;
+    while (**p == ' ') (*p)++;
+    while (**p >= '0' && **p <= '9') {
+        v = v * 10 + (uint64_t)(**p - '0');
+        (*p)++;
+    }
+    return v;
+}
+
+static void cmd_fat_mount(const char *args)
+{
+    const char *p = args;
+    while (*p == ' ') p++;
+
+    if (!*p) {
+        if (fat32_automount() == 0) {
+            kputs("  fat32: auto-mounted\n");
+        } else {
+            kputs("  fat32: no FAT32 volume found\n");
+            kputs("  Usage: fat-mount <drive> <partition-lba>\n");
+        }
+        return;
+    }
+
+    int drive = 0;
+    while (*p >= '0' && *p <= '9') {
+        drive = drive * 10 + (*p - '0');
+        p++;
+    }
+    while (*p == ' ') p++;
+    uint64_t plba = fat_parse_u64_dec(&p);
+
+    if (fat32_mount(drive, plba) == 0) {
+        kputs("  fat32: mounted\n");
+    } else {
+        kputs("  fat32: mount failed (not FAT32 at LBA ");
+        kput_dec(plba);
+        kputs(")\n");
+    }
+}
+
+static void cmd_fat_ls(const char *args)
+{
+    if (!fat32_mounted()) {
+        kputs("  fat32: not mounted (run 'fat-mount' first)\n");
+        return;
+    }
+    const char *path = args;
+    while (*path == ' ') path++;
+    if (!*path) path = "/";
+
+    struct fat32_dirent *ents =
+        (struct fat32_dirent *)kmalloc(sizeof(struct fat32_dirent) * 64);
+    if (!ents) { kputs("  out of memory\n"); return; }
+
+    int n = fat32_list(path, ents, 64);
+    if (n < 0) {
+        kputs("  fat-ls: not a directory or not found: ");
+        kputs(path);
+        kputs("\n");
+        kfree(ents);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        kputs("  ");
+        if (ents[i].is_dir) kputs("[d] ");
+        else                kputs("    ");
+        kputs(ents[i].name);
+        if (!ents[i].is_dir) {
+            kputs("  (");
+            kput_dec(ents[i].size);
+            kputs(" bytes)");
+        }
+        kputs("\n");
+    }
+    if (n == 0) kputs("  (empty)\n");
+    kfree(ents);
+}
+
+static void cmd_fat_cat(const char *args)
+{
+    if (!fat32_mounted()) {
+        kputs("  fat32: not mounted (run 'fat-mount' first)\n");
+        return;
+    }
+    const char *path = args;
+    while (*path == ' ') path++;
+    if (!*path) {
+        kputs("  Usage: fat-cat <path>\n");
+        return;
+    }
+
+    struct fat32_file f;
+    if (fat32_open(path, &f) != 0) {
+        kputs("  fat-cat: not found: ");
+        kputs(path);
+        kputs("\n");
+        return;
+    }
+    if (f.is_dir) {
+        kputs("  fat-cat: is a directory\n");
+        return;
+    }
+
+    char buf[4096];
+    uint32_t want = sizeof(buf) - 1;
+    if (f.size < want) want = f.size;
+    int got = fat32_read(&f, buf, want);
+    if (got < 0) {
+        kputs("  fat-cat: read failed\n");
+        return;
+    }
+    buf[got] = '\0';
+    kputs("\n");
+    kputs(buf);
+    if (got > 0 && buf[got - 1] != '\n') kputs("\n");
+    if ((uint32_t)got < f.size) {
+        kputs("  ... (");
+        kput_dec(f.size - (uint32_t)got);
+        kputs(" more bytes)\n");
     }
 }
