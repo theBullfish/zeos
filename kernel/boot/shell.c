@@ -73,6 +73,7 @@
 #include "brightness.h"
 #include "bt_hci.h"
 #include "bt_usb.h"
+#include "bt_l2cap.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -258,6 +259,7 @@ static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 static void cmd_wifi_scan(const char *args);
 static void cmd_bt(const char *args);
+static void cmd_bt_l2cap(const char *args);
 static void bt_print_bdaddr(const uint8_t bd[6]);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
@@ -730,6 +732,7 @@ static const struct shell_cmd commands[] = {
     {"wifi",    "RTL8188EU USB WiFi: status|scan|list|connect|forget", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
     {"bt",      "Bluetooth: bt status|scan|connect <addr>|disconnect <addr>", cmd_bt, VIS_DEREZ},
+    {"bt-l2cap","BT L2CAP: list active channels (cid, peer cid, psm, MTU, state)", cmd_bt_l2cap, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
     {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
@@ -3839,6 +3842,26 @@ vault_done:
         if (bn == 4) passes++; else fails++;
     }
 
+    /* L2CAP: signaling channel registered + N channels available. */
+    kputs("  BT L2CAP .............. ");
+    if (l2cap_signaling_ready()) {
+        kput_dec((uint64_t)l2cap_channel_count());
+        kputs(" channels available, signaling registered\n");
+        passes++;
+    } else {
+        kputs("not initialized\n");
+        fails++;
+    }
+    if (CHAIN_BT_L2CAP >= 0) {
+        chain_t *l2c = chain_get(CHAIN_BT_L2CAP);
+        int ln = l2c ? l2c->node_count : 0;
+        kputs("    chain nodes=");
+        kput_dec((uint64_t)ln);
+        kputs("\n");
+        chain_dump(CHAIN_BT_L2CAP);
+        if (ln == 4) passes++; else fails++;
+    }
+
     /* MDE chain: submit a trivial compute_request through CHAIN_MDE
      * and verify (a) the kernel_fn really ran (rc=42), (b)
      * vault_version bumped at least twice (schedule admit +
@@ -5112,6 +5135,69 @@ static void cmd_bt(const char *args)
         return;
     }
     kputs("usage: bt [status|scan|connect <addr>|disconnect <addr>]\n");
+}
+
+static const char *l2cap_state_name(l2cap_state_t s)
+{
+    switch (s) {
+    case L2CAP_STATE_CLOSED:            return "closed";
+    case L2CAP_STATE_WAIT_CONN_RSP:     return "wait-conn-rsp";
+    case L2CAP_STATE_CONFIG:            return "config";
+    case L2CAP_STATE_OPEN:              return "open";
+    case L2CAP_STATE_WAIT_DISCONN_RSP:  return "wait-disc-rsp";
+    }
+    return "?";
+}
+
+static const char *l2cap_flavor_name(l2cap_flavor_t f)
+{
+    switch (f) {
+    case L2CAP_FLAVOR_FIXED:        return "fixed";
+    case L2CAP_FLAVOR_CLASSIC:      return "classic";
+    case L2CAP_FLAVOR_LE_CREDIT:    return "le-credit";
+    }
+    return "?";
+}
+
+static void cmd_bt_l2cap(const char *args)
+{
+    (void)args;
+    if (!l2cap_signaling_ready()) {
+        kputs("bt-l2cap: not initialized\n");
+        return;
+    }
+    l2cap_chan_info_t info[L2CAP_MAX_CHANNELS];
+    int n = l2cap_channels_snapshot(info, L2CAP_MAX_CHANNELS);
+    kputs("L2CAP channels (");
+    kput_dec((uint64_t)n);
+    kputs("):\n");
+    kputs("  cid    peer   psm    handle  mtu(loc/peer)   state          flavor\n");
+    for (int i = 0; i < n; i++) {
+        kputs("  0x");
+        kput_hex(info[i].cid);
+        kputs(" 0x");
+        kput_hex(info[i].peer_cid);
+        kputs(" 0x");
+        kput_hex(info[i].psm);
+        kputs("  0x");
+        kput_hex(info[i].conn_handle);
+        kputs("   ");
+        kput_dec((uint64_t)info[i].local_mtu);
+        kputc('/');
+        kput_dec((uint64_t)info[i].peer_mtu);
+        kputs("    ");
+        kputs(l2cap_state_name(info[i].state));
+        kputs("  ");
+        kputs(l2cap_flavor_name(info[i].flavor));
+        kputc('\n');
+    }
+    kputs("  rx_frames=");
+    kput_dec((uint64_t)l2cap_rx_frames());
+    kputs(" tx_frames=");
+    kput_dec((uint64_t)l2cap_tx_frames());
+    kputs(" sig_count=");
+    kput_dec((uint64_t)l2cap_signaling_count());
+    kputc('\n');
 }
 
 /* ── USB CDC ACM ──────────────────────────────────────────────── */

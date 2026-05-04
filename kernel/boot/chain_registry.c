@@ -77,6 +77,7 @@ int CHAIN_SETTINGS       = -1;
 int CHAIN_BRIGHTNESS     = -1;
 int CHAIN_WIFI           = -1;
 int CHAIN_BLUETOOTH      = -1;
+int CHAIN_BT_L2CAP       = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -525,6 +526,12 @@ extern void     bt_hci_poll(void);
 extern int      bt_usb_present(void);
 extern int      bt_hci_ready(void);
 extern uint32_t bt_hci_event_count(void);
+extern void     bt_l2cap_poll(void);
+extern uint32_t l2cap_rx_frames(void);
+extern uint32_t l2cap_tx_frames(void);
+extern uint32_t l2cap_signaling_count(void);
+extern int      l2cap_channel_count(void);
+extern int      l2cap_signaling_ready(void);
 
 static uint32_t s_bt_last_event_count;
 
@@ -574,6 +581,78 @@ static void bt_emit_event_resolve(chain_node_t *self,
     if (delta > 0 && CHAIN_BLUETOOTH >= 0) {
         chain_t *cb = chain_get(CHAIN_BLUETOOTH);
         if (cb) cb->vault_version++;
+    }
+}
+
+/* ── BT L2CAP chain resolves ───────────────────────────────────── */
+/*
+ * CHAIN_BT_L2CAP pipeline:
+ *   acl_rx -> l2cap_decode -> channel_dispatch -> app_signal
+ *
+ * acl_rx drains ACL packets from the controller; l2cap_decode is a
+ * typed passthrough (recombination + frame split happens inline in
+ * bt_l2cap_poll); channel_dispatch is the typed handoff to ATT/SMP/
+ * dynamic-channel callbacks (also inline); app_signal bumps the
+ * chain's vault_version when frames or signaling activity tick.
+ */
+
+static uint32_t s_l2cap_last_rx;
+static uint32_t s_l2cap_last_tx;
+static uint32_t s_l2cap_last_sig;
+
+static void bt_l2cap_acl_rx_resolve(chain_node_t *self,
+                                    void *input, void *output)
+{
+    (void)self; (void)input;
+    int *out = (int *)output;
+    if (!bt_usb_present()) {
+        if (out) *out = 0;
+        return;
+    }
+    bt_l2cap_poll();
+    uint32_t now = l2cap_rx_frames();
+    int delta = (int)(now - s_l2cap_last_rx);
+    s_l2cap_last_rx = now;
+    if (out) *out = delta;
+}
+
+static void bt_l2cap_decode_resolve(chain_node_t *self,
+                                    void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    /* Decode happens inline in bt_l2cap_poll(); typed passthrough so
+     * MDE can route on "l2cap_frame_decoded". */
+    if (out) *out = delta;
+}
+
+static void bt_l2cap_channel_dispatch_resolve(chain_node_t *self,
+                                              void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    if (out) *out = delta;
+}
+
+static void bt_l2cap_app_signal_resolve(chain_node_t *self,
+                                        void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    if (out) *out = delta;
+    uint32_t tx_now  = l2cap_tx_frames();
+    uint32_t sig_now = l2cap_signaling_count();
+    int tx_delta  = (int)(tx_now  - s_l2cap_last_tx);
+    int sig_delta = (int)(sig_now - s_l2cap_last_sig);
+    s_l2cap_last_tx  = tx_now;
+    s_l2cap_last_sig = sig_now;
+    if ((delta > 0 || tx_delta > 0 || sig_delta > 0) &&
+        CHAIN_BT_L2CAP >= 0) {
+        chain_t *cl = chain_get(CHAIN_BT_L2CAP);
+        if (cl) cl->vault_version++;
     }
 }
 
@@ -845,6 +924,37 @@ int chain_registry_init(void)
                            bt_emit_event_resolve);
             chain_t *cb = chain_get(CHAIN_BLUETOOTH);
             if (cb) cb->resolve_interval_ticks = 8;
+        }
+    }
+
+    /* CHAIN_BT_L2CAP: parent CHAIN_BLUETOOTH. Sits one layer above HCI
+     * — ACL fragments come off the controller, get recombined into
+     * L2CAP B-frames, dispatched to signaling / fixed CIDs / dynamic
+     * channels. Foundation for GATT, RFCOMM, HID-over-BT.
+     *
+     *   acl_rx -> l2cap_decode -> channel_dispatch -> app_signal
+     *
+     * resolve_interval_ticks=8 keeps it in lockstep with CHAIN_BLUETOOTH.
+     * Created unconditionally for the same observability reason — even
+     * with no controller, the chain is visible to the inspector / B3
+     * and bt_l2cap_init() runs so the signaling table is present. */
+    if (CHAIN_BLUETOOTH >= 0) {
+        CHAIN_BT_L2CAP = chain_create("bt_l2cap", CHAIN_BLUETOOTH, MASQ_INTERNAL);
+        if (CHAIN_BT_L2CAP >= 0) {
+            chain_add_node(CHAIN_BT_L2CAP, "acl_rx",
+                           "bt_tick", "acl_fragment",
+                           bt_l2cap_acl_rx_resolve);
+            chain_add_node(CHAIN_BT_L2CAP, "l2cap_decode",
+                           "acl_fragment", "l2cap_frame_decoded",
+                           bt_l2cap_decode_resolve);
+            chain_add_node(CHAIN_BT_L2CAP, "channel_dispatch",
+                           "l2cap_frame_decoded", "l2cap_channel_event",
+                           bt_l2cap_channel_dispatch_resolve);
+            chain_add_node(CHAIN_BT_L2CAP, "app_signal",
+                           "l2cap_channel_event", "l2cap_app_event",
+                           bt_l2cap_app_signal_resolve);
+            chain_t *cl = chain_get(CHAIN_BT_L2CAP);
+            if (cl) cl->resolve_interval_ticks = 8;
         }
     }
 

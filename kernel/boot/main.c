@@ -609,9 +609,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         {
             extern int bt_usb_init(void);
             extern int bt_hci_init(void);
+            extern int bt_l2cap_init(void);
             if (bt_usb_init() == 0) {
                 (void)bt_hci_init();
             }
+            /* L2CAP layers on top of HCI ACL — initialize unconditionally
+             * so the signaling channel is registered even when no
+             * controller is bound (chain still appears in the graph). */
+            (void)bt_l2cap_init();
         }
     } else {
         kputs("USB xHCI: not available\n");
