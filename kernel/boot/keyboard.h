@@ -25,4 +25,14 @@ int keyboard_has_char(void);
  * state, and pushes ASCII into the shell buffer. */
 void keyboard_inject_scancode(uint8_t scancode, int extended);
 
+/* Non-blocking variant of keyboard_getc. Returns 1 + writes char if
+ * one is queued, 0 otherwise. Used by the scheduler-driven shell pump. */
+int  keyboard_try_getc(char *out);
+
+/* CHAIN_KEYBOARD plumbing. */
+int      keyboard_chain_pending(void);   /* scancodes waiting in ring */
+uint32_t keyboard_chain_drain(void);     /* drain through process_scancode */
+uint32_t keyboard_chain_total(void);     /* lifetime drained count */
+uint32_t keyboard_pending_irqs(void);    /* lifetime IRQ count */
+
 #endif /* ZEOS_KEYBOARD_H */

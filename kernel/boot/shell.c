@@ -45,6 +45,7 @@
 #include "chain.h"
 #include "cfa_handle.h"
 #include "chain_registry.h"
+#include "scheduler.h"
 #include "gpu_virtio.h"
 #include "mde_chain.h"
 #include "serial.h"
@@ -221,6 +222,7 @@ static void cmd_wifi(const char *args);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
+static void cmd_scheduler_log(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -342,6 +344,27 @@ static void cmd_gpustat(const char *args) {
     kputc('\n');
 }
 
+static void cmd_scheduler_log(const char *args)
+{
+    int n = 16;
+    if (args && *args) {
+        int v = 0; const char *p = args;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); p++; }
+        if (v > 0) n = v;
+    }
+    kputs("\n  Scheduler quantum: ");
+    kput_dec((uint64_t)scheduler_quantum_us_get());
+    kputs(" us, ticks=");
+    kput_dec(scheduler_tick_count());
+    kputs(", tps=");
+    kput_dec((uint64_t)scheduler_tps());
+    kputs(", slow_total=");
+    kput_dec((uint64_t)scheduler_slow_resolves_total());
+    kputc('\n');
+    scheduler_log_dump(n);
+}
+
 /* FAT32 read-only */
 static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
@@ -407,6 +430,7 @@ static const struct shell_cmd commands[] = {
     {"lsdrives","list storage drives (NVMe / AHCI / USB MSC)", cmd_lsdrives, VIS_ALWAYS},
     {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
+    {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
@@ -2578,6 +2602,28 @@ vault_done:
         }
     }
 
+    /* Scheduler: chain resolution as the kernel scheduler. Reports
+     * ticks-per-second from the rolling 100ms sample, count of LIVE
+     * chains visible in the registry, and per-tick error count. */
+    kputs("  Scheduler ............ ");
+    {
+        uint32_t tps = scheduler_tps();
+        int live = 0, errs = 0;
+        for (int id = 0; id < MAX_CHAINS; id++) {
+            chain_t *cc = chain_get(id);
+            if (!cc) continue;
+            if (cc->status == CHAIN_LIVE)  live++;
+            if (cc->status == CHAIN_ERROR) errs++;
+        }
+        kput_dec((uint64_t)tps);
+        kputs(" tps, ");
+        kput_dec((uint64_t)live);
+        kputs(" LIVE chains, ");
+        kput_dec((uint64_t)errs);
+        kputs(" error\n");
+        if (tps > 0 && live >= 1 && errs == 0) passes++; else fails++;
+    }
+
     kputs("  ──────────────\n  ");
     kput_dec(passes); kputs(" passed, ");
     kput_dec(fails); kputs(" failed\n\n");
@@ -2790,13 +2836,35 @@ static void cmd_df(const char *args)
     kputs(" total\n\n");
 }
 
-/* ── Main shell loop ────────────────────────────── */
+/* ── Scheduler-driven shell pump ─────────────────── */
+/*
+ * The kernel main loop is now scheduler_run() — chain resolution is
+ * the scheduler. This file no longer owns a blocking loop; instead it
+ * exposes:
+ *   shell_init()        — one-shot setup (VAULT, networking, banner)
+ *   shell_pump_char()   — fed one ASCII character at a time
+ *   shell_print_prompt()— external trigger for a fresh prompt
+ *
+ * The CHAIN_KEYBOARD resolve translates scancodes -> ASCII -> kb_buf;
+ * the scheduler drains kb_buf via keyboard_try_getc() and feeds chars
+ * here. The user-visible behavior is identical to the old polling loop.
+ */
 
-void shell_run(struct zeos_boot_info *boot)
+static char     g_cmd_buf[CMD_BUF_SIZE];
+static int      g_cmd_pos = 0;
+static int      g_shell_initialized = 0;
+
+void shell_print_prompt(void)
 {
+    shell_prompt();
+    g_cmd_pos = 0;
+}
+
+void shell_init(struct zeos_boot_info *boot)
+{
+    if (g_shell_initialized) return;
+    g_shell_initialized = 1;
     g_boot = boot;
-    char cmd[CMD_BUF_SIZE];
-    int pos;
 
     /* Initialize VAULT ramdisk */
     vault_init_ramdisk();
@@ -2811,59 +2879,71 @@ void shell_run(struct zeos_boot_info *boot)
 
     kputs("Type 'help' for commands.\n");
     kputs("Switch modes: 'zeros' (robotics) | 'derez' (dev) | 'raise' (full)\n\n");
+    g_cmd_pos = 0;
+}
 
-    for (;;) {
-        shell_prompt();
-        pos = 0;
+static void shell_dispatch(char *cmd)
+{
+    /* Extract command name (first word) */
+    const char *args = skip_word(cmd);
 
-        /* Read a line */
-        for (;;) {
-            char c = keyboard_getc();
+    /* Null-terminate the command name for matching */
+    char name[32];
+    int ni = 0;
+    for (int i = 0; cmd[i] && cmd[i] != ' ' && ni < 31; i++)
+        name[ni++] = cmd[i];
+    name[ni] = '\0';
 
-            if (c == '\n') {
-                kputc('\n');
-                cmd[pos] = '\0';
-                break;
-            } else if (c == '\b') {
-                if (pos > 0) {
-                    pos--;
-                    kputs("\b \b");
-                }
-            } else if (pos < CMD_BUF_SIZE - 1) {
-                cmd[pos++] = c;
-                kputc(c);
-            }
-        }
-
-        if (pos == 0)
-            continue;
-
-        /* Extract command name (first word) */
-        const char *args = skip_word(cmd);
-
-        /* Null-terminate the command name for matching */
-        char name[32];
-        int ni = 0;
-        for (int i = 0; cmd[i] && cmd[i] != ' ' && ni < 31; i++)
-            name[ni++] = cmd[i];
-        name[ni] = '\0';
-
-        /* Search command table — ALL commands work in ALL modes */
-        int found = 0;
-        for (int i = 0; i < (int)NUM_COMMANDS; i++) {
-            if (streq(name, commands[i].name)) {
-                commands[i].handler(args);
-                found = 1;
-                break;
-            }
-        }
-
-        if (!found) {
-            kputs("unknown command: ");
-            kputs(name);
-            kputs("  (type 'help')\n");
+    /* Search command table — ALL commands work in ALL modes */
+    int found = 0;
+    for (int i = 0; i < (int)NUM_COMMANDS; i++) {
+        if (streq(name, commands[i].name)) {
+            commands[i].handler(args);
+            found = 1;
+            break;
         }
     }
+
+    if (!found) {
+        kputs("unknown command: ");
+        kputs(name);
+        kputs("  (type 'help')\n");
+    }
+}
+
+int shell_pump_char(char c)
+{
+    if (c == '\n') {
+        kputc('\n');
+        g_cmd_buf[g_cmd_pos] = '\0';
+        if (g_cmd_pos == 0) {
+            shell_prompt();
+            return 1;
+        }
+        shell_dispatch(g_cmd_buf);
+        g_cmd_pos = 0;
+        shell_prompt();
+        return 1;
+    } else if (c == '\b') {
+        if (g_cmd_pos > 0) {
+            g_cmd_pos--;
+            kputs("\b \b");
+        }
+        return 0;
+    } else if (g_cmd_pos < CMD_BUF_SIZE - 1) {
+        g_cmd_buf[g_cmd_pos++] = c;
+        kputc(c);
+    }
+    return 0;
+}
+
+/* Legacy entry: initialize and hand control to the scheduler. */
+void shell_run(struct zeos_boot_info *boot)
+{
+    extern void scheduler_run(void);
+    shell_init(boot);
+    shell_prompt();
+    scheduler_run();   /* never returns */
 }
 
 /* ── wifi: RTL8188EU USB dongle (detection-stage only) ────────── */

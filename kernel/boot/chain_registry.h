@@ -43,5 +43,7 @@ extern int CHAIN_GPU_0;
 extern int CHAIN_GPU_0_RENDER;
 extern int CHAIN_GPU_0_DISPLAY;
 extern int CHAIN_DISPLAY_GOP;
+extern int CHAIN_KEYBOARD;
+extern int CHAIN_MOUSE;
 
 #endif /* ZEOS_CHAIN_REGISTRY_H */

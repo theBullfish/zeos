@@ -598,7 +598,16 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         chain_registry_init();
     }
 
-    /* Enter shell — never returns */
+    /* Scheduler: chain resolution as the kernel main loop. Must
+     * follow chain_registry_init + mde_auto_route (done inside) so
+     * the topo order is ready before the first tick. */
+    {
+        extern void scheduler_init(void);
+        scheduler_init();
+    }
+
+    /* Enter shell — initializes shell state then hands off to
+     * scheduler_run() which never returns. */
     shell_run(&boot_info);
 
     /* Safety net: if shell_run ever returns, halt instead of

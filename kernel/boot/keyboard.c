@@ -19,6 +19,60 @@ static char kb_buf[KB_BUF_SIZE];
 static volatile uint32_t kb_head;
 static volatile uint32_t kb_tail;
 
+/* Raw scancode ring for the CHAIN_KEYBOARD pipeline. The IRQ handler
+ * pushes scancodes here so the chain resolve can drain them on the
+ * scheduler tick — the chain becomes the source of truth for keyboard
+ * events visible to MasQ / B3, while the IRQ-side fast-path still keeps
+ * the existing kb_buf alive for blocking shell paths during early boot. */
+#define KB_SC_RING 256
+static volatile uint8_t  kb_sc_ring[KB_SC_RING];
+static volatile uint8_t  kb_sc_ext[KB_SC_RING];
+static volatile uint32_t kb_sc_head;
+static volatile uint32_t kb_sc_tail;
+static volatile uint32_t kb_sc_drained;   /* events drained by chain */
+static volatile uint32_t kb_pending_irqs; /* scheduler wake counter  */
+
+static void kb_sc_push(uint8_t sc, int ext)
+{
+    uint32_t next = (kb_sc_head + 1) % KB_SC_RING;
+    if (next != kb_sc_tail) {
+        kb_sc_ring[kb_sc_head] = sc;
+        kb_sc_ext[kb_sc_head]  = (uint8_t)(ext ? 1 : 0);
+        kb_sc_head = next;
+        kb_pending_irqs++;
+    }
+}
+
+int keyboard_chain_pending(void)
+{
+    return (int)((kb_sc_head - kb_sc_tail) & (KB_SC_RING - 1));
+}
+
+uint32_t keyboard_chain_drain(void)
+{
+    /* Called by CHAIN_KEYBOARD's resolve. Drains scancodes through the
+     * existing process_scancode pipeline (which pushes ASCII into
+     * kb_buf for the shell). Returns count drained this tick. */
+    uint32_t n = 0;
+    while (kb_sc_tail != kb_sc_head) {
+        uint8_t sc = kb_sc_ring[kb_sc_tail];
+        uint8_t ex = kb_sc_ext[kb_sc_tail];
+        kb_sc_tail = (kb_sc_tail + 1) % KB_SC_RING;
+        /* process_scancode is the shared decode path; calling it from
+         * the chain resolve makes the chain the canonical event source. */
+        extern void keyboard_inject_scancode(uint8_t scancode, int extended);
+        keyboard_inject_scancode(sc, (int)ex);
+        n++;
+        kb_sc_drained++;
+    }
+    return n;
+}
+
+uint32_t keyboard_chain_total(void)
+{
+    return kb_sc_drained;
+}
+
 /* Modifier state */
 static int shift_held;
 static int caps_lock;
@@ -173,7 +227,10 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
     }
     int extended = e0_prefix;
     e0_prefix = 0;
-    process_scancode(scancode, extended);
+    /* Push to the scancode ring; CHAIN_KEYBOARD's resolve drains it
+     * each scheduler tick. Decoding and ASCII translation happen there
+     * via keyboard_inject_scancode -> process_scancode. */
+    kb_sc_push(scancode, extended);
 }
 
 void keyboard_inject_scancode(uint8_t scancode, int extended)
@@ -213,15 +270,31 @@ extern void usb_hid_poll(void);
 char keyboard_getc(void)
 {
     /* Drain USB HID interrupt-IN reports while we wait. The PS/2 IRQ
-     * path can still wake us via the kb_buf interrupt, but USB HID is
-     * polling-only and needs us to consume the event ring. We spin
-     * cheaply with `pause` so an interrupt can preempt us. */
+     * pushes scancodes into kb_sc_ring; without the scheduler running
+     * we drain them inline here so blocking callers (early boot paths)
+     * still observe ASCII output. */
     while (kb_head == kb_tail) {
         usb_hid_poll();
+        if (kb_sc_tail != kb_sc_head)
+            keyboard_chain_drain();
         __asm__ volatile("pause");
     }
 
     char c = kb_buf[kb_tail];
     kb_tail = (kb_tail + 1) % KB_BUF_SIZE;
     return c;
+}
+
+int keyboard_try_getc(char *out)
+{
+    if (kb_head == kb_tail)
+        return 0;
+    *out = kb_buf[kb_tail];
+    kb_tail = (kb_tail + 1) % KB_BUF_SIZE;
+    return 1;
+}
+
+uint32_t keyboard_pending_irqs(void)
+{
+    return kb_pending_irqs;
 }

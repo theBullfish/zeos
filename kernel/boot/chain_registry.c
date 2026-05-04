@@ -25,6 +25,8 @@
 #include "block_chain.h"
 #include "mde_chain.h"
 #include "gpu_virtio.h"
+#include "keyboard.h"
+#include "mouse.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -43,6 +45,8 @@ int CHAIN_GPU_0          = -1;
 int CHAIN_GPU_0_RENDER   = -1;
 int CHAIN_GPU_0_DISPLAY  = -1;
 int CHAIN_DISPLAY_GOP    = -1;
+int CHAIN_KEYBOARD       = -1;
+int CHAIN_MOUSE          = -1;
 
 /* ── Node resolve functions ────────────────────────────────────── */
 /*
@@ -121,6 +125,81 @@ static void palette_search_resolve(chain_node_t *self, void *input, void *output
     (void)output;
 
     palette_draw();
+}
+
+/* ── Keyboard chain resolves ───────────────────────────────────── */
+
+static void kbd_irq_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)input;
+    /* The IRQ handler fills the scancode ring asynchronously. Here we
+     * simply publish the pending count so downstream nodes see "how
+     * many scancodes are queued" as their typed input. */
+    int *out = (int *)output;
+    *out = keyboard_chain_pending();
+}
+
+static void kbd_decode_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    int pending = input ? *(int *)input : keyboard_chain_pending();
+    int *out = (int *)output;
+    if (pending <= 0) {
+        *out = 0;
+        return;
+    }
+    /* keyboard_chain_drain runs each scancode through the existing
+     * keybinds + ASCII pipeline, pushing characters into kb_buf. */
+    *out = (int)keyboard_chain_drain();
+    if (*out > 0) {
+        chain_t *c = chain_get(CHAIN_KEYBOARD);
+        if (c) c->vault_version++;
+    }
+}
+
+static void kbd_event_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)output;
+    /* Terminal node: events are now in kb_buf, ready for the scheduler
+     * to feed the shell pump. The 'input_event' output type is what
+     * MDE auto-routes to the shell, palette, browser etc. */
+    int decoded = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    *out = decoded;
+}
+
+/* ── Mouse chain resolves ──────────────────────────────────────── */
+
+static void mouse_irq_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)input;
+    int *out = (int *)output;
+    *out = mouse_chain_pending();
+}
+
+static void mouse_decode_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    int pending = input ? *(int *)input : mouse_chain_pending();
+    int *out = (int *)output;
+    if (pending <= 0) { *out = 0; return; }
+    *out = (int)mouse_chain_drain();
+    if (*out > 0) {
+        chain_t *c = chain_get(CHAIN_MOUSE);
+        if (c) c->vault_version++;
+    }
+}
+
+static void mouse_event_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)output;
+    int decoded = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    *out = decoded;
 }
 
 /* ── Init ──────────────────────────────────────────────────────── */
@@ -210,6 +289,37 @@ int chain_registry_init(void)
         chain_add_node(CHAIN_PALETTE, "search",
                        "input_event", "surface_output",
                        palette_search_resolve);
+    }
+
+    /* Keyboard: input pipeline. The IRQ handler queues scancodes in a
+     * lock-free ring; this chain drains the ring on every scheduler
+     * tick and produces input_event so MDE can route keystrokes to
+     * the shell, palette, browser, etc. */
+    CHAIN_KEYBOARD = chain_create("keyboard", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_KEYBOARD >= 0) {
+        chain_add_node(CHAIN_KEYBOARD, "kbd_irq",
+                       "kbd_irq_event",  "scancode_count",
+                       kbd_irq_resolve);
+        chain_add_node(CHAIN_KEYBOARD, "scancode_decode",
+                       "scancode_count", "kbd_decoded_count",
+                       kbd_decode_resolve);
+        chain_add_node(CHAIN_KEYBOARD, "input_event",
+                       "kbd_decoded_count", "input_event",
+                       kbd_event_resolve);
+    }
+
+    /* Mouse: same shape as keyboard but for PS/2 mouse packets. */
+    CHAIN_MOUSE = chain_create("mouse", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_MOUSE >= 0) {
+        chain_add_node(CHAIN_MOUSE, "mouse_irq",
+                       "mouse_irq_event",  "packet_count",
+                       mouse_irq_resolve);
+        chain_add_node(CHAIN_MOUSE, "packet_decode",
+                       "packet_count", "mouse_decoded_count",
+                       mouse_decode_resolve);
+        chain_add_node(CHAIN_MOUSE, "mouse_event",
+                       "mouse_decoded_count", "mouse_event",
+                       mouse_event_resolve);
     }
 
     /* Audio (HDA): first hardware driver converted to native chain

@@ -25,4 +25,7 @@ void serial_put_hex(uint64_t val);
 /* Write a decimal value */
 void serial_put_dec(uint64_t val);
 
+/* Non-blocking RX poll. Returns 1 + char if a byte is queued, 0 otherwise. */
+int  serial_try_getc(char *out);
+
 #endif /* ZEOS_SERIAL_H */

@@ -62,6 +62,44 @@ static uint8_t packet[3];
 /* ── Mouse state ── */
 static mouse_state_t g_mouse;
 
+/* Raw packet ring for CHAIN_MOUSE. The IRQ assembles 3-byte packets
+ * and pushes them here; the chain resolve drains the ring through
+ * process_packet on each scheduler tick so mouse events flow through
+ * the same MasQ/B3 path as every other device. */
+#define MS_PKT_RING 128
+static volatile uint8_t  ms_pkt_ring[MS_PKT_RING][3];
+static volatile uint32_t ms_pkt_head;
+static volatile uint32_t ms_pkt_tail;
+static volatile uint32_t ms_pkt_drained;
+static volatile uint32_t ms_pending_irqs;
+
+static void ms_pkt_push(const uint8_t *p)
+{
+    uint32_t next = (ms_pkt_head + 1) % MS_PKT_RING;
+    if (next != ms_pkt_tail) {
+        ms_pkt_ring[ms_pkt_head][0] = p[0];
+        ms_pkt_ring[ms_pkt_head][1] = p[1];
+        ms_pkt_ring[ms_pkt_head][2] = p[2];
+        ms_pkt_head = next;
+        ms_pending_irqs++;
+    }
+}
+
+int mouse_chain_pending(void)
+{
+    return (int)((ms_pkt_head - ms_pkt_tail) & (MS_PKT_RING - 1));
+}
+
+uint32_t mouse_chain_total(void)
+{
+    return ms_pkt_drained;
+}
+
+uint32_t mouse_pending_irqs(void)
+{
+    return ms_pending_irqs;
+}
+
 /* ── Forward declarations ── */
 static void mouse_isr(uint64_t vector, uint64_t error_code);
 static void process_packet(void);
@@ -248,15 +286,31 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
         break;
 
     case 2:
-        /* Byte 2: Y movement — packet complete */
+        /* Byte 2: Y movement — packet complete. Push to ring; the
+         * CHAIN_MOUSE resolve drains and decodes on the next tick. */
         packet[2] = data;
         packet_index = 0;
-        process_packet();
+        ms_pkt_push(packet);
         break;
     }
 
     /* Send EOI to slave PIC (IRQ >= 8) then master */
     pic_eoi(12);
+}
+
+uint32_t mouse_chain_drain(void)
+{
+    uint32_t n = 0;
+    while (ms_pkt_tail != ms_pkt_head) {
+        packet[0] = ms_pkt_ring[ms_pkt_tail][0];
+        packet[1] = ms_pkt_ring[ms_pkt_tail][1];
+        packet[2] = ms_pkt_ring[ms_pkt_tail][2];
+        ms_pkt_tail = (ms_pkt_tail + 1) % MS_PKT_RING;
+        process_packet();
+        n++;
+        ms_pkt_drained++;
+    }
+    return n;
 }
 
 /*

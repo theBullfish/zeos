@@ -85,7 +85,8 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/theme_runtime.c \
            boot/icon_render.c \
            boot/updater.c \
-           boot/gpu_virtio.c
+           boot/gpu_virtio.c \
+           boot/scheduler.c
 
 # mbedTLS library sources (3.6 LTS, vendored at lib/mbedtls/)
 MBEDTLS_SRCS = $(wildcard lib/mbedtls/library/*.c)

@@ -71,6 +71,14 @@ void serial_put_hex(uint64_t val)
     serial_puts(p);
 }
 
+/* Returns 1 + char if a byte is waiting on the UART, 0 otherwise. */
+int serial_try_getc(char *out)
+{
+    if (!(inb(COM1 + 5) & 0x01)) return 0;  /* RX data ready? */
+    *out = (char)inb(COM1 + 0);
+    return 1;
+}
+
 void serial_put_dec(uint64_t val)
 {
     char buf[21];

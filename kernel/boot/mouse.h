@@ -51,4 +51,10 @@ const mouse_state_t *mouse_get_state(void);
  * fires cursor_move/press/release exactly like the PS/2 IRQ path. */
 void mouse_inject(int dx, int dy, uint8_t buttons);
 
+/* CHAIN_MOUSE plumbing. */
+int      mouse_chain_pending(void);
+uint32_t mouse_chain_drain(void);
+uint32_t mouse_chain_total(void);
+uint32_t mouse_pending_irqs(void);
+
 #endif /* ZEOS_MOUSE_H */
