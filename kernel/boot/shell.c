@@ -541,6 +541,7 @@ static void cmd_touch(const char *args);
 static void cmd_rm(const char *args);
 static void cmd_truncate(const char *args);
 static void cmd_echo(const char *args);
+static void cmd_trash(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -635,7 +636,8 @@ static const struct shell_cmd commands[] = {
     {"fat-ls",  "list FAT32 directory (fat-ls <path>)", cmd_fat_ls, VIS_ALWAYS},
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
     {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
-    {"rm",      "delete file or empty directory (FAT32)", cmd_rm,    VIS_ALWAYS},
+    {"rm",      "delete (moves to /.zeos-trash; rm -f to bypass)", cmd_rm,    VIS_ALWAYS},
+    {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
     {"truncate","truncate file to size (truncate <path> <size>)", cmd_truncate, VIS_DEREZ},
     {"echo",    "write text to FAT32 file (echo <text> > <path>)", cmd_echo, VIS_ALWAYS},
 };
@@ -2853,6 +2855,34 @@ vault_done:
         }
     }
 
+    /* Trash subsystem readiness. Reports the trash root status,
+     * current entry count, and approximate bytes consumed. Skips
+     * silently when no FAT32 volume is mounted. */
+    kputs("  Trash ................. ");
+    if (!fat32_mounted()) {
+        kputs("SKIP (no FAT32 volume)\n");
+    } else {
+        uint32_t tcount = 0;
+        uint64_t tbytes = 0;
+        int sr = fat32_trash_stats(&tcount, &tbytes);
+        if (sr != 0) {
+            kputs("FAIL (stats)\n");
+            fails++;
+        } else {
+            kputs("/.zeos-trash/ ");
+            /* Existence is implicit: if stats returned 0 with no
+             * mkdir attempt, the directory is either present or
+             * lazily-created on first delete. */
+            kputs("ready, ");
+            kput_dec((uint64_t)tcount);
+            kputs(" entries, ");
+            uint64_t mb = tbytes / (1024ULL * 1024ULL);
+            kput_dec(mb);
+            kputs(" MB used\n");
+            passes++;
+        }
+    }
+
     /* DNS: resolve a known host (if network is up) */
     kputs("  DNS resolve ........... ");
     if (!g_net.up) {
@@ -4039,16 +4069,206 @@ static void cmd_touch(const char *args)
     }
 }
 
+/* rm <path>          — soft-delete: move to /.zeos-trash/<id>/
+ * rm -f <path>       — hard unlink, bypassing trash entirely
+ * rm <path> -f       — same
+ *
+ * Directories use direct unlink (empty-dir-only) regardless of -f
+ * because the trash subsystem does not yet support recursive trash. */
 static void cmd_rm(const char *args)
 {
     while (*args == ' ') args++;
-    if (!*args) { kputs("  Usage: rm <path>\n"); return; }
+    if (!*args) { kputs("  Usage: rm [-f] <path>\n"); return; }
     if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
-    if (fat32_unlink(args) == 0) {
-        kputs("  Removed: "); kputs(args); kputs("\n");
-    } else {
-        kputs("  rm: failed (not found or non-empty dir?)\n");
+
+    int force = 0;
+    char path[FAT32_PATH_MAX];
+    int pi = 0;
+    while (*args && pi < (int)sizeof(path) - 1) {
+        while (*args == ' ') args++;
+        if (!*args) break;
+        if (args[0] == '-' && args[1] == 'f' &&
+            (args[2] == '\0' || args[2] == ' ')) {
+            force = 1;
+            args += 2;
+            continue;
+        }
+        if (pi != 0) {
+            while (*args && *args != ' ') args++;
+            continue;
+        }
+        while (*args && *args != ' ' && pi < (int)sizeof(path) - 1) {
+            path[pi++] = *args++;
+        }
     }
+    path[pi] = '\0';
+    if (!path[0]) { kputs("  Usage: rm [-f] <path>\n"); return; }
+
+    if (force) {
+        if (fat32_unlink(path) == 0) {
+            kputs("  Removed: "); kputs(path); kputs(" (forced)\n");
+        } else {
+            kputs("  rm: failed (not found or non-empty dir?)\n");
+        }
+        return;
+    }
+
+    /* Try trash first. If the source is a directory or already lives in
+     * the trash root, fall through to direct unlink. */
+    char id[FAT32_TRASH_ID_MAX + 1];
+    int rc = fat32_trash(path, "user", id);
+    if (rc == 0) {
+        kputs("  Trashed: "); kputs(path);
+        kputs("  (id="); kputs(id); kputs(")\n");
+        return;
+    }
+
+    if (fat32_unlink(path) == 0) {
+        kputs("  Removed: "); kputs(path); kputs("\n");
+    } else {
+        kputs("  rm: failed (not found, non-empty dir, or trash error)\n");
+        kputs("       try `rm -f <path>` to bypass trash.\n");
+    }
+}
+
+/* ── Trash subcommand dispatcher ─────────────────────────────────
+ *
+ *   trash                          — list pending entries
+ *   trash restore <id>             — restore one entry to its origin
+ *   trash empty                    — purge ALL entries permanently
+ *   trash empty --older-than <D>   — purge entries older than D days
+ */
+
+static void trash_list_cb(const char *id, const char *orig,
+                          uint64_t deleted_at, uint32_t size)
+{
+    char tbuf[64];
+    int tn = tod_format(deleted_at, tbuf, sizeof(tbuf));
+    kputs("  ");
+    kputs(id);
+    kputs("  ");
+    kput_dec((uint64_t)size);
+    kputs("B  ");
+    if (tn > 0) kputs(tbuf);
+    else        kputs("(no clock)");
+    kputs("  ");
+    kputs(orig);
+    kputs("\n");
+}
+
+static int trash_args_eq(const char *a, const char *b)
+{
+    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+static void cmd_trash(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
+
+    if (!*args) {
+        kputs("\n  Trash entries (/.zeos-trash):\n");
+        kputs("  ID        SIZE   DELETED                       ORIGINAL\n");
+        kputs("  --------  -----  ----------------------------  --------\n");
+        int n = fat32_trash_list(trash_list_cb);
+        if (n == 0) kputs("  (empty)\n");
+        else {
+            kputs("  ── ");
+            kput_dec((uint64_t)n);
+            kputs(" entr");
+            kputs(n == 1 ? "y" : "ies");
+            kputs(" ──\n");
+        }
+        kputs("  Use `trash restore <id>` or `trash empty` to manage.\n\n");
+        return;
+    }
+
+    char sub[16];
+    int si = 0;
+    while (*args && *args != ' ' && si < (int)sizeof(sub) - 1) {
+        sub[si++] = *args++;
+    }
+    sub[si] = '\0';
+    while (*args == ' ') args++;
+
+    if (trash_args_eq(sub, "restore")) {
+        if (!*args) { kputs("  Usage: trash restore <id>\n"); return; }
+        char id[FAT32_TRASH_ID_MAX + 1];
+        int ii = 0;
+        while (*args && *args != ' ' && ii < FAT32_TRASH_ID_MAX) {
+            id[ii++] = *args++;
+        }
+        id[ii] = '\0';
+        if (fat32_trash_restore(id) == 0) {
+            kputs("  Restored: "); kputs(id); kputs("\n");
+        } else {
+            kputs("  trash: restore failed (id not found, parent gone, "
+                  "or destination already exists)\n");
+        }
+        return;
+    }
+
+    if (trash_args_eq(sub, "empty")) {
+        if (*args) {
+            const char *p = args;
+            if (p[0] == '-' && p[1] == '-') {
+                const char *flag = p + 2;
+                const char *flag_end = flag;
+                while (*flag_end && *flag_end != ' ') flag_end++;
+                int flen = (int)(flag_end - flag);
+                if (flen == 11 && flag[0] == 'o' && flag[1] == 'l') {
+                    p = flag_end;
+                    while (*p == ' ') p++;
+                    if (!*p) {
+                        kputs("  Usage: trash empty --older-than <days>\n");
+                        return;
+                    }
+                    uint64_t days = 0;
+                    while (*p >= '0' && *p <= '9') {
+                        days = days * 10 + (uint64_t)(*p - '0');
+                        p++;
+                    }
+                    if (days == 0) {
+                        kputs("  Usage: trash empty --older-than <days>  (days >= 1)\n");
+                        return;
+                    }
+                    int freed = fat32_trash_empty_older_than(days * 86400ULL);
+                    if (freed < 0) {
+                        kputs("  trash: empty --older-than failed\n");
+                    } else {
+                        kputs("  Auto-emptied "); kput_dec((uint64_t)freed);
+                        kputs(" entr");
+                        kputs(freed == 1 ? "y" : "ies");
+                        kputs(" older than ");
+                        kput_dec(days);
+                        kputs(" days.\n");
+                    }
+                    return;
+                }
+            }
+            kputs("  Usage: trash empty [--older-than <days>]\n");
+            return;
+        }
+
+        int freed = fat32_trash_empty();
+        if (freed < 0) {
+            kputs("  trash: empty failed\n");
+        } else {
+            kputs("  Emptied trash: ");
+            kput_dec((uint64_t)freed);
+            kputs(" entr");
+            kputs(freed == 1 ? "y" : "ies");
+            kputs(" purged permanently.\n");
+        }
+        return;
+    }
+
+    kputs("  Usage:\n");
+    kputs("    trash                          list pending entries\n");
+    kputs("    trash restore <id>             restore one entry\n");
+    kputs("    trash empty                    purge all entries\n");
+    kputs("    trash empty --older-than <N>   purge entries >N days old\n");
 }
 
 static void cmd_truncate(const char *args)

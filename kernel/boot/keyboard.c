@@ -9,6 +9,15 @@
 #include "keybinds.h"
 #include "idt.h"
 #include "io.h"
+#include "hda.h"
+
+/* Media-key scancodes (set 1, with the 0xE0 prefix flagged via the
+ * `extended` arg to process_scancode). These are the "Multimedia"
+ * codes used by virtually every modern keyboard for volume +/-/mute,
+ * including the F-key overlays on most laptops. */
+#define SC_EXT_VOL_UP     0x30
+#define SC_EXT_VOL_DOWN   0x2E
+#define SC_EXT_MUTE       0x20
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -144,6 +153,19 @@ static void kb_buf_push(char c)
  */
 static void process_scancode(uint8_t scancode, int extended)
 {
+    /*
+     * Media keys (XF86AudioRaiseVolume / LowerVolume / Mute) are
+     * extended scancodes 0xE0 0x30 / 0x2E / 0x20. We dispatch them
+     * directly into the audio driver before anything else so they
+     * work regardless of focus or modifier state. Releases (bit 7
+     * set) are ignored — only act on the press edge.
+     */
+    if (extended && !(scancode & 0x80)) {
+        if (scancode == SC_EXT_VOL_UP)   { hda_audio_volume_step(+5); return; }
+        if (scancode == SC_EXT_VOL_DOWN) { hda_audio_volume_step(-5); return; }
+        if (scancode == SC_EXT_MUTE)     { hda_audio_toggle_mute();   return; }
+    }
+
     /*
      * Pass every scancode to the keybinds system first.
      * It tracks modifier state (shift/ctrl/alt/super) internally

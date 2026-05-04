@@ -29,9 +29,43 @@
 #include "timer.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "vault.h"
 
 #include <stdint.h>
 #include <stddef.h>
+
+/* ── Master volume / mute state ────────────────────────────────────
+ *
+ * g_audio is the single source of truth for the master output level.
+ * The shell, F-keys, and persistence layer all read/write through the
+ * hda_audio_* API; they never touch this struct directly. The amps are
+ * pushed by hda_audio_apply_amps() which writes verb 0x300 to the DAC
+ * and pin output amps for both channels.
+ *
+ * Default 60/100, unmuted, until hda_audio_restore_from_vault() loads
+ * a previous value from /audio/volume.
+ *
+ * On-disk format is the raw hda_audio_persist_t (8 bytes). magic
+ * guards against a corrupt or short read.
+ */
+
+#define AUDIO_VAULT_PATH    "/audio/volume"
+#define AUDIO_VAULT_MAGIC   0x5A415544u    /* 'ZAUD' */
+#define AUDIO_VAULT_VERSION 1u
+
+typedef struct {
+    uint32_t magic;
+    uint8_t  version;
+    uint8_t  volume;     /* 0..100 */
+    uint8_t  muted;      /* 0 or 1 */
+    uint8_t  reserved;
+} hda_audio_persist_t;
+
+static struct {
+    int volume;          /* 0..100 */
+    int muted;           /* 0/1 */
+    int initialized;     /* set once we have a codec path */
+} g_audio = { .volume = 60, .muted = 0, .initialized = 0 };
 
 #define HDA_GCAP       0x00
 #define HDA_GCTL       0x08
@@ -513,32 +547,33 @@ static int hda_setup_stream(void)
         codec_cmd(codec_addr, path_nids[i], VERB_SET_POWER, 0x00);
     }
 
-    /* Unmute output and input amps on every widget along the path that
-     * advertises them. Amp Gain/Mute payload bits:
+    /* Unmute the input amps along the path so the mixer/selector
+     * sums actually reach the DAC. Output amps are programmed by
+     * hda_audio_apply_amps() below using the master volume.
+     *
+     * Amp Gain/Mute payload bits (verb 0x300):
      *   15: set output amp     14: set input amp
      *   13: set left            12: set right
-     *   11:8 input index (0 here -- mixer/selector idx 0 is fine for
-     *        the chain we already picked or set-connect-sel'd above)
+     *   11:8 input index (0 here)
      *   7:   mute (0 = unmute)
      *   6:0: gain (0x7F = max)
      */
-    const uint16_t out_left  = (1u << 15) | (1u << 13) | 0x7F;
-    const uint16_t out_right = (1u << 15) | (1u << 12) | 0x7F;
     const uint16_t in_left   = (1u << 14) | (1u << 13) | 0x7F;
     const uint16_t in_right  = (1u << 14) | (1u << 12) | 0x7F;
 
     for (uint8_t i = 0; i < path_len; i++) {
         uint16_t nid = path_nids[i];
         uint32_t wcap = codec_cmd(codec_addr, nid, VERB_GET_PARAM, PARAM_WIDGET_CAP);
-        if (wcap & WCAP_OUT_AMP) {
-            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, out_left);
-            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, out_right);
-        }
         if (wcap & WCAP_IN_AMP) {
             codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, in_left);
             codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, in_right);
         }
     }
+
+    /* Mark the codec path live and push the current master volume +
+     * mute state to the DAC and pin output amps. */
+    g_audio.initialized = 1;
+    hda_audio_apply_amps();
 
     uint32_t pcap = codec_cmd(codec_addr, pin_nid, VERB_GET_PARAM, PARAM_PIN_CAP);
     uint8_t pinctl = PIN_CTL_OUT_ENABLE;
@@ -720,7 +755,18 @@ void hda_volume_filter_resolve(chain_node_t *self, void *input, void *output)
     if (in->error || !in->samples)
         return;
 
-    int gain = (st ? st->gain_q8 : 256);
+    /* Software backstop: if the codec path isn't initialized yet we
+     * can't program hardware amps, so apply master volume / mute in
+     * software here. Once the path is up the hardware amps own the
+     * level and this filter stays at unity (gain_q8 = 256) to avoid
+     * double-attenuation. The shell `volume`/`mute` commands keep
+     * gain_q8 in sync via hda_audio_apply_amps(). */
+    int gain;
+    if (!g_audio.initialized) {
+        gain = g_audio.muted ? 0 : ((g_audio.volume * 256) / 100);
+    } else {
+        gain = (st ? st->gain_q8 : 256);
+    }
     if (gain == 256)
         return;                         /* unity -- no work */
 
@@ -755,10 +801,8 @@ void hda_pin_resolve(chain_node_t *self, void *input, void *output)
      * bumps gain or remaps the pin, we re-push here. */
     if (!st || st->pushed) return;
 
-    codec_cmd(st->cad, st->dac, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
-    codec_cmd(st->cad, st->dac, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
-    codec_cmd(st->cad, st->pin, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
-    codec_cmd(st->cad, st->pin, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
+    /* Push the master volume / mute via verb 0x300 to DAC and pin. */
+    hda_audio_apply_amps();
 
     uint32_t pcap = codec_cmd(st->cad, st->pin, VERB_GET_PARAM, PARAM_PIN_CAP);
     uint8_t pinctl = PIN_CTL_OUT_ENABLE;
@@ -813,6 +857,144 @@ void hda_dma_resolve(chain_node_t *self, void *input, void *output)
     out->ok            = 1;
     out->frames_played = in->frames;
     out->elapsed_ms    = ms;
+}
+
+/* ── Master volume + mute API ──────────────────────────────────────
+ *
+ * Pushes verb 0x300 (Set Amp Gain/Mute) to the DAC and pin output
+ * amps. We program left and right separately, both for the output
+ * amp side (bit 15). 0..100 maps linearly into the codec's 7-bit
+ * gain register. Bit 7 is the per-payload mute flag.
+ *
+ * volume_filter's gain_q8 is held at 256 (unity) when the codec is
+ * driving the level, so software volume doesn't double-attenuate. If
+ * the codec ever stops being initialized (path lost), the filter
+ * falls back to software scaling using g_audio directly.
+ */
+
+static uint16_t amp_payload(int set_left, int muted, int vol_pct)
+{
+    /* set output amp + L or R + mute + 7-bit gain */
+    uint16_t pl = (1u << 15);
+    pl |= set_left ? (1u << 13) : (1u << 12);
+    if (muted) pl |= (1u << 7);
+    /* 0..100 -> 0..0x7F with proper rounding. */
+    int gain = ((vol_pct * 0x7F) + 50) / 100;
+    if (gain < 0)    gain = 0;
+    if (gain > 0x7F) gain = 0x7F;
+    pl |= (uint16_t)(gain & 0x7F);
+    return pl;
+}
+
+void hda_audio_apply_amps(void)
+{
+    /* Software filter stays at unity once hardware amps are in charge.
+     * If the codec path isn't initialized yet, mirror the level into
+     * gain_q8 so the volume_filter resolve applies it in software. */
+    if (!g_audio.initialized) {
+        s_volume_filter.gain_q8 = g_audio.muted
+            ? 0
+            : ((g_audio.volume * 256) / 100);
+        return;
+    }
+
+    s_volume_filter.gain_q8 = 256;
+
+    uint16_t left  = amp_payload(1, g_audio.muted, g_audio.volume);
+    uint16_t right = amp_payload(0, g_audio.muted, g_audio.volume);
+
+    /* Push to DAC's output amp if it has one, and to the pin's output
+     * amp if it has one. We always attempt both — the codec ignores a
+     * write to a non-existent amp (and the spec says the verb is safe
+     * to issue regardless). */
+    uint32_t dac_wcap = codec_cmd(codec_addr, dac_nid,
+                                  VERB_GET_PARAM, PARAM_WIDGET_CAP);
+    if (dac_wcap & WCAP_OUT_AMP) {
+        codec_cmd(codec_addr, dac_nid, VERB_SET_AMP_GAIN, left);
+        codec_cmd(codec_addr, dac_nid, VERB_SET_AMP_GAIN, right);
+    }
+
+    uint32_t pin_wcap = codec_cmd(codec_addr, pin_nid,
+                                  VERB_GET_PARAM, PARAM_WIDGET_CAP);
+    if (pin_wcap & WCAP_OUT_AMP) {
+        codec_cmd(codec_addr, pin_nid, VERB_SET_AMP_GAIN, left);
+        codec_cmd(codec_addr, pin_nid, VERB_SET_AMP_GAIN, right);
+    }
+}
+
+int hda_audio_get_volume(void) { return g_audio.volume; }
+int hda_audio_get_muted(void)  { return g_audio.muted; }
+
+void hda_audio_set_volume(int pct)
+{
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    g_audio.volume = pct;
+    hda_audio_apply_amps();
+    chain_t *c = chain_get(CHAIN_AUDIO);
+    if (c) c->vault_version++;
+    (void)hda_audio_save_to_vault();
+}
+
+void hda_audio_set_muted(int muted)
+{
+    g_audio.muted = muted ? 1 : 0;
+    hda_audio_apply_amps();
+    chain_t *c = chain_get(CHAIN_AUDIO);
+    if (c) c->vault_version++;
+    (void)hda_audio_save_to_vault();
+}
+
+void hda_audio_toggle_mute(void)
+{
+    hda_audio_set_muted(!g_audio.muted);
+}
+
+void hda_audio_volume_step(int delta)
+{
+    hda_audio_set_volume(g_audio.volume + delta);
+}
+
+/* ── Persistence ───────────────────────────────────────────────────
+ *
+ * /audio/volume in VAULT, INTERNAL tier. Written on every change so
+ * a reboot picks up the last level the user set. Reads tolerate a
+ * missing file (first boot) and discard records with a bad magic /
+ * version. */
+
+int hda_audio_save_to_vault(void)
+{
+    hda_audio_persist_t rec;
+    rec.magic    = AUDIO_VAULT_MAGIC;
+    rec.version  = (uint8_t)AUDIO_VAULT_VERSION;
+    rec.volume   = (uint8_t)g_audio.volume;
+    rec.muted    = (uint8_t)g_audio.muted;
+    rec.reserved = 0;
+
+    /* mkdir is idempotent; ignore the return code. */
+    (void)vault_mkdir("/audio", VAULT_TIER_INTERNAL);
+    int n = vault_write(AUDIO_VAULT_PATH, &rec, sizeof(rec));
+    return (n == (int)sizeof(rec)) ? 0 : -1;
+}
+
+int hda_audio_restore_from_vault(void)
+{
+    int sz = vault_size(AUDIO_VAULT_PATH);
+    if (sz != (int)sizeof(hda_audio_persist_t)) return -1;
+
+    hda_audio_persist_t rec;
+    int n = vault_read(AUDIO_VAULT_PATH, &rec, sizeof(rec));
+    if (n != (int)sizeof(rec)) return -1;
+    if (rec.magic   != AUDIO_VAULT_MAGIC)   return -1;
+    if (rec.version != AUDIO_VAULT_VERSION) return -1;
+
+    int v = rec.volume;
+    if (v < 0)   v = 0;
+    if (v > 100) v = 100;
+    g_audio.volume = v;
+    g_audio.muted  = rec.muted ? 1 : 0;
+    hda_audio_apply_amps();
+    return 0;
 }
 
 /* ── Compat shim ───────────────────────────────────────────────────── */

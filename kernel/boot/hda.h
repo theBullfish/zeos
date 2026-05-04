@@ -27,6 +27,32 @@ int         hda_ready(void);
 int         hda_play_pcm(const int16_t *samples, int num_samples, int sample_rate);
 const char *hda_status(void);
 
+/* ── Master volume + mute ──────────────────────────────────────────
+ *
+ * Master volume is a 0..100 integer + a mute flag. Both are pushed to
+ * the discovered DAC and pin output amps via HDA verb 0x300 (Set Amp
+ * Gain/Mute). Persisted to VAULT under /audio/volume; restored on boot
+ * by hda_audio_restore() (called from hda_init after the path is up).
+ *
+ * Every successful set bumps CHAIN_AUDIO->vault_version (provenance).
+ */
+int  hda_audio_get_volume(void);                /* 0..100 */
+int  hda_audio_get_muted(void);                 /* 0 or 1 */
+void hda_audio_set_volume(int pct);             /* clamps 0..100 */
+void hda_audio_set_muted(int muted);
+void hda_audio_toggle_mute(void);
+void hda_audio_volume_step(int delta);          /* +5/-5 etc., clamps */
+
+/* Re-apply current g_audio state to the codec amps. Called internally
+ * after set; exposed so the volume_filter resolve can refresh after a
+ * remap. Idempotent. */
+void hda_audio_apply_amps(void);
+
+/* Persistence — write/read /audio/volume in VAULT. Both safe to call
+ * before VAULT is mounted (return without error). */
+int  hda_audio_save_to_vault(void);
+int  hda_audio_restore_from_vault(void);
+
 /* ── Chain node resolves (called by chain_resolve via chain_registry) ─ */
 
 void hda_pcm_source_resolve   (chain_node_t *self, void *input, void *output);

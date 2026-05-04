@@ -694,6 +694,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         persistence_apply_snapshot();
     }
 
+    /* Restore master audio volume + mute from VAULT (/audio/volume).
+     * Default 60/unmuted on first boot. Pushes verb 0x300 to the DAC
+     * and pin output amps once loaded. */
+    {
+        extern int hda_audio_restore_from_vault(void);
+        (void)hda_audio_restore_from_vault();
+    }
+
     /* Z+ runtime registry — backs `chain ... { ... }` blocks declared
      * in user Z+ programs with persistent kernel chain entries. Idempotent. */
     {
