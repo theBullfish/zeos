@@ -46,6 +46,7 @@
 #include "wpa.h"
 #include "net_ip.h"
 #include "net_dns.h"
+#include "net_ipv6.h"
 #include "net_tcp.h"
 #include "net_http.h"
 #include "timer.h"
@@ -236,6 +237,9 @@ static void cmd_lid_close(const char *args);
 static void cmd_lid_open(const char *args);
 static void cmd_power(const char *args);
 static void cmd_static_ip(const char *args);
+static void cmd_ip6(const char *args);
+static void cmd_ping6(const char *args);
+static void cmd_nslookup6(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
 static void cmd_wc(const char *args);
@@ -256,6 +260,7 @@ static void cmd_gpustat(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
+static void cmd_preempt_test(const char *args);
 static void cmd_persistence(const char *args);
 static void cmd_hotplug(const char *args);
 
@@ -470,6 +475,8 @@ static void cmd_scheduler_log(const char *args)
     kput_dec((uint64_t)scheduler_slow_resolves_total());
     kputs(", agg_slow=");
     kput_dec((uint64_t)scheduler_aggregate_slow_total());
+    kputs(", preempt_kills=");
+    kput_dec((uint64_t)scheduler_preempt_kills());
     kputs(", wdog_kills=");
     kput_dec((uint64_t)scheduler_watchdog_kills());
     kputc('\n');
@@ -547,6 +554,71 @@ static void cmd_chain_backoff(const char *args)
     kputc('\n');
 }
 
+/* preempt-test: register a chain whose only node infinite-loops, call
+ * scheduler_preempt_resolve directly, assert the LAPIC timer kills it
+ * within watchdog_timeout_us, then unregister the chain. Verifies the
+ * preempt path actually rescues a hung resolve. */
+static void preempt_test_hang_node(chain_node_t *self, void *in, void *out)
+{
+    (void)self; (void)in; (void)out;
+    /* Spin forever; only the LAPIC preempt timer can break us out. */
+    for (;;) {
+        __asm__ volatile("pause");
+    }
+}
+
+static void cmd_preempt_test(const char *args)
+{
+    (void)args;
+    kputs("  preempt-test: registering hang-chain ...\n");
+
+    int id = chain_create("preempt-test-hang", -1, MASQ_INTERNAL);
+    if (id < 0) { kputs("  preempt-test: chain_create failed\n"); return; }
+
+    chain_t *c = chain_get(id);
+    if (!c) { kputs("  preempt-test: chain_get failed\n"); chain_destroy(id); return; }
+
+    /* Short timeout so the test finishes promptly. */
+    c->watchdog_timeout_us = 5000;   /* 5 ms */
+    c->status = CHAIN_LIVE;
+
+    int n = chain_add_node(id, "hang", "void", "void", preempt_test_hang_node);
+    if (n < 0) { kputs("  preempt-test: add_node failed\n"); chain_destroy(id); return; }
+
+    uint32_t kills_before = scheduler_preempt_kills();
+
+    kputs("  preempt-test: arming + entering hang (timeout=5000us) ...\n");
+    uint64_t t0 = timer_read_tsc();
+    int rc = scheduler_preempt_resolve(id);
+    uint64_t t1 = timer_read_tsc();
+
+    uint32_t kills_after = scheduler_preempt_kills();
+    uint64_t freq = timer_tsc_freq();
+    uint64_t us = (freq > 0) ? ((t1 - t0) * 1000000ULL / freq) : 0;
+
+    chain_t *cc = chain_get(id);
+    int status_ok = (cc && cc->status == CHAIN_ERROR);
+    int kill_seen = (kills_after > kills_before);
+
+    kputs("  preempt-test: rc=");
+    kput_dec((uint64_t)(rc & 0xFFFFFFFF));
+    kputs(" elapsed=");
+    kput_dec(us);
+    kputs("us preempt_kills delta=");
+    kput_dec((uint64_t)(kills_after - kills_before));
+    kputs(" status=");
+    kputs(status_ok ? "CHAIN_ERROR" : "(unexpected)");
+    kputc('\n');
+
+    if (rc == -1 && kill_seen && status_ok) {
+        kputs("  preempt-test: PASS (LAPIC preempt killed hung resolve)\n");
+    } else {
+        kputs("  preempt-test: FAIL\n");
+    }
+
+    chain_destroy(id);
+}
+
 /* FAT32 read-only */
 static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
@@ -608,6 +680,9 @@ static const struct shell_cmd commands[] = {
     {"aml-eval","evaluate an AML path (aml-eval <\\\\PATH>) — debug/introspection", cmd_aml_eval, VIS_DEREZ},
     {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
+    {"ip6",     "list configured IPv6 addresses + neighbor cache", cmd_ip6,    VIS_DEREZ},
+    {"ping6",   "ICMPv6 echo request (ping6 <addr>)",              cmd_ping6,  VIS_DEREZ},
+    {"nslookup6","resolve a hostname to an AAAA record",            cmd_nslookup6, VIS_DEREZ},
     {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
     {"cp",      "copy a file (cp src dst)",       cmd_cp,      VIS_ALWAYS},
     {"wc",      "byte and line count of a file",  cmd_wc,      VIS_ALWAYS},
@@ -635,6 +710,7 @@ static const struct shell_cmd commands[] = {
     {"epoch",   "current Unix epoch seconds",     tod_cmd_epoch,  VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
+    {"preempt-test","verify LAPIC-timer preemption kills a hung chain_resolve", cmd_preempt_test, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|list|connect|forget", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
 
@@ -2480,6 +2556,89 @@ static void cmd_dns_cmd(const char *args)
     }
 }
 
+/* ── IPv6 commands ───────────────────────────────────────── */
+
+static void cmd_ip6(const char *args)
+{
+    (void)args;
+    char buf[48];
+    kputs("  IPv6 addresses:\n");
+    int any = 0;
+    for (int i = 0; i < IPV6_ADDR_MAX; i++) {
+        if (!g_net6.addrs[i].valid) continue;
+        any = 1;
+        ipv6_format(g_net6.addrs[i].addr, buf);
+        kputs("    "); kputs(buf);
+        kputs("/"); kput_dec(g_net6.addrs[i].prefix_len);
+        kputs(g_net6.addrs[i].is_dhcp ? " (DHCPv6)" :
+              (ipv6_is_link_local(g_net6.addrs[i].addr) ? " (link-local)" : " (SLAAC)"));
+        kputs("\n");
+    }
+    if (!any) kputs("    (none)\n");
+
+    if (g_net6.have_gateway) {
+        ipv6_format(g_net6.gateway, buf);
+        kputs("  Gateway: "); kputs(buf); kputs("\n");
+    }
+
+    kputs("  Neighbor cache:\n");
+    int nany = 0;
+    for (int i = 0; i < IPV6_NEIGH_CACHE_SIZE; i++) {
+        if (!g_net6.neigh[i].valid) continue;
+        nany = 1;
+        ipv6_format(g_net6.neigh[i].ip, buf);
+        kputs("    "); kputs(buf); kputs(" -> ");
+        for (int b = 0; b < 6; b++) {
+            if (b) kputs(":");
+            uint8_t v = g_net6.neigh[i].mac.b[b];
+            static const char H[] = "0123456789abcdef";
+            kputc(H[(v>>4)&0xF]); kputc(H[v&0xF]);
+        }
+        kputs("\n");
+    }
+    if (!nany) kputs("    (empty)\n");
+}
+
+static void cmd_ping6(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: ping6 <addr>\n");
+        kputs("  Example: ping6 fec0::2\n");
+        return;
+    }
+    struct ipv6_addr target;
+    if (ipv6_parse(args, &target) < 0) {
+        kputs("  Invalid IPv6 address.\n");
+        return;
+    }
+    char buf[48];
+    ipv6_format(target, buf);
+    kputs("  Pinging "); kputs(buf); kputs("...\n");
+    uint64_t rtt = ipv6_ping(target);
+    if (rtt > 0) {
+        kputs("  Reply: "); kput_dec(rtt); kputs(" TSC cycles\n");
+    } else {
+        kputs("  Timeout.\n");
+    }
+}
+
+static void cmd_nslookup6(const char *args)
+{
+    if (!g_net.up || !*args) {
+        kputs("  Usage: nslookup6 <hostname>\n");
+        return;
+    }
+    struct ipv6_addr result;
+    kputs("  Resolving "); kputs(args); kputs(" (AAAA)...\n");
+    if (dns_resolve_aaaa(args, &result) == 0) {
+        char buf[48];
+        ipv6_format(result, buf);
+        kputs("  "); kputs(args); kputs(" = "); kputs(buf); kputs("\n");
+    } else {
+        kputs("  Failed to resolve.\n");
+    }
+}
+
 static void cmd_fetch(const char *args)
 {
     if (!g_net.up || !*args) {
@@ -3422,6 +3581,10 @@ vault_done:
         }
     }
 
+    /* IPv6: link-local + DHCPv6 + AAAA selftest line */
+    ipv6_print_selftest_line();
+    passes++;
+
     /* MSI-X infrastructure */
     kputs("  MSI-X: ready (");
     kput_dec(msix_free_count());
@@ -3764,6 +3927,8 @@ vault_done:
          * resolve time (with average per-resolve ms). */
         kputs("                         agg_slow_total=");
         kput_dec((uint64_t)scheduler_aggregate_slow_total());
+        kputs(", preempt_kills=");
+        kput_dec((uint64_t)scheduler_preempt_kills());
         kputs(", watchdog_kills=");
         kput_dec((uint64_t)scheduler_watchdog_kills());
         kputs(", tick_avg=");

@@ -14,7 +14,9 @@
 #include "usb_eth.h"
 #include "net_arp.h"
 #include "net_ip.h"
+#include "net_ipv6.h"
 #include "net_tcp.h"
+#include "net_tcp6.h"
 #include "net_dhcp.h"
 #include "net_chain.h"
 #include "kprint.h"
@@ -112,6 +114,12 @@ int net_init(void)
     kput_dec(g_net.ip.b[3]);
     kputs("\n");
 
+    /* Bring up the IPv6 stack: derive link-local from MAC via EUI-64,
+     * send a Router Solicitation, run SLAAC, optionally DHCPv6 if the
+     * RA's M-bit is set. The CHAIN_NET_TX/RX pipelines are shared with
+     * v4 -- the L3 dispatch in net_poll() branches on EtherType. */
+    ipv6_init();
+
     /* Bring up TLS subsystem (mbedTLS init + PSA + DRBG seed + CA load).
      * On failure HTTPS is unavailable; HTTP and the rest of the kernel
      * keep working. */
@@ -141,10 +149,14 @@ void net_poll(void)
     case ETH_TYPE_IP:
         ip_process(frame, (uint16_t)len);
         break;
+    case ETH_TYPE_IPV6:
+        ipv6_process(frame, (uint16_t)len);
+        break;
     }
 
     /* Check retransmission timers after processing any packet */
     tcp_retransmit_tick();
+    tcp6_retransmit_tick();
 }
 
 void net_poll_wait(uint32_t timeout_ms)

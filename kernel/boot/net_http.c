@@ -8,7 +8,9 @@
 
 #include "net_http.h"
 #include "net_tcp.h"
+#include "net_tcp6.h"
 #include "net_dns.h"
+#include "net_ipv6.h"
 #include "net_tls.h"
 #include "kprint.h"
 
@@ -223,32 +225,51 @@ int http_get_once_loc(const char *host, const char *path,
     mem_set(resp, 0, sizeof(*resp));
     if (redir_max > 0) redir_loc[0] = 0;
 
-    /* DNS resolve */
-    struct ipv4_addr server_ip;
+    /* Happy Eyeballs (simplified): resolve AAAA + A in series, try v6
+     * connect first. If v6 connect fails (or AAAA missing) we fall back
+     * to v4. The 200 ms threshold from RFC 8305 is implicit: tcp_open_v6
+     * blocks at most 5 s waiting for SYN-ACK; we either get one quickly
+     * or fall through. The structure stays single-threaded in this kernel. */
     kputs("  DNS: resolving ");
     kputs(host);
     kputs("...\n");
 
-    if (dns_resolve(host, &server_ip) < 0) {
-        kputs("  DNS: failed\n");
-        return -1;
+    int via_v6 = 0;
+    tcp_handle_t v6h = TCP_INVALID_HANDLE;
+    struct ipv6_addr server_ip6;
+    if (dns_resolve_aaaa(host, &server_ip6) == 0) {
+        char buf[48];
+        ipv6_format(server_ip6, buf);
+        kputs("  DNS6: "); kputs(buf); kputs("\n");
+        kputs("  TCP6: connecting...\n");
+        v6h = tcp_open_v6(server_ip6, 80);
+        if (v6h != TCP_INVALID_HANDLE) {
+            via_v6 = 1;
+            kputs("  TCP6: connected\n");
+        } else {
+            kputs("  TCP6: failed -- falling back to v4\n");
+        }
     }
 
-    kputs("  DNS: ");
-    kput_dec(server_ip.b[0]); kputs(".");
-    kput_dec(server_ip.b[1]); kputs(".");
-    kput_dec(server_ip.b[2]); kputs(".");
-    kput_dec(server_ip.b[3]); kputs("\n");
-
-    /* TCP connect */
+    struct ipv4_addr server_ip;
     struct tcp_conn conn;
-    kputs("  TCP: connecting...\n");
-
-    if (tcp_connect(&conn, server_ip, 80) < 0) {
-        kputs("  TCP: connect failed\n");
-        return -1;
+    if (!via_v6) {
+        if (dns_resolve(host, &server_ip) < 0) {
+            kputs("  DNS: failed\n");
+            return -1;
+        }
+        kputs("  DNS: ");
+        kput_dec(server_ip.b[0]); kputs(".");
+        kput_dec(server_ip.b[1]); kputs(".");
+        kput_dec(server_ip.b[2]); kputs(".");
+        kput_dec(server_ip.b[3]); kputs("\n");
+        kputs("  TCP: connecting...\n");
+        if (tcp_connect(&conn, server_ip, 80) < 0) {
+            kputs("  TCP: connect failed\n");
+            return -1;
+        }
+        kputs("  TCP: connected\n");
     }
-    kputs("  TCP: connected\n");
 
     /* Build HTTP request */
     char request[512];
@@ -281,7 +302,8 @@ int http_get_once_loc(const char *host, const char *path,
 
     /* Send */
     kputs("  HTTP: sending request...\n");
-    tcp_send(&conn, request, (uint16_t)rpos);
+    if (via_v6) tcp_send_v6(v6h, request, (uint16_t)rpos);
+    else        tcp_send(&conn, request, (uint16_t)rpos);
 
     /* Receive response — keep buffer in BSS (256 KB+ won't fit on UEFI stack).
      * Chunk reads to a uint16_t-bounded size since tcp_recv's len arg is u16. */
@@ -293,13 +315,15 @@ int http_get_once_loc(const char *host, const char *path,
     while (total < cap) {
         int remaining = cap - total;
         uint16_t chunk = remaining > 0xF000 ? 0xF000 : (uint16_t)remaining;
-        int got = tcp_recv(&conn, raw + total, chunk);
+        int got = via_v6 ? tcp_recv_v6(v6h, raw + total, chunk)
+                         : tcp_recv(&conn, raw + total, chunk);
         if (got <= 0) break;
         total += got;
     }
     raw[total] = '\0';
 
-    tcp_close(&conn);
+    if (via_v6) tcp_close_v6(v6h);
+    else        tcp_close(&conn);
 
     if (total == 0) {
         kputs("  HTTP: no response\n");

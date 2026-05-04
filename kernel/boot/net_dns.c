@@ -20,6 +20,11 @@ static struct {
 static volatile int dns_got_reply = 0;
 static struct ipv4_addr dns_reply_ip;
 
+/* AAAA response state */
+static volatile int dns6_got_reply = 0;
+static struct ipv6_addr dns6_reply_ip;
+static uint16_t dns_query_qtype = 1;  /* 1 = A, 28 = AAAA */
+
 /* DNS header */
 struct dns_hdr {
     uint16_t id;
@@ -135,6 +140,12 @@ past_qname:
             dns_got_reply = 1;
             return;
         }
+        if (rtype == 28 && rdlength == 16 && p + 16 <= end) {
+            /* AAAA record! */
+            for (int b = 0; b < 16; b++) dns6_reply_ip.bytes[b] = p[b];
+            dns6_got_reply = 1;
+            return;
+        }
 
         p += rdlength;
     }
@@ -201,5 +212,49 @@ int dns_resolve(const char *hostname, struct ipv4_addr *out)
         }
     }
 
+    return 0;
+}
+
+/* AAAA resolver. Sends a QTYPE=28 query and parses the AAAA out of the
+ * response via the same callback (which now also sets dns6_got_reply). */
+int dns_resolve_aaaa(const char *hostname, struct ipv6_addr *out)
+{
+    if (g_net.dns.b[0] == 0 && g_net.dns.b[1] == 0 &&
+        g_net.dns.b[2] == 0 && g_net.dns.b[3] == 0)
+        return -1;
+
+    if (!dns_registered) {
+        udp_bind(53, dns_recv_callback);
+        dns_registered = 1;
+    }
+
+    uint8_t query[256];
+    struct dns_hdr *hdr = (struct dns_hdr *)query;
+    hdr->id = htons(0x5678);
+    hdr->flags = htons(0x0100);
+    hdr->qdcount = htons(1);
+    hdr->ancount = 0;
+    hdr->nscount = 0;
+    hdr->arcount = 0;
+
+    int name_len = dns_encode_name(hostname, query + sizeof(struct dns_hdr),
+                                    256 - sizeof(struct dns_hdr) - 4);
+    if (name_len < 0) return -1;
+
+    int qpos = sizeof(struct dns_hdr) + name_len;
+    query[qpos++] = 0; query[qpos++] = 28;  /* QTYPE: AAAA */
+    query[qpos++] = 0; query[qpos++] = 1;   /* QCLASS: IN */
+
+    dns6_got_reply = 0;
+    dns_query_qtype = 28;
+    udp_send(g_net.dns, 53, 53, query, (uint16_t)qpos);
+
+    for (int i = 0; i < 30000 && !dns6_got_reply; i++) {
+        net_poll();
+        for (volatile int j = 0; j < 5000; j++);
+    }
+    dns_query_qtype = 1;
+    if (!dns6_got_reply) return -1;
+    *out = dns6_reply_ip;
     return 0;
 }
