@@ -183,14 +183,27 @@ $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so
 	@echo "  Zeos UEFI bootloader ready."
 	@echo ""
 
+# Persistent VAULT backing image: NVMe drive that survives QEMU
+# `system_reset` so the VAULT journal + chain registry snapshot
+# round-trip across reboots. 8 MB is enough for the 2 MB ramdisk
+# image plus headroom for future growth.
+VAULT_IMG  = $(BUILDDIR)/vault.img
+VAULT_SIZE = 8
+
+$(VAULT_IMG):
+	@mkdir -p $(BUILDDIR)
+	dd if=/dev/zero of=$(VAULT_IMG) bs=1M count=$(VAULT_SIZE) 2>/dev/null
+
 # Create a FAT32 ESP image and run in QEMU
-run: $(BUILDDIR)/$(TARGET)
+run: $(BUILDDIR)/$(TARGET) $(VAULT_IMG)
 	@mkdir -p $(ESP)/EFI/BOOT
 	cp $(BUILDDIR)/$(TARGET) $(ESP)/EFI/BOOT/BOOTX64.EFI
 	qemu-system-x86_64 \
 		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
 		-drive if=pflash,format=raw,file=$(BUILDDIR)/OVMF_VARS.fd \
 		-drive format=raw,file=fat:rw:$(ESP) \
+		-drive if=none,id=zeosvault,file=$(VAULT_IMG),format=raw \
+		-device nvme,drive=zeosvault,serial=ZEOSVAULT \
 		-m 256M \
 		-device virtio-net-pci,netdev=n0 \
 		-netdev user,id=n0 \

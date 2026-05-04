@@ -24,6 +24,9 @@
 #include "zeos_boot.h"
 #include "gdt.h"
 #include "idt.h"
+#include "acpi.h"
+#include "lapic.h"
+#include "ioapic.h"
 #include "panic.h"
 #include "keyboard.h"
 #include "mouse.h"
@@ -499,6 +502,40 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     int pci_count = pci_enumerate();
     kput_dec(pci_count);
     kputs(" devices found.\n");
+
+    /*
+     * ── ACPI / LAPIC / IOAPIC ──────────────────────────────────────
+     * Parse the MADT from the RSDP UEFI handed us, bring up the BSP's
+     * Local APIC (mapped uncached, SVR enabled, every LVT masked),
+     * calibrate the APIC bus frequency against PIT channel 2, and map
+     * each IOAPIC. The APIC timer is left disarmed; arming it for
+     * scheduler preemption is a separate change.
+     *
+     * Without lapic_init() running before the first MSI-X interrupt,
+     * subsequent interrupts on the same vector queue at the LAPIC ISR
+     * because nobody acknowledges them. msix_dispatch() now writes
+     * LAPIC EOI at the tail of every dispatch.
+     */
+    kputs("ACPI MADT... ");
+    if (acpi_init(boot_info.rsdp) == 0) {
+        kputs("ok ("); kput_dec((uint64_t)acpi_madt()->lapic_count);
+        kputs(" CPU, "); kput_dec((uint64_t)acpi_madt()->ioapic_count);
+        kputs(" IOAPIC).\n");
+    } else {
+        kputs("not found (defaults).\n");
+    }
+    kputs("LAPIC init... ");
+    lapic_init();
+    lapic_timer_calibrate();
+    kputs("id="); kput_dec(lapic_id());
+    kputs(", "); kput_dec(lapic_ticks_per_us());
+    kputs(" ticks/us.\n");
+    kputs("IOAPIC init... ");
+    if (ioapic_init() == 0) {
+        kput_dec(ioapic_count()); kputs(" mapped.\n");
+    } else {
+        kputs("none.\n");
+    }
 
     /* Initialize xHCI (USB 3.x) host controller. Polling-based; safe
      * even before timer/IDT IRQs are wired. Enumerates root-hub ports

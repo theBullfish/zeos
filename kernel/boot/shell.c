@@ -226,6 +226,7 @@ static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
 static void cmd_scheduler_log(const char *args);
+static void cmd_chain_backoff(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -364,8 +365,83 @@ static void cmd_scheduler_log(const char *args)
     kput_dec((uint64_t)scheduler_tps());
     kputs(", slow_total=");
     kput_dec((uint64_t)scheduler_slow_resolves_total());
+    kputs(", agg_slow=");
+    kput_dec((uint64_t)scheduler_aggregate_slow_total());
+    kputs(", wdog_kills=");
+    kput_dec((uint64_t)scheduler_watchdog_kills());
     kputc('\n');
     scheduler_log_dump(n);
+}
+
+/* chain-backoff <id> <threshold> <every>
+ *   threshold: failure-ratio threshold (e.g. 0.5 for 50%) -- accepts
+ *              integer percent (50) OR decimal-string ("0.5", "0.75").
+ *   every:     base skip period (skip every Nth tick when failing).
+ * Updates chain->backoff_skip_threshold + chain->backoff_skip_every. */
+static void cmd_chain_backoff(const char *args)
+{
+    if (!args || !*args) {
+        kputs("  usage: chain-backoff <id> <threshold> <every>\n");
+        kputs("    threshold: 0.0..1.0 (or integer percent like 50)\n");
+        kputs("    every:     >= 1 (default 4)\n");
+        return;
+    }
+    const char *p = args;
+    while (*p == ' ') p++;
+
+    /* id */
+    int id = 0;
+    if (*p < '0' || *p > '9') { kputs("  bad id\n"); return; }
+    while (*p >= '0' && *p <= '9') { id = id*10 + (*p - '0'); p++; }
+    while (*p == ' ') p++;
+
+    /* threshold: parse as either percent (e.g. 50) or decimal (0.5). */
+    if (*p == 0) { kputs("  missing threshold\n"); return; }
+    int int_part = 0;
+    int has_dot = 0;
+    int frac_part = 0, frac_div = 1;
+    while (*p >= '0' && *p <= '9') { int_part = int_part*10 + (*p - '0'); p++; }
+    if (*p == '.') {
+        has_dot = 1;
+        p++;
+        while (*p >= '0' && *p <= '9') {
+            frac_part = frac_part*10 + (*p - '0');
+            frac_div *= 10;
+            p++;
+        }
+    }
+    float threshold;
+    if (has_dot) {
+        threshold = (float)int_part + (float)frac_part / (float)frac_div;
+    } else if (int_part > 1) {
+        /* Treat as percent (e.g. 50 -> 0.5). */
+        threshold = (float)int_part / 100.0f;
+    } else {
+        threshold = (float)int_part;
+    }
+    while (*p == ' ') p++;
+
+    /* every */
+    if (*p == 0) { kputs("  missing every\n"); return; }
+    uint32_t every = 0;
+    while (*p >= '0' && *p <= '9') { every = every*10 + (uint32_t)(*p - '0'); p++; }
+
+    if (scheduler_set_backoff(id, threshold, every) != 0) {
+        kputs("  chain-backoff: bad args (id invalid, or threshold not in (0,1], or every<1)\n");
+        return;
+    }
+
+    chain_t *c = chain_get(id);
+    kputs("  chain-backoff: id=");
+    kput_dec((uint64_t)id);
+    kputs(" name=\"");
+    kputs(c ? c->name : "?");
+    kputs("\" threshold=");
+    /* Print as integer permille for predictability without printf. */
+    kput_dec((uint64_t)(threshold * 1000.0f));
+    kputs("/1000 every=");
+    kput_dec((uint64_t)every);
+    kputc('\n');
 }
 
 /* FAT32 read-only */
@@ -434,6 +510,7 @@ static const struct shell_cmd commands[] = {
     {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
+    {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
 
@@ -2436,8 +2513,12 @@ vault_done:
         kputs(" MHz, IOAPIC count=");
         kput_dec((uint64_t)ioapic_count());
         kputs("\n");
-        if (mhz >= 100) passes++;
-        else            fails++;
+        /* Sanity floor: any non-zero calibrated frequency means PIT
+         * channel 2 ticked and the LAPIC timer counted. QEMU's
+         * emulated APIC bus is ~62 MHz at div=16; real silicon is
+         * 100+ MHz. Anything less means calibration broke. */
+        if (mhz >= 50) passes++;
+        else           fails++;
     } else {
         kputs("not ready\n");
         fails++;
@@ -2680,6 +2761,29 @@ vault_done:
         kputs(" LIVE chains, ");
         kput_dec((uint64_t)errs);
         kputs(" error\n");
+        /* New scheduler hardening lines: aggregate slow ticks,
+         * watchdog kills, and the top slow chain by cumulative
+         * resolve time (with average per-resolve ms). */
+        kputs("                         agg_slow_total=");
+        kput_dec((uint64_t)scheduler_aggregate_slow_total());
+        kputs(", watchdog_kills=");
+        kput_dec((uint64_t)scheduler_watchdog_kills());
+        kputc('\n');
+        int top_id = -1;
+        float top_avg = 0.0f;
+        if (scheduler_top_slow_chain(&top_id, &top_avg) && top_id >= 0) {
+            chain_t *tc = chain_get(top_id);
+            kputs("                         top_slow=id ");
+            kput_dec((uint64_t)top_id);
+            kputs(" \"");
+            kputs(tc ? tc->name : "?");
+            kputs("\" avg=");
+            /* Integer ms -- avoid float printf in kernel. */
+            kput_dec((uint64_t)top_avg);
+            kputs("ms\n");
+        } else {
+            kputs("                         top_slow=(none yet)\n");
+        }
         if (tps > 0 && live >= 1 && errs == 0) passes++; else fails++;
     }
 

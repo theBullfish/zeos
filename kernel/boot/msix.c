@@ -23,6 +23,7 @@
 #include "pci.h"
 #include "idt.h"
 #include "vmm.h"
+#include "lapic.h"
 #include "kprint.h"
 
 #define MSIX_TBL_OFFSET        0x04
@@ -101,11 +102,19 @@ void msix_free_vector(int vec)
 
 void msix_dispatch(int vec)
 {
-    if (vec < MSIX_VECTOR_BASE || vec >= MSIX_VECTOR_TOP) return;
+    if (vec < MSIX_VECTOR_BASE || vec >= MSIX_VECTOR_TOP) {
+        /* Still EOI: the LAPIC accepted this vector. */
+        lapic_eoi();
+        return;
+    }
     int i = vec - MSIX_VECTOR_BASE;
     if (g_vector_handlers[i]) {
         g_vector_handlers[i]();
     }
+    /* Acknowledge to the LAPIC so the next interrupt on this vector
+     * can be delivered. Without this, the LAPIC's ISR keeps the bit
+     * set and subsequent interrupts at the same priority queue. */
+    lapic_eoi();
 }
 
 static struct msix_device_state *find_state(struct pci_device *dev)
