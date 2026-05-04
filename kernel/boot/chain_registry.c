@@ -20,6 +20,7 @@
 #include "wm.h"
 #include "inspector.h"
 #include "palette.h"
+#include "hda.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -33,6 +34,7 @@ int CHAIN_SHELL      = -1;
 int CHAIN_BROWSER    = -1;
 int CHAIN_INSPECTOR  = -1;
 int CHAIN_PALETTE    = -1;
+int CHAIN_AUDIO      = -1;
 
 /* ── Node resolve functions ────────────────────────────────────── */
 /*
@@ -200,6 +202,41 @@ int chain_registry_init(void)
         chain_add_node(CHAIN_PALETTE, "search",
                        "input_event", "surface_output",
                        palette_search_resolve);
+    }
+
+    /* Audio (HDA): first hardware driver converted to native chain
+     * paradigm. Pipeline: pcm_source -> volume_filter -> hda_pin ->
+     * hardware_dma. hda_init() ran during boot so the controller is
+     * already programmed; these nodes wrap the per-PCM playback path. */
+    CHAIN_AUDIO = chain_create("audio", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_AUDIO >= 0) {
+        extern void *hda_pcm_source_state(void);
+        extern void *hda_volume_filter_state(void);
+        extern void *hda_pin_state(void);
+        extern void *hda_dma_state(void);
+
+        int n0 = chain_add_node(CHAIN_AUDIO, "pcm_source",
+                                "pcm_request", "pcm_frame",
+                                hda_pcm_source_resolve);
+        int n1 = chain_add_node(CHAIN_AUDIO, "volume_filter",
+                                "pcm_frame", "pcm_frame",
+                                hda_volume_filter_resolve);
+        int n2 = chain_add_node(CHAIN_AUDIO, "hda_pin",
+                                "pcm_frame", "dma_descriptor",
+                                hda_pin_resolve);
+        int n3 = chain_add_node(CHAIN_AUDIO, "hardware_dma",
+                                "dma_descriptor", "tx_completion",
+                                hda_dma_resolve);
+
+        /* Wire each node's state pointer to the right module-private
+         * struct. The accessor functions live in hda.c. */
+        chain_t *c = chain_get(CHAIN_AUDIO);
+        if (c) {
+            if (n0 >= 0) c->nodes[n0].state = hda_pcm_source_state();
+            if (n1 >= 0) c->nodes[n1].state = hda_volume_filter_state();
+            if (n2 >= 0) c->nodes[n2].state = hda_pin_state();
+            if (n3 >= 0) c->nodes[n3].state = hda_dma_state();
+        }
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

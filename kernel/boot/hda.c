@@ -1,12 +1,25 @@
 /*
  * Zeos -- Intel HD Audio (HDA) driver
  *
+ * Chain-native HDA driver. Pipeline:
+ *   pcm_source -> volume_filter -> hda_pin -> hardware_dma
+ * Each node is a chain_node_t resolved through chain_resolve().
+ * MasQ tier: INTERNAL. Parent: CHAIN_CPU.
+ * This is the first hardware driver converted to the Zeos native paradigm
+ * (per docs/PARADIGM_CONVERSION.md). NIC, NVMe, AHCI, USB follow this shape.
+ *
  * Spec: Intel HD Audio Specification rev 1.0a (2010).
  *
  * Minimum-viable: PCI class 0x04 / subclass 0x03, MMIO at BAR0, CORB/RIRB
  * DMA rings for codec verbs, one BDL per output stream. Walks the codec
  * tree, finds an analog output pin, configures SD0 for 48 kHz/16-bit
  * stereo, plays PCM. Polling-only -- no MSI/IRQ. 48 kHz only.
+ *
+ * Imperative bringup (PCI scan, controller reset, CORB/RIRB ring setup,
+ * codec walk, stream pre-config) still runs in hda_init() so the controller
+ * is live before chain_registry_init() registers CHAIN_AUDIO. After that,
+ * every PCM playback flows through chain_resolve(CHAIN_AUDIO). hda_play_pcm
+ * is a compat shim that stages a pcm_request and calls chain_resolve.
  */
 
 #include "hda.h"
@@ -14,6 +27,8 @@
 #include "pmm.h"
 #include "kprint.h"
 #include "timer.h"
+#include "chain.h"
+#include "chain_registry.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -100,6 +115,37 @@ static uint16_t           pin_nid    = 0;
 static int                out_sd_idx = -1;
 static volatile uint8_t  *sd_regs = 0;
 
+/* ── Chain-node-private state ──────────────────────────────────────── */
+
+typedef struct {
+    /* The active request, staged by hda_play_pcm() before chain_resolve. */
+    hda_pcm_request_t pending;
+} pcm_source_state_t;
+
+typedef struct {
+    /* 0..256: 256 = unity, 0 = mute. Linear scale, fixed-point /256. */
+    int gain_q8;
+} volume_filter_state_t;
+
+typedef struct {
+    /* Codec/pin we're driving + last gain we pushed. -1 = not yet pushed. */
+    uint8_t  cad;
+    uint16_t dac;
+    uint16_t pin;
+    int      pushed;     /* 1 once codec pin/amp settings have been applied */
+} hda_pin_state_t;
+
+typedef struct {
+    /* SD0 register pointers + BDL phys -- already resolved in hda_init. */
+    volatile uint8_t *sd_regs;
+    uint64_t          bdl_phys;
+} hda_dma_state_t;
+
+static pcm_source_state_t    s_pcm_source;
+static volume_filter_state_t s_volume_filter   = { .gain_q8 = 256 };
+static hda_pin_state_t       s_hda_pin;
+static hda_dma_state_t       s_hda_dma;
+
 static inline uint8_t  mr8 (uint32_t off) { return *(volatile uint8_t  *)(mmio + off); }
 static inline uint16_t mr16(uint32_t off) { return *(volatile uint16_t *)(mmio + off); }
 static inline uint32_t mr32(uint32_t off) { return *(volatile uint32_t *)(mmio + off); }
@@ -107,10 +153,15 @@ static inline void     mw8 (uint32_t off, uint8_t  v) { *(volatile uint8_t  *)(m
 static inline void     mw16(uint32_t off, uint16_t v) { *(volatile uint16_t *)(mmio + off) = v; }
 static inline void     mw32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(mmio + off) = v; }
 
-static inline uint8_t  sdr8 (uint32_t off) { return *(volatile uint8_t  *)(sd_regs + off); }
-static inline void     sdw8 (uint32_t off, uint8_t  v) { *(volatile uint8_t  *)(sd_regs + off) = v; }
-static inline void     sdw16(uint32_t off, uint16_t v) { *(volatile uint16_t *)(sd_regs + off) = v; }
-static inline void     sdw32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(sd_regs + off) = v; }
+static inline uint8_t  sdr8_at (volatile uint8_t *r, uint32_t off) { return *(volatile uint8_t  *)(r + off); }
+static inline void     sdw8_at (volatile uint8_t *r, uint32_t off, uint8_t  v) { *(volatile uint8_t  *)(r + off) = v; }
+static inline void     sdw16_at(volatile uint8_t *r, uint32_t off, uint16_t v) { *(volatile uint16_t *)(r + off) = v; }
+static inline void     sdw32_at(volatile uint8_t *r, uint32_t off, uint32_t v) { *(volatile uint32_t *)(r + off) = v; }
+
+static inline uint8_t  sdr8 (uint32_t off) { return sdr8_at(sd_regs, off); }
+static inline void     sdw8 (uint32_t off, uint8_t  v) { sdw8_at(sd_regs, off, v); }
+static inline void     sdw16(uint32_t off, uint16_t v) { sdw16_at(sd_regs, off, v); }
+static inline void     sdw32(uint32_t off, uint32_t v) { sdw32_at(sd_regs, off, v); }
 
 static void busy_pause(int loops)
 {
@@ -414,6 +465,16 @@ int hda_init(void)
 
     if (hda_setup_stream() < 0) return -1;
 
+    /* Seed chain-node-private state from the bringup we just did. */
+    s_pcm_source.pending.valid = 0;
+    s_volume_filter.gain_q8    = 256;
+    s_hda_pin.cad              = codec_addr;
+    s_hda_pin.dac              = dac_nid;
+    s_hda_pin.pin              = pin_nid;
+    s_hda_pin.pushed           = 1;   /* hda_setup_stream already pushed once */
+    s_hda_dma.sd_regs          = sd_regs;
+    s_hda_dma.bdl_phys         = bdl_phys;
+
     ready = 1;
     status_msg = "ready";
     return 0;
@@ -422,29 +483,205 @@ int hda_init(void)
 int hda_ready(void) { return ready; }
 const char *hda_status(void) { return status_msg; }
 
+/* State accessors used by chain_registry to bind chain_node_t->state. */
+void *hda_pcm_source_state(void)    { return &s_pcm_source; }
+void *hda_volume_filter_state(void) { return &s_volume_filter; }
+void *hda_pin_state(void)           { return &s_hda_pin; }
+void *hda_dma_state(void)           { return &s_hda_dma; }
+
+/* ── Chain node resolves ───────────────────────────────────────────── */
+/*
+ * Each resolve has the signature
+ *   void f(chain_node_t *self, void *input, void *output)
+ * and reads/writes scratch buffers supplied by chain_resolve.
+ *
+ * The four nodes form a linear pipeline; chain_resolve passes each
+ * node's output to the next node's input.
+ *
+ *   pcm_source     : (module-state pending request) -> hda_pcm_frame_t
+ *   volume_filter  : hda_pcm_frame_t                -> hda_pcm_frame_t (in-place scale)
+ *   hda_pin        : hda_pcm_frame_t                -> hda_dma_descriptor_t
+ *   hardware_dma   : hda_dma_descriptor_t           -> hda_tx_completion_t
+ */
+
+void hda_pcm_source_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)input;
+    pcm_source_state_t *st = (pcm_source_state_t *)self->state;
+    hda_pcm_frame_t *out = (hda_pcm_frame_t *)output;
+
+    out->samples     = (int16_t *)0;
+    out->num_samples = 0;
+    out->sample_rate = 0;
+    out->error       = 0;
+
+    if (!st || !st->pending.valid) {
+        out->error = 1;          /* nothing to play this tick -- benign idle */
+        return;
+    }
+
+    /* Copy caller samples into the DMA-mapped audio_buf so downstream
+     * nodes can mutate volume in place and hardware_dma can DMA from a
+     * known physical address. Cap to buffer capacity. */
+    int max_frames = HDA_AUDIO_BYTES / 4;          /* 16-bit stereo frames */
+    int frames = st->pending.num_samples / 2;
+    if (frames > max_frames) frames = max_frames;
+    int n_int16 = frames * 2;
+
+    int16_t *dst = (int16_t *)audio_buf;
+    for (int i = 0; i < n_int16; i++) dst[i] = st->pending.samples[i];
+    /* Zero remainder of buffer so the second BDL half doesn't replay stale audio. */
+    for (int i = n_int16; i < HDA_AUDIO_BYTES / 2; i++) dst[i] = 0;
+
+    out->samples     = dst;
+    out->num_samples = n_int16;
+    out->sample_rate = st->pending.sample_rate;
+    out->error       = 0;
+
+    /* Mark the request consumed. */
+    st->pending.valid = 0;
+}
+
+void hda_volume_filter_resolve(chain_node_t *self, void *input, void *output)
+{
+    volume_filter_state_t *st = (volume_filter_state_t *)self->state;
+    hda_pcm_frame_t *in  = (hda_pcm_frame_t *)input;
+    hda_pcm_frame_t *out = (hda_pcm_frame_t *)output;
+
+    *out = *in;                         /* pass-through descriptor */
+    if (in->error || !in->samples)
+        return;
+
+    int gain = (st ? st->gain_q8 : 256);
+    if (gain == 256)
+        return;                         /* unity -- no work */
+
+    /* Scale samples in place: sample = sample * gain / 256.
+     * Saturate at int16 bounds. */
+    int n = in->num_samples;
+    int16_t *s = in->samples;
+    for (int i = 0; i < n; i++) {
+        int32_t v = ((int32_t)s[i] * gain) >> 8;
+        if (v > 32767) v = 32767;
+        if (v < -32768) v = -32768;
+        s[i] = (int16_t)v;
+    }
+}
+
+void hda_pin_resolve(chain_node_t *self, void *input, void *output)
+{
+    hda_pin_state_t *st = (hda_pin_state_t *)self->state;
+    hda_pcm_frame_t *in  = (hda_pcm_frame_t *)input;
+    hda_dma_descriptor_t *out = (hda_dma_descriptor_t *)output;
+
+    out->buf_phys    = audio_buf_phys;
+    out->bytes       = HDA_AUDIO_BYTES;
+    out->frames      = in->num_samples / 2;
+    out->sample_rate = in->sample_rate;
+    out->error       = in->error;
+
+    if (in->error || !in->samples) return;
+
+    /* Push pin/AMP settings if not yet applied. hda_init() already does
+     * this once, so st->pushed starts at 1 -- but if a future caller
+     * bumps gain or remaps the pin, we re-push here. */
+    if (!st || st->pushed) return;
+
+    codec_cmd(st->cad, st->dac, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
+    codec_cmd(st->cad, st->dac, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
+    codec_cmd(st->cad, st->pin, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
+    codec_cmd(st->cad, st->pin, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
+
+    uint32_t pcap = codec_cmd(st->cad, st->pin, VERB_GET_PARAM, PARAM_PIN_CAP);
+    uint8_t pinctl = PIN_CTL_OUT_ENABLE;
+    if (pcap & PIN_CAP_HEADPHONE) pinctl |= PIN_CTL_HP_ENABLE;
+    codec_cmd(st->cad, st->pin, VERB_SET_PIN_CTL, pinctl);
+
+    if (pcap & PIN_CAP_EAPD)
+        codec_cmd(st->cad, st->pin, VERB_SET_EAPD, 0x02);
+
+    st->pushed = 1;
+
+    /* Pin/AMP state-changing operation: bump MasQ/VAULT version. */
+    chain_t *c = chain_get(CHAIN_AUDIO);
+    if (c) c->vault_version++;
+}
+
+void hda_dma_resolve(chain_node_t *self, void *input, void *output)
+{
+    hda_dma_state_t *st = (hda_dma_state_t *)self->state;
+    hda_dma_descriptor_t *in  = (hda_dma_descriptor_t *)input;
+    hda_tx_completion_t  *out = (hda_tx_completion_t *)output;
+
+    out->ok            = 0;
+    out->frames_played = 0;
+    out->elapsed_ms    = 0;
+
+    if (!st || !st->sd_regs || in->error || in->frames <= 0)
+        return;
+
+    volatile uint8_t *r = st->sd_regs;
+
+    /* Stop any prior run. */
+    sdw8_at(r, SD_CTL, sdr8_at(r, SD_CTL) & ~SDCTL_RUN);
+    for (int i = 0; i < 100; i++) {
+        if (!(sdr8_at(r, SD_CTL) & SDCTL_RUN)) break;
+        busy_pause(1000);
+    }
+
+    /* Stream start = state change. */
+    chain_t *c = chain_get(CHAIN_AUDIO);
+    if (c) c->vault_version++;
+
+    sdw8_at(r, SD_CTL, sdr8_at(r, SD_CTL) | SDCTL_RUN);
+
+    uint32_t ms = (uint32_t)(((uint64_t)in->frames * 1000ULL) /
+                             (uint64_t)(in->sample_rate ? in->sample_rate : 48000)) + 1;
+    timer_wait_ms(ms);
+
+    sdw8_at(r, SD_CTL, sdr8_at(r, SD_CTL) & ~SDCTL_RUN);
+    if (c) c->vault_version++;
+
+    out->ok            = 1;
+    out->frames_played = in->frames;
+    out->elapsed_ms    = ms;
+}
+
+/* ── Compat shim ───────────────────────────────────────────────────── */
+
 int hda_play_pcm(const int16_t *samples, int num_samples, int sample_rate)
 {
     if (!ready) return -1;
     if (sample_rate != 48000) return -2;
     if (num_samples <= 0) return 0;
-
-    sdw8(SD_CTL, sdr8(SD_CTL) & ~SDCTL_RUN);
-    for (int i = 0; i < 100; i++) {
-        if (!(sdr8(SD_CTL) & SDCTL_RUN)) break;
-        busy_pause(1000);
+    if (CHAIN_AUDIO < 0) {
+        /* Chain not yet registered (extremely early call) -- fall back to
+         * the legacy direct path so the OS still makes sound. */
+        sdw8(SD_CTL, sdr8(SD_CTL) & ~SDCTL_RUN);
+        for (int i = 0; i < 100; i++) {
+            if (!(sdr8(SD_CTL) & SDCTL_RUN)) break;
+            busy_pause(1000);
+        }
+        int max_frames = HDA_AUDIO_BYTES / 4;
+        int frames = num_samples / 2;
+        if (frames > max_frames) frames = max_frames;
+        int16_t *dst = (int16_t *)audio_buf;
+        for (int i = 0; i < frames * 2; i++) dst[i] = samples[i];
+        for (int i = frames * 2; i < HDA_AUDIO_BYTES / 2; i++) dst[i] = 0;
+        sdw8(SD_CTL, sdr8(SD_CTL) | SDCTL_RUN);
+        uint32_t ms = (uint32_t)(((uint64_t)frames * 1000ULL) / 48000ULL) + 1;
+        timer_wait_ms(ms);
+        sdw8(SD_CTL, sdr8(SD_CTL) & ~SDCTL_RUN);
+        return 0;
     }
 
-    int max_frames = HDA_AUDIO_BYTES / 4;
-    int frames = num_samples > max_frames ? max_frames : num_samples;
-    int16_t *dst = (int16_t *)audio_buf;
-    for (int i = 0; i < frames * 2; i++) dst[i] = samples[i];
-    for (int i = frames * 2; i < HDA_AUDIO_BYTES / 2; i++) dst[i] = 0;
+    /* Stage the request and resolve the chain. */
+    s_pcm_source.pending.samples     = samples;
+    s_pcm_source.pending.num_samples = num_samples;
+    s_pcm_source.pending.sample_rate = sample_rate;
+    s_pcm_source.pending.valid       = 1;
+    s_pcm_source.pending.error       = 0;
 
-    sdw8(SD_CTL, sdr8(SD_CTL) | SDCTL_RUN);
-
-    uint32_t ms = (uint32_t)(((uint64_t)frames * 1000ULL) / 48000ULL) + 1;
-    timer_wait_ms(ms);
-
-    sdw8(SD_CTL, sdr8(SD_CTL) & ~SDCTL_RUN);
-    return 0;
+    int rc = chain_resolve(CHAIN_AUDIO);
+    return (rc == 0) ? 0 : -3;
 }

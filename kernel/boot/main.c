@@ -589,6 +589,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     sig_init();
     kputs("ready.\n\n");
 
+    /* Wire all subsystems into the chain/MDE graph (CPU, memory, GPU,
+     * NIC discovery + system chains: compositor, panel, dock, desktop,
+     * shell, browser, inspector, palette, AND audio -- the first hardware
+     * driver in the native paradigm. See docs/PARADIGM_CONVERSION.md. */
+    {
+        extern int chain_registry_init(void);
+        chain_registry_init();
+    }
+
     /* Enter shell — never returns */
     shell_run(&boot_info);
 

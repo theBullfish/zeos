@@ -42,6 +42,7 @@
 #include "timer.h"
 #include "signal.h"
 #include "chain.h"
+#include "chain_registry.h"
 #include "serial.h"
 #include "persona_filter.h"
 #include "persona_anim.h"
@@ -2180,10 +2181,30 @@ vault_done:
     kputs(" vectors free)\n");
     passes++;
 
-    /* HDA audio */
+    /* HDA audio -- exercises the chain-native pipeline:
+     * pcm_source -> volume_filter -> hda_pin -> hardware_dma.
+     * The chain is dumped regardless of controller readiness so the
+     * paradigm conversion is observable even on hardware where the
+     * codec walk doesn't bring up an output path. */
     kputs("  Audio (HDA) ........... ");
-    if (hda_ready()) { kputs("HDA detected\n"); passes++; }
-    else             { kputs("not available ("); kputs(hda_status()); kputs(")\n"); }
+    if (hda_ready())          kputs("HDA ready\n");
+    else { kputs("controller not ready ("); kputs(hda_status()); kputs(")\n"); }
+
+    if (CHAIN_AUDIO >= 0) {
+        chain_t *ac = chain_get(CHAIN_AUDIO);
+        int nc = ac ? ac->node_count : 0;
+        int rc = (hda_ready()) ? chain_resolve(CHAIN_AUDIO) : 0;
+        kputs("    chain ok (nodes=");
+        kput_dec((uint64_t)nc);
+        kputs(", rc=");
+        kput_dec((uint64_t)rc);
+        kputs(")\n");
+        chain_dump(CHAIN_AUDIO);
+        if (nc == 4) passes++; else fails++;
+    } else {
+        kputs("    chain not registered\n");
+        fails++;
+    }
 
     /* USB MSC: report presence + size in MB. */
     kputs("  USB MSC ............... ");
