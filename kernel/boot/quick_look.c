@@ -2,8 +2,20 @@
  * Zeos — Quick Look implementation
  *
  * Doctrine: read once, render forever. The preview panel owns a
- * 64KB scratch buffer (static) so it never allocates from heap.
- * Files larger than the buffer get a metadata-only card.
+ * small static sniff buffer so type detection never allocates.
+ * For PNGs we go further: full RGBA decode via lodepng, with the
+ * input file bytes pulled into a PMM-contiguous buffer (heap is
+ * the wrong tool for >64 KB allocations). Decoded RGBA pixels are
+ * kept until the panel closes, then freed.
+ *
+ * Quick Look: full PNG decode via lodepng + pmm_alloc_contiguous.
+ * Capped at 1920x1080 (8 MB buffer). Larger → metadata only.
+ * JPEG / WebP / HEIC are future work.
+ *
+ * Async-friendly: the first draw after open shows a spinner and
+ * arms a "needs decode" flag. The next draw performs the decode
+ * and paints. This keeps quick_look_open() — which runs on the
+ * keyboard ISR's caller path — out of the heavy decode work.
  */
 
 #include "quick_look.h"
@@ -12,11 +24,25 @@
 #include "theme.h"
 #include "compositor.h"
 #include "timeofday.h"
+#include "pmm.h"
+#include "fat32.h"
+#include "ui_states.h"
+#include "lodepng/lodepng.h"
 
-#define QL_BUF_SIZE   (64 * 1024)
-#define QL_W          640
-#define QL_H          480
-#define QL_PAD         16
+/* lodepng allocator shims live in browser.c — reuse them here. */
+extern void *lodepng_malloc(uint64_t size);
+extern void  lodepng_free(void *ptr);
+
+#define QL_SNIFF_SIZE  (4 * 1024)   /* enough for magic + IHDR + text head */
+#define QL_W           640
+#define QL_H           480
+#define QL_PAD          16
+#define PAGE_SIZE      4096
+
+/* Hard caps on PNG dimensions. 1920x1080 RGBA = ~8 MB output buffer. */
+#define MAX_PREVIEW_W       1920
+#define MAX_PREVIEW_H       1080
+#define MAX_PNG_FILE_BYTES  (8 * 1024 * 1024)   /* 8 MB on-disk PNG */
 
 static void ql_strncpy(char *dst, const char *src, int max) {
     int i = 0; if (!dst || max <= 0) return;
@@ -52,6 +78,14 @@ static int ql_u64_to_hex2(uint64_t v, char *out, int max) {
 
 /* ── State ── */
 
+typedef enum {
+    QL_PNG_NONE = 0,    /* not a PNG */
+    QL_PNG_PENDING,     /* PNG detected, decode not yet attempted */
+    QL_PNG_OK,          /* decoded RGBA in png_pixels */
+    QL_PNG_TOO_BIG,     /* dimensions exceed cap */
+    QL_PNG_FAIL,        /* decode error / OOM / unreadable */
+} ql_png_state_t;
+
 typedef struct {
     int       active;
     char      path[QL_PATH_MAX];
@@ -59,19 +93,22 @@ typedef struct {
     uint64_t  mtime;
     ql_kind_t kind;
 
-    /* Loaded bytes */
-    uint8_t   buf[QL_BUF_SIZE];
-    int       buf_used;     /* bytes loaded */
+    /* Sniff buffer — always populated by read_fn. */
+    uint8_t   buf[QL_SNIFF_SIZE];
+    int       buf_used;
 
-    /* PNG decode result (kept tiny — only metadata; full RGBA decode
-     * would need the heap. For now we render PNGs as their hex header
-     * + dimensions inferred from IHDR. lodepng integration is a TODO
-     * that doesn't block the preview pattern.) */
-    int       png_w, png_h;
+    /* PNG decode result. */
+    int             png_w, png_h;       /* native dims from IHDR */
+    ql_png_state_t  png_state;
+    unsigned char  *png_pixels;         /* RGBA, lodepng_malloc'd */
+    unsigned        png_decoded_w;      /* dims confirmed by decoder */
+    unsigned        png_decoded_h;
 } ql_state_t;
 
 static ql_state_t g_ql;
 static uint32_t g_total_opens = 0;
+static uint32_t g_total_decodes_ok = 0;
+static uint32_t g_total_decodes_fail = 0;
 
 /* ── Type sniff ── */
 
@@ -100,11 +137,100 @@ static void ql_parse_png_dims(const uint8_t *b, int n, int *w, int *h) {
     *h = (b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23];
 }
 
+/* ── PNG decode ── */
+
+static void ql_release_png(void) {
+    if (g_ql.png_pixels) {
+        lodepng_free(g_ql.png_pixels);
+        g_ql.png_pixels = 0;
+    }
+    g_ql.png_decoded_w = 0;
+    g_ql.png_decoded_h = 0;
+}
+
+/* Pull the entire PNG into a contiguous PMM buffer, decode, then
+ * release the input buffer. Output RGBA stays alive in g_ql.png_pixels
+ * (lodepng_malloc-backed) until quick_look_close.
+ *
+ * Failure modes set png_state and bail; the draw path falls back to
+ * the metadata card. */
+static void ql_decode_png(void) {
+    /* Pre-flight: size cap and dimension cap from IHDR. */
+    if (g_ql.size == 0 || g_ql.size > MAX_PNG_FILE_BYTES) {
+        g_ql.png_state = QL_PNG_TOO_BIG;
+        return;
+    }
+    if (g_ql.png_w <= 0 || g_ql.png_h <= 0 ||
+        g_ql.png_w > MAX_PREVIEW_W || g_ql.png_h > MAX_PREVIEW_H) {
+        g_ql.png_state = QL_PNG_TOO_BIG;
+        return;
+    }
+    if (!fat32_mounted() || g_ql.path[0] != '/') {
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+
+    /* Allocate input buffer from PMM (page-aligned, contiguous). */
+    uint64_t pages = (g_ql.size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) {
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    uint8_t *in_buf = (uint8_t *)phys;
+
+    /* Read full file. fat32_read is a single-shot read against an
+     * fat32_file cursor; we open fresh to read from offset 0. */
+    struct fat32_file f;
+    if (fat32_open(g_ql.path, &f) < 0) {
+        for (uint64_t i = 0; i < pages; i++)
+            pmm_free(phys + i * PAGE_SIZE);
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    int got = fat32_read(&f, in_buf, (uint32_t)g_ql.size);
+    if (got <= 0 || (uint64_t)got < g_ql.size) {
+        /* Short read — try to decode anyway with what we got, but
+         * if that also fails we'll surface the error. */
+        if (got <= 0) {
+            for (uint64_t i = 0; i < pages; i++)
+                pmm_free(phys + i * PAGE_SIZE);
+            g_ql.png_state = QL_PNG_FAIL;
+            return;
+        }
+    }
+
+    unsigned char *pixels = 0;
+    unsigned w = 0, h = 0;
+    unsigned err = lodepng_decode32(&pixels, &w, &h, in_buf, (size_t)got);
+
+    /* Release input buffer immediately — decoder no longer needs it. */
+    for (uint64_t i = 0; i < pages; i++)
+        pmm_free(phys + i * PAGE_SIZE);
+
+    if (err || !pixels || w == 0 || h == 0 ||
+        w > MAX_PREVIEW_W || h > MAX_PREVIEW_H) {
+        if (pixels) lodepng_free(pixels);
+        g_ql.png_state = QL_PNG_FAIL;
+        g_total_decodes_fail++;
+        return;
+    }
+
+    g_ql.png_pixels    = pixels;
+    g_ql.png_decoded_w = w;
+    g_ql.png_decoded_h = h;
+    g_ql.png_state     = QL_PNG_OK;
+    g_total_decodes_ok++;
+}
+
 /* ── API ── */
 
 void quick_look_open(const char *path, uint64_t size, uint64_t mtime,
                      ql_read_fn read_fn, void *ctx)
 {
+    /* Drop any prior decode. */
+    ql_release_png();
+
     g_ql.active = 1;
     ql_strncpy(g_ql.path, path ? path : "", QL_PATH_MAX);
     g_ql.size = size;
@@ -113,17 +239,23 @@ void quick_look_open(const char *path, uint64_t size, uint64_t mtime,
     g_ql.kind = QL_KIND_UNKNOWN;
     g_ql.png_w = 0;
     g_ql.png_h = 0;
+    g_ql.png_state = QL_PNG_NONE;
 
     if (read_fn) {
         uint64_t s = 0, m = 0;
-        int n = read_fn(path, g_ql.buf, QL_BUF_SIZE, &s, &m, ctx);
+        int n = read_fn(path, g_ql.buf, QL_SNIFF_SIZE, &s, &m, ctx);
         if (n > 0) {
             g_ql.buf_used = n;
             if (s) g_ql.size = s;
             if (m) g_ql.mtime = m;
             g_ql.kind = ql_sniff(g_ql.buf, n);
-            if (g_ql.kind == QL_KIND_PNG)
+            if (g_ql.kind == QL_KIND_PNG) {
                 ql_parse_png_dims(g_ql.buf, n, &g_ql.png_w, &g_ql.png_h);
+                /* Defer decode to first draw — gives the compositor a
+                 * frame to paint the spinner before we burn cycles in
+                 * inflate(). */
+                g_ql.png_state = QL_PNG_PENDING;
+            }
         }
     }
 
@@ -136,6 +268,7 @@ void quick_look_close(void)
 {
     if (!g_ql.active) return;
     g_ql.active = 0;
+    ql_release_png();
     int sw = (int)fb_width(), sh = (int)fb_height();
     compositor_dirty((sw - QL_W) / 2, (sh - QL_H) / 2, QL_W, QL_H);
 }
@@ -240,6 +373,47 @@ static void ql_draw_metadata(int x, int y)
     fb_text(x, y + 88, buf, COLOR_ON_SURFACE_2);
 }
 
+/* Centered nearest-neighbor blit of decoded RGBA into the body rect.
+ * Down- and up-scale handled the same way (skip / replicate by the
+ * (dst*src)/dst index map). Aspect is preserved. */
+static void ql_draw_png_pixels(int bx, int by, int bw, int bh)
+{
+    int sw = (int)g_ql.png_decoded_w;
+    int sh = (int)g_ql.png_decoded_h;
+    if (sw <= 0 || sh <= 0 || !g_ql.png_pixels) return;
+
+    /* Fit into body rect, preserve aspect. */
+    int dw = bw;
+    int dh = (sh * dw) / sw;
+    if (dh > bh) {
+        dh = bh;
+        dw = (sw * dh) / sh;
+    }
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+
+    int dx0 = bx + (bw - dw) / 2;
+    int dy0 = by + (bh - dh) / 2;
+
+    for (int y = 0; y < dh; y++) {
+        int sy = (y * sh) / dh;
+        if (sy < 0) sy = 0;
+        if (sy >= sh) sy = sh - 1;
+        const uint8_t *row = g_ql.png_pixels + (size_t)sy * sw * 4;
+        for (int x = 0; x < dw; x++) {
+            int sx = (x * sw) / dw;
+            if (sx < 0) sx = 0;
+            if (sx >= sw) sx = sw - 1;
+            const uint8_t *p = row + sx * 4;
+            uint32_t argb = ((uint32_t)p[3] << 24) |
+                            ((uint32_t)p[0] << 16) |
+                            ((uint32_t)p[1] <<  8) |
+                            ((uint32_t)p[2]);
+            fb_pixel_blend(dx0 + x, dy0 + y, argb);
+        }
+    }
+}
+
 void quick_look_draw(void)
 {
     if (!g_ql.active) return;
@@ -267,24 +441,56 @@ void quick_look_draw(void)
     if (g_ql.kind == QL_KIND_TEXT && g_ql.buf_used > 0) {
         ql_draw_text_body(body_x, body_y, body_w, body_h);
     } else if (g_ql.kind == QL_KIND_PNG) {
-        /* Show PNG dimensions + "rendered preview not available" — full
-         * lodepng decode requires heap > 64KB for typical screenshots
-         * and is wired separately by the image viewer chain. */
-        char buf[80];
-        int o = 0;
-        const char *p = "PNG image  ";
-        while (p[o] && o < 79) { buf[o] = p[o]; o++; }
-        o += ql_u64_to_dec((uint64_t)g_ql.png_w, buf + o, 79 - o);
-        if (o < 78) buf[o++] = 'x';
-        o += ql_u64_to_dec((uint64_t)g_ql.png_h, buf + o, 79 - o);
-        buf[o] = '\0';
-        fb_text(body_x, body_y, buf, COLOR_ON_SURFACE);
-        fb_text(body_x, body_y + 20,
-                "(open in image viewer for full render)",
-                COLOR_ON_SURFACE_2);
+        if (g_ql.png_state == QL_PNG_PENDING) {
+            /* Spinner via list_render_state — first frame after open. */
+            list_state_ctx_t lc = {
+                .x = body_x, .y = body_y, .w = body_w, .h = body_h,
+                .state = LIST_LOADING,
+                .message = "Decoding PNG…",
+                .cta = 0, .retry_cb = 0, .retry_ctx = 0,
+            };
+            list_render_state(&lc);
+            /* Trigger decode and request another paint. */
+            ql_decode_png();
+            compositor_dirty(qx, qy, QL_W, QL_H);
+            return;
+        }
+        if (g_ql.png_state == QL_PNG_OK && g_ql.png_pixels) {
+            ql_draw_png_pixels(body_x, body_y, body_w, body_h);
+            /* Caption: dimensions */
+            char buf[80];
+            int o = 0;
+            o += ql_u64_to_dec((uint64_t)g_ql.png_decoded_w, buf + o, 79 - o);
+            if (o < 78) buf[o++] = 'x';
+            o += ql_u64_to_dec((uint64_t)g_ql.png_decoded_h, buf + o, 79 - o);
+            buf[o] = '\0';
+            int cap_w = ql_strlen(buf) * 8;
+            fb_text(body_x + (body_w - cap_w) / 2,
+                    body_y + body_h - 14, buf, COLOR_ON_SURFACE_3);
+        } else if (g_ql.png_state == QL_PNG_TOO_BIG) {
+            char buf[80];
+            int o = 0;
+            const char *p = "PNG ";
+            while (p[o] && o < 79) { buf[o] = p[o]; o++; }
+            o += ql_u64_to_dec((uint64_t)g_ql.png_w, buf + o, 79 - o);
+            if (o < 78) buf[o++] = 'x';
+            o += ql_u64_to_dec((uint64_t)g_ql.png_h, buf + o, 79 - o);
+            buf[o] = '\0';
+            fb_text(body_x, body_y, buf, COLOR_ON_SURFACE);
+            fb_text(body_x, body_y + 20,
+                    "Too large to preview (cap 1920x1080).",
+                    COLOR_ON_SURFACE_2);
+        } else {
+            /* QL_PNG_FAIL — fall back to metadata card. */
+            ql_draw_metadata(body_x, body_y);
+            fb_text(body_x, body_y + 112,
+                    "(PNG decode failed)", COLOR_ON_SURFACE_3);
+        }
     } else {
         ql_draw_metadata(body_x, body_y);
     }
 }
 
 uint32_t quick_look_total_opens(void) { return g_total_opens; }
+uint32_t quick_look_total_decodes_ok(void)   { return g_total_decodes_ok; }
+uint32_t quick_look_total_decodes_fail(void) { return g_total_decodes_fail; }
