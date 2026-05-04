@@ -1,0 +1,429 @@
+/*
+ * Unified settings registry. Every config knob in the system registers
+ * a getter/setter pair. Shell `settings` command is the single source
+ * of truth for "what can the user change?" Each module continues to
+ * own its own VAULT persistence — we just expose the surface.
+ */
+
+#include "settings_registry.h"
+#include "kprint.h"
+
+#include "hda.h"
+#include "brightness.h"
+#include "idle.h"
+#include "lockscreen.h"
+#include "timeofday.h"
+#include "access.h"
+#include "power_buttons.h"
+
+#include <stdint.h>
+
+/* ── Internal table ───────────────────────────────────────────── */
+
+static const settings_entry_t *g_table[SETTINGS_REGISTRY_MAX];
+static int                     g_count = 0;
+
+/* ── String helpers (no libc) ─────────────────────────────────── */
+
+static int sr_strlen(const char *s)
+{
+    int n = 0;
+    while (s && s[n]) n++;
+    return n;
+}
+
+static int sr_streq(const char *a, const char *b)
+{
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+static void sr_strcpy(char *dst, int dst_len, const char *src)
+{
+    int i = 0;
+    if (dst_len <= 0) return;
+    if (src) {
+        while (src[i] && i < dst_len - 1) { dst[i] = src[i]; i++; }
+    }
+    dst[i] = '\0';
+}
+
+static int sr_atoi(const char *s, int *out)
+{
+    if (!s || !*s) return -1;
+    int sign = 1;
+    if (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') { s++; }
+    if (!*s) return -1;
+    int v = 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    *out = v * sign;
+    return 0;
+}
+
+static int sr_itoa(int v, char *out, int out_len)
+{
+    if (out_len <= 0) return -1;
+    char tmp[16];
+    int n = 0, neg = 0;
+    if (v < 0) { neg = 1; v = -v; }
+    if (v == 0) tmp[n++] = '0';
+    while (v > 0 && n < (int)sizeof(tmp)) { tmp[n++] = (char)('0' + (v % 10)); v /= 10; }
+    int i = 0;
+    if (neg && i < out_len - 1) out[i++] = '-';
+    while (n > 0 && i < out_len - 1) out[i++] = tmp[--n];
+    out[i] = '\0';
+    return i;
+}
+
+/* parse one of the labels in "a|b|c" — returns index, or -1 on miss */
+static int sr_enum_index(const char *labels, const char *value)
+{
+    if (!labels || !value) return -1;
+    int idx = 0;
+    const char *p = labels;
+    const char *seg_start = p;
+    while (1) {
+        if (*p == '|' || *p == '\0') {
+            int seg_len = (int)(p - seg_start);
+            int v_len = sr_strlen(value);
+            if (seg_len == v_len) {
+                int match = 1;
+                for (int i = 0; i < seg_len; i++) {
+                    if (seg_start[i] != value[i]) { match = 0; break; }
+                }
+                if (match) return idx;
+            }
+            if (*p == '\0') break;
+            idx++;
+            seg_start = p + 1;
+        }
+        p++;
+    }
+    return -1;
+}
+
+/* ── Public registry API ─────────────────────────────────────── */
+
+int settings_register(const settings_entry_t *entry)
+{
+    if (!entry || !entry->name) return -1;
+    if (g_count >= SETTINGS_REGISTRY_MAX) return -1;
+    /* Reject duplicates */
+    for (int i = 0; i < g_count; i++) {
+        if (sr_streq(g_table[i]->name, entry->name)) return -1;
+    }
+    g_table[g_count++] = entry;
+    return 0;
+}
+
+const settings_entry_t *settings_find(const char *name)
+{
+    if (!name) return 0;
+    for (int i = 0; i < g_count; i++) {
+        if (sr_streq(g_table[i]->name, name)) return g_table[i];
+    }
+    return 0;
+}
+
+int settings_get(const char *name, char *out, int out_len)
+{
+    const settings_entry_t *e = settings_find(name);
+    if (!e || out_len <= 0) return -1;
+    out[0] = '\0';
+    if (e->flags & SETTINGS_FLAG_WRITEONLY) {
+        sr_strcpy(out, out_len, "***");
+        return 0;
+    }
+    if (!e->getter) return -1;
+    return e->getter(out, out_len);
+}
+
+int settings_set(const char *name, const char *value)
+{
+    const settings_entry_t *e = settings_find(name);
+    if (!e) return -1;
+    if (e->flags & SETTINGS_FLAG_READONLY) return -1;
+    if (!e->setter) return -1;
+    return e->setter(value);
+}
+
+int settings_enumerate(settings_walk_cb cb, void *user)
+{
+    if (!cb) return 0;
+    for (int i = 0; i < g_count; i++) {
+        if (cb(g_table[i], user)) return i + 1;
+    }
+    return g_count;
+}
+
+int settings_count(void) { return g_count; }
+
+int settings_live_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_count; i++) {
+        if ((g_table[i]->flags & SETTINGS_FLAG_STUB) == 0) n++;
+    }
+    return n;
+}
+
+const char *settings_kind_label(settings_kind_t k)
+{
+    switch (k) {
+        case SK_STRING:   return "STRING";
+        case SK_INT:      return "INT";
+        case SK_INT_PCT:  return "INT_PCT";
+        case SK_INT_SECS: return "INT_SECS";
+        case SK_BOOL:     return "BOOL";
+        case SK_ENUM:     return "ENUM";
+    }
+    return "?";
+}
+
+/* ── Source-module bridges ─────────────────────────────────────
+ *
+ * Each setting below has a tiny getter/setter pair that translates
+ * between the registry's string interface and the source module's
+ * native API. Persistence lives entirely in the source module — we
+ * never write to VAULT directly here.
+ */
+
+/* audio.volume */
+static int g_audio_volume(char *out, int n) {
+    return sr_itoa(hda_audio_get_volume(), out, n) >= 0 ? 0 : -1;
+}
+static int s_audio_volume(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 0 || x > 100) return -1;
+    hda_audio_set_volume(x);
+    (void)hda_audio_save_to_vault();
+    return 0;
+}
+
+/* audio.muted */
+static int g_audio_muted(char *out, int n) {
+    return sr_itoa(hda_audio_get_muted() ? 1 : 0, out, n) >= 0 ? 0 : -1;
+}
+static int s_audio_muted(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    hda_audio_set_muted(x ? 1 : 0);
+    (void)hda_audio_save_to_vault();
+    return 0;
+}
+
+/* display.brightness */
+static int g_display_brightness(char *out, int n) {
+    int b = brightness_get();
+    if (b < 0) { sr_strcpy(out, n, "n/a"); return 0; }
+    return sr_itoa(b, out, n) >= 0 ? 0 : -1;
+}
+static int s_display_brightness(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 0 || x > 100) return -1;
+    int rc = brightness_set(x);
+    if (rc < 0) return -1;
+    (void)brightness_save_to_vault();
+    return 0;
+}
+
+/* idle.dim_secs / lock_secs / blank_secs */
+static int g_idle_dim(char *o, int n)   { return sr_itoa((int)idle_dim_secs(),   o, n) >= 0 ? 0 : -1; }
+static int g_idle_lock(char *o, int n)  { return sr_itoa((int)idle_lock_secs(),  o, n) >= 0 ? 0 : -1; }
+static int g_idle_blank(char *o, int n) { return sr_itoa((int)idle_blank_secs(), o, n) >= 0 ? 0 : -1; }
+static int s_idle_dim(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0 || x < 0) return -1;
+    return idle_set_dim((uint32_t)x);
+}
+static int s_idle_lock(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0 || x < 0) return -1;
+    return idle_set_lock((uint32_t)x);
+}
+static int s_idle_blank(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0 || x < 0) return -1;
+    return idle_set_blank((uint32_t)x);
+}
+
+/* lock.pin (write-only) */
+static int g_lock_pin(char *out, int n) { sr_strcpy(out, n, "***"); return 0; }
+static int s_lock_pin(const char *v) {
+    if (!v) return -1;
+    return lockscreen_set_pin(v);
+}
+
+/* trash.auto_empty_days — there is no live setter (CHAIN_TRASH_GC
+ * uses a baked-in 30-day cutoff). Expose as readonly until a tunable
+ * lands. */
+static int g_trash_auto_empty(char *out, int n) {
+    return sr_itoa(30, out, n) >= 0 ? 0 : -1;
+}
+static int s_trash_auto_empty(const char *v) { (void)v; return -1; }
+
+/* power.button_action / lid_close_action / lid_open_action — back
+ * onto power_buttons.c. */
+static int g_power_btn(char *out, int n) {
+    sr_strcpy(out, n, power_action_label(power_button_action()));
+    return 0;
+}
+static int g_power_lid_close(char *out, int n) {
+    sr_strcpy(out, n, power_action_label(lid_close_action()));
+    return 0;
+}
+static int g_power_lid_open(char *out, int n) {
+    sr_strcpy(out, n, power_action_label(lid_open_action()));
+    return 0;
+}
+static int s_power_btn(const char *v) {
+    power_action_t a;
+    if (power_action_parse(v, &a) != 0) return -1;
+    return power_button_set_action(a);
+}
+static int s_power_lid_close(const char *v) {
+    power_action_t a;
+    if (power_action_parse(v, &a) != 0) return -1;
+    return lid_close_set_action(a);
+}
+static int s_power_lid_open(const char *v) {
+    power_action_t a;
+    if (power_action_parse(v, &a) != 0) return -1;
+    return lid_open_set_action(a);
+}
+
+/* time.tz_offset_minutes — exposed via the global hook in timeofday.h. */
+static int g_tz(char *out, int n) {
+    return sr_itoa(tod_tz_offset_minutes, out, n) >= 0 ? 0 : -1;
+}
+static int s_tz(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < -24*60 || x > 24*60) return -1;
+    tod_tz_offset_minutes = x;
+    return 0;
+}
+
+/* network.dhcp_enabled — no toggle exists yet; expose readonly. */
+static int g_net_dhcp(char *out, int n) { sr_itoa(1, out, n); return 0; }
+static int s_net_dhcp(const char *v)    { (void)v; return -1; }
+
+/* theme.dark_mode — derived from access config. SCHEME_DARK or AUTO
+ * with a dark resolve count as on; LIGHT counts as off. Setter flips
+ * between SCHEME_DARK and SCHEME_LIGHT. */
+static int g_theme_dark(char *out, int n) {
+    access_config_t *c = access_get();
+    int on = (c && c->scheme != SCHEME_LIGHT) ? 1 : 0;
+    return sr_itoa(on, out, n) >= 0 ? 0 : -1;
+}
+static int s_theme_dark(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    access_set_scheme(x ? SCHEME_DARK : SCHEME_LIGHT);
+    access_save();
+    return 0;
+}
+
+/* ── Static entry table. Pointers handed to settings_register. ── */
+
+static const settings_entry_t E_AUDIO_VOLUME = {
+    "audio.volume", SK_INT_PCT, 0, g_audio_volume, s_audio_volume, 0,
+    "master volume (0-100)"
+};
+static const settings_entry_t E_AUDIO_MUTED = {
+    "audio.muted", SK_BOOL, 0, g_audio_muted, s_audio_muted, 0,
+    "master mute (0/1)"
+};
+static const settings_entry_t E_DISPLAY_BRIGHTNESS = {
+    "display.brightness", SK_INT_PCT, 0, g_display_brightness, s_display_brightness, 0,
+    "backlight (0-100, 'n/a' if no _BCL)"
+};
+static const settings_entry_t E_IDLE_DIM = {
+    "idle.dim_secs", SK_INT_SECS, 0, g_idle_dim, s_idle_dim, 0,
+    "seconds of input idle before dim"
+};
+static const settings_entry_t E_IDLE_LOCK = {
+    "idle.lock_secs", SK_INT_SECS, 0, g_idle_lock, s_idle_lock, 0,
+    "seconds of input idle before lock"
+};
+static const settings_entry_t E_IDLE_BLANK = {
+    "idle.blank_secs", SK_INT_SECS, 0, g_idle_blank, s_idle_blank, 0,
+    "seconds of input idle before blank"
+};
+static const settings_entry_t E_LOCK_PIN = {
+    "lock.pin", SK_STRING, SETTINGS_FLAG_WRITEONLY, g_lock_pin, s_lock_pin, 0,
+    "lock screen PIN (4-16 digits, write-only)"
+};
+static const settings_entry_t E_TRASH_DAYS = {
+    "trash.auto_empty_days", SK_INT_SECS,
+    SETTINGS_FLAG_READONLY | SETTINGS_FLAG_STUB,
+    g_trash_auto_empty, s_trash_auto_empty, 0,
+    "days before auto-empty (currently fixed at 30)"
+};
+static const settings_entry_t E_POWER_BTN = {
+    "power.button_action", SK_ENUM, 0,
+    g_power_btn, s_power_btn, "suspend|shutdown|lock|ask|nothing|wake",
+    "power button action"
+};
+static const settings_entry_t E_POWER_LID_CLOSE = {
+    "power.lid_close_action", SK_ENUM, 0,
+    g_power_lid_close, s_power_lid_close, "suspend|shutdown|lock|ask|nothing|wake",
+    "lid close action"
+};
+static const settings_entry_t E_POWER_LID_OPEN = {
+    "power.lid_open_action", SK_ENUM, 0,
+    g_power_lid_open, s_power_lid_open, "suspend|shutdown|lock|ask|nothing|wake",
+    "lid open action"
+};
+static const settings_entry_t E_TIME_TZ = {
+    "time.tz_offset_minutes", SK_INT, 0, g_tz, s_tz, 0,
+    "timezone offset in minutes east of UTC"
+};
+static const settings_entry_t E_NET_DHCP = {
+    "network.dhcp_enabled", SK_BOOL,
+    SETTINGS_FLAG_READONLY | SETTINGS_FLAG_STUB,
+    g_net_dhcp, s_net_dhcp, 0,
+    "DHCP toggle (no live switch yet)"
+};
+static const settings_entry_t E_THEME_DARK = {
+    "theme.dark_mode", SK_BOOL, 0, g_theme_dark, s_theme_dark, 0,
+    "dark mode (0=light, 1=dark/auto)"
+};
+
+void settings_register_all(void)
+{
+    static int done = 0;
+    if (done) return;
+    done = 1;
+
+    settings_register(&E_AUDIO_VOLUME);
+    settings_register(&E_AUDIO_MUTED);
+    settings_register(&E_DISPLAY_BRIGHTNESS);
+    settings_register(&E_IDLE_DIM);
+    settings_register(&E_IDLE_LOCK);
+    settings_register(&E_IDLE_BLANK);
+    settings_register(&E_LOCK_PIN);
+    settings_register(&E_TRASH_DAYS);
+    settings_register(&E_POWER_BTN);
+    settings_register(&E_POWER_LID_CLOSE);
+    settings_register(&E_POWER_LID_OPEN);
+    settings_register(&E_TIME_TZ);
+    settings_register(&E_NET_DHCP);
+    settings_register(&E_THEME_DARK);
+
+    (void)sr_enum_index; /* may be unused if no parser path uses it */
+}
+
+void settings_print_selftest_line(void)
+{
+    int total = settings_count();
+    int live  = settings_live_count();
+    kputs("  Settings .............. ");
+    kput_dec((uint64_t)total);
+    kputs(" keys registered, ");
+    kput_dec((uint64_t)live);
+    kputs(" from current modules\n");
+}

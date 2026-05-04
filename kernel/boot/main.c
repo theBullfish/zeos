@@ -720,6 +720,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         zp_runtime_init();
     }
 
+    /* Unified settings registry — every config knob in the system
+     * exposes a getter/setter pair through this surface so the shell
+     * `settings` command can list and toggle everything. Persistence
+     * still lives in each source module. Idempotent. */
+    {
+        extern void settings_register_all(void);
+        extern void settings_print_selftest_line(void);
+        settings_register_all();
+        settings_print_selftest_line();
+    }
+
     /* Scheduler: chain resolution as the kernel main loop. Must
      * follow chain_registry_init + mde_auto_route (done inside) so
      * the topo order is ready before the first tick. */
