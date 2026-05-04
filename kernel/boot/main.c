@@ -635,6 +635,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         chain_registry_init();
     }
 
+    /* Z+ runtime registry — backs `chain ... { ... }` blocks declared
+     * in user Z+ programs with persistent kernel chain entries. Idempotent. */
+    {
+        extern void zp_runtime_init(void);
+        zp_runtime_init();
+    }
+
     /* Scheduler: chain resolution as the kernel main loop. Must
      * follow chain_registry_init + mde_auto_route (done inside) so
      * the topo order is ready before the first tick. */

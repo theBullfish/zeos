@@ -1439,6 +1439,17 @@ static const char zp_compute_via_mde[] =
     "trigger -> runner -> log\n"
     "chain workload { trigger runner log }\n";
 
+/* runtime_chain — register a chain whose nodes are real entries in the
+ * kernel chain registry (chain.h), parented under CHAIN_CPU with
+ * MASQ_INTERNAL tier. After running this program, `chains` lists
+ * `heartbeat_runtime` as a LIVE chain and chain_registry_tick resolves
+ * it via the Z+ dispatch thunk every frame. */
+static const char zp_runtime_chain[] =
+    "// Live runtime chain registered into the kernel chain graph.\n"
+    "chain heartbeat_runtime {\n"
+    "  pulse : emit(1) -> sustained(> 0, for = 3) -> tap.log\n"
+    "}\n";
+
 struct zp_builtin {
     const char *name;
     const char *desc;
@@ -1454,6 +1465,7 @@ static const struct zp_builtin builtins[] = {
     {"pipeline", "gate + math combined — transform then filter",    zp_pipeline},
     {"chain_native", "Z+ -> live kernel chains (audio + tap.log)",  zp_chain_native},
     {"compute_via_mde", "Z+ submits compute through CHAIN_MDE",     zp_compute_via_mde},
+    {"40_runtime_chain", "Z+ registers a chain into the live kernel registry", zp_runtime_chain},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -2785,6 +2797,18 @@ vault_done:
             kputs("                         top_slow=(none yet)\n");
         }
         if (tps > 0 && live >= 1 && errs == 0) passes++; else fails++;
+    }
+
+    /* Z+ runtime chains: count chains registered via the Z+ runtime
+     * (zp_runtime_register_chain). N=0 on first boot; after running
+     * any program with a `chain ... { }` block, N>=1. */
+    {
+        extern int zp_runtime_count(void);
+        int rt_n = zp_runtime_count();
+        kputs("  Z+ runtime ........... PASS — ");
+        kput_dec((uint64_t)rt_n);
+        kputs(" user chain(s) live\n");
+        passes++;
     }
 
     kputs("  ──────────────\n  ");

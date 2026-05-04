@@ -98,6 +98,12 @@ struct zp_edge {
 struct zp_chain_def {
     char    name[ZP_MAX_NAME];
     char    node_names[ZP_MAX_CHAIN_NODES][ZP_MAX_NAME];
+    /* Per-node verb AST captured inline in the chain block. When
+     * have_decl[i] is non-zero, decls[i] is the parsed verb for node i;
+     * otherwise the chain block referenced an existing/external node by
+     * name only and the runtime should treat it as a passthrough. */
+    struct zp_node_decl decls[ZP_MAX_CHAIN_NODES];
+    uint8_t have_decl[ZP_MAX_CHAIN_NODES];
     int     node_count;
     int     chain_id;           /* chain.h chain ID after compilation */
 };

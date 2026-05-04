@@ -1,0 +1,15 @@
+// 40_runtime_chain.zp
+// Z+ runtime chains: declare a chain whose nodes become real entries in
+// the kernel chain registry (chain.h), parented under CHAIN_CPU with
+// MASQ_INTERNAL tier. After `run 40_runtime_chain`, the `chains` shell
+// command lists `heartbeat_runtime` as a LIVE chain. `inspect <id>`
+// shows the three declared nodes (pulse, sustained, tap.log).
+//
+// chain_registry_tick will resolve the chain every frame via the Z+
+// dispatch thunk (zp_kernel_resolve_thunk in zp_runtime.c) which walks
+// each node's stored verb AST. B3 stats and MasQ provenance accumulate
+// the same way as for any other registered chain.
+
+chain heartbeat_runtime {
+  pulse : emit(1) -> sustained(> 0, for = 3) -> tap.log
+}

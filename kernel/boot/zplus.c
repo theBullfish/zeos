@@ -18,6 +18,7 @@
  */
 
 #include "zplus.h"
+#include "zp_runtime.h"
 #include "signal.h"
 #include "chain.h"
 #include "chain_registry.h"
@@ -455,7 +456,19 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
     if (tok.type != TOK_IDENT)
         return 0;  /* Skip lines we can't parse */
 
-    /* ── Chain definition: chain name { node1 -> node2 -> ... } ── */
+    /* ── Chain definition: chain name { step1 -> step2 -> ... } ──
+     *
+     * Each step is one of:
+     *   name                       — bare reference to an existing node
+     *   name : emit(N)             — declare a source node inline
+     *   name : verb                — declare a verb-only node inline
+     *   name : verb(args)          — declare a verb with args inline
+     *   name : input -> verb(args) — declare a transform inline
+     *   verb                       — bare verb (auto-named)
+     *   verb(args)                 — bare verb with args (auto-named)
+     *
+     * Steps are separated by `->`. The body may span multiple lines.
+     */
     if (zp_streq(tok.text, "chain")) {
         if (prog->chain_def_count >= ZP_MAX_CHAINS)
             return -1;
@@ -469,28 +482,256 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
         zp_strcpy(def->name, t.text, ZP_MAX_NAME);
         def->node_count = 0;
         def->chain_id = -1;
+        for (int i = 0; i < ZP_MAX_CHAIN_NODES; i++)
+            def->have_decl[i] = 0;
 
         lexer_token(lex, &t);  /* { */
         if (t.type != TOK_LBRACE)
             return -1;
 
-        /* Skip newlines after { */
+        /* Skip leading newlines after { */
         lexer_token(lex, &t);
         while (t.type == TOK_NEWLINE)
             lexer_token(lex, &t);
 
-        /* Parse node1 -> node2 -> node3 ... until } */
+        int auto_seq = 0;
+
         while (t.type != TOK_RBRACE && t.type != TOK_EOF) {
-            if (t.type == TOK_IDENT) {
-                if (def->node_count < ZP_MAX_CHAIN_NODES) {
-                    zp_strcpy(def->node_names[def->node_count], t.text, ZP_MAX_NAME);
-                    def->node_count++;
-                }
-            }
-            /* Skip arrows and newlines between nodes */
-            lexer_token(lex, &t);
-            while (t.type == TOK_ARROW || t.type == TOK_NEWLINE)
+            if (t.type != TOK_IDENT) {
+                /* Step boundary token (->, newline) — advance and retry. */
                 lexer_token(lex, &t);
+                continue;
+            }
+            if (def->node_count >= ZP_MAX_CHAIN_NODES) {
+                /* Skip remaining body. */
+                while (t.type != TOK_RBRACE && t.type != TOK_EOF)
+                    lexer_token(lex, &t);
+                break;
+            }
+
+            int slot = def->node_count;
+            char first[ZP_MAX_NAME];
+            zp_strcpy(first, t.text, ZP_MAX_NAME);
+
+            /* Look ahead one token to disambiguate. */
+            struct zp_token la;
+            lexer_token(lex, &la);
+
+            if (la.type == TOK_COLON) {
+                /* name : ...  — full inline declaration. */
+                zp_strcpy(def->node_names[slot], first, ZP_MAX_NAME);
+
+                struct zp_node_decl *d = &def->decls[slot];
+                d->name[0] = '\0';
+                zp_strcpy(d->name, first, ZP_MAX_NAME);
+                d->int_val = 0; d->int_val2 = 0; d->int_val3 = 0;
+                d->fmt[0] = '\0';
+                d->sig_idx = -1;
+                d->chain_bind_id = -1;
+                d->type = ZP_PASSTHROUGH;
+
+                /* RHS: either `emit(N)`, `verb`, `verb(args)`, or
+                 * `input -> verb...` — we walk until we hit `->`
+                 * (the next chain step) or `}`. */
+                struct zp_token r;
+                lexer_token(lex, &r);
+                int captured = 0;
+
+                while (r.type != TOK_ARROW && r.type != TOK_RBRACE &&
+                       r.type != TOK_NEWLINE && r.type != TOK_EOF) {
+                    if (r.type == TOK_IDENT) {
+                        if (zp_streq(r.text, "input")) {
+                            /* `input -> ...` form: skip arrow and read
+                             * the operator/verb that follows. */
+                            struct zp_token op;
+                            lexer_token(lex, &op);  /* expect -> */
+                            if (op.type != TOK_ARROW) { r = op; continue; }
+                            lexer_token(lex, &op);  /* operator/verb */
+                            if (op.type == TOK_STAR) {
+                                lexer_token(lex, &op);
+                                d->type = ZP_MULTIPLY;
+                                d->int_val = op.num_val;
+                                captured = 1;
+                            } else if (op.type == TOK_PLUS) {
+                                lexer_token(lex, &op);
+                                d->type = ZP_ADD;
+                                d->int_val = op.num_val;
+                                captured = 1;
+                            } else if (op.type == TOK_MINUS) {
+                                lexer_token(lex, &op);
+                                d->type = ZP_SUBTRACT;
+                                d->int_val = op.num_val;
+                                captured = 1;
+                            } else if (op.type == TOK_IDENT &&
+                                       zp_streq(op.text, "gate")) {
+                                int32_t th;
+                                enum zp_node_type gt = parse_gate_expr(lex, &th);
+                                d->type = gt;
+                                d->int_val = th;
+                                captured = 1;
+                            } else if (op.type == TOK_IDENT &&
+                                       zp_streq(op.text, "delta")) {
+                                d->type = ZP_DELTA;
+                                captured = 1;
+                            } else if (op.type == TOK_IDENT &&
+                                       zp_streq(op.text, "knee")) {
+                                int32_t lo, hi;
+                                parse_knee_args(lex, &lo, &hi);
+                                d->type = ZP_KNEE;
+                                d->int_val = lo;
+                                d->int_val2 = hi;
+                                captured = 1;
+                            } else if (op.type == TOK_IDENT &&
+                                       zp_streq(op.text, "sustained")) {
+                                enum zp_node_type gt;
+                                int32_t thresh, count;
+                                parse_sustained_args(lex, &gt, &thresh, &count);
+                                d->type = ZP_SUSTAINED;
+                                d->int_val = thresh;
+                                d->int_val2 = count;
+                                d->int_val3 = (int32_t)gt;
+                                captured = 1;
+                            } else if (op.type == TOK_IDENT) {
+                                enum zp_node_type vt;
+                                if (verb_to_type(op.text, &vt)) {
+                                    d->type = vt;
+                                    captured = 1;
+                                    /* consume verb args if present */
+                                    if (lexer_peek(lex) == '(') {
+                                        struct zp_token p;
+                                        do { lexer_token(lex, &p); }
+                                        while (p.type != TOK_RPAREN &&
+                                               p.type != TOK_NEWLINE &&
+                                               p.type != TOK_EOF &&
+                                               p.type != TOK_RBRACE);
+                                    }
+                                }
+                            }
+                            /* fall through to outer loop to continue reading
+                             * up to the step boundary `->` (which will end
+                             * THIS step in the outer chain) */
+                            lexer_token(lex, &r);
+                            continue;
+                        }
+
+                        /* Bare verb / `emit(N)` form. */
+                        if (zp_streq(r.text, "emit")) {
+                            struct zp_token p;
+                            lexer_token(lex, &p);  /* ( */
+                            lexer_token(lex, &p);  /* number */
+                            d->type = ZP_EMIT;
+                            d->int_val = p.num_val;
+                            captured = 1;
+                            lexer_token(lex, &p);  /* ) */
+                        } else if (zp_streq(r.text, "delta")) {
+                            d->type = ZP_DELTA;
+                            captured = 1;
+                        } else if (zp_streq(r.text, "knee")) {
+                            int32_t lo, hi;
+                            parse_knee_args(lex, &lo, &hi);
+                            d->type = ZP_KNEE;
+                            d->int_val = lo;
+                            d->int_val2 = hi;
+                            captured = 1;
+                        } else if (zp_streq(r.text, "sustained")) {
+                            enum zp_node_type gt;
+                            int32_t thresh, count;
+                            parse_sustained_args(lex, &gt, &thresh, &count);
+                            d->type = ZP_SUSTAINED;
+                            d->int_val = thresh;
+                            d->int_val2 = count;
+                            d->int_val3 = (int32_t)gt;
+                            captured = 1;
+                        } else if (zp_streq(r.text, "gate")) {
+                            int32_t th;
+                            enum zp_node_type gt = parse_gate_expr(lex, &th);
+                            d->type = gt;
+                            d->int_val = th;
+                            captured = 1;
+                        } else {
+                            enum zp_node_type vt;
+                            if (verb_to_type(r.text, &vt)) {
+                                d->type = vt;
+                                captured = 1;
+                                if (lexer_peek(lex) == '(') {
+                                    struct zp_token p;
+                                    do { lexer_token(lex, &p); }
+                                    while (p.type != TOK_RPAREN &&
+                                           p.type != TOK_NEWLINE &&
+                                           p.type != TOK_EOF &&
+                                           p.type != TOK_RBRACE);
+                                }
+                            }
+                        }
+                    }
+                    lexer_token(lex, &r);
+                }
+
+                def->have_decl[slot] = captured ? 1 : 0;
+                def->node_count++;
+                t = r;  /* continue with ARROW / RBRACE / NEWLINE */
+                continue;
+            }
+
+            /* No colon — it's a bare reference or a bare verb-only node. */
+            enum zp_node_type vt;
+            if (verb_to_type(first, &vt)) {
+                /* Auto-name: verbN where N is the slot index. */
+                char autoname[ZP_MAX_NAME];
+                int p = 0;
+                const char *s = first;
+                /* Strip leading dot-prefix-friendly chars; replace '.' with '_'
+                 * so the chain node name is registry-friendly. */
+                while (*s && p < ZP_MAX_NAME - 4) {
+                    autoname[p++] = (*s == '.') ? '_' : *s;
+                    s++;
+                }
+                /* Append a digit so multiple verbs of the same kind don't
+                 * collide. */
+                if (p < ZP_MAX_NAME - 1) {
+                    int n = auto_seq++;
+                    if (n >= 10) {
+                        if (p < ZP_MAX_NAME - 2) {
+                            autoname[p++] = '0' + (n / 10);
+                            autoname[p++] = '0' + (n % 10);
+                        }
+                    } else {
+                        autoname[p++] = '0' + n;
+                    }
+                }
+                autoname[p] = '\0';
+
+                zp_strcpy(def->node_names[slot], autoname, ZP_MAX_NAME);
+                struct zp_node_decl *d = &def->decls[slot];
+                zp_strcpy(d->name, autoname, ZP_MAX_NAME);
+                d->int_val = 0; d->int_val2 = 0; d->int_val3 = 0;
+                d->fmt[0] = '\0';
+                d->sig_idx = -1;
+                d->chain_bind_id = -1;
+                d->type = vt;
+
+                /* Consume verb args if present. */
+                if (la.type == TOK_LPAREN) {
+                    struct zp_token p2;
+                    do { lexer_token(lex, &p2); }
+                    while (p2.type != TOK_RPAREN &&
+                           p2.type != TOK_NEWLINE &&
+                           p2.type != TOK_EOF &&
+                           p2.type != TOK_RBRACE);
+                    lexer_token(lex, &t);  /* next: -> or } */
+                } else {
+                    t = la;
+                }
+                def->have_decl[slot] = 1;
+                def->node_count++;
+                continue;
+            }
+
+            /* Plain identifier reference (no inline decl). */
+            zp_strcpy(def->node_names[slot], first, ZP_MAX_NAME);
+            def->have_decl[slot] = 0;
+            def->node_count++;
+            t = la;
         }
 
         prog->chain_def_count++;
@@ -1231,56 +1472,76 @@ static int zp_proc_print(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
-/* ── Chain node resolve (placeholder for user-defined nodes) ── */
-
-static void zp_chain_node_resolve(chain_node_t *self, void *input, void *output)
-{
-    (void)input;
-    (void)output;
-    kputs("  resolved: ");
-    kputs(self->name);
-    kputs("\n");
-}
-
 /*
  * Compile chain definitions from Z+ source into chain.h chains.
- * Called from zp_compile after signal chain compilation.
+ *
+ * Each `chain name { ... }` block becomes a real chain in the kernel
+ * registry under CHAIN_CPU with MASQ_INTERNAL tier, and each node uses
+ * zp_kernel_resolve_thunk so chain_resolve / chain_registry_tick walk
+ * the user's verb AST. The runtime persists the AST across program
+ * reloads and tears down any prior chain with the same name first.
  */
 static int zp_compile_chains(struct zp_program *prog)
 {
     for (int i = 0; i < prog->chain_def_count; i++) {
         struct zp_chain_def *def = &prog->chain_defs[i];
 
-        int cid = chain_create(def->name, -1, MASQ_REFERENCE);
+        /* Build the runtime node array from the per-step decls. Steps
+         * without an inline decl fall back to a passthrough verb so the
+         * chain still resolves cleanly. */
+        struct zp_runtime_node rt_nodes[ZP_MAX_CHAIN_NODES];
+        int rn = 0;
+        for (int n = 0; n < def->node_count && n < ZP_MAX_CHAIN_NODES; n++) {
+            struct zp_runtime_node *rnode = &rt_nodes[rn];
+            rnode->int_val = 0;
+            rnode->int_val2 = 0;
+            rnode->int_val3 = 0;
+            rnode->fmt[0] = '\0';
+            rnode->sustain_count = 0;
+            rnode->delta_prev = 0;
+            rnode->has_delta_prev = 0;
+            zp_strcpy(rnode->name, def->node_names[n], ZP_MAX_NAME);
+            if (def->have_decl[n]) {
+                struct zp_node_decl *d = &def->decls[n];
+                rnode->type = d->type;
+                rnode->int_val  = d->int_val;
+                rnode->int_val2 = d->int_val2;
+                rnode->int_val3 = d->int_val3;
+                zp_strcpy(rnode->fmt, d->fmt, ZP_MAX_STRING);
+            } else {
+                /* Try to find a top-level node decl with this name and use
+                 * its type. If not found, passthrough. */
+                int idx = find_node(prog, def->node_names[n]);
+                if (idx >= 0) {
+                    struct zp_node_decl *d = &prog->nodes[idx];
+                    rnode->type = d->type;
+                    rnode->int_val  = d->int_val;
+                    rnode->int_val2 = d->int_val2;
+                    rnode->int_val3 = d->int_val3;
+                    zp_strcpy(rnode->fmt, d->fmt, ZP_MAX_STRING);
+                } else {
+                    rnode->type = ZP_PASSTHROUGH;
+                }
+            }
+            rn++;
+        }
+
+        int cid = zp_runtime_register_chain(def->name, rt_nodes, rn);
         if (cid < 0) {
-            kputs("Z+ error: could not create chain '");
+            kputs("Z+ error: could not register runtime chain '");
             kputs(def->name);
             kputs("'\n");
             return -1;
         }
         def->chain_id = cid;
 
-        for (int n = 0; n < def->node_count; n++) {
-            int nid = chain_add_node(cid, def->node_names[n],
-                                     "any", "any",
-                                     zp_chain_node_resolve);
-            if (nid < 0) {
-                kputs("Z+ error: could not add node '");
-                kputs(def->node_names[n]);
-                kputs("' to chain '");
-                kputs(def->name);
-                kputs("'\n");
-                return -1;
-            }
-        }
-
         kputs("  Chain '");
         kputs(def->name);
-        kputs("' created (id=");
+        kputs("' registered (id=");
         kput_dec((uint64_t)cid);
         kputs(", ");
-        kput_dec((uint64_t)def->node_count);
-        kputs(" nodes)\n");
+        kput_dec((uint64_t)rn);
+        kputs(" nodes, parent=CPU, tier=internal)\n");
     }
 
     return 0;
