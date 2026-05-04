@@ -22,6 +22,7 @@
 #include "block_chain.h"
 #include "persistence.h"
 #include "hotplug.h"
+#include "timeofday.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -602,6 +603,9 @@ static const struct shell_cmd commands[] = {
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
+    {"date",    "show or set wall clock (date [\"YYYY-MM-DD HH:MM:SS\"])", tod_cmd_date, VIS_ALWAYS},
+    {"uptime",  "time since boot",                tod_cmd_uptime, VIS_ALWAYS},
+    {"epoch",   "current Unix epoch seconds",     tod_cmd_epoch,  VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
