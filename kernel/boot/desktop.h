@@ -108,4 +108,10 @@ void desktop_load(void);
  */
 desktop_state_t *desktop_get_state(void);
 
+/* Right-click on empty desktop — opens "New folder / Settings / Wallpaper". */
+int desktop_right_click(int x, int y);
+
+/* Open Quick Look on the currently-selected desktop icon (if any). */
+void desktop_quick_look_selected(void);
+
 #endif /* ZEOS_DESKTOP_H */

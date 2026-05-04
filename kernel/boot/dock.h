@@ -87,6 +87,9 @@ void dock_mouse_leave(void);
 /* Click at screen-space x. Activates the item (focus or launch). */
 void dock_click(int x);
 
+/* Right-click on a dock cell — opens a context menu. */
+int  dock_right_click(int x, int y);
+
 /* Render the dock to the framebuffer. Called by compositor. */
 void dock_draw(void);
 

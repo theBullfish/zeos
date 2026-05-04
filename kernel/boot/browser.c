@@ -18,6 +18,43 @@
 #include "kprint.h"
 #include "heap.h"
 #include "lodepng/lodepng.h"
+#include "ui_undo.h"
+#include "ui_hover.h"
+#include "ui_dirty.h"
+#include "ui_context_menu.h"
+#include "ui_states.h"
+
+/* ── UI primitive wiring (call-sites) ── */
+#define BROWSER_WIN_ID 4001
+static undo_buffer_t s_url_undo;
+static int s_url_undo_inited = 0;
+static uint64_t s_hov_back, s_hov_fwd, s_hov_refresh, s_hov_home, s_hov_url;
+static int s_hov_inited = 0;
+#define BROWSER_MAX_LINK_HOVERS 256
+static uint64_t s_link_tokens[BROWSER_MAX_LINK_HOVERS];
+static int s_link_token_count = 0;
+static browser_t *s_rc_browser = 0;
+static char s_rc_href[2048];
+static void browser_url_apply(void *ctx, int pos,
+                              const char *old_text, int old_len,
+                              const char *new_text, int new_len) {
+    browser_t *b = (browser_t *)ctx; if (!b) return;
+    int url_len = 0; while (b->url[url_len]) url_len++;
+    if (pos < 0) pos = 0; if (pos > url_len) pos = url_len;
+    int tail_len = url_len - (pos + old_len); if (tail_len < 0) tail_len = 0;
+    char tail[2048];
+    for (int i = 0; i < tail_len && i < 2047; i++) tail[i] = b->url[pos + old_len + i];
+    int wp = pos;
+    for (int i = 0; i < new_len && wp < 2047; i++) b->url[wp++] = new_text[i];
+    for (int i = 0; i < tail_len && wp < 2047; i++) b->url[wp++] = tail[i];
+    b->url[wp] = 0; (void)old_text;
+}
+static void browser_ensure_undo(browser_t *b) {
+    if (s_url_undo_inited) return;
+    undo_init(&s_url_undo, browser_url_apply, b);
+    s_url_undo_inited = 1;
+    undo_set_focus(&s_url_undo);
+}
 
 /* ── lodepng allocator shims ──
  * lodepng was compiled with -DLODEPNG_NO_COMPILE_ALLOCATORS, so it expects
@@ -1159,6 +1196,40 @@ void browser_init(browser_t *b) {
     mem_zero(b, sizeof(*b));
     str_copy(b->url, "about:blank");
     b->history_pos = -1;
+    browser_ensure_undo(b);
+    dirty_clear(BROWSER_WIN_ID);
+}
+
+void browser_url_type(browser_t *b, char ch) {
+    if (!b || ch == 0) return;
+    browser_ensure_undo(b);
+    int n = 0; while (b->url[n]) n++;
+    if (n >= (int)sizeof(b->url) - 1) return;
+    char ins[2] = { ch, 0 };
+    undo_record(&s_url_undo, n, "", ins);
+    b->url[n] = ch; b->url[n + 1] = 0;
+    dirty_register(BROWSER_WIN_ID);
+}
+
+void browser_url_backspace(browser_t *b) {
+    if (!b) return;
+    browser_ensure_undo(b);
+    int n = 0; while (b->url[n]) n++;
+    if (n == 0) return;
+    char del[2] = { b->url[n - 1], 0 };
+    undo_record(&s_url_undo, n - 1, del, "");
+    b->url[n - 1] = 0;
+    dirty_register(BROWSER_WIN_ID);
+}
+
+void browser_history_render_state(browser_t *b, int x, int y, int w, int h) {
+    list_state_t st = LIST_OK;
+    const char *msg = 0;
+    if (b->history_len == 0) { st = LIST_EMPTY; msg = "No history yet."; }
+    else if (b->http_status < 0) { st = LIST_ERROR; msg = "Couldn't connect."; }
+    if (st == LIST_OK) return;
+    list_state_ctx_t ctx = { x, y, w, h, st, msg, 0, 0, 0 };
+    list_render_state(&ctx);
 }
 
 /* Parse URL into hostname + path */
@@ -1192,6 +1263,8 @@ static void parse_url(const char *url, char *hostname, int hmax,
 
 /* Forward declarations for image fetch helpers used during navigation */
 static void resolve_url(browser_t *b, const char *href, char *out, int max);
+static dom_node_t *hit_test_link(dom_node_t *node, int px, int py,
+                                  int parent_x, int parent_y);
 
 /* Fetch URL into a kmalloc'd buffer. Caller must kfree(*out_buf).
  * Sets *out_len. Returns HTTP status (>=0) or -1 on failure.
@@ -1373,7 +1446,80 @@ int browser_navigate(browser_t *b, const char *url)
     kput_dec(b->page_height);
     kputs("px\n");
 
+    dirty_clear(BROWSER_WIN_ID);
     return 0;
+}
+
+/* ── Right-click context menu actions ── */
+static void rc_action_open(void *ctx) {
+    (void)ctx;
+    if (!s_rc_browser || !s_rc_href[0]) return;
+    char resolved[2048];
+    resolve_url(s_rc_browser, s_rc_href, resolved, 2048);
+    browser_navigate(s_rc_browser, resolved);
+}
+static void rc_action_open_new_tab(void *ctx) { rc_action_open(ctx); }
+static void rc_action_copy_link(void *ctx) {
+    (void)ctx;
+    kputs("BROWSE: copy link: "); kputs(s_rc_href); kputs("\n");
+}
+static void rc_action_inspect(void *ctx) {
+    (void)ctx;
+    kputs("BROWSE: inspect link: "); kputs(s_rc_href); kputs("\n");
+}
+
+int browser_right_click(browser_t *b, int x, int y) {
+    if (!b || !b->dom) return 0;
+    int content_x = b->surface_x + 8;
+    int content_y = b->surface_y + 48;
+    int px = x - content_x;
+    int py = y - content_y + b->scroll_y;
+    dom_node_t *link = hit_test_link(b->dom, px, py, 0, 0);
+    if (!link || !link->attr_href[0]) return 0;
+    s_rc_browser = b;
+    int hi = 0;
+    while (link->attr_href[hi] && hi < 2047) { s_rc_href[hi] = link->attr_href[hi]; hi++; }
+    s_rc_href[hi] = 0;
+    static const ctx_menu_item_t items[4] = {
+        { "Open",            rc_action_open,         0, 1 },
+        { "Open in new tab", rc_action_open_new_tab, 0, 1 },
+        { "Copy link",       rc_action_copy_link,    0, 1 },
+        { "Inspect",         rc_action_inspect,      0, 1 },
+    };
+    context_menu_open(x, y, items, 4);
+    return 1;
+}
+
+static void browser_register_link_hovers_walk(dom_node_t *node, int parent_x, int parent_y,
+                                              int viewport_x, int viewport_y, int scroll_y)
+{
+    if (!node) return;
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int bx = parent_x + c->box.x;
+        int by = parent_y + c->box.y;
+        if (str_eq(c->tag, "a") && c->attr_href[0] && c->box.w > 0 && c->box.h > 0 &&
+            s_link_token_count < BROWSER_MAX_LINK_HOVERS)
+        {
+            int sx = viewport_x + bx;
+            int sy = viewport_y + by - scroll_y;
+            uint64_t tok = hover_register(sx, sy, c->box.w, c->box.h,
+                                          HOVER_CURSOR_POINTER, 0, 0);
+            if (tok) s_link_tokens[s_link_token_count++] = tok;
+        }
+        int nx = parent_x + c->box.x + c->style.padding[3];
+        int ny = parent_y + c->box.y + c->style.padding[0];
+        browser_register_link_hovers_walk(c, nx, ny, viewport_x, viewport_y, scroll_y);
+    }
+}
+
+static void browser_refresh_link_hovers(browser_t *b) {
+    for (int i = 0; i < s_link_token_count; i++) hover_unregister(s_link_tokens[i]);
+    s_link_token_count = 0;
+    if (!b->dom) return;
+    int cx = b->surface_x + 8;
+    int cy = b->surface_y + 48;
+    browser_register_link_hovers_walk(b->dom, 0, 0, cx, cy, b->scroll_y);
 }
 
 void browser_back(browser_t *b) {
@@ -1562,6 +1708,9 @@ void browser_draw(browser_t *b) {
     int page_w = cw - SCROLLBAR_WIDTH - 2;  /* 2px gap before scrollbar */
     render_page(b->dom, cx, cy, b->scroll_y, page_w, ch);
 
+    /* Refresh link hover zones — cursor changes to hand over <a>. */
+    browser_refresh_link_hovers(b);
+
     /* ── Scrollbar ── */
     if (b->page_height > ch) {
         int track_x = cx + cw - SCROLLBAR_WIDTH;
@@ -1680,6 +1829,28 @@ void browser_draw_toolbar(browser_t *b) {
 
     /* Separator */
     fb_hline(tx, ty + 47, tw, COLOR_SEPARATOR);
+
+    /* ── Hover zones for nav buttons + URL bar ── */
+    int back_x = tx + 4,  back_y = ty + 8, back_w = 16, back_h = 32;
+    int fwd_x  = tx + 20, fwd_y  = ty + 8, fwd_w  = 16, fwd_h  = 32;
+    int rfr_x  = tx + 36, rfr_y  = ty + 8, rfr_w  = 16, rfr_h  = 32;
+    int home_x = tx + 52, home_y = ty + 8, home_w = 12, home_h = 32;
+    int url_x  = tx + 64, url_y  = ty + 8;
+    int url_w  = tw - 128, url_h = 32;
+    if (!s_hov_inited) {
+        s_hov_back    = hover_register(back_x, back_y, back_w, back_h, HOVER_CURSOR_POINTER, 0, 0);
+        s_hov_fwd     = hover_register(fwd_x,  fwd_y,  fwd_w,  fwd_h,  HOVER_CURSOR_POINTER, 0, 0);
+        s_hov_refresh = hover_register(rfr_x,  rfr_y,  rfr_w,  rfr_h,  HOVER_CURSOR_POINTER, 0, 0);
+        s_hov_home    = hover_register(home_x, home_y, home_w, home_h, HOVER_CURSOR_POINTER, 0, 0);
+        s_hov_url     = hover_register(url_x,  url_y,  url_w,  url_h,  HOVER_CURSOR_TEXT,    0, 0);
+        s_hov_inited = 1;
+    } else {
+        hover_update_rect(s_hov_back,    back_x, back_y, back_w, back_h);
+        hover_update_rect(s_hov_fwd,     fwd_x,  fwd_y,  fwd_w,  fwd_h);
+        hover_update_rect(s_hov_refresh, rfr_x,  rfr_y,  rfr_w,  rfr_h);
+        hover_update_rect(s_hov_home,    home_x, home_y, home_w, home_h);
+        hover_update_rect(s_hov_url,     url_x,  url_y,  url_w,  url_h);
+    }
 }
 
 void browser_draw_status(browser_t *b) {

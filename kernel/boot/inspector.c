@@ -14,6 +14,15 @@
 #include "theme.h"
 #include "sigviz.h"
 #include "persona_filter.h"
+#include "ui_hover.h"
+#include "ui_context_menu.h"
+#include "kprint.h"
+
+/* ── UI primitive wiring ── */
+#define INSPECTOR_MAX_ROWS 8
+static uint64_t s_row_tokens[INSPECTOR_MAX_ROWS];
+static int      s_row_token_count = 0;
+static int      s_rc_chain_id = -1;
 
 /* ── Constants ──────────────────────────────────────────────────── */
 
@@ -412,6 +421,48 @@ static const char *fmt_cfa(const cfa_addr_t *addr)
 
 /* ── API Implementation ─────────────────────────────────────────── */
 
+/* ── Right-click actions ── */
+static void rc_resolve_once(void *ctx) {
+    (void)ctx;
+    if (s_rc_chain_id < 0) return;
+    (void)chain_resolve(s_rc_chain_id);
+    kputs("INSP: resolve once chain="); kput_dec((uint64_t)s_rc_chain_id); kputs("\n");
+}
+static void rc_pause(void *ctx) {
+    (void)ctx;
+    if (s_rc_chain_id < 0) return;
+    chain_t *c = chain_get(s_rc_chain_id);
+    if (c) {
+        c->status = (c->status == CHAIN_PAUSED) ? CHAIN_LIVE : CHAIN_PAUSED;
+        kputs("INSP: toggled pause chain="); kput_dec((uint64_t)s_rc_chain_id); kputs("\n");
+    }
+}
+static void rc_reset_b3(void *ctx) {
+    (void)ctx;
+    if (s_rc_chain_id < 0) return;
+    chain_t *c = chain_get(s_rc_chain_id);
+    if (c) {
+        c->b3_alpha = 1.0f; c->b3_beta = 1.0f; c->b3_observations = 0;
+        kputs("INSP: reset B3 chain="); kput_dec((uint64_t)s_rc_chain_id); kputs("\n");
+    }
+}
+
+int inspector_right_click(int x, int y) {
+    extern const inspector_state_t *inspector_get_state(void);
+    const inspector_state_t *st = inspector_get_state();
+    if (!st->visible) return 0;
+    if (x < st->x || x >= st->x + st->w) return 0;
+    if (y < st->y || y >= st->y + st->h) return 0;
+    s_rc_chain_id = st->target_chain_id;
+    static const ctx_menu_item_t items[3] = {
+        { "Resolve once", rc_resolve_once, 0, 1 },
+        { "Pause",        rc_pause,        0, 1 },
+        { "Reset B3",     rc_reset_b3,     0, 1 },
+    };
+    context_menu_open(x, y, items, 3);
+    return 1;
+}
+
 void inspector_init(void)
 {
     state.visible = 0;
@@ -491,6 +542,18 @@ void inspector_draw(void)
     state.h = (int)fb_height() - TOOLBAR_HEIGHT;
     state.x = (int)fb_width() - INSPECTOR_WIDTH;
     state.y = TOOLBAR_HEIGHT;
+
+    /* Refresh hover zones — one per section (5 sections). */
+    for (int i = 0; i < s_row_token_count; i++) hover_unregister(s_row_tokens[i]);
+    s_row_token_count = 0;
+    {
+        int row_h = state.h / 5;
+        for (int i = 0; i < 5 && s_row_token_count < INSPECTOR_MAX_ROWS; i++) {
+            uint64_t tok = hover_register(state.x, state.y + i * row_h,
+                                          state.w, row_h, HOVER_CURSOR_POINTER, 0, 0);
+            if (tok) s_row_tokens[s_row_token_count++] = tok;
+        }
+    }
 
     /* Panel background */
     fb_rect(state.x, state.y, state.w, state.h, COLOR_SURFACE_HIGH);

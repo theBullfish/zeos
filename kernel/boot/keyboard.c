@@ -205,11 +205,15 @@ static void process_scancode(uint8_t scancode, int extended)
             if (context_menu_active()) { context_menu_key(27); return; }
         }
 
-        /* Space (0x39) opens / closes Quick Look only if it's already
-         * up — opening from a file list is the list's responsibility. */
-        if (scancode == 0x39 && quick_look_active()) {
-            quick_look_key(' ');
-            return;
+        /* Space (0x39) — close if already open, otherwise open Quick
+         * Look on the currently-selected list item. The desktop is the
+         * only built-in list with a selectable file path right now;
+         * other lists can register their own hook here later. */
+        if (scancode == 0x39) {
+            if (quick_look_active()) { quick_look_key(' '); return; }
+            extern void desktop_quick_look_selected(void);
+            desktop_quick_look_selected();
+            if (quick_look_active()) return;
         }
 
         /* Ctrl-Z (scancode 0x2C='z') / Ctrl-Y (scancode 0x15='y'). */

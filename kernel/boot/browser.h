@@ -191,6 +191,16 @@ void browser_mouse_wheel(browser_t *b, int delta);
 /* Handle click at viewport coordinates */
 void browser_click(browser_t *b, int x, int y);
 
+/* Right-click on a link (returns 1 if a context menu opened). */
+int  browser_right_click(browser_t *b, int x, int y);
+
+/* URL bar editing — records undo, marks surface dirty. */
+void browser_url_type(browser_t *b, char ch);
+void browser_url_backspace(browser_t *b);
+
+/* Render history list state (LOADING/EMPTY/ERROR) into a rect. */
+void browser_history_render_state(browser_t *b, int x, int y, int w, int h);
+
 /* Scrollbar interaction — returns 1 if click was on scrollbar */
 int browser_scrollbar_click(browser_t *b, int x, int y);
 

@@ -15,6 +15,15 @@
 #include "chain.h"
 #include "compositor.h"
 #include "kprint.h"
+#include "ui_hover.h"
+#include "ui_context_menu.h"
+
+/* ── UI primitive wiring ── */
+#define DOCK_MAX_HOVERS  (DOCK_MAX_PINNED + DOCK_MAX_RUNNING)
+static uint64_t s_dock_tokens[DOCK_MAX_HOVERS];
+static int      s_dock_token_count = 0;
+static int      s_rc_kind = -1;
+static int      s_rc_idx  = -1;
 
 /* ── Constants ── */
 #define DOCK_ITEM_SIZE    40    /* Cell size for each item */
@@ -328,6 +337,10 @@ void dock_draw(void) {
     fb_hline(dx + DOCK_CORNER_R, dy, g_dock.dock_w - 2 * DOCK_CORNER_R,
              COLOR_SEPARATOR);
 
+    /* Refresh hover zones — every visible cell gets one. */
+    for (int i = 0; i < s_dock_token_count; i++) hover_unregister(s_dock_tokens[i]);
+    s_dock_token_count = 0;
+
     /* Item rendering area */
     int item_y = dy + (full_h - DOCK_ITEM_SIZE) / 2;
     int item_x = dx + DOCK_MARGIN;
@@ -337,6 +350,11 @@ void dock_draw(void) {
     for (int i = 0; i < g_dock.pinned_count; i++) {
         int sel = (g_dock.selected == global_idx);
         draw_item(item_x, item_y, &g_dock.pinned[i], sel);
+        if (s_dock_token_count < DOCK_MAX_HOVERS) {
+            uint64_t tok = hover_register(item_x, item_y, DOCK_ITEM_SIZE, DOCK_ITEM_SIZE,
+                                          HOVER_CURSOR_POINTER, 0, 0);
+            if (tok) s_dock_tokens[s_dock_token_count++] = tok;
+        }
         item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
         global_idx++;
     }
@@ -354,9 +372,81 @@ void dock_draw(void) {
     for (int i = 0; i < g_dock.running_count; i++) {
         int sel = (g_dock.selected == global_idx);
         draw_item(item_x, item_y, &g_dock.running[i], sel);
+        if (s_dock_token_count < DOCK_MAX_HOVERS) {
+            uint64_t tok = hover_register(item_x, item_y, DOCK_ITEM_SIZE, DOCK_ITEM_SIZE,
+                                          HOVER_CURSOR_POINTER, 0, 0);
+            if (tok) s_dock_tokens[s_dock_token_count++] = tok;
+        }
         item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
         global_idx++;
     }
+}
+
+/* ── Right-click actions ── */
+static void rc_quit(void *ctx) {
+    (void)ctx;
+    if (s_rc_kind == 1 && s_rc_idx >= 0 && s_rc_idx < g_dock.running_count) {
+        int sid = g_dock.running[s_rc_idx].surface_id;
+        if (sid >= 0) wm_minimize_surface(sid);
+        kputs("DOCK: quit (minimize) sid="); kput_dec((uint64_t)sid); kputs("\n");
+    }
+}
+static void rc_hide(void *ctx) {
+    (void)ctx;
+    if (s_rc_kind == 1 && s_rc_idx >= 0 && s_rc_idx < g_dock.running_count) {
+        int sid = g_dock.running[s_rc_idx].surface_id;
+        if (sid >= 0) wm_minimize_surface(sid);
+    }
+}
+static void rc_pin(void *ctx) {
+    (void)ctx;
+    if (s_rc_kind == 1 && s_rc_idx >= 0 && s_rc_idx < g_dock.running_count) {
+        dock_pin(g_dock.running[s_rc_idx].name, g_dock.running[s_rc_idx].chain_id);
+    } else if (s_rc_kind == 0) {
+        dock_unpin(s_rc_idx);
+    }
+}
+
+int dock_right_click(int x, int y) {
+    if (!g_dock.visible) return 0;
+    compositor_t *comp = compositor_get_state();
+    int dx = (comp->screen_w - g_dock.dock_w) / 2;
+    int slide_offset = (int)((1.0f - g_dock.slide_y) * (float)g_dock.dock_h);
+    int dy = comp->screen_h - g_dock.dock_h + slide_offset;
+    if (y < dy || y >= dy + g_dock.dock_h) return 0;
+
+    int item_y = dy + (g_dock.dock_h - DOCK_ITEM_SIZE) / 2;
+    (void)item_y;
+    int item_x = dx + DOCK_MARGIN;
+    for (int i = 0; i < g_dock.pinned_count; i++) {
+        if (x >= item_x && x < item_x + DOCK_ITEM_SIZE) {
+            s_rc_kind = 0; s_rc_idx = i;
+            static const ctx_menu_item_t items[3] = {
+                { "Quit",  rc_quit,  0, 0 },
+                { "Hide",  rc_hide,  0, 0 },
+                { "Unpin", rc_pin,   0, 1 },
+            };
+            context_menu_open(x, y, items, 3);
+            return 1;
+        }
+        item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
+    }
+    if (g_dock.pinned_count > 0 && g_dock.running_count > 0)
+        item_x += DOCK_DIVIDER_GAP * 2 + DOCK_DIVIDER_W;
+    for (int i = 0; i < g_dock.running_count; i++) {
+        if (x >= item_x && x < item_x + DOCK_ITEM_SIZE) {
+            s_rc_kind = 1; s_rc_idx = i;
+            static const ctx_menu_item_t items[3] = {
+                { "Quit", rc_quit, 0, 1 },
+                { "Hide", rc_hide, 0, 1 },
+                { "Pin",  rc_pin,  0, 1 },
+            };
+            context_menu_open(x, y, items, 3);
+            return 1;
+        }
+        item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
+    }
+    return 0;
 }
 
 int dock_get_height(void) {

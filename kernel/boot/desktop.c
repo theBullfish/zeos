@@ -18,6 +18,48 @@
 #include "wm.h"
 #include "compositor.h"
 #include "kprint.h"
+#include "ui_context_menu.h"
+#include "quick_look.h"
+
+/* ── UI primitive wiring ── */
+static void rc_new_folder(void *ctx) { (void)ctx; kputs("DESK: new folder\n"); }
+static void rc_settings(void *ctx)   { (void)ctx; kputs("DESK: settings\n"); }
+static void rc_wallpaper(void *ctx)  { (void)ctx; kputs("DESK: wallpaper\n"); }
+
+int desktop_right_click(int x, int y) {
+    (void)x; (void)y;
+    static const ctx_menu_item_t items[3] = {
+        { "New folder", rc_new_folder, 0, 1 },
+        { "Settings",   rc_settings,   0, 1 },
+        { "Wallpaper",  rc_wallpaper,  0, 1 },
+    };
+    context_menu_open(x, y, items, 3);
+    return 1;
+}
+
+/* Spacebar on a list with a selected item → open Quick Look. The desktop
+ * is the only built-in list with a notion of a "selected file path". */
+static int desktop_quicklook_read(const char *path, uint8_t *out, int max,
+                                  uint64_t *out_size, uint64_t *out_mtime,
+                                  void *ctx)
+{
+    (void)path; (void)out; (void)max; (void)ctx;
+    if (out_size)  *out_size  = 0;
+    if (out_mtime) *out_mtime = 0;
+    return 0;
+}
+
+void desktop_quick_look_selected(void) {
+    extern desktop_state_t *desktop_get_state(void);
+    desktop_state_t *st = desktop_get_state();
+    for (int i = 0; i < st->icon_count; i++) {
+        if (st->icons[i].selected) {
+            quick_look_open(st->icons[i].name, 0, 0,
+                            desktop_quicklook_read, 0);
+            return;
+        }
+    }
+}
 
 /* ── Static state ── */
 static desktop_state_t g_desktop;

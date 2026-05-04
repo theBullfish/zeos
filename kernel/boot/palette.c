@@ -19,6 +19,19 @@
 #include "chain.h"
 #include "wm.h"
 #include "persona_filter.h"
+#include "ui_undo.h"
+#include "ui_hover.h"
+#include "ui_context_menu.h"
+#include "ui_states.h"
+#include "kprint.h"
+
+/* ── UI primitive wiring ── */
+static undo_buffer_t s_pal_undo;
+static int           s_pal_undo_inited = 0;
+#define PAL_MAX_ROW_HOVERS 8
+static uint64_t s_row_tokens[PAL_MAX_ROW_HOVERS];
+static int      s_row_token_count = 0;
+static int      s_rc_filtered_idx = -1;
 
 /* ── String helpers (freestanding, no libc) ─────────────────────── */
 
@@ -223,6 +236,92 @@ static void palette_refresh_chains(void)
     }
 }
 
+/* ── Undo apply: replace [pos..pos+old_len) of the query with new ── */
+static void palette_undo_apply(void *ctx, int pos,
+                               const char *old_text, int old_len,
+                               const char *new_text, int new_len)
+{
+    (void)ctx; (void)old_text;
+    int qlen = pal.query_len;
+    if (pos < 0) pos = 0;
+    if (pos > qlen) pos = qlen;
+    int tail_len = qlen - (pos + old_len);
+    if (tail_len < 0) tail_len = 0;
+    char tail[PALETTE_MAX_QUERY];
+    for (int i = 0; i < tail_len && i < PALETTE_MAX_QUERY - 1; i++)
+        tail[i] = pal.query[pos + old_len + i];
+    int wp = pos;
+    for (int i = 0; i < new_len && wp < PALETTE_MAX_QUERY - 1; i++)
+        pal.query[wp++] = new_text[i];
+    for (int i = 0; i < tail_len && wp < PALETTE_MAX_QUERY - 1; i++)
+        pal.query[wp++] = tail[i];
+    pal.query[wp] = 0;
+    pal.query_len = wp;
+    palette_filter();
+}
+static void palette_ensure_undo(void) {
+    if (s_pal_undo_inited) return;
+    undo_init(&s_pal_undo, palette_undo_apply, 0);
+    s_pal_undo_inited = 1;
+}
+
+/* ── Right-click actions ── */
+static void rc_run(void *ctx) {
+    (void)ctx;
+    if (s_rc_filtered_idx < 0 || s_rc_filtered_idx >= pal.filtered_count) return;
+    palette_item_t *it = &pal.filtered[s_rc_filtered_idx];
+    if (it->execute) it->execute(it->ctx);
+    palette_hide();
+}
+static void rc_show_source(void *ctx) {
+    (void)ctx;
+    if (s_rc_filtered_idx < 0 || s_rc_filtered_idx >= pal.filtered_count) return;
+    kputs("PAL: source: "); kputs(pal.filtered[s_rc_filtered_idx].label); kputs("\n");
+}
+static void rc_copy(void *ctx) {
+    (void)ctx;
+    if (s_rc_filtered_idx < 0 || s_rc_filtered_idx >= pal.filtered_count) return;
+    kputs("PAL: copy: "); kputs(pal.filtered[s_rc_filtered_idx].label); kputs("\n");
+}
+
+int palette_right_click(int x, int y) {
+    if (!pal.visible) return 0;
+    int scr_w = (int)fb_width();
+    int scr_h = (int)fb_height();
+    int pal_w = PAL_WIDTH;
+    int visible = pal.filtered_count;
+    if (visible > PAL_VISIBLE_ITEMS) visible = PAL_VISIBLE_ITEMS;
+    int results_h = visible * PAL_ITEM_HEIGHT;
+    int pal_h = PAL_SEARCH_HEIGHT + PAL_PADDING * 2 + results_h;
+    if (pal_h > PAL_MAX_HEIGHT) pal_h = PAL_MAX_HEIGHT;
+    if (pal_h < PAL_SEARCH_HEIGHT + PAL_PADDING * 2)
+        pal_h = PAL_SEARCH_HEIGHT + PAL_PADDING * 2;
+    int px = (scr_w - pal_w) / 2;
+    int py = (scr_h - pal_h) / 3;
+    if (py < Z16) py = Z16;
+    int sx = px + PAL_PADDING;
+    int sy = py + PAL_PADDING;
+    int sw = pal_w - PAL_PADDING * 2;
+    int ry = sy + PAL_SEARCH_HEIGHT;
+    if (x < sx || x >= sx + sw) return 0;
+    for (int i = 0; i < PAL_VISIBLE_ITEMS; i++) {
+        int idx = pal.scroll_offset + i;
+        if (idx >= pal.filtered_count) break;
+        int item_y = ry + i * PAL_ITEM_HEIGHT;
+        if (y >= item_y && y < item_y + PAL_ITEM_HEIGHT) {
+            s_rc_filtered_idx = idx;
+            static const ctx_menu_item_t items[3] = {
+                { "Run",         rc_run,         0, 1 },
+                { "Show source", rc_show_source, 0, 1 },
+                { "Copy",        rc_copy,        0, 1 },
+            };
+            context_menu_open(x, y, items, 3);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* ── Public API ─────────────────────────────────────────────────── */
 
 int palette_add_item(const char *label, const char *category,
@@ -284,11 +383,17 @@ void palette_show(void)
 
     palette_refresh_chains();
     palette_filter();
+
+    palette_ensure_undo();
+    undo_set_focus(&s_pal_undo);
 }
 
 void palette_hide(void)
 {
     pal.visible = 0;
+    for (int i = 0; i < s_row_token_count; i++) hover_unregister(s_row_tokens[i]);
+    s_row_token_count = 0;
+    if (undo_get_focus() == &s_pal_undo) undo_set_focus(0);
 }
 
 void palette_toggle(void)
@@ -304,6 +409,10 @@ void palette_type(char c)
     if (!pal.visible) return;
     if (pal.query_len >= PALETTE_MAX_QUERY - 1) return;
 
+    palette_ensure_undo();
+    char ins[2] = { c, 0 };
+    undo_record(&s_pal_undo, pal.query_len, "", ins);
+
     pal.query[pal.query_len++] = c;
     pal.query[pal.query_len] = '\0';
     palette_filter();
@@ -313,6 +422,10 @@ void palette_backspace(void)
 {
     if (!pal.visible) return;
     if (pal.query_len <= 0) return;
+
+    palette_ensure_undo();
+    char del[2] = { pal.query[pal.query_len - 1], 0 };
+    undo_record(&s_pal_undo, pal.query_len - 1, del, "");
 
     pal.query_len--;
     pal.query[pal.query_len] = '\0';
@@ -422,12 +535,34 @@ void palette_draw(void)
     /* ── Results list ── */
     int ry = sy + PAL_SEARCH_HEIGHT;
 
+    /* Drop previous row hover zones; we re-issue below. */
+    for (int i = 0; i < s_row_token_count; i++) hover_unregister(s_row_tokens[i]);
+    s_row_token_count = 0;
+
+    /* Empty state — caller hasn't typed or query has no matches. */
+    if (pal.filtered_count == 0) {
+        list_state_ctx_t lc = {
+            sx, ry, sw, PAL_ITEM_HEIGHT * 3, LIST_EMPTY,
+            pal.query_len > 0 ? "No matches — try a different query."
+                              : "Type to search actions, chains, settings.",
+            0, 0, 0
+        };
+        list_render_state(&lc);
+    }
+
     for (int i = 0; i < PAL_VISIBLE_ITEMS; i++) {
         int idx = pal.scroll_offset + i;
         if (idx >= pal.filtered_count) break;
 
         palette_item_t *item = &pal.filtered[idx];
         int item_y = ry + i * PAL_ITEM_HEIGHT;
+
+        /* Register hover zone for this row (cursor → hand). */
+        if (s_row_token_count < PAL_MAX_ROW_HOVERS) {
+            uint64_t tok = hover_register(sx, item_y, sw, PAL_ITEM_HEIGHT,
+                                          HOVER_CURSOR_POINTER, 0, 0);
+            if (tok) s_row_tokens[s_row_token_count++] = tok;
+        }
 
         /* Highlight selected item */
         if (idx == pal.selected) {

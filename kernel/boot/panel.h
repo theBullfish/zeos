@@ -85,4 +85,7 @@ void panel_set_persona(int persona);
 /* Current panel height */
 int  panel_get_height(void);
 
+/* Right-click on the panel — opens Settings / About Zeos menu. */
+int  panel_right_click(int x, int y);
+
 #endif /* ZEOS_PANEL_H */

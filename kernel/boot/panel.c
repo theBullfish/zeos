@@ -16,6 +16,27 @@
 #include "palette.h"
 #include "kprint.h"
 #include "persona_filter.h"
+#include "ui_hover.h"
+#include "ui_context_menu.h"
+
+/* ── UI primitive wiring ── */
+#define PANEL_MAX_HOVERS  (PANEL_MAX_PILLS + 4)
+static uint64_t s_panel_tokens[PANEL_MAX_HOVERS];
+static int      s_panel_token_count = 0;
+
+static void rc_settings(void *ctx) { (void)ctx; kputs("PANEL: open settings\n"); }
+static void rc_about(void *ctx)    { (void)ctx; kputs("PANEL: about Zeos\n"); }
+
+int panel_right_click(int x, int y) {
+    extern int panel_get_height(void);
+    if (y < 0 || y >= panel_get_height()) return 0;
+    static const ctx_menu_item_t items[2] = {
+        { "Settings",    rc_settings, 0, 1 },
+        { "About Zeos",  rc_about,    0, 1 },
+    };
+    context_menu_open(x, y, items, 2);
+    return 1;
+}
 
 /* ── Static state ── */
 static panel_state_t g_panel;
@@ -200,6 +221,20 @@ void panel_draw(void) {
     /* ── Bottom separator ── */
     fb_hline(0, ph - 1, pw, COLOR_SEPARATOR);
 
+    /* Refresh hover zones every draw. */
+    for (int i = 0; i < s_panel_token_count; i++) hover_unregister(s_panel_tokens[i]);
+    s_panel_token_count = 0;
+    {
+        uint64_t tok = hover_register(0, 0, PANEL_LEFT_W, ph,
+                                      HOVER_CURSOR_POINTER, 0, 0);
+        if (tok && s_panel_token_count < PANEL_MAX_HOVERS)
+            s_panel_tokens[s_panel_token_count++] = tok;
+        tok = hover_register(pw - PANEL_RIGHT_W, 0, PANEL_RIGHT_W, ph,
+                             HOVER_CURSOR_POINTER, 0, 0);
+        if (tok && s_panel_token_count < PANEL_MAX_HOVERS)
+            s_panel_tokens[s_panel_token_count++] = tok;
+    }
+
     /* ═══════════════════════════════════════════════════════════════
      * LEFT ZONE (0 to PANEL_LEFT_W)
      * Persona dot + name. Click opens command palette.
@@ -238,6 +273,13 @@ void panel_draw(void) {
         /* Store position for hit testing */
         p->x = cx;
         p->w = pill_w;
+
+        /* Hover zone for the pill (cursor → hand). */
+        if (s_panel_token_count < PANEL_MAX_HOVERS) {
+            uint64_t ptok = hover_register(cx, pill_y, pill_w, pill_h,
+                                           HOVER_CURSOR_POINTER, 0, 0);
+            if (ptok) s_panel_tokens[s_panel_token_count++] = ptok;
+        }
 
         /* Pill background — accent for live, dim for paused, red for error */
         uint32_t bg;

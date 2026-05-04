@@ -45,4 +45,7 @@ void inspector_scroll(int delta);
 /* Get current inspector state (read-only) */
 const inspector_state_t *inspector_get_state(void);
 
+/* Right-click on the inspector panel — opens chain action menu. */
+int inspector_right_click(int x, int y);
+
 #endif /* ZEOS_INSPECTOR_H */

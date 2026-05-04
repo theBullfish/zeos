@@ -73,4 +73,7 @@ int palette_add_item(const char *label, const char *category,
 /* Get palette state (for input routing) */
 int palette_is_visible(void);
 
+/* Right-click on a result row — opens a context menu. */
+int palette_right_click(int x, int y);
+
 #endif /* ZEOS_PALETTE_H */

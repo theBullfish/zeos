@@ -32,13 +32,27 @@
 /* ── Forward: dispatch button events to UI overlays.
  * Returns 1 if the event was consumed by an overlay (caller should
  * suppress further routing). button: 1=left, 2=right, 3=middle. */
+/* Forward declarations of per-app right-click hooks. Each returns 1 if
+ * it consumed the event; we walk them in priority order before the
+ * generic fallback menu. */
+extern int  panel_right_click(int x, int y);
+extern int  dock_right_click(int x, int y);
+extern int  inspector_right_click(int x, int y);
+extern int  palette_right_click(int x, int y);
+extern int  desktop_right_click(int x, int y);
+
 static int mouse_ui_dispatch_down(int x, int y, int button) {
     if (dirty_modal_active() && dirty_modal_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
     if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
     if (button == 2) {
-        /* Right-click with no registered overlay: open a generic
-         * fallback menu so users always get *some* contextual action. */
+        /* App-level handlers first — most specific wins. */
+        if (palette_right_click(x, y))   return 1;
+        if (panel_right_click(x, y))     return 1;
+        if (dock_right_click(x, y))      return 1;
+        if (inspector_right_click(x, y)) return 1;
+        if (desktop_right_click(x, y))   return 1;
+        /* Generic fallback menu — shouldn't normally be reached now. */
         static ctx_menu_item_t fallback[] = {
             { "Refresh",   0, 0, 1 },
             { "Copy",      0, 0, 0 },
