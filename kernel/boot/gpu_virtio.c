@@ -44,6 +44,7 @@
 #include "chain.h"
 #include "chain_registry.h"
 #include "cfa_handle.h"
+#include "gpu_compute.h"
 #include "pci.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -366,6 +367,13 @@ typedef struct gpu_dev {
      * device has its own resource namespace, so gpu0.rid=N and
      * gpu1.rid=N are distinct on the wire. Starts at 1; 0 is reserved. */
     uint32_t  next_rid;
+
+    /* Set to 1 if the host offered VIRTIO_GPU_F_VIRGL during feature
+     * negotiation. We never accept the feature (we don't speak Virgl
+     * protocol) but its presence tells us a GL/compute-capable host
+     * sits underneath, which is the trigger for registering the
+     * "virtio-virgl" gpu_compute backend. */
+    int       virgl_offered;
 } gpu_dev_t;
 
 static gpu_dev_t s_devs[GPU_VIRTIO_MAX_DEVICES];
@@ -1089,7 +1097,11 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
     mmio_w8(&gd->common->device_status, VS_ACK | VS_DRIVER);
 
     /* Negotiate features. We REQUIRE VIRTIO_F_VERSION_1 (bit 32) and
-     * accept VIRTIO_GPU_F_EDID if offered. We never accept VIRGL. */
+     * accept VIRTIO_GPU_F_EDID if offered. We never accept VIRGL --
+     * but we DO note when the host offers it, so the gpu_compute
+     * registry can publish a "virtio-virgl" backend (currently a
+     * CPU-fallback dispatch path; see the bottom of this file and
+     * GPU_HOLES.md D1-D3). */
     mmio_w32(&gd->common->device_feature_select, 0);
     uint32_t feat_lo = mmio_r32(&gd->common->device_feature);
     mmio_w32(&gd->common->device_feature_select, 1);
@@ -1099,6 +1111,9 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
         /* Modern transport without VERSION_1 is illegal; bail. */
         mmio_w8(&gd->common->device_status, VS_FAILED);
         return -1;
+    }
+    if (feat_lo & VIRTIO_GPU_F_VIRGL) {
+        gd->virgl_offered = 1;
     }
     uint32_t accept_lo = 0;
     uint32_t accept_hi = VIRTIO_F_VERSION_1_HI;
@@ -1221,6 +1236,56 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
 
 /* ── Public entry points ────────────────────────────────────────── */
 
+/* ── virtio-virgl gpu_compute backend ─────────────────────────────
+ *
+ * Honest scope: this backend is REGISTERED when the host offers
+ * VIRTIO_GPU_F_VIRGL, but its dispatch currently runs the kernel_fn
+ * on the CPU. We don't ship a SPIR-V/GLSL compiler, no Virgl
+ * command-stream serializer, no fence wait. Wiring a real GPU
+ * shader path is queued in docs/GPU_HOLES.md sections D1-D3.
+ *
+ * What this backend DOES give us today:
+ *   - device_select can pick a non-CPU backend when prefer_gpu=1
+ *   - the dispatch is tagged backend->name == "virtio-virgl" so the
+ *     log clearly says where the work was routed
+ *   - real Intel/AMD/NVIDIA backends will plug in here with the same
+ *     vtable shape; the rest of the stack does not change
+ */
+static int virgl_can_dispatch(void *args)
+{
+    (void)args;
+    /* Today: accept everything (CPU fallback runs it). When a real
+     * shader compiler integrates, this becomes a real eligibility
+     * check (op class, operand size, FP precision). */
+    return 1;
+}
+
+static int virgl_dispatch(int (*kernel_fn)(void *), void *args,
+                          uint64_t *elapsed_tsc)
+{
+    if (!kernel_fn) return -1;
+    /* Honest tag: the backend was selected, but the actual execution
+     * is CPU fallback because no shader compiler is wired yet. This
+     * line appears once per dispatch; it's noisy on purpose so nobody
+     * mistakes "virtio-virgl backend chosen" for "GPU shader ran". */
+    kputs("[gpu] dispatch routed to virtio-virgl (CPU fallback -- no shader compiler yet)\n");
+    uint64_t t0 = timer_read_tsc();
+    int rc = kernel_fn(args);
+    uint64_t t1 = timer_read_tsc();
+    if (elapsed_tsc) *elapsed_tsc = t1 - t0;
+    return rc;
+}
+
+static gpu_compute_backend_t s_virgl_backend = {
+    .name         = "virtio-virgl",
+    .can_dispatch = virgl_can_dispatch,
+    .dispatch     = virgl_dispatch,
+    .capabilities = GPU_CAP_FLOAT | GPU_CAP_FP16,
+    /* device_id reserved for future per-PCI binding; -2 marks "GPU-class
+     * backend, not pinned to one PCI function yet". CPU uses -1. */
+    .device_id    = -2,
+};
+
 int gpu_virtio_init(int parent_id)
 {
     s_dev_count = 0;
@@ -1309,6 +1374,19 @@ int gpu_virtio_init(int parent_id)
          * the multi-GPU / multi-scanout topology. */
         gpu_virtio_dump_status();
     }
+
+    /* Register the virtio-virgl gpu_compute backend if any bound
+     * device's host offered VIRTIO_GPU_F_VIRGL. This is an honest
+     * "the path exists" registration -- dispatch falls back to CPU
+     * until a shader compiler lands (GPU_HOLES.md D1-D3). */
+    int any_virgl = 0;
+    for (int i = 0; i < s_dev_count; i++) {
+        if (s_devs[i].virgl_offered) { any_virgl = 1; break; }
+    }
+    if (any_virgl) {
+        gpu_compute_register(&s_virgl_backend);
+    }
+
     return s_dev_count;
 }
 

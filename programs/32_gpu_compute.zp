@@ -1,0 +1,23 @@
+// 32_gpu_compute.zp
+// Z+ submits compute work through CHAIN_MDE with prefer_gpu=true.
+//
+// trigger fires (42). compute.run(double, prefer_gpu = true) submits
+// the work through CHAIN_MDE; device_select asks the gpu_compute
+// registry for a backend. If a GPU backend (e.g. virtio-virgl) is
+// registered AND can_dispatch returns 1, that backend wins. Otherwise
+// CPU handles it (CPU backend is always at registry index 0).
+//
+// Today the virtio-virgl backend's dispatch is a CPU-fallback path
+// that logs "[gpu] dispatch routed to virtio-virgl (CPU fallback --
+// no shader compiler yet)". Real shader execution lands when
+// docs/GPU_HOLES.md D1-D3 (compiler integration) closes; the rest of
+// this Z+ program does not change.
+
+trigger : emit(42)
+double  : input -> multiply(2) -> output
+runner  : input -> compute.run(double, prefer_gpu = true)
+log     : input -> tap.log
+
+trigger -> runner -> log
+
+chain compute_demo { trigger runner log }

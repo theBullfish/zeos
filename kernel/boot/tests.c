@@ -15,6 +15,7 @@
 #include "keyboard.h"
 #include "mouse.h"
 #include "gpu_virtio.h"
+#include "gpu_compute.h"
 #include "net.h"
 #include "vault.h"
 #include "zplus.h"
@@ -523,6 +524,80 @@ static int test_cfa_coverage(char *reason, uint32_t rsize)
     return TEST_FAIL;
 }
 
+/*
+ * GPU compute backend selftest. Reports the registered backends in
+ * the canonical "GPU compute .......... N backend(s) -- ..." form.
+ * Lives in the test harness rather than shell.c's selftest renderer
+ * (shell.c is held; same convention as test_cfa_coverage).
+ *
+ * PASS gate: at least the CPU backend must be registered (proves
+ * gpu_compute_init ran before mde_chain_register, so device_select
+ * actually has a registry to query).
+ *
+ * Verifies a real submit through CHAIN_MDE with prefer_gpu=1 picks
+ * a registry-backed backend AND records backend_used. CPU-only
+ * environments still PASS -- the picker falls back to CPU honestly.
+ */
+struct gpu_compute_test_args { int answer; };
+static int gpu_compute_test_kfn(void *a)
+{
+    struct gpu_compute_test_args *x = (struct gpu_compute_test_args *)a;
+    return x ? x->answer : -1;
+}
+
+static int test_gpu_compute(char *reason, uint32_t rsize)
+{
+    int n = gpu_compute_count();
+
+    kputs("\n  GPU compute .......... ");
+    kput_dec((uint64_t)n);
+    kputs(" backend(s)");
+    if (n > 0) {
+        kputs(" -- ");
+        for (int i = 0; i < n; i++) {
+            gpu_compute_backend_t *b = gpu_compute_get(i);
+            if (!b) continue;
+            if (i > 0) kputs(", ");
+            kputs(b->name ? b->name : "(unnamed)");
+            if (i == 0) kputs(" (default)");
+            else        kputs(" (fallback)");
+        }
+    }
+    kputs("  ");
+
+    if (n < 1) {
+        t_strcopy(reason, "no backends registered (gpu_compute_init missed?)", rsize);
+        return TEST_FAIL;
+    }
+
+    /* Real submit through CHAIN_MDE with prefer_gpu=1. */
+    if (CHAIN_MDE < 0) {
+        t_strcopy(reason, "CHAIN_MDE not registered", rsize);
+        return TEST_FAIL;
+    }
+    struct gpu_compute_test_args ta = { .answer = 7 };
+    mde_compute_request_t req = {
+        .kernel_fn   = gpu_compute_test_kfn,
+        .args        = &ta,
+        .rc          = 0,
+        .elapsed_tsc = 0,
+        .prefer_gpu  = 1,
+        .backend_used = 0,
+    };
+    int srv = mde_chain_submit(&req);
+    if (srv != 7 || req.rc != 7 || req.elapsed_tsc == 0) {
+        t_strcopy(reason, "submit with prefer_gpu did not run kernel_fn", rsize);
+        return TEST_FAIL;
+    }
+    /* backend_used must be CPU or GPU -- never NONE after a successful
+     * dispatch. */
+    if (req.backend_used == 0) {
+        t_strcopy(reason, "backend_used not recorded after dispatch", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -553,6 +628,7 @@ void tests_register_all(void)
     test_register("integration.zp.chain", test_zp_program_runs_chain, CHAIN_AUDIO);
     test_register("cfa.perceive.violation", test_cfa_perceive_violation, -1);
     test_register("cfa.coverage",           test_cfa_coverage,           -1);
+    test_register("gpu.compute",            test_gpu_compute,            CHAIN_MDE);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */

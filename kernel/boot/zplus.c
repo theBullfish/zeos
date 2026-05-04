@@ -850,16 +850,29 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                    && p.type != TOK_EOF)
                                 lexer_token(lex, &p);
                         } else if (vt == ZP_COMPUTE_RUN) {
-                            /* compute.run(target_node_ident) — record the
-                             * target name in fmt; resolved to a sig_idx
-                             * during compile. */
+                            /* compute.run(target_node_ident [, prefer_gpu = true])
+                             * Record the target name in fmt; resolved to
+                             * a sig_idx during compile. prefer_gpu is
+                             * stashed in int_val (0|1) and threaded into
+                             * the mde_compute_request_t at submit time. */
                             lexer_token(lex, &p);
                             if (p.type == TOK_IDENT)
                                 zp_strcpy(prog->nodes[prog->node_count - 1].fmt,
                                           p.text, ZP_MAX_STRING);
+                            /* Scan remaining tokens for prefer_gpu = true. */
+                            int seen_prefer_gpu = 0;
                             while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
-                                   && p.type != TOK_EOF)
+                                   && p.type != TOK_EOF) {
                                 lexer_token(lex, &p);
+                                if (p.type == TOK_IDENT &&
+                                    zp_streq(p.text, "prefer_gpu")) {
+                                    seen_prefer_gpu = 1;
+                                }
+                                if (seen_prefer_gpu && p.type == TOK_IDENT &&
+                                    zp_streq(p.text, "true")) {
+                                    prog->nodes[prog->node_count - 1].int_val = 1;
+                                }
+                            }
                         } else if (vt == ZP_FS_READ || vt == ZP_FS_WRITE) {
                             int32_t a = 0, b = 0, c = 0;
                             lexer_token(lex, &p);
@@ -1352,6 +1365,7 @@ static int32_t zp_compute_target_chain[ZP_MAX_NODES]; /* target sig chain id */
 static int32_t zp_compute_target_idx[ZP_MAX_NODES];   /* target sig node idx */
 static int32_t zp_compute_input_val[ZP_MAX_NODES];    /* threaded value */
 static int32_t zp_compute_output_val[ZP_MAX_NODES];   /* result of node */
+static int32_t zp_compute_prefer_gpu[ZP_MAX_NODES];   /* 1 if compute.run(..., prefer_gpu=true) */
 
 typedef struct {
     int      chain_id;
@@ -1407,10 +1421,13 @@ static int zp_proc_compute_run(struct sig_node *node, struct sig_data *in,
         .output_val = 0,
     };
     mde_compute_request_t req = {
-        .kernel_fn   = zp_compute_kfn,
-        .args        = &args,
-        .rc          = 0,
-        .elapsed_tsc = 0,
+        .kernel_fn    = zp_compute_kfn,
+        .args         = &args,
+        .rc           = 0,
+        .elapsed_tsc  = 0,
+        .prefer_gpu   = (idx >= 0 && idx < ZP_MAX_NODES)
+                            ? zp_compute_prefer_gpu[idx] : 0,
+        .backend_used = 0,
     };
     int submit_rc = mde_chain_submit(&req);
     zp_compute_output_val[idx] = args.output_val;
@@ -1723,6 +1740,7 @@ int zp_compile(struct zp_program *prog)
                 zp_compute_target_idx[idx]   = -1;
                 zp_compute_input_val[idx]    = 0;
                 zp_compute_output_val[idx]   = 0;
+                zp_compute_prefer_gpu[idx]   = decl->int_val ? 1 : 0;
             }
         }
     }

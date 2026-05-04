@@ -17,9 +17,11 @@
 #include "mde_chain.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "gpu_compute.h"
 #include "kprint.h"
 #include "timer.h"
 #include <stdint.h>
+#include <stddef.h>
 
 int CHAIN_MDE = -1;
 
@@ -40,6 +42,9 @@ int mde_chain_inflight(void) { return s_inflight; }
  */
 typedef struct {
     int                       backend_id;
+    gpu_compute_backend_t    *backend;   /* non-NULL when a registry-backed
+                                          * backend was picked (CPU or GPU);
+                                          * NULL = legacy direct CPU path */
     mde_compute_request_t    *req;
 } mde_dispatch_token_t;
 
@@ -88,6 +93,7 @@ static void compute_request_resolve(chain_node_t *self, void *input, void *outpu
         return;
     }
     s_slot.tok.backend_id = MDE_BACKEND_NONE;
+    s_slot.tok.backend    = NULL;
     s_slot.tok.req        = s_slot.req;
     s_slot.res.rc          = -1;
     s_slot.res.elapsed_tsc = 0;
@@ -117,10 +123,33 @@ static void device_select_resolve(chain_node_t *self, void *input, void *output)
 
     if (!s_slot.valid || s_slot.error) { s_slot.error = 1; return; }
 
-    /* TODO(GPU/Goya/FPGA): probe driver-published backends here.
-     * Until those drivers expose mde_chain hooks, every request
-     * routes to CPU. */
-    s_slot.tok.backend_id = MDE_BACKEND_CPU;
+    /* Ask the gpu_compute registry for a backend. Today the registry
+     * always has at least the CPU backend; GPU backends register from
+     * gpu_virtio_init / future Intel/AMD/NVIDIA drivers.
+     *
+     * Selection policy:
+     *   prefer_gpu=1 -> use whatever gpu_compute_pick returns (GPU first,
+     *                   CPU fallback when no GPU backend can_dispatch).
+     *   prefer_gpu=0 -> force CPU backend at index 0 for safety/determinism.
+     *
+     * The registry never returns NULL when init has run, so the
+     * legacy MDE_BACKEND_CPU branch in execute_resolve only fires if
+     * the registry was somehow empty (defense-in-depth). */
+    gpu_compute_backend_t *picked = NULL;
+    if (s_slot.req->prefer_gpu) {
+        picked = gpu_compute_pick(s_slot.req->args);
+    } else if (gpu_compute_count() > 0) {
+        picked = gpu_compute_get(0);  /* CPU is always at index 0 */
+    }
+
+    if (picked) {
+        s_slot.tok.backend    = picked;
+        s_slot.tok.backend_id = (picked->device_id < 0)
+                                ? MDE_BACKEND_CPU : MDE_BACKEND_GPU;
+    } else {
+        s_slot.tok.backend    = NULL;
+        s_slot.tok.backend_id = MDE_BACKEND_CPU;
+    }
 }
 
 /*
@@ -167,23 +196,33 @@ static void execute_resolve(chain_node_t *self, void *input, void *output)
     s_slot.exec_start_tsc = timer_read_tsc();
 
     int rc = -1;
-    switch (s_slot.tok.backend_id) {
-    case MDE_BACKEND_CPU:
+    uint64_t elapsed = 0;
+
+    if (s_slot.tok.backend && s_slot.tok.backend->dispatch) {
+        /* Registry-backed dispatch. The CPU backend really runs the
+         * kernel_fn. The virtio-virgl backend currently logs and falls
+         * back to CPU execution -- honest about not having a shader
+         * compiler yet. Real Intel/AMD/NVIDIA backends will execute on
+         * device when they register. */
+        rc = s_slot.tok.backend->dispatch(s_slot.tok.req->kernel_fn,
+                                          s_slot.tok.req->args,
+                                          &elapsed);
+    } else if (s_slot.tok.backend_id == MDE_BACKEND_CPU) {
+        /* Legacy direct path -- only reached if the registry is empty
+         * (gpu_compute_init never ran). */
         rc = s_slot.tok.req->kernel_fn(s_slot.tok.req->args);
-        break;
-    /* case MDE_BACKEND_GPU:  rc = mde_gpu_dispatch(...);  break;  */
-    /* case MDE_BACKEND_GOYA: rc = mde_goya_dispatch(...); break;  */
-    /* case MDE_BACKEND_FPGA: rc = mde_fpga_dispatch(...); break;  */
-    default:
+        elapsed = timer_read_tsc() - s_slot.exec_start_tsc;
+    } else {
         s_slot.error = 1;
         return;
     }
 
-    uint64_t end = timer_read_tsc();
     s_slot.res.rc          = rc;
-    s_slot.res.elapsed_tsc = end - s_slot.exec_start_tsc;
-    s_slot.req->rc          = rc;
-    s_slot.req->elapsed_tsc = s_slot.res.elapsed_tsc;
+    s_slot.res.elapsed_tsc = elapsed ? elapsed
+                                     : (timer_read_tsc() - s_slot.exec_start_tsc);
+    s_slot.req->rc           = rc;
+    s_slot.req->elapsed_tsc  = s_slot.res.elapsed_tsc;
+    s_slot.req->backend_used = s_slot.tok.backend_id;
 }
 
 /*
@@ -252,8 +291,9 @@ int mde_chain_submit(mde_compute_request_t *req)
     s_slot.error     = 0;
     s_slot.admitted  = 0;
     s_slot.req       = req;
-    req->rc          = -1;
-    req->elapsed_tsc = 0;
+    req->rc           = -1;
+    req->elapsed_tsc  = 0;
+    req->backend_used = MDE_BACKEND_NONE;
 
     int rc = chain_resolve(CHAIN_MDE);
 

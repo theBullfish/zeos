@@ -24,6 +24,7 @@
 #include "net_chain.h"
 #include "block_chain.h"
 #include "mde_chain.h"
+#include "gpu_compute.h"
 #include "gpu_virtio.h"
 #include "keyboard.h"
 #include "mouse.h"
@@ -413,7 +414,13 @@ int chain_registry_init(void)
     /* MDE-as-a-chain: the routing engine itself exposed as a chain so
      * userspace + Z+ can submit generic compute work via the same
      * pipeline contract. CPU backend wired today; GPU/Goya/FPGA slots
-     * present in device_select for future drivers. */
+     * present in device_select for future drivers.
+     *
+     * gpu_compute_init() must run BEFORE mde_chain_register so the
+     * device_select node finds at least the CPU backend in the
+     * registry on its first resolve. GPU backends register later
+     * during gpu_virtio_init. */
+    gpu_compute_init();
     if (mde_chain_register(CHAIN_CPU) != 0) {
         kputs("[chain_registry] WARN: mde chain registration failed\n");
     }

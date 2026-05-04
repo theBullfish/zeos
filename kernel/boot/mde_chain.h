@@ -33,6 +33,8 @@ typedef struct {
     void      *args;                    /* opaque payload */
     int        rc;                      /* filled on completion */
     uint64_t   elapsed_tsc;             /* filled on completion */
+    int        prefer_gpu;              /* opt-in: try GPU backend first */
+    int        backend_used;            /* filled on completion: MDE_BACKEND_* */
 } mde_compute_request_t;
 
 /* Register CHAIN_MDE under parent_id (CHAIN_CPU). Returns 0 on success. */
