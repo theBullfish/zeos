@@ -205,6 +205,40 @@ void vault_stat(uint32_t *total_blocks, uint32_t *free_blocks,
  */
 void vault_sync(void);
 
+/* ── Disk-backed persistence ─────────────────────── */
+
+/*
+ * Bind the VAULT region to a block-device drive index and try to
+ * load a previously-written image from LBA 0 onwards.
+ *
+ *   ram      — pointer to the RAM region that hosts the filesystem.
+ *   ram_size — size of that region (must be a multiple of 512).
+ *   drive_id — block.c drive index. Pass -1 to disable persistence;
+ *              the region stays purely in RAM.
+ *
+ * Returns:
+ *    1 — backing image found and loaded into RAM (caller should
+ *        vault_mount() without re-formatting).
+ *    0 — drive present but no valid image (caller must vault_format()
+ *        and the next vault_sync() will write the freshly-formatted
+ *        region back to the drive).
+ *   -1 — drive not usable (out of range or read failure). Caller may
+ *        still operate the filesystem in pure-RAM mode, but writes
+ *        will not survive a reboot.
+ */
+int vault_persist_attach(void *ram, uint32_t ram_size, int drive_id);
+
+/*
+ * Flush the entire backing region to the bound drive. Called from
+ * vault_sync(). Safe to call when no drive is bound (no-op).
+ *
+ * Returns 0 on success, -1 on error or when no drive is bound.
+ */
+int vault_persist_flush(void);
+
+/* True if vault_persist_attach() bound a usable drive. */
+int vault_persist_active(void);
+
 /* ── Chain Persistence ──────────────────────────── */
 
 /*

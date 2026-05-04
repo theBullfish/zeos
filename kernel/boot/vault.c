@@ -14,6 +14,7 @@
 #include "cfa_handle.h"
 #include "kprint.h"
 #include "heap.h"
+#include "block.h"
 
 /* Global filesystem state */
 static struct vault_fs g_vault;
@@ -728,6 +729,94 @@ void vault_stat(uint32_t *total_blocks, uint32_t *free_blocks,
     if (free_inodes) *free_inodes = g_vault.super.free_inodes;
 }
 
+/* ── Persistent backing (whole-region image on a block device) ─── */
+/*
+ * The current VAULT impl operates on a contiguous RAM region. To
+ * survive reboot we mirror that region to a block device: the entire
+ * 2 MB image is read at boot and written back on every vault_sync().
+ * Crude but correct -- a future change can dirty-track 4 KB blocks
+ * once we want to scale this past a few MB.
+ */
+
+static int      g_persist_drive = -1;
+static void    *g_persist_ram   = (void *)0;
+static uint32_t g_persist_size  = 0;
+
+int vault_persist_active(void)
+{
+    return (g_persist_drive >= 0 && g_persist_ram && g_persist_size > 0);
+}
+
+int vault_persist_attach(void *ram, uint32_t ram_size, int drive_id)
+{
+    g_persist_drive = -1;
+    g_persist_ram   = (void *)0;
+    g_persist_size  = 0;
+
+    if (!ram || ram_size == 0 || (ram_size % 512) != 0) return -1;
+    if (drive_id < 0 || drive_id >= block_drive_count()) return -1;
+
+    /* Probe the drive: must be at least as large as our region. */
+    block_drive_info_t info;
+    if (block_drive_info(drive_id, &info) != 0) return -1;
+    uint64_t bytes_avail = info.sectors * (uint64_t)info.sector_size;
+    if (bytes_avail < ram_size) return -1;
+
+    g_persist_drive = drive_id;
+    g_persist_ram   = ram;
+    g_persist_size  = ram_size;
+
+    /* Read the existing image back, sector-aligned, in 8-sector chunks
+     * so the polled NVMe / AHCI / USB-MSC paths stay simple. */
+    uint32_t sector = info.sector_size ? info.sector_size : 512;
+    uint32_t total_sectors = ram_size / sector;
+    uint8_t *cursor = (uint8_t *)ram;
+    uint64_t lba = 0;
+    uint32_t chunk_max = 8;
+
+    while (total_sectors > 0) {
+        uint32_t chunk = total_sectors < chunk_max ? total_sectors : chunk_max;
+        if (block_read_drive(drive_id, lba, chunk, cursor) != 0) {
+            return 0;  /* leave RAM as-is; caller will format */
+        }
+        cursor         += chunk * sector;
+        lba            += chunk;
+        total_sectors  -= chunk;
+    }
+
+    /* Validate the loaded superblock. */
+    struct vault_super *sb = (struct vault_super *)ram;
+    if (sb->magic == VAULT_MAGIC) return 1;
+
+    /* No valid superblock -- caller will format and the next
+     * vault_sync() flushes the freshly-formatted image back. */
+    return 0;
+}
+
+int vault_persist_flush(void)
+{
+    if (!vault_persist_active()) return -1;
+
+    block_drive_info_t info;
+    if (block_drive_info(g_persist_drive, &info) != 0) return -1;
+    uint32_t sector = info.sector_size ? info.sector_size : 512;
+    uint32_t total_sectors = g_persist_size / sector;
+    uint8_t *cursor = (uint8_t *)g_persist_ram;
+    uint64_t lba = 0;
+    uint32_t chunk_max = 8;
+
+    while (total_sectors > 0) {
+        uint32_t chunk = total_sectors < chunk_max ? total_sectors : chunk_max;
+        if (block_write_drive(g_persist_drive, lba, chunk, cursor) != 0) {
+            return -1;
+        }
+        cursor         += chunk * sector;
+        lba            += chunk;
+        total_sectors  -= chunk;
+    }
+    return 0;
+}
+
 void vault_sync(void)
 {
     /* In RAM-backed mode, superblock is already in memory.
@@ -737,6 +826,10 @@ void vault_sync(void)
         if (base)
             v_memcpy(base, &g_vault.super, sizeof(struct vault_super));
     }
+
+    /* Mirror the whole region to the bound block device (if any) so
+     * the next boot can resume from disk. */
+    (void)vault_persist_flush();
 }
 
 /* ── Chain Persistence ───────────────────────────── */

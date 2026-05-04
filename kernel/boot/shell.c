@@ -229,6 +229,7 @@ static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
 static void cmd_scheduler_log(const char *args);
+static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
 static void cmd_persistence(const char *args);
 
@@ -358,6 +359,56 @@ static void cmd_gpustat(const char *args) {
         kputc('\n');
     }
     kputc('\n');
+}
+
+/* tickrate [watch]
+ *   Show the current scheduler tps and average tick wall time.
+ *   "tickrate watch" prints a fresh line every second until Esc / q. */
+static void cmd_tickrate(const char *args)
+{
+    int watch = 0;
+    if (args) {
+        const char *p = args;
+        while (*p == ' ') p++;
+        if (p[0] == 'w' && p[1] == 'a' && p[2] == 't' && p[3] == 'c' && p[4] == 'h')
+            watch = 1;
+    }
+
+    extern uint32_t compositor_composite_count(void);
+    extern uint32_t compositor_composite_skips(void);
+
+    int loops = 0;
+    for (;;) {
+        uint32_t tps  = scheduler_tps();
+        uint32_t avg  = scheduler_tick_avg_us();
+        uint32_t agg  = scheduler_aggregate_slow_total();
+        uint32_t comp = compositor_composite_count();
+        uint32_t skip = compositor_composite_skips();
+        kputs("  tickrate: ");
+        kput_dec((uint64_t)tps);
+        kputs(" tps, avg=");
+        kput_dec((uint64_t)avg);
+        kputs("us, agg_slow=");
+        kput_dec((uint64_t)agg);
+        kputs(", comp=");
+        kput_dec((uint64_t)comp);
+        kputs("/");
+        kput_dec((uint64_t)(comp + skip));
+        kputc('\n');
+        if (!watch) break;
+
+        /* Poll for a key, sleep 1s in 100ms slices. Esc / q / Ctrl-C breaks. */
+        int aborted = 0;
+        for (int i = 0; i < 10; i++) {
+            char c;
+            if (keyboard_try_getc(&c)) {
+                if (c == 27 || c == 'q' || c == 3) { aborted = 1; break; }
+            }
+            timer_wait_ms(100);
+        }
+        if (aborted) break;
+        if (++loops > 600) break;  /* 10 min hard cap */
+    }
 }
 
 static void cmd_scheduler_log(const char *args)
@@ -530,6 +581,7 @@ static const struct shell_cmd commands[] = {
     {"persistence","show VAULT persistence stats (journal + chain snapshot)", cmd_persistence, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
+    {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
@@ -1814,7 +1866,9 @@ static void cmd_wc(const char *args)
 
 static void cmd_cp(const char *args)
 {
-    /* cp <src> <dst> */
+    /* cp <src> <dst>  — src can be VAULT or (if mounted) FAT32; dst
+     * picks whichever filesystem the path is on. We try VAULT first,
+     * then fall back to FAT32 for the source. */
     char src[128], dst[128];
     int si = 0, di = 0;
     const char *p = args;
@@ -1826,20 +1880,50 @@ static void cmd_cp(const char *args)
     dst[di] = 0;
     if (!src[0] || !dst[0]) { kputs("  Usage: cp <src> <dst>\n"); return; }
 
-    int sz = vault_size(src);
-    if (sz < 0) { kputs("  Source not found.\n"); return; }
-
     static uint8_t buf[65536];
-    if (sz > (int)sizeof(buf)) {
-        kputs("  Source too large (");
-        kput_dec((unsigned)sz);
-        kputs(" bytes; cp limited to 64 KB).\n");
+    int got = -1;
+    int src_sz = 0;
+
+    int vsz = vault_ready ? vault_size(src) : -1;
+    if (vsz >= 0) {
+        if (vsz > (int)sizeof(buf)) {
+            kputs("  Source too large (");
+            kput_dec((unsigned)vsz);
+            kputs(" bytes; cp limited to 64 KB).\n");
+            return;
+        }
+        got = vault_read(src, buf, (uint32_t)vsz);
+        src_sz = vsz;
+    } else if (fat32_mounted()) {
+        struct fat32_file f;
+        if (fat32_open(src, &f) == 0 && !f.is_dir) {
+            if (f.size > sizeof(buf)) {
+                kputs("  Source too large (");
+                kput_dec((unsigned)f.size);
+                kputs(" bytes; cp limited to 64 KB).\n");
+                return;
+            }
+            got = fat32_read(&f, buf, f.size);
+            src_sz = (int)f.size;
+        }
+    }
+
+    if (got < 0) { kputs("  Source not found / read error.\n"); return; }
+    (void)src_sz;
+
+    /* Decide dst: prefer FAT32 if mounted; else VAULT. */
+    if (fat32_mounted()) {
+        (void)fat32_create(dst);
+        if (fat32_truncate(dst, 0) != 0) {
+            kputs("  cp: truncate dst failed\n"); return;
+        }
+        int w = fat32_write(dst, 0, buf, (uint32_t)got);
+        if (w < 0) { kputs("  cp: write failed\n"); return; }
+        kputs("  Copied "); kput_dec((unsigned)w); kputs(" bytes.\n");
         return;
     }
-    int got = vault_read(src, buf, (uint32_t)sz);
-    if (got < 0) { kputs("  Read error.\n"); return; }
 
-    /* Create dst (delete first if it existed) */
+    if (!vault_ready) { kputs("  No filesystem mounted.\n"); return; }
     if (vault_exists(dst)) vault_delete(dst);
     if (vault_create(dst, 0) < 0) { kputs("  Create dst failed.\n"); return; }
     if (vault_write(dst, buf, (uint32_t)got) < 0) {
@@ -2386,6 +2470,22 @@ static void cmd_selftest(const char *args)
             if (info.model[0]) { kputs(" "); kputs(info.model); }
             kputs("\n");
         }
+        /* Per-NVMe-drive completion path: MSI-X (preferred) or polling. */
+        int nn = nvme_drive_count();
+        for (int i = 0; i < nn; i++) {
+            nvme_dev_t *dd = nvme_get_drive(i);
+            if (!dd) continue;
+            kputs("    NVMe drive ");
+            kput_dec(i);
+            kputs(" ........ ");
+            if (dd->msix_vector >= 0) {
+                kputs("msi-x driven (vec ");
+                kput_hex((uint64_t)dd->msix_vector);
+                kputs(")\n");
+            } else {
+                kputs("polling fallback\n");
+            }
+        }
     }
 
     /* Block chain: dump pipeline + drive a small write/read loop on
@@ -2492,6 +2592,79 @@ static void cmd_selftest(const char *args)
         kputs("PASS\n"); passes++;
     }
 vault_done:
+
+    /* FAT32 write: round-trip on the mounted volume. Auto-mount first
+     * if nothing is mounted (NVMe boot will land here). */
+    kputs("  FAT32 write ........... ");
+    if (!fat32_mounted()) {
+        (void)fat32_automount();
+    }
+    if (!fat32_mounted()) {
+        kputs("SKIP (no FAT32 volume)\n");
+    } else {
+        const char *dir  = "/test";
+        const char *path = "/test/zeos_test.txt";
+        const char  msg[] = "zeos-fat32-write-selftest-OK";
+        const uint32_t msg_len = (uint32_t)(sizeof(msg) - 1);
+
+        /* Clean any prior run. Best-effort (ignore errors). */
+        (void)fat32_unlink(path);
+        (void)fat32_unlink(dir);
+
+        int step = 0;
+        int bytes_w = 0, bytes_r = 0;
+        do {
+            if (fat32_mkdir(dir) != 0) { step = 1; break; }
+            if (fat32_create(path) != 0) { step = 2; break; }
+            int w = fat32_write(path, 0, msg, msg_len);
+            if (w != (int)msg_len) { step = 3; bytes_w = w; break; }
+            bytes_w = w;
+
+            struct fat32_file f;
+            if (fat32_open(path, &f) != 0) { step = 4; break; }
+            if (f.size != msg_len)         { step = 5; break; }
+            char rbuf[64];
+            int got = fat32_read(&f, rbuf, sizeof(rbuf));
+            if (got != (int)msg_len) { step = 6; bytes_r = got; break; }
+            bytes_r = got;
+            for (uint32_t i = 0; i < msg_len; i++) {
+                if (rbuf[i] != msg[i]) { step = 7; break; }
+            }
+            if (step) break;
+
+            uint32_t half = msg_len / 2;
+            if (fat32_truncate(path, half) != 0) { step = 8; break; }
+            struct fat32_file f2;
+            if (fat32_open(path, &f2) != 0)  { step = 9; break; }
+            if (f2.size != half)             { step = 10; break; }
+
+            if (fat32_unlink(path) != 0) { step = 11; break; }
+            struct fat32_file f3;
+            if (fat32_open(path, &f3) == 0) { step = 12; break; }
+            (void)fat32_unlink(dir);
+        } while (0);
+
+        if (step == 0) {
+            kputs("PASS (wrote ");
+            kput_dec((uint64_t)bytes_w);
+            kputs(", read ");
+            kput_dec((uint64_t)bytes_r);
+            kputs(")\n");
+            passes++;
+        } else {
+            kputs("FAIL (step=");
+            kput_dec((uint64_t)step);
+            kputs(", w=");
+            kput_dec((uint64_t)bytes_w);
+            kputs(", r=");
+            kput_dec((uint64_t)bytes_r);
+            kputs(")\n");
+            fails++;
+            /* Best-effort cleanup. */
+            (void)fat32_unlink(path);
+            (void)fat32_unlink(dir);
+        }
+    }
 
     /* DNS: resolve a known host (if network is up) */
     kputs("  DNS resolve ........... ");
@@ -2804,7 +2977,9 @@ vault_done:
         kput_dec((uint64_t)scheduler_aggregate_slow_total());
         kputs(", watchdog_kills=");
         kput_dec((uint64_t)scheduler_watchdog_kills());
-        kputc('\n');
+        kputs(", tick_avg=");
+        kput_dec((uint64_t)scheduler_tick_avg_us());
+        kputs("us\n");
         int top_id = -1;
         float top_avg = 0.0f;
         if (scheduler_top_slow_chain(&top_id, &top_avg) && top_id >= 0) {
@@ -2816,9 +2991,30 @@ vault_done:
             kputs("\" avg=");
             /* Integer ms -- avoid float printf in kernel. */
             kput_dec((uint64_t)top_avg);
-            kputs("ms\n");
+            kputs("ms");
+            if (tc && tc->resolve_interval_ticks > 0) {
+                kputs(" (resolved 1/");
+                kput_dec((uint64_t)tc->resolve_interval_ticks);
+                kputs(" ticks)");
+            }
+            kputc('\n');
         } else {
             kputs("                         top_slow=(none yet)\n");
+        }
+        /* Compositor async stats: composites that ran vs skipped via
+         * the dirty-rect gate. High skips with a healthy composite
+         * count = the async path is working. */
+        {
+            extern uint32_t compositor_composite_count(void);
+            extern uint32_t compositor_composite_skips(void);
+            extern uint32_t compositor_dirty_pushes(void);
+            kputs("                         compositor: composites=");
+            kput_dec((uint64_t)compositor_composite_count());
+            kputs(" skips=");
+            kput_dec((uint64_t)compositor_composite_skips());
+            kputs(" dirty_pushes=");
+            kput_dec((uint64_t)compositor_dirty_pushes());
+            kputc('\n');
         }
         if (tps > 0 && live >= 1 && errs == 0) passes++; else fails++;
     }
@@ -3524,4 +3720,110 @@ static void cmd_fat_cat(const char *args)
         kput_dec(f.size - (uint32_t)got);
         kputs(" more bytes)\n");
     }
+}
+
+/* ── FAT32 write-side shell commands ─────────────────────────── */
+
+static int strlen_simple(const char *s) { int n = 0; while (s[n]) n++; return n; }
+
+static void cmd_touch(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) { kputs("  Usage: touch <path>\n"); return; }
+    if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
+    if (fat32_create(args) == 0) {
+        kputs("  Created: "); kputs(args); kputs("\n");
+    } else {
+        kputs("  touch: failed (exists or bad path?)\n");
+    }
+}
+
+static void cmd_rm(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) { kputs("  Usage: rm <path>\n"); return; }
+    if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
+    if (fat32_unlink(args) == 0) {
+        kputs("  Removed: "); kputs(args); kputs("\n");
+    } else {
+        kputs("  rm: failed (not found or non-empty dir?)\n");
+    }
+}
+
+static void cmd_truncate(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) { kputs("  Usage: truncate <path> <size>\n"); return; }
+    if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
+
+    /* Parse path then size. */
+    char path[256];
+    int pi = 0;
+    while (*args && *args != ' ' && pi < 255) path[pi++] = *args++;
+    path[pi] = 0;
+    while (*args == ' ') args++;
+    if (!*args) { kputs("  Usage: truncate <path> <size>\n"); return; }
+
+    uint32_t sz = 0;
+    while (*args >= '0' && *args <= '9') {
+        sz = sz * 10 + (uint32_t)(*args - '0');
+        args++;
+    }
+    if (fat32_truncate(path, sz) == 0) {
+        kputs("  Truncated "); kputs(path); kputs(" to ");
+        kput_dec(sz); kputs(" bytes\n");
+    } else {
+        kputs("  truncate: failed\n");
+    }
+}
+
+/* echo <text> > <path>  — writes <text> to <path>, creating it if
+ * needed. Always replaces full contents. */
+static void cmd_echo(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) { kputs("  Usage: echo <text> > <path>\n"); return; }
+    if (!fat32_mounted()) { kputs("  fat32: not mounted\n"); return; }
+
+    /* Find the last unquoted '>' for redirection. */
+    int len = strlen_simple(args);
+    int redir = -1;
+    for (int i = 0; i < len; i++) {
+        if (args[i] == '>') redir = i;
+    }
+    if (redir < 0) {
+        kputs("  Usage: echo <text> > <path>\n");
+        return;
+    }
+
+    /* Split. */
+    char text[1024];
+    int ti = 0;
+    int end_text = redir;
+    /* Trim trailing spaces from text region. */
+    while (end_text > 0 && args[end_text - 1] == ' ') end_text--;
+    for (int i = 0; i < end_text && ti < 1023; i++) text[ti++] = args[i];
+    text[ti] = '\0';
+
+    /* Skip past '>' and any spaces. */
+    int pi = redir + 1;
+    while (pi < len && args[pi] == ' ') pi++;
+    char path[256];
+    int pj = 0;
+    while (pi < len && args[pi] != ' ' && pj < 255) path[pj++] = args[pi++];
+    path[pj] = '\0';
+    if (!path[0]) { kputs("  Usage: echo <text> > <path>\n"); return; }
+
+    /* Append a newline, mirroring shell echo behaviour. */
+    if (ti < 1023) { text[ti++] = '\n'; text[ti] = '\0'; }
+
+    /* Create-if-missing, truncate to 0, then write. */
+    (void)fat32_create(path);
+    if (fat32_truncate(path, 0) != 0) {
+        kputs("  echo: truncate failed\n"); return;
+    }
+    int wrote = fat32_write(path, 0, text, (uint32_t)ti);
+    if (wrote < 0) { kputs("  echo: write failed\n"); return; }
+    kputs("  Wrote "); kput_dec((uint32_t)wrote); kputs(" bytes to ");
+    kputs(path); kputs("\n");
 }

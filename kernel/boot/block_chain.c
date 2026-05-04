@@ -26,6 +26,7 @@
 #include "usb_msc.h"
 #include "kprint.h"
 #include "timer.h"
+#include "persistence.h"
 #include <stdint.h>
 
 /* ── Public chain ID ───────────────────────────────────────────── */
@@ -91,7 +92,37 @@ static void journal_append(int drive_id, uint64_t lba, uint32_t count,
                            int op, int prior_vv, int new_vv)
 {
     int slot = (int)(s_journal_total % BLOCK_JOURNAL_CAP);
-    s_journal[slot].tsc                 = timer_read_tsc();
+    uint64_t tsc = timer_read_tsc();
+    s_journal[slot].tsc                 = tsc;
+    s_journal[slot].lba                 = lba;
+    s_journal[slot].count               = count;
+    s_journal[slot].drive_id            = drive_id;
+    s_journal[slot].op                  = op;
+    s_journal[slot].prior_vault_version = prior_vv;
+    s_journal[slot].new_vault_version   = new_vv;
+    s_journal_total++;
+
+    /* Mirror to VAULT so the record survives a reboot. The
+     * persistence layer no-ops until vault is mounted + initialized;
+     * before that point we still keep the in-RAM record. */
+    persistence_journal_append(tsc, drive_id, lba, count, op,
+                               prior_vv, new_vv);
+}
+
+/*
+ * Boot-time replay sink. Called by persistence_init() once per
+ * persisted record so the in-RAM ring shows pre-reboot writes when
+ * `masq-journal` runs. Does NOT touch VAULT (we're already loading
+ * FROM vault) and does NOT bump any chain's vault_version (the live
+ * registry is rebuilt elsewhere; vault_version comes from the chain
+ * snapshot, not the journal).
+ */
+void block_chain_journal_replay_record(uint64_t tsc, int drive_id,
+                                       uint64_t lba, uint32_t count,
+                                       int op, int prior_vv, int new_vv)
+{
+    int slot = (int)(s_journal_total % BLOCK_JOURNAL_CAP);
+    s_journal[slot].tsc                 = tsc;
     s_journal[slot].lba                 = lba;
     s_journal[slot].count               = count;
     s_journal[slot].drive_id            = drive_id;

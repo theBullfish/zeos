@@ -8,6 +8,7 @@
 #include "cfa_handle.h"
 #include "kprint.h"
 #include "timer.h"
+#include "persistence.h"
 
 /* ── Static registry ─────────────────────────────────────────────── */
 
@@ -95,6 +96,8 @@ void chain_init(void)
         registry[i].watchdog_timeout_us   = 100000;  /* 100ms default */
         registry[i].backoff_skip_threshold = 0.5f;
         registry[i].backoff_skip_every     = 4;
+        registry[i].resolve_interval_ticks = 0;
+        registry[i].last_resolved_tick     = 0;
         registry[i].addr.depth = 0;
         registry[i].addr.birth_tsc = 0;
         for (j = 0; j < 8; j++)
@@ -156,6 +159,8 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     registry[slot].watchdog_timeout_us   = 100000;  /* 100ms default */
     registry[slot].backoff_skip_threshold = 0.5f;
     registry[slot].backoff_skip_every     = 4;
+    registry[slot].resolve_interval_ticks = 0;
+    registry[slot].last_resolved_tick     = 0;
 
     registry_used[slot] = 1;
     chain_total++;
@@ -279,6 +284,12 @@ int chain_resolve(int id)
      * (mde_resolve_chain / mde_resolve_all), which observes both
      * success AND failure outcomes. Don't double-count here.
      */
+
+    /* Persistence checkpoint hook: increments resolve counter and
+     * snapshots the registry to VAULT every CHECKPOINT_EVERY resolves.
+     * Cheap until the threshold trips, then a single vault_write +
+     * vault_sync. */
+    persistence_on_resolve_complete();
 
     return 0;
 }

@@ -626,6 +626,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     sig_init();
     kputs("ready.\n\n");
 
+    /* Bring up VAULT BEFORE chain_registry_init so the persistence
+     * layer can replay the masq_journal + buffer the chain registry
+     * snapshot in time for chain_registry_init to apply it to the
+     * freshly-built chains. block_init() above already enumerated
+     * the persistent NVMe drive that backs vault_ram. */
+    {
+        extern void shell_vault_init(void);
+        extern void persistence_init(void);
+        shell_vault_init();
+        persistence_init();
+    }
+
     /* Wire all subsystems into the chain/MDE graph (CPU, memory, GPU,
      * NIC discovery + system chains: compositor, panel, dock, desktop,
      * shell, browser, inspector, palette, AND audio -- the first hardware
@@ -633,6 +645,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         extern int chain_registry_init(void);
         chain_registry_init();
+    }
+
+    /* With the registry built, replay the persisted snapshot onto the
+     * live chains (B3 priors, vault_version, watchdog/backoff
+     * tunables). No-op on first boot. */
+    {
+        extern int persistence_apply_snapshot(void);
+        persistence_apply_snapshot();
     }
 
     /* Z+ runtime registry — backs `chain ... { ... }` blocks declared

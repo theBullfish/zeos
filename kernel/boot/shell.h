@@ -33,4 +33,12 @@ void shell_print_prompt(void);
  * scheduler. Never returns. Kept so main.c keeps calling shell_run. */
 void shell_run(struct zeos_boot_info *boot);
 
+/* Bring up the VAULT ramdisk -- attempts to mount a previously
+ * persisted image from drive 0; falls back to formatting a fresh
+ * region. Idempotent: subsequent calls are no-ops once vault_ready.
+ * main.c calls this before chain_registry_init() so persistence_init()
+ * + persistence_apply_snapshot() can replay journal/snapshot before
+ * any chain B3 priors get clobbered. */
+void shell_vault_init(void);
+
 #endif /* ZEOS_SHELL_H */
