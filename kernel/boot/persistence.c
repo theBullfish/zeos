@@ -23,6 +23,7 @@
  */
 
 #include "persistence.h"
+#include "timeofday.h"
 #include "vault.h"
 #include "chain.h"
 #include "kprint.h"
@@ -213,6 +214,11 @@ void persistence_init(void)
     load_journal_into_ring();
     load_snapshot_buffered();
 
+    /* Time-of-day persistence: if CMOS read failed in tod_init(), try
+     * to restore the last-known wall clock from VAULT so logs aren't
+     * stamped 1970. No-op if tod is already CMOS-backed. */
+    tod_persist_load();
+
     g_ready = 1;
 
     kputs("[persistence] init: journal=");
@@ -353,6 +359,10 @@ int persistence_save_snapshot_now(void)
 
     g_snapshot_saves++;
     g_last_save_tsc = hdr->saved_tsc;
+
+    /* Sink the current wall clock too -- so a CMOS-less reboot can
+     * restore a low-fidelity time instead of starting at 1970. */
+    tod_persist_save();
     return 0;
 }
 

@@ -26,6 +26,7 @@
 #include "usb_msc.h"
 #include "kprint.h"
 #include "timer.h"
+#include "timeofday.h"
 #include "persistence.h"
 #include <stdint.h>
 
@@ -172,6 +173,27 @@ void block_chain_dump_journal(int n)
 
         kputs("    tsc=");
         kput_dec(r->tsc);
+        /* If wall clock is up, render the record's tsc as a UTC string
+         * alongside the raw cycles -- TSC stays for sub-second ordering,
+         * tod string makes cross-reboot correlation possible. */
+        if (tod_ready()) {
+            uint64_t freq = timer_tsc_freq();
+            uint64_t now_tsc = timer_read_tsc();
+            uint64_t now_epoch = tod_now_unix();
+            /* boot_epoch = now_epoch - (now_tsc - boot_tsc)/freq, but we
+             * don't expose boot_tsc/boot_epoch directly. Approximate the
+             * record's wall-clock from delta: secs_back = (now_tsc - r->tsc)/freq */
+            if (freq > 0 && now_tsc >= r->tsc) {
+                uint64_t secs_back = (now_tsc - r->tsc) / freq;
+                uint64_t rec_epoch = (now_epoch >= secs_back)
+                                   ? (now_epoch - secs_back) : 0;
+                char tbuf[40];
+                if (tod_format(rec_epoch, tbuf, sizeof(tbuf)) > 0) {
+                    kputs(" tod=");
+                    kputs(tbuf);
+                }
+            }
+        }
         kputs(" drv=");
         kput_dec((uint64_t)r->drive_id);
         kputs(" op=");

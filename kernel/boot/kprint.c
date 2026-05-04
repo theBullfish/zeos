@@ -78,3 +78,35 @@ void kput_dec(uint64_t val)
     }
     kputs(&buf[i]);
 }
+
+void kprint_log_prefix(void)
+{
+    uint64_t now = timer_read_tsc();
+    if (s_first_tsc == 0) s_first_tsc = now;
+
+    uint64_t freq = timer_tsc_freq();
+    uint64_t us   = 0;
+    if (freq > 0 && now >= s_first_tsc) {
+        /* freq is Hz; us = delta * 1e6 / freq. Avoid 128-bit math by
+         * dividing freq down to MHz first; loses sub-us precision but
+         * a log prefix doesn't need it. */
+        uint64_t mhz = freq / 1000000ULL;
+        if (mhz == 0) mhz = 1;
+        us = (now - s_first_tsc) / mhz;
+    }
+
+    char tbuf[16];
+    int n = tod_format_log(tbuf, sizeof(tbuf));
+    if (n > 0 && tod_ready()) {
+        /* "[HH:MM:SS.mmm +N us] " */
+        tbuf[n - 1] = '\0';     /* strip trailing ']' */
+        kputs(tbuf);
+        kputs(" +");
+        kput_dec(us);
+        kputs(" us] ");
+    } else {
+        kputs("[+");
+        kput_dec(us);
+        kputs(" us] ");
+    }
+}
