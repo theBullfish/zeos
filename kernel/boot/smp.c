@@ -1,22 +1,26 @@
 /*
- * SMP bring-up via INIT-SIPI-SIPI. Each AP runs its own scheduler
- * loop on its own per-CPU stack and resolves a partition of the
- * chain set. Coarse spinlock around shared structs (registry,
- * masq_journal, persistence) — fine-grained locking is future work.
+ * SMP bring-up via INIT-SIPI-SIPI.
  *
- * Honest scope today (2026-05-03):
+ * Each AP runs its own scheduler loop on its per-CPU stack and resolves
+ * chains pinned by (chain_id % cpu_count). Coarse spinlocks protect the
+ * shared chain registry, masq_journal, persistence checkpoint, VAULT,
+ * and kprint serial. Fine-grained per-chain locking is future work.
+ *
+ * Honest scope today (2026-05-03, second pass):
  *   - MADT enumeration of all Processor LAPIC entries .......... ✓
- *   - Per-CPU state struct + per-CPU stack + per-CPU page ...... ✓
- *   - INIT-SIPI-SIPI sequence helpers + IPI helper ............. ✓
+ *   - Per-CPU state + per-CPU stack + per-CPU page ............. ✓
+ *   - INIT-SIPI-SIPI sequence + IPI helper ..................... ✓
  *   - 16->32->64-bit trampoline (NASM, embedded via objcopy) ... ✓
- *   - Coarse spinlock around chain registry .................... ✓ (primitive ready)
- *   - APs reach 64-bit ap_main and bump per-CPU heartbeat ...... ✓
- *   - Concurrent chain partition + ap_scheduler_loop() ......... NOT YET
- *       Reason: chain.c / chain_registry.c / masq_journal /
- *       persistence.c are not audited for re-entrance from a
- *       second hardware thread. APs currently spin in a halt-loop
- *       bumping heartbeat. The per-CPU stacks, GDT/IDT, spinlock,
- *       and IPI helper are all ready for the partition step.
+ *   - APs reach 64-bit ap_main + bump per-CPU heartbeat ........ ✓
+ *   - Coarse locks around registry / journal / persist / vault . ✓
+ *   - APs run real chain_resolve on a partition .............. ✓
+ *   - LAPIC-timer preemption on APs ......................... NOT YET
+ *       Today preemption uses a single static jmpbuf in scheduler.c
+ *       so only BSP arms the watchdog timer. APs run their slice
+ *       without per-resolve preemption — a hung chain on an AP will
+ *       still be caught by the post-hoc watchdog sweep on the next
+ *       BSP tick (chain marked CHAIN_ERROR, b3_beta bumped). Per-AP
+ *       preempt jmpbuf is the next step; not blocking the partition.
  *
  * Trampoline rewrite history:
  *   v1 (gate=0): hand-encoded uint8_t array — far jumps targeted
@@ -43,6 +47,9 @@
 #include "timer.h"
 #include "kprint.h"
 #include "io.h"
+#include "spinlock.h"
+#include "chain.h"
+#include "chain_registry.h"
 
 /* LAPIC register offsets we need for ICR. Other LAPIC regs live in lapic.c
  * but we re-declare a couple here to avoid a public surface change. */
@@ -76,29 +83,24 @@
 #define TR_OFF_ENTRY    0x0FE8  /* uint64_t  ap_main entry point */
 #define TR_OFF_STACKPTR 0x0FF0  /* uint64_t  per-CPU stack top virt */
 
-/* ── Spinlock primitive ──────────────────────────────────────────── */
-typedef struct { volatile uint32_t v; } smp_spinlock_t;
-
-static inline void smp_spin_lock(smp_spinlock_t *l)
-{
-    while (__sync_lock_test_and_set(&l->v, 1)) {
-        while (l->v) __asm__ volatile("pause");
-    }
-}
-static inline void smp_spin_unlock(smp_spinlock_t *l)
-{
-    __sync_lock_release(&l->v);
-}
-
-/* Coarse lock around chain registry / masq journal / persistence.
- * Exported via smp.h once we enable concurrent ap_scheduler_loop(). */
-smp_spinlock_t g_chain_registry_lock = { 0 };
+/* Coarse lock for chain_create / chain_destroy. Per-chain resolves use
+ * try-lock semantics inside chain.c so a chain in flight on one CPU is
+ * skipped (not waited for) by another CPU this tick. Defined here so
+ * smp.c owns SMP-shared lock placement. */
+zeos_spinlock_t g_chain_registry_rw_lock = ZEOS_SPINLOCK_INIT;
 
 /* ── Per-CPU state ───────────────────────────────────────────────── */
 static smp_cpu_t s_cpus[SMP_MAX_CPUS];
 static int       s_cpu_count = 0;       /* CPUs known per MADT */
 static int       s_cpus_online = 1;     /* BSP always counts */
 static int       s_smp_inited = 0;
+/* APs spin on this flag in ap_main until BSP flips it after chain
+ * registry is built. Plain volatile uint32_t plus __sync barriers. */
+static volatile uint32_t s_partition_active_flag = 0;
+/* Rolling sample for per-CPU TPS reporting. */
+static uint64_t s_sample_tsc;
+static uint64_t s_sample_ticks[SMP_MAX_CPUS];
+static uint32_t s_tps_per_cpu[SMP_MAX_CPUS];
 
 /* ── LAPIC ICR helpers ───────────────────────────────────────────── */
 static volatile uint8_t *lapic_mmio(void)
@@ -227,6 +229,72 @@ static void ap_lapic_init_local(void)
     *(volatile uint32_t *)(m + 0x0F0) = (1u << 8) | 0xFF;
 }
 
+/* ── AP scheduler loop ────────────────────────────────────────────────
+ * Each AP walks the chain registry once per tick and resolves only the
+ * chains that hash to its CPU index. Cheap: chain_get is a bounds check
+ * + occupied-slot test. Expensive work happens inside chain_resolve,
+ * which the audit pass put behind the appropriate locks (journal,
+ * persist, vault, kprint).
+ *
+ * The AP does NOT use scheduler_preempt_resolve(); that path uses a
+ * single static jmpbuf shared with the BSP. A hung chain on an AP is
+ * caught by the next BSP tick's post-hoc watchdog sweep (deadline_tsc).
+ * Per-CPU preempt state is the next step.
+ */
+static void ap_scheduler_loop(smp_cpu_t *me) __attribute__((noreturn));
+static void ap_scheduler_loop(smp_cpu_t *me)
+{
+    int my_idx = me->cpu_idx;
+    int total  = s_cpu_count > 0 ? s_cpu_count : 1;
+
+    for (;;) {
+        me->tick_count++;
+        me->heartbeat++;
+        me->heartbeat_tsc = timer_read_tsc();
+
+        uint64_t now_tick = me->tick_count;
+
+        for (int id = 0; id < MAX_CHAINS; id++) {
+            /* Partition: chain id mod total cores. */
+            if ((id % total) != my_idx) continue;
+
+            chain_t *c = chain_get(id);
+            if (!c) continue;
+            if (c->status != CHAIN_LIVE) continue;
+            if (c->node_count == 0) continue;
+
+            /* Respect resolve_interval_ticks per-chain. We use this
+             * AP's local tick count as the cadence reference; the BSP
+             * uses the global scheduler tick. The two diverge but the
+             * cadence still rate-limits correctly per CPU. */
+            if (c->resolve_interval_ticks > 0) {
+                uint64_t since = now_tick - c->last_resolved_tick;
+                if (since < (uint64_t)c->resolve_interval_ticks) continue;
+            }
+
+            me->current_chain_id = id;
+            int rc = chain_resolve(id);
+            me->current_chain_id = -1;
+
+            if (rc == 0) {
+                me->chains_resolved++;
+                c->last_resolved_tick = now_tick;
+            } else if (rc == -2) {
+                /* -2 == per-chain lock contention: another CPU is
+                 * resolving this chain right now. Skip. (chain.c
+                 * returns -2 from try-lock failure.) */
+            }
+        }
+
+        /* HLT until next interrupt (timer / IPI). The AP LAPIC SVR is
+         * enabled but no LAPIC timer is armed yet — the AP wakes on
+         * any IPI. Add a tiny busy-wait to ensure forward progress on
+         * hosts that don't deliver wake interrupts to APs. */
+        for (volatile int i = 0; i < 50000; i++) { }
+        __asm__ volatile("hlt");
+    }
+}
+
 void ap_main(uint64_t cpu_idx) __attribute__((noreturn));
 void ap_main(uint64_t cpu_idx)
 {
@@ -234,6 +302,7 @@ void ap_main(uint64_t cpu_idx)
         for (;;) __asm__ volatile("cli; hlt");
     }
     smp_cpu_t *me = &s_cpus[cpu_idx];
+    me->cpu_idx = (int)cpu_idx;
 
     /* Mark alive BEFORE touching anything else — the BSP polls this
      * to confirm AP bring-up succeeded. */
@@ -260,19 +329,23 @@ void ap_main(uint64_t cpu_idx)
 
     ap_lapic_init_local();
 
-    /* AP heartbeat loop. Concurrent chain resolution is intentionally
-     * not enabled yet — the chain registry / masq journal need a
-     * re-entrance audit before APs can call into them. The per-CPU
-     * stack, GDT/IDT, and the chain-registry spinlock are all in
-     * place for that next step. */
-    for (;;) {
+    /* Wait until BSP signals "registry built, partition active". The
+     * BSP sets s_partition_active = 1 after chain_registry_init.
+     * Until then, the AP just heartbeats — chain_get against a
+     * not-yet-built registry would just return NULL but it's still
+     * cleaner to gate. */
+    while (!__sync_fetch_and_add(&s_partition_active_flag, 0)) {
         me->heartbeat++;
+        me->heartbeat_tsc = timer_read_tsc();
         for (volatile int i = 0; i < 100000; i++) { }
-        /* Halt-with-interrupts-disabled so the AP doesn't burn a core
-         * spinning hot. Re-enable timer wake when ap_scheduler_loop
-         * lands. */
-        __asm__ volatile("hlt");
+        __asm__ volatile("pause");
     }
+
+    /* Sti: APs come up with IF clear. We don't have any per-AP IRQ
+     * handlers yet but the SVR is enabled and IPIs will land. */
+    __asm__ volatile("sti");
+
+    ap_scheduler_loop(me);
 }
 
 /* ── Init ────────────────────────────────────────────────────────── */
@@ -330,20 +403,31 @@ int smp_init(void)
     s_cpus[0].lapic_id = (uint8_t)bsp;
     s_cpus[0].is_bsp = 1;
     s_cpus[0].alive = 1;
+    s_cpus[0].cpu_idx = 0;
     s_cpus[0].current_chain_id = -1;
     s_cpus[0].heartbeat = 0;
+    s_cpus[0].tick_count = 0;
+    s_cpus[0].chains_resolved = 0;
+    s_cpus[0].preempt_kills = 0;
+    s_cpus[0].heartbeat_tsc = 0;
     s_cpu_count = 1;
 
     for (int i = 0; i < m->lapic_count && s_cpu_count < SMP_MAX_CPUS; i++) {
         acpi_lapic_t *l = &m->lapics[i];
         if (!(l->flags & 0x1)) continue;            /* not enabled */
         if (l->apic_id == (uint8_t)bsp) continue;   /* skip BSP */
-        smp_cpu_t *c = &s_cpus[s_cpu_count++];
+        smp_cpu_t *c = &s_cpus[s_cpu_count];
         c->lapic_id = l->apic_id;
         c->is_bsp = 0;
         c->alive = 0;
+        c->cpu_idx = s_cpu_count;
         c->current_chain_id = -1;
         c->heartbeat = 0;
+        c->tick_count = 0;
+        c->chains_resolved = 0;
+        c->preempt_kills = 0;
+        c->heartbeat_tsc = 0;
+        s_cpu_count++;
     }
 
     kputs("[smp] enumerated ");
@@ -471,6 +555,55 @@ void smp_tlb_shootdown(void)
     }
 }
 
+void tlb_shootdown_all(void) { smp_tlb_shootdown(); }
+
+int smp_chain_owner(int chain_id)
+{
+    int total = (s_cpus_online > 0) ? s_cpus_online : 1;
+    if (chain_id < 0) return 0;
+    return chain_id % total;
+}
+
+int smp_partition_active(void)
+{
+    return (int)s_partition_active_flag;
+}
+
+void smp_partition_activate(void)
+{
+    /* Called from main.c after chain_registry_init completes. Releases
+     * APs from their pre-partition spin. */
+    __sync_synchronize();
+    s_partition_active_flag = 1;
+    __sync_synchronize();
+}
+
+uint32_t smp_cpu_tps(int cpu_idx)
+{
+    if (cpu_idx < 0 || cpu_idx >= s_cpu_count) return 0;
+    return s_tps_per_cpu[cpu_idx];
+}
+
+/* Refresh the per-CPU TPS sample. Called from smp_print_selftest_line()
+ * and smp_cmd_cores() so both surfaces show fresh numbers. */
+static void smp_refresh_tps_sample(void)
+{
+    uint64_t freq = timer_tsc_freq();
+    uint64_t now  = timer_read_tsc();
+    if (s_sample_tsc != 0 && freq > 0) {
+        uint64_t dt = now - s_sample_tsc;
+        if (dt > 0) {
+            for (int i = 0; i < s_cpu_count; i++) {
+                uint64_t d = s_cpus[i].tick_count - s_sample_ticks[i];
+                uint64_t per_s = (d * freq) / dt;
+                s_tps_per_cpu[i] = (uint32_t)per_s;
+            }
+        }
+    }
+    for (int i = 0; i < s_cpu_count; i++) s_sample_ticks[i] = s_cpus[i].tick_count;
+    s_sample_tsc = now;
+}
+
 void smp_print_selftest_line(void)
 {
     int total = (s_cpu_count > 0) ? s_cpu_count : 1;
@@ -482,33 +615,55 @@ void smp_print_selftest_line(void)
 
     kputs("SMP ................... ");
     kput_dec((uint64_t)online);
-    kputs(" cores online (BSP + ");
-    kput_dec((uint64_t)(aps_online < 0 ? 0 : aps_online));
-    kputs(" APs)");
+    kputs(" cores online");
 
 #if !SMP_DISPATCH_APS
+    kputs(" (BSP + ");
+    kput_dec((uint64_t)(aps_online < 0 ? 0 : aps_online));
+    kputs(" APs)");
     if (aps_total > 0) {
         kputs(" [");
         kput_dec((uint64_t)aps_total);
         kputs(" AP(s) enumerated, trampoline placed, SIPI gated]");
     }
+    kputc('\n');
 #else
     if (online < total) {
-        kputs(" [");
+        kputs(" (BSP + ");
+        kput_dec((uint64_t)(aps_online < 0 ? 0 : aps_online));
+        kputs(" APs) [");
         kput_dec((uint64_t)(total - online));
-        kputs(" AP(s) failed bring-up]");
+        kputs(" AP(s) failed bring-up]\n");
+        return;
     }
-    if (online > 1) {
-        kputs(", APs in alive-loop (chain partition: TODO)");
+    if (s_partition_active_flag) {
+        smp_refresh_tps_sample();
+        kputs(", ticking — ");
+        for (int i = 0; i < s_cpu_count; i++) {
+            if (i > 0) kputs(", ");
+            kputs(s_cpus[i].is_bsp ? "BSP=" : "AP");
+            if (!s_cpus[i].is_bsp) {
+                kput_dec((uint64_t)i);
+                kputc('=');
+            }
+            kput_dec((uint64_t)s_tps_per_cpu[i]);
+            kputs("tps");
+        }
+    } else {
+        kputs(" (BSP + ");
+        kput_dec((uint64_t)(aps_online < 0 ? 0 : aps_online));
+        kputs(" APs), partition not yet active");
     }
-#endif
     kputc('\n');
+#endif
 }
 
 void smp_cmd_cores(void)
 {
+    smp_refresh_tps_sample();
+
     kputs("\n  Cores\n  ─────\n");
-    kputs("  idx  lapic  role  alive   heartbeat   chain\n");
+    kputs("  idx  lapic  role  alive   ticks       resolved   preempt   tps    chain\n");
     for (int i = 0; i < s_cpu_count; i++) {
         smp_cpu_t *c = &s_cpus[i];
         kputs("  ");
@@ -520,34 +675,22 @@ void smp_cmd_cores(void)
         kputs("   ");
         kputs(c->alive ? "yes" : "no ");
         kputs("    ");
-        kput_dec(c->heartbeat);
+        kput_dec(c->tick_count);
+        kputs("       ");
+        kput_dec(c->chains_resolved);
+        kputs("        ");
+        kput_dec(c->preempt_kills);
+        kputs("        ");
+        kput_dec((uint64_t)s_tps_per_cpu[i]);
         kputs("   ");
         if (c->current_chain_id < 0) kputs("(idle)");
         else                          kput_dec((uint64_t)c->current_chain_id);
         kputc('\n');
     }
-    /* Compute approx ticks-per-second from heartbeat deltas across a
-     * 100ms sample. Cheap, demonstrates aliveness over time. */
-    static uint64_t s_prev[SMP_MAX_CPUS];
-    static uint64_t s_prev_tsc;
-    uint64_t freq = timer_tsc_freq();
-    uint64_t now = timer_read_tsc();
-    if (s_prev_tsc != 0 && freq > 0) {
-        uint64_t dt = now - s_prev_tsc;
-        if (dt > 0) {
-            kputs("  heartbeat-rate (since last `cores`):\n");
-            for (int i = 0; i < s_cpu_count; i++) {
-                uint64_t d = s_cpus[i].heartbeat - s_prev[i];
-                uint64_t per_s = (d * freq) / dt;
-                kputs("    cpu ");
-                kput_dec((uint64_t)i);
-                kputs(": ");
-                kput_dec(per_s);
-                kputs(" tps\n");
-            }
-        }
-    }
-    for (int i = 0; i < s_cpu_count; i++) s_prev[i] = s_cpus[i].heartbeat;
-    s_prev_tsc = now;
+    kputs("\n  partition_active=");
+    kputs(s_partition_active_flag ? "yes" : "no");
+    kputs("  cpus_online=");
+    kput_dec((uint64_t)s_cpus_online);
+    kputc('\n');
     kputc('\n');
 }

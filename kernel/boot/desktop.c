@@ -20,6 +20,7 @@
 #include "kprint.h"
 #include "ui_context_menu.h"
 #include "quick_look.h"
+#include "fat32.h"
 
 /* ── UI primitive wiring ── */
 static void rc_new_folder(void *ctx) { (void)ctx; kputs("DESK: new folder\n"); }
@@ -38,15 +39,27 @@ int desktop_right_click(int x, int y) {
 }
 
 /* Spacebar on a list with a selected item → open Quick Look. The desktop
- * is the only built-in list with a notion of a "selected file path". */
+ * is the only built-in list with a notion of a "selected file path".
+ *
+ * If the icon name looks like a FAT32 path (starts with '/') and FAT32
+ * is mounted, we open it and read up to max bytes into the sniff buffer.
+ * Quick Look uses this to detect type; for PNGs it later does its own
+ * full-file read via fat32_open into a PMM-backed buffer. */
 static int desktop_quicklook_read(const char *path, uint8_t *out, int max,
                                   uint64_t *out_size, uint64_t *out_mtime,
                                   void *ctx)
 {
-    (void)path; (void)out; (void)max; (void)ctx;
+    (void)ctx;
     if (out_size)  *out_size  = 0;
     if (out_mtime) *out_mtime = 0;
-    return 0;
+    if (!path || path[0] != '/' || !fat32_mounted()) return 0;
+
+    struct fat32_file f;
+    if (fat32_open(path, &f) < 0) return 0;
+    if (out_size) *out_size = f.size;
+    int n = fat32_read(&f, out, (uint32_t)max);
+    if (n < 0) return 0;
+    return n;
 }
 
 void desktop_quick_look_selected(void) {
