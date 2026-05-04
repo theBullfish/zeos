@@ -92,6 +92,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/icon_render.c \
            boot/updater.c \
            boot/gpu_virtio.c \
+           boot/gpu_nvidia.c \
            boot/gpu_compute.c \
            boot/gpu_goya.c \
            boot/scheduler.c \

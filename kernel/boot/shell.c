@@ -57,6 +57,7 @@
 #include "chain_registry.h"
 #include "scheduler.h"
 #include "gpu_virtio.h"
+#include "gpu_nvidia.h"
 #include "gpu_goya.h"
 #include "mde_chain.h"
 #include "serial.h"
@@ -266,6 +267,7 @@ static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
 static void cmd_goya(const char *args);
+static void cmd_nvidia(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
@@ -424,6 +426,16 @@ static void cmd_gpustat(const char *args) {
 static void cmd_goya(const char *args) {
     (void)args;
     gpu_goya_dump_status();
+}
+
+/* nvidia
+ *   Multi-line dump of every detected NVIDIA card: chip family
+ *   (Turing/Ampere/...), PCI BDF, PMC_BOOT_0, connector list with
+ *   mode + EDID monitor name, and GSP / fence / perf state.
+ *   Mirrors gpu_nvidia_dump_status(). */
+static void cmd_nvidia(const char *args) {
+    (void)args;
+    gpu_nvidia_dump_status();
 }
 
 /* tickrate [watch]
@@ -731,6 +743,7 @@ static const struct shell_cmd commands[] = {
     {"persistence","show VAULT persistence stats (journal + chain snapshot)", cmd_persistence, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"goya",   "Habana Goya HL-1000: card count, BARs, fw, fence", cmd_goya,   VIS_DEREZ},
+    {"nvidia", "NVIDIA GPUs: chip family, outputs, mode, GSP state", cmd_nvidia, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
     {"date",    "show or set wall clock (date [\"YYYY-MM-DD HH:MM:SS\"])", tod_cmd_date, VIS_ALWAYS},
@@ -4018,6 +4031,28 @@ vault_done:
                     chain_dump(info.chain_id);
             }
             if (dn >= 1) passes++; else fails++;
+        }
+    }
+
+    /* NVIDIA: peer to virtio-gpu under CHAIN_CPU. Stage 1 reports
+     * Turing scanout state; Stage 2 reports GSP firmware state.
+     * SKIP when no NVIDIA card is present (QEMU default). */
+    kputs("  NVIDIA ................ ");
+    {
+        int nvn = gpu_nvidia_device_count();
+        if (nvn == 0) {
+            kputs("SKIP (no NVIDIA card)\n");
+        } else {
+            char line[160];
+            gpu_nvidia_selftest_summary(line, (int)sizeof(line));
+            kputs(line);
+            kputc('\n');
+            int any_ok = 0;
+            for (int i = 0; i < nvn; i++) {
+                const gpu_nvidia_device_t *d = gpu_nvidia_device(i);
+                if (d && d->ready) any_ok = 1;
+            }
+            if (any_ok) passes++; else fails++;
         }
     }
 

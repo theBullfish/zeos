@@ -1005,6 +1005,21 @@ int chain_registry_init(void)
         }
     }
 
+    /* NVIDIA: peer to virtio-gpu under CHAIN_CPU. Stage 1 = Turing
+     * scanout (no GSP). Stage 2 = Ampere GSP firmware load + RM
+     * control path (honest stub returning -ENOTREADY until firmware
+     * blobs are embedded). Compute backend "nvidia-N" registers
+     * only when GSP is up; never at Stage 1. */
+    {
+        extern int gpu_nvidia_init(int);
+        extern int gpu_nvidia_gpu_chain(int);
+        int n = gpu_nvidia_init(CHAIN_CPU);
+        if (n > 0 && CHAIN_GPU_0 < 0) {
+            int nvc = gpu_nvidia_gpu_chain(0);
+            if (nvc >= 0) CHAIN_GPU_0 = nvc;
+        }
+    }
+
     /* Habana Goya HL-1000 compute accelerator(s). Compute-only — no
      * display sub-chains (per docs/GPU_HOLES.md A3 / D3). Each detected
      * card registers a CHAIN_GOYA_<n> under CHAIN_CPU and (when the
