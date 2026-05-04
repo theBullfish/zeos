@@ -18,6 +18,7 @@
 #include "net.h"
 #include "vault.h"
 #include "zplus.h"
+#include "cfa_handle.h"
 
 /* ── Registry ─────────────────────────────────────────────────────── */
 
@@ -426,6 +427,102 @@ static int test_zp_program_runs_chain(char *reason, uint32_t rsize)
     return TEST_PASS;
 }
 
+/*
+ * MasQ tier enforcement: a chain at MASQ_REFERENCE tier must NOT be
+ * able to perceive a SOVEREIGN-wrapped handle. Wraps a small dummy
+ * buffer at SOVEREIGN, sets the observer to a freshly-created REFERENCE
+ * chain, and asserts cfa_resolve returns NULL. Then restores observer
+ * and confirms the same handle resolves cleanly with no observer (the
+ * permissive default). Releases the handle on exit.
+ */
+static int test_cfa_perceive_violation(char *reason, uint32_t rsize)
+{
+    static int dummy_buffer[4] = { 0xDEAD, 0xBEEF, 0xCAFE, 0xF00D };
+
+    int probe_chain = chain_create("test.cfa.probe", -1, MASQ_REFERENCE);
+    if (probe_chain < 0) {
+        t_strcopy(reason, "could not create reference probe chain", rsize);
+        return TEST_FAIL;
+    }
+
+    cfa_addr_t addr;
+    for (int j = 0; j < 8; j++) addr.segments[j] = 0;
+    addr.segments[0] = 0xDE;
+    addr.depth = 1;
+    addr.birth_tsc = 0;
+
+    cfa_handle_t h = cfa_wrap(dummy_buffer, sizeof(dummy_buffer),
+                              addr, MASQ_SOVEREIGN);
+    if (!h) {
+        t_strcopy(reason, "cfa_wrap returned 0 (table full?)", rsize);
+        return TEST_FAIL;
+    }
+
+    int prior_observer = cfa_get_observer();
+    cfa_set_observer(probe_chain);
+
+    void *denied = cfa_resolve(h);
+
+    /* Restore observer regardless of outcome to keep the kernel sane. */
+    cfa_set_observer(prior_observer);
+
+    if (denied) {
+        cfa_release(h);
+        chain_destroy(probe_chain);
+        t_strcopy(reason, "REFERENCE chain perceived SOVEREIGN handle", rsize);
+        return TEST_FAIL;
+    }
+
+    /* Sanity: with no observer (permissive), resolve must succeed. */
+    cfa_set_observer(-1);
+    void *ok = cfa_resolve(h);
+    cfa_set_observer(prior_observer);
+    cfa_release(h);
+    chain_destroy(probe_chain);
+
+    if (ok != dummy_buffer) {
+        t_strcopy(reason, "permissive resolve returned wrong pointer", rsize);
+        return TEST_FAIL;
+    }
+
+    return TEST_PASS;
+}
+
+/*
+ * CFA coverage breakdown. Not really a pass/fail test -- it prints
+ * the per-subsystem count and passes whenever at least the core
+ * categories (TLS conf, VAULT blob) are live. Format matches the
+ * cfa_handle.c top-of-file note's expanded coverage map.
+ *
+ * Lives here because shell.c is in flight (FAT32 agent); rather than
+ * touch shell.c's selftest renderer we emit the same breakdown via
+ * the test harness output. Run with `tests cfa.coverage`.
+ */
+static int test_cfa_coverage(char *reason, uint32_t rsize)
+{
+    int hc        = cfa_handle_count();
+    int tls_conf  = cfa_handle_count_cat(CFA_CAT_TLS_CONF);
+    int tls_sess  = cfa_handle_count_cat(CFA_CAT_TLS_SESSION);
+    int vault_bl  = cfa_handle_count_cat(CFA_CAT_VAULT_BLOB);
+    int vault_kk  = cfa_handle_count_cat(CFA_CAT_VAULT_KEY);
+    int msix_tbl  = cfa_handle_count_cat(CFA_CAT_MSIX_TABLE);
+    int gpu_cmd   = cfa_handle_count_cat(CFA_CAT_GPU_CMD_BUF);
+
+    kputs("\n  CFA handles ........... ");
+    kput_dec((uint64_t)hc);
+    kputs(" active\n");
+    kputs("    TLS conf:    "); kput_dec((uint64_t)tls_conf);  kputs("\n");
+    kputs("    TLS sessions: "); kput_dec((uint64_t)tls_sess); kputs("\n");
+    kputs("    VAULT blob:  "); kput_dec((uint64_t)vault_bl);  kputs("\n");
+    kputs("    VAULT keys: ");  kput_dec((uint64_t)vault_kk);  kputs("\n");
+    kputs("    MSI-X table: "); kput_dec((uint64_t)msix_tbl);  kputs("\n");
+    kputs("    GPU cmd buf: "); kput_dec((uint64_t)gpu_cmd);   kputs("  ");
+
+    if (tls_conf >= 1 && vault_bl >= 1) return TEST_PASS;
+    t_strcopy(reason, "core categories missing (need TLS conf + VAULT blob)", rsize);
+    return TEST_FAIL;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -454,6 +551,8 @@ void tests_register_all(void)
     test_register("chain.mouse",          test_chain_mouse,          CHAIN_MOUSE);
     test_register("integration.https",    test_https_through_chains, -1);
     test_register("integration.zp.chain", test_zp_program_runs_chain, CHAIN_AUDIO);
+    test_register("cfa.perceive.violation", test_cfa_perceive_violation, -1);
+    test_register("cfa.coverage",           test_cfa_coverage,           -1);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */

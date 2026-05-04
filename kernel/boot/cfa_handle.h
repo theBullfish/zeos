@@ -18,9 +18,33 @@
 
 typedef uint64_t cfa_handle_t;
 
+/* Categories used purely for selftest accounting. Wrapping callers can
+ * tag the handle so the selftest can render a per-subsystem breakdown
+ * (TLS conf, TLS sessions, VAULT blob, VAULT keys, MSI-X table, GPU
+ * cmd buf). Tag value is opaque to the security checks -- those are
+ * driven by tier alone. */
+typedef enum {
+    CFA_CAT_OTHER = 0,
+    CFA_CAT_TLS_CONF,
+    CFA_CAT_TLS_SESSION,
+    CFA_CAT_VAULT_BLOB,
+    CFA_CAT_VAULT_KEY,
+    CFA_CAT_MSIX_TABLE,
+    CFA_CAT_GPU_CMD_BUF,
+    CFA_CAT__COUNT
+} cfa_category_t;
+
 /* Wrap a flat pointer in a CFA handle. The (addr, tier) pair governs
  * MasQ-tier access checks at resolve time. Returns 0 on failure. */
 cfa_handle_t cfa_wrap(void *ptr, size_t len, cfa_addr_t addr, masq_tier_t tier);
+
+/* Tagged variant -- same as cfa_wrap but records a category for
+ * selftest accounting. Use the untagged variant for ad-hoc wraps. */
+cfa_handle_t cfa_wrap_cat(void *ptr, size_t len, cfa_addr_t addr,
+                          masq_tier_t tier, cfa_category_t cat);
+
+/* Live count for a specific category (selftest reporting). */
+int cfa_handle_count_cat(cfa_category_t cat);
 
 /* Resolve a handle to its raw pointer. Returns NULL if:
  *   - handle is 0 / invalid / generation-stale

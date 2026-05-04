@@ -27,6 +27,14 @@ static uint8_t *g_base;
 static uint64_t g_size;
 static cfa_handle_t g_h_base;  /* CFA wrap of g_base, INTERNAL tier */
 
+/* Per-key (per-inode) CFA handle cache. Each entry wraps the
+ * vault_inode struct for one inode at MASQ_INTERNAL. Lookups in
+ * vault_read / vault_write / vault_append flow through this so the
+ * MasQ tier check applies on every access. Sized to inode count;
+ * 0 means "not yet wrapped". The handle is created lazily on first
+ * touch so we don't burn slots on cold inodes. */
+static cfa_handle_t g_h_inode[VAULT_INODE_COUNT];
+
 /* ── Helpers ──────────────────────────────────── */
 
 static int v_strlen(const char *s)
@@ -131,7 +139,32 @@ static int alloc_block(void)
 static struct vault_inode *inode_ptr(uint32_t ino)
 {
     if (ino >= g_vault.super.inode_count) return 0;
-    return &g_vault.inodes[ino];
+    if (!g_vault.inodes) return 0;
+
+    /* Wrap each inode lazily on first access, then route through
+     * cfa_resolve so the MasQ tier check gates every read/write that
+     * walks the file metadata. Tier INTERNAL: VAULT contents are
+     * private to internal/sovereign observers. */
+    if (g_h_inode[ino] == 0) {
+        cfa_addr_t addr;
+        int j;
+        for (j = 0; j < 8; j++) addr.segments[j] = 0;
+        addr.segments[0] = 0x5A;          /* "VAULT" root */
+        addr.segments[1] = 0x100;         /* inode subspace */
+        addr.segments[2] = ino;
+        addr.depth = 3;
+        addr.birth_tsc = read_tsc();
+        g_h_inode[ino] = cfa_wrap_cat(&g_vault.inodes[ino],
+                                      sizeof(struct vault_inode),
+                                      addr, MASQ_INTERNAL,
+                                      CFA_CAT_VAULT_KEY);
+        /* If the table is full we still have to make forward progress;
+         * fall back to the raw pointer. The blob handle still gates the
+         * underlying memory through block_ptr. */
+        if (g_h_inode[ino] == 0)
+            return &g_vault.inodes[ino];
+    }
+    return (struct vault_inode *)cfa_resolve(g_h_inode[ino]);
 }
 
 static int alloc_inode(void)
@@ -400,7 +433,8 @@ int vault_mount(void *base, uint64_t size)
         addr.segments[0] = 0x5A;        /* "VAULT" root segment */
         addr.depth = 1;
         addr.birth_tsc = read_tsc();
-        g_h_base = cfa_wrap(g_base, (size_t)g_size, addr, MASQ_INTERNAL);
+        g_h_base = cfa_wrap_cat(g_base, (size_t)g_size, addr,
+                                MASQ_INTERNAL, CFA_CAT_VAULT_BLOB);
         if (!g_h_base) {
             kputs("VAULT: cfa_wrap failed\n");
             return -1;

@@ -25,6 +25,8 @@
 #include "vmm.h"
 #include "lapic.h"
 #include "kprint.h"
+#include "cfa_handle.h"
+#include "chain.h"
 
 #define MSIX_TBL_OFFSET        0x04
 #define MSIX_PBA_OFFSET        0x08
@@ -47,6 +49,10 @@ struct msix_device_state {
     uint64_t table_phys;
     int      num_entries;
     int      vectors[MSIX_VECTOR_COUNT];
+    /* CFA handle wrapping the device's vector table mapping.
+     * Tier MASQ_SOVEREIGN -- writing to interrupt routing is a
+     * kernel-only privilege; only sovereign observers can perceive. */
+    cfa_handle_t h_table;
 };
 
 static struct msix_device_state g_devices[MSIX_MAX_DEVICES];
@@ -107,7 +113,22 @@ void msix_dispatch(int vec)
         lapic_eoi();
         return;
     }
+    /* Resolve the owning device's CFA table handle as a presence
+     * check. ISR context runs with no observer, so MasQ check is
+     * permissive -- this just validates the handle is still live. */
     int i = vec - MSIX_VECTOR_BASE;
+    for (int d = 0; d < g_device_count; d++) {
+        struct msix_device_state *st = &g_devices[d];
+        for (int e = 0; e < st->num_entries; e++) {
+            if (st->vectors[e] == vec && st->h_table) {
+                if (!cfa_resolve(st->h_table)) {
+                    lapic_eoi();
+                    return;
+                }
+                break;
+            }
+        }
+    }
     if (g_vector_handlers[i]) {
         g_vector_handlers[i]();
     }
@@ -131,6 +152,7 @@ static struct msix_device_state *alloc_state(struct pci_device *dev)
     s->dev = dev;
     s->cap_off = 0;
     s->num_entries = 0;
+    s->h_table = 0;
     for (int i = 0; i < MSIX_VECTOR_COUNT; i++) s->vectors[i] = -1;
     return s;
 }
@@ -205,7 +227,28 @@ int msix_enable(struct pci_device *dev, int num_vectors)
     st->table_offset = off;
     st->table_phys = table_phys;
 
-    volatile uint32_t *table = (volatile uint32_t *)(uintptr_t)table_phys;
+    /* Wrap the vector table mapping in a CFA handle. SOVEREIGN tier:
+     * writing to MSI-X table entries reroutes hardware interrupts.
+     * Only sovereign observers (kernel-internal chains) can resolve
+     * this. The table_size * 16 byte region covers every entry. */
+    if (!st->h_table) {
+        cfa_addr_t addr;
+        for (int j = 0; j < 8; j++) addr.segments[j] = 0;
+        addr.segments[0] = 0xA1;        /* "MSI-X" root segment */
+        addr.segments[1] = (uint32_t)dev->bus;
+        addr.segments[2] = ((uint32_t)dev->dev << 8) | (uint32_t)dev->func;
+        addr.depth = 3;
+        addr.birth_tsc = 0;
+        st->h_table = cfa_wrap_cat((void *)(uintptr_t)table_phys,
+                                   (size_t)table_size * 16,
+                                   addr, MASQ_SOVEREIGN,
+                                   CFA_CAT_MSIX_TABLE);
+        if (!st->h_table) return -2;
+    }
+
+    volatile uint32_t *table =
+        (volatile uint32_t *)cfa_resolve(st->h_table);
+    if (!table) return -2;
     for (int e = 0; e < num_vectors; e++) {
         int v = msix_alloc_vector(0);
         if (v < 0) {
@@ -249,6 +292,11 @@ int msix_set_handler(struct pci_device *dev, int entry, void (*handler)(void))
 {
     struct msix_device_state *st = find_state(dev);
     if (!st) return -1;
+    /* Re-resolve the table CFA handle. The pointer itself isn't used
+     * here -- we only mutate g_vector_handlers -- but routing through
+     * cfa_resolve makes a wrong-tier observer fail closed instead of
+     * silently rebinding a kernel ISR. */
+    if (st->h_table && !cfa_resolve(st->h_table)) return -1;
     if (entry < 0 || entry >= st->num_entries) return -1;
     int v = st->vectors[entry];
     if (v < MSIX_VECTOR_BASE || v >= MSIX_VECTOR_TOP) return -1;
@@ -269,7 +317,10 @@ void msix_disable(struct pci_device *dev)
     struct msix_device_state *st = find_state(dev);
     if (!st || !st->cap_off) return;
 
-    volatile uint32_t *table = (volatile uint32_t *)(uintptr_t)st->table_phys;
+    volatile uint32_t *table = st->h_table
+        ? (volatile uint32_t *)cfa_resolve(st->h_table)
+        : (volatile uint32_t *)(uintptr_t)st->table_phys;
+    if (!table) return;  /* MasQ denied -- refuse to mask vectors */
     for (int e = 0; e < st->num_entries; e++) {
         volatile uint32_t *entry = table + (e * 4);
         entry[3] = MSIX_ENTRY_VEC_CTRL_MASK;

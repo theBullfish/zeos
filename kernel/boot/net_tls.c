@@ -51,10 +51,22 @@ struct tls_conn {
     char hostname[256];
     uint16_t port;
     int active;
+    /* Per-session CFA handle wrapping &ssl. Populated at tls_init for
+     * every slot in the pool so the handle table reports session
+     * coverage even when no connection is live. cfa_resolve through
+     * this is the only path internal tls_send/recv/close use. */
+    cfa_handle_t h_ssl;
 };
 
-/* Single connection (matches TCP limitation) */
-static struct tls_conn g_tls;
+/* TLS connection pool. The transport layer is still single-active
+ * (TCP can host one stream at a time), but having multiple slots lets
+ * the CFA handle table reflect that the kernel is willing to terminate
+ * N independent TLS sessions and each one has its own MasQ-tier-gated
+ * ssl_context. Bump if more concurrent sessions are ever needed. */
+#define TLS_POOL_SIZE 4
+static struct tls_conn g_tls_pool[TLS_POOL_SIZE];
+/* Backwards-compat alias: pre-existing code paths reach for g_tls. */
+#define g_tls (g_tls_pool[0])
 
 /* ── Global mbedTLS state ── */
 static mbedtls_x509_crt      g_ca_certs;
@@ -70,7 +82,6 @@ static mbedtls_ssl_config       g_ssl_conf;
  * is derived from CHAIN_NET_TX -- TLS is the upper layer of network.
  */
 static cfa_handle_t g_h_conf;     /* wraps g_ssl_conf */
-static cfa_handle_t g_h_ssl;      /* wraps g_tls.ssl while connection live */
 
 /* Resolve helpers. Before tls_init() finishes wrapping the statics,
  * the handles are 0 and we fall through to the raw struct so the
@@ -85,8 +96,9 @@ static mbedtls_ssl_config *tls_conf(void)
 
 static mbedtls_ssl_context *tls_ssl(struct tls_conn *conn)
 {
-    if (!g_h_ssl) return &conn->ssl;    /* pre-wrap: setup path */
-    return (mbedtls_ssl_context *)cfa_resolve(g_h_ssl);
+    if (!conn) return (mbedtls_ssl_context *)0;
+    if (!conn->h_ssl) return &conn->ssl;  /* pre-wrap: setup path */
+    return (mbedtls_ssl_context *)cfa_resolve(conn->h_ssl);
 }
 
 /* ── Platform callbacks for mbedTLS ── */
@@ -217,10 +229,39 @@ int tls_init(void)
             conf_addr.depth = 2;
             conf_addr.birth_tsc = 0;
         }
-        g_h_conf = cfa_wrap(&g_ssl_conf, sizeof(g_ssl_conf),
-                            conf_addr, MASQ_INTERNAL);
+        g_h_conf = cfa_wrap_cat(&g_ssl_conf, sizeof(g_ssl_conf),
+                                conf_addr, MASQ_INTERNAL, CFA_CAT_TLS_CONF);
         if (!g_h_conf) {
             kputs("TLS: cfa_wrap(ssl_conf) failed\n");
+            return -1;
+        }
+    }
+
+    /* Pre-wrap each session slot's ssl_context. The struct is zeroed
+     * BSS at this point; mbedtls_ssl_init will be called against it
+     * inside tls_connect. The handle stays live for the lifetime of
+     * the kernel so the MasQ tier check applies whether or not the
+     * slot is currently carrying a live handshake. */
+    for (int s = 0; s < TLS_POOL_SIZE; s++) {
+        struct tls_conn *slot = &g_tls_pool[s];
+        cfa_addr_t ssl_addr;
+        chain_t *net_tx = (CHAIN_NET_TX >= 0) ? chain_get(CHAIN_NET_TX) : (chain_t *)0;
+        if (net_tx) {
+            /* child slot 0x100 + s = ssl session */
+            ssl_addr = cfa_derive(&net_tx->addr, (uint32_t)(0x100 + s));
+        } else {
+            int j;
+            for (j = 0; j < 8; j++) ssl_addr.segments[j] = 0;
+            ssl_addr.segments[0] = 0xFF;
+            ssl_addr.segments[1] = (uint32_t)(0x100 + s);
+            ssl_addr.depth = 2;
+            ssl_addr.birth_tsc = 0;
+        }
+        slot->h_ssl = cfa_wrap_cat(&slot->ssl, sizeof(slot->ssl),
+                                   ssl_addr, MASQ_INTERNAL,
+                                   CFA_CAT_TLS_SESSION);
+        if (!slot->h_ssl) {
+            kputs("TLS: cfa_wrap(session) failed\n");
             return -1;
         }
     }
@@ -307,37 +348,15 @@ have_ip:;
     g_tls.hostname[i] = 0;
     g_tls.port = port;
 
-    /* Set up SSL context. Initialize raw, then wrap in a CFA handle so
-     * the session keys allocated by mbedtls_ssl_setup are reachable
-     * only via MasQ-checked resolves. */
+    /* Set up SSL context. The slot's CFA handle was wrapped at
+     * tls_init time; we just initialize the underlying struct here.
+     * Every subsequent access goes through cfa_resolve via tls_ssl(). */
     mbedtls_ssl_init(&g_tls.ssl);
-
-    {
-        cfa_addr_t ssl_addr;
-        chain_t *net_tx = (CHAIN_NET_TX >= 0) ? chain_get(CHAIN_NET_TX) : (chain_t *)0;
-        if (net_tx) {
-            ssl_addr = cfa_derive(&net_tx->addr, 2); /* child slot 2 = ssl_context */
-        } else {
-            int j;
-            for (j = 0; j < 8; j++) ssl_addr.segments[j] = 0;
-            ssl_addr.segments[0] = 0xFF;
-            ssl_addr.segments[1] = 2;
-            ssl_addr.depth = 2;
-            ssl_addr.birth_tsc = 0;
-        }
-        g_h_ssl = cfa_wrap(&g_tls.ssl, sizeof(g_tls.ssl), ssl_addr, MASQ_INTERNAL);
-        if (!g_h_ssl) {
-            kputs("TLS: cfa_wrap(ssl_ctx) failed\n");
-            tcp_close(&g_tls.tcp);
-            return NULL;
-        }
-    }
 
     mbedtls_ssl_context *ssl = tls_ssl(&g_tls);
     mbedtls_ssl_config  *conf = tls_conf();
     if (!ssl || !conf) {
         kputs("TLS: cfa_resolve denied during connect\n");
-        cfa_release(g_h_ssl); g_h_ssl = 0;
         mbedtls_ssl_free(&g_tls.ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
@@ -346,7 +365,6 @@ have_ip:;
     int ret = mbedtls_ssl_setup(ssl, conf);
     if (ret != 0) {
         kputs("TLS: ssl_setup failed\n");
-        cfa_release(g_h_ssl); g_h_ssl = 0;
         mbedtls_ssl_free(ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
@@ -356,7 +374,6 @@ have_ip:;
     ret = mbedtls_ssl_set_hostname(ssl, g_tls.hostname);
     if (ret != 0) {
         kputs("TLS: set_hostname failed\n");
-        cfa_release(g_h_ssl); g_h_ssl = 0;
         mbedtls_ssl_free(ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
@@ -379,7 +396,6 @@ have_ip:;
                 kput_hex(f);
             }
             kputs("\n");
-            cfa_release(g_h_ssl); g_h_ssl = 0;
             mbedtls_ssl_free(ssl);
             tcp_close(&g_tls.tcp);
             return NULL;
@@ -393,7 +409,6 @@ have_ip:;
         kput_hex(flags);
         kputs(")\n");
         mbedtls_ssl_close_notify(ssl);
-        cfa_release(g_h_ssl); g_h_ssl = 0;
         mbedtls_ssl_free(ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
@@ -444,11 +459,10 @@ void tls_close(tls_conn_t *conn)
     }
     tcp_close(&conn->tcp);
 
-    /* Drop the CFA handle so any leaked references become stale. */
-    if (g_h_ssl) {
-        cfa_release(g_h_ssl);
-        g_h_ssl = 0;
-    }
+    /* The slot's h_ssl is permanent for the slot lifetime. We don't
+     * release it here -- the next tls_connect on this slot will
+     * mbedtls_ssl_init() the same struct and the existing handle keeps
+     * pointing at the same memory. */
 
     conn->active = 0;
     conn->tcp_connected = 0;

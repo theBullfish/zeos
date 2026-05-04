@@ -5,13 +5,18 @@
  * DMA still requires flat pointers; cfa_resolve() is the boundary.
  * Rust lib at ~/cfa-lib (TPM-sealed, patent filed 2026-03-15) is the
  * userspace mirror -- kernel side keeps a minimal compatible API.
+ *
+ * Coverage now includes: per-session TLS contexts, per-key VAULT buffers,
+ * MSI-X vector table (SOVEREIGN tier -- interrupt routing is kernel-only),
+ * GPU command buffers. Hardware DMA still requires flat pointers;
+ * cfa_resolve() is the boundary, gated by chain MasQ tier check.
  */
 
 #include "cfa_handle.h"
 #include "chain.h"
 #include "kprint.h"
 
-#define CFA_SLOT_COUNT  256
+#define CFA_SLOT_COUNT  1024
 
 typedef struct {
     void        *ptr;
@@ -20,10 +25,12 @@ typedef struct {
     masq_tier_t  tier;
     uint32_t     generation;   /* bumps on release */
     uint8_t      in_use;
+    uint8_t      category;     /* cfa_category_t */
 } cfa_slot_t;
 
 static cfa_slot_t s_slots[CFA_SLOT_COUNT];
 static int        s_live_count;
+static int        s_cat_count[CFA_CAT__COUNT];
 
 /*
  * Observer chain context. In a bare-metal single-threaded kernel this
@@ -58,9 +65,11 @@ static int tier_can_perceive(masq_tier_t observer_tier, masq_tier_t target_tier)
     return 0;
 }
 
-cfa_handle_t cfa_wrap(void *ptr, size_t len, cfa_addr_t addr, masq_tier_t tier)
+cfa_handle_t cfa_wrap_cat(void *ptr, size_t len, cfa_addr_t addr,
+                          masq_tier_t tier, cfa_category_t cat)
 {
     if (!ptr) return 0;
+    if ((int)cat < 0 || (int)cat >= CFA_CAT__COUNT) cat = CFA_CAT_OTHER;
 
     int i;
     for (i = 0; i < CFA_SLOT_COUNT; i++) {
@@ -70,15 +79,22 @@ cfa_handle_t cfa_wrap(void *ptr, size_t len, cfa_addr_t addr, masq_tier_t tier)
             s_slots[i].addr       = addr;
             s_slots[i].tier       = tier;
             s_slots[i].in_use     = 1;
+            s_slots[i].category   = (uint8_t)cat;
             /* Generation starts at 1 so handle 0 is always invalid. */
             if (s_slots[i].generation == 0) s_slots[i].generation = 1;
             s_live_count++;
+            s_cat_count[cat]++;
             return ((uint64_t)(uint32_t)i << 32) | (uint64_t)s_slots[i].generation;
         }
     }
 
     kputs("[cfa] ERROR: handle table full\n");
     return 0;
+}
+
+cfa_handle_t cfa_wrap(void *ptr, size_t len, cfa_addr_t addr, masq_tier_t tier)
+{
+    return cfa_wrap_cat(ptr, len, addr, tier, CFA_CAT_OTHER);
 }
 
 void *cfa_resolve(cfa_handle_t h)
@@ -126,6 +142,9 @@ void cfa_release(cfa_handle_t h)
     s->in_use = 0;
     s->ptr    = (void *)0;
     s->len    = 0;
+    if (s->category < CFA_CAT__COUNT && s_cat_count[s->category] > 0)
+        s_cat_count[s->category]--;
+    s->category = CFA_CAT_OTHER;
     /* Bump generation so any other copy of this handle becomes stale.
      * Skip 0 (reserved as invalid). */
     s->generation++;
@@ -136,4 +155,10 @@ void cfa_release(cfa_handle_t h)
 int cfa_handle_count(void)
 {
     return s_live_count;
+}
+
+int cfa_handle_count_cat(cfa_category_t cat)
+{
+    if ((int)cat < 0 || (int)cat >= CFA_CAT__COUNT) return 0;
+    return s_cat_count[cat];
 }

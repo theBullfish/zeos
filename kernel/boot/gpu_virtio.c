@@ -26,6 +26,7 @@
 #include "gpu_virtio.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "cfa_handle.h"
 #include "pci.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -321,6 +322,17 @@ typedef struct gpu_dev {
 
     /* Bookkeeping for chain wiring. */
     int       gpu_index;
+
+    /* CFA wraps for distinct controlq command buffer pointers. We
+     * keep a small per-device cache so the same static buffer doesn't
+     * burn a slot per submit. Tier MASQ_INTERNAL: command buffers
+     * carry framebuffer pointers and resource state. */
+#define GPU_CMD_HANDLE_SLOTS 8
+    struct {
+        const void  *ptr;
+        cfa_handle_t h;
+    } cmd_handles[GPU_CMD_HANDLE_SLOTS];
+    int cmd_handle_count;
 } gpu_dev_t;
 
 static gpu_dev_t s_devs[GPU_VIRTIO_MAX_DEVICES];
@@ -405,6 +417,38 @@ static void vq_kick(gpu_dev_t *gd, uint16_t qidx)
     *p = qidx;
 }
 
+/* Look up (or lazily wrap) a CFA handle for this command buffer.
+ * Returns the resolved pointer, or NULL if MasQ denies. The cache is
+ * small (GPU_CMD_HANDLE_SLOTS) which is enough for the static command
+ * structs the driver uses; on overflow we fall back to a fresh wrap
+ * each call (still gated by MasQ, just costs slots). */
+static const void *gpu_cmd_resolve(gpu_dev_t *gd, const void *cmd, uint32_t len)
+{
+    if (!gd || !cmd) return cmd;
+    for (int i = 0; i < gd->cmd_handle_count; i++) {
+        if (gd->cmd_handles[i].ptr == cmd) {
+            return cfa_resolve(gd->cmd_handles[i].h);
+        }
+    }
+    cfa_addr_t addr;
+    for (int j = 0; j < 8; j++) addr.segments[j] = 0;
+    addr.segments[0] = 0x6C;
+    addr.segments[1] = (uint32_t)gd->gpu_index;
+    addr.segments[2] = (uint32_t)gd->cmd_handle_count;
+    addr.depth = 3;
+    addr.birth_tsc = 0;
+    cfa_handle_t h = cfa_wrap_cat((void *)cmd, (size_t)len, addr,
+                                  MASQ_INTERNAL, CFA_CAT_GPU_CMD_BUF);
+    if (!h) return cmd;
+
+    if (gd->cmd_handle_count < GPU_CMD_HANDLE_SLOTS) {
+        gd->cmd_handles[gd->cmd_handle_count].ptr = cmd;
+        gd->cmd_handles[gd->cmd_handle_count].h   = h;
+        gd->cmd_handle_count++;
+    }
+    return cfa_resolve(h);
+}
+
 /* Submit a request (cmd buf -> resp buf) on the control queue and
  * synchronously poll for completion. Two descriptors chained:
  * desc[0] = device-readable cmd
@@ -417,10 +461,17 @@ static int vq_submit_sync(gpu_dev_t *gd,
     vqueue_t *vq = &gd->controlq;
     if (vq->size < 2) return -1;
 
+    /* Route the command buffer pointer through a CFA handle. The
+     * resolved pointer is what we hand to the device; if MasQ denies,
+     * we abort the submit rather than leaking the framebuffer pointer
+     * the buffer encodes. */
+    const void *resolved_cmd = gpu_cmd_resolve(gd, cmd, cmd_len);
+    if (!resolved_cmd) return -1;
+
     uint16_t d0 = 0;
     uint16_t d1 = 1;
 
-    vq->desc[d0].addr  = (uint64_t)(uintptr_t)cmd;
+    vq->desc[d0].addr  = (uint64_t)(uintptr_t)resolved_cmd;
     vq->desc[d0].len   = cmd_len;
     vq->desc[d0].flags = VRING_DESC_F_NEXT;
     vq->desc[d0].next  = d1;
