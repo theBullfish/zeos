@@ -24,6 +24,7 @@
 #include "persistence.h"
 #include "hotplug.h"
 #include "timeofday.h"
+#include "notify.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -623,6 +624,9 @@ static const struct shell_cmd commands[] = {
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
     {"date",    "show or set wall clock (date [\"YYYY-MM-DD HH:MM:SS\"])", tod_cmd_date, VIS_ALWAYS},
+    {"notify",  "fire a test notification (notify [level] [source] <text>)", notify_cmd_send, VIS_DEREZ},
+    {"notify-history","show recent notifications (notify-history [N|clear])", notify_cmd_history, VIS_ALWAYS},
+    {"dnd",     "Do Not Disturb (dnd | on|off|schedule [HH-HH] | mute|unmute <src>)", notify_cmd_dnd, VIS_ALWAYS},
     {"uptime",  "time since boot",                tod_cmd_uptime, VIS_ALWAYS},
     {"epoch",   "current Unix epoch seconds",     tod_cmd_epoch,  VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
@@ -3890,6 +3894,11 @@ vault_done:
         kputs("FAIL (not initialized)\n");
         fails++;
     }
+
+    /* Notify history + DND. Reports current state via the spec line. */
+    kputs("  ");
+    notify_print_selftest_line();
+    passes++;
 
     /* UI primitives — undo/redo, context menus, hover, dirty,
      * quick-look, list states. All wired additively; modules report
