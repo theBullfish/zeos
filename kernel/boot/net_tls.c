@@ -18,6 +18,9 @@
 #include "net_dns.h"
 #include "net_http.h"
 #include "kprint.h"
+#include "cfa_handle.h"
+#include "chain.h"
+#include "chain_registry.h"
 
 /* ── mbedTLS headers ── */
 #include "mbedtls/ssl.h"
@@ -58,6 +61,33 @@ static mbedtls_x509_crt      g_ca_certs;
 static mbedtls_ctr_drbg_context g_ctr_drbg;
 static mbedtls_entropy_context  g_entropy;
 static mbedtls_ssl_config       g_ssl_conf;
+
+/*
+ * CFA handles for the security-relevant TLS state. The raw structs
+ * still live in BSS (mbedTLS APIs require flat pointers), but every
+ * access in this file goes through cfa_resolve() so MasQ-tier rules
+ * gate observers that lack INTERNAL/SOVEREIGN perception. CFA address
+ * is derived from CHAIN_NET_TX -- TLS is the upper layer of network.
+ */
+static cfa_handle_t g_h_conf;     /* wraps g_ssl_conf */
+static cfa_handle_t g_h_ssl;      /* wraps g_tls.ssl while connection live */
+
+/* Resolve helpers. Before tls_init() finishes wrapping the statics,
+ * the handles are 0 and we fall through to the raw struct so the
+ * mbedtls init calls work. After wrapping, every access goes through
+ * cfa_resolve(): a wrong-tier observer gets NULL and the path returns
+ * an error rather than silently leaking the keys. */
+static mbedtls_ssl_config *tls_conf(void)
+{
+    if (!g_h_conf) return &g_ssl_conf;  /* pre-wrap: init path */
+    return (mbedtls_ssl_config *)cfa_resolve(g_h_conf);
+}
+
+static mbedtls_ssl_context *tls_ssl(struct tls_conn *conn)
+{
+    if (!g_h_ssl) return &conn->ssl;    /* pre-wrap: setup path */
+    return (mbedtls_ssl_context *)cfa_resolve(g_h_ssl);
+}
 
 /* ── Platform callbacks for mbedTLS ── */
 
@@ -168,11 +198,38 @@ int tls_init(void)
     mbedtls_ssl_conf_ca_chain(&g_ssl_conf, &g_ca_certs, NULL);
     mbedtls_ssl_conf_rng(&g_ssl_conf, mbedtls_ctr_drbg_random, &g_ctr_drbg);
 
+    /* Wrap the SSL config in a CFA handle. CFA address is derived from
+     * CHAIN_NET_TX (TLS is the upper layer of network). If the net
+     * chain hasn't registered yet (early init), use a synthetic root
+     * address so the handle still exists; rebinding from net_tx is a
+     * later optimization. Tier INTERNAL: kernel TLS state is private
+     * to internal/sovereign observers. */
+    {
+        cfa_addr_t conf_addr;
+        chain_t *net_tx = (CHAIN_NET_TX >= 0) ? chain_get(CHAIN_NET_TX) : (chain_t *)0;
+        if (net_tx) {
+            conf_addr = cfa_derive(&net_tx->addr, 1);  /* child slot 1 = ssl_config */
+        } else {
+            int j;
+            for (j = 0; j < 8; j++) conf_addr.segments[j] = 0;
+            conf_addr.segments[0] = 0xFF;  /* synthetic TLS root */
+            conf_addr.segments[1] = 1;
+            conf_addr.depth = 2;
+            conf_addr.birth_tsc = 0;
+        }
+        g_h_conf = cfa_wrap(&g_ssl_conf, sizeof(g_ssl_conf),
+                            conf_addr, MASQ_INTERNAL);
+        if (!g_h_conf) {
+            kputs("TLS: cfa_wrap(ssl_conf) failed\n");
+            return -1;
+        }
+    }
+
     kputs("TLS: subsystem ready (mbedTLS ");
     kputs(MBEDTLS_VERSION_STRING);
     kputs("), epoch=");
     kput_dec((unsigned long)zeos_time(0));
-    kputs("\n");
+    kputs(", cfa_handle=conf\n");
 
     return 0;
 }
@@ -250,62 +307,100 @@ have_ip:;
     g_tls.hostname[i] = 0;
     g_tls.port = port;
 
-    /* Set up SSL context */
+    /* Set up SSL context. Initialize raw, then wrap in a CFA handle so
+     * the session keys allocated by mbedtls_ssl_setup are reachable
+     * only via MasQ-checked resolves. */
     mbedtls_ssl_init(&g_tls.ssl);
 
-    int ret = mbedtls_ssl_setup(&g_tls.ssl, &g_ssl_conf);
-    if (ret != 0) {
-        kputs("TLS: ssl_setup failed\n");
-        tcp_close(&g_tls.tcp);
-        return NULL;
+    {
+        cfa_addr_t ssl_addr;
+        chain_t *net_tx = (CHAIN_NET_TX >= 0) ? chain_get(CHAIN_NET_TX) : (chain_t *)0;
+        if (net_tx) {
+            ssl_addr = cfa_derive(&net_tx->addr, 2); /* child slot 2 = ssl_context */
+        } else {
+            int j;
+            for (j = 0; j < 8; j++) ssl_addr.segments[j] = 0;
+            ssl_addr.segments[0] = 0xFF;
+            ssl_addr.segments[1] = 2;
+            ssl_addr.depth = 2;
+            ssl_addr.birth_tsc = 0;
+        }
+        g_h_ssl = cfa_wrap(&g_tls.ssl, sizeof(g_tls.ssl), ssl_addr, MASQ_INTERNAL);
+        if (!g_h_ssl) {
+            kputs("TLS: cfa_wrap(ssl_ctx) failed\n");
+            tcp_close(&g_tls.tcp);
+            return NULL;
+        }
     }
 
-    /* SNI — server name indication */
-    ret = mbedtls_ssl_set_hostname(&g_tls.ssl, g_tls.hostname);
-    if (ret != 0) {
-        kputs("TLS: set_hostname failed\n");
+    mbedtls_ssl_context *ssl = tls_ssl(&g_tls);
+    mbedtls_ssl_config  *conf = tls_conf();
+    if (!ssl || !conf) {
+        kputs("TLS: cfa_resolve denied during connect\n");
+        cfa_release(g_h_ssl); g_h_ssl = 0;
         mbedtls_ssl_free(&g_tls.ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
     }
 
+    int ret = mbedtls_ssl_setup(ssl, conf);
+    if (ret != 0) {
+        kputs("TLS: ssl_setup failed\n");
+        cfa_release(g_h_ssl); g_h_ssl = 0;
+        mbedtls_ssl_free(ssl);
+        tcp_close(&g_tls.tcp);
+        return NULL;
+    }
+
+    /* SNI — server name indication */
+    ret = mbedtls_ssl_set_hostname(ssl, g_tls.hostname);
+    if (ret != 0) {
+        kputs("TLS: set_hostname failed\n");
+        cfa_release(g_h_ssl); g_h_ssl = 0;
+        mbedtls_ssl_free(ssl);
+        tcp_close(&g_tls.tcp);
+        return NULL;
+    }
+
     /* Set I/O callbacks — ctx is the tcp_conn */
-    mbedtls_ssl_set_bio(&g_tls.ssl, &g_tls.tcp,
+    mbedtls_ssl_set_bio(ssl, &g_tls.tcp,
                          zeos_tls_send, zeos_tls_recv, NULL);
 
     /* TLS handshake */
-    while ((ret = mbedtls_ssl_handshake(&g_tls.ssl)) != 0) {
+    while ((ret = mbedtls_ssl_handshake(ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
             ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             kputs("TLS: handshake failed (");
             kput_dec(-ret);
             kputs(")");
             if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-                uint32_t f = mbedtls_ssl_get_verify_result(&g_tls.ssl);
+                uint32_t f = mbedtls_ssl_get_verify_result(ssl);
                 kputs(" verify_flags=0x");
                 kput_hex(f);
             }
             kputs("\n");
-            mbedtls_ssl_free(&g_tls.ssl);
+            cfa_release(g_h_ssl); g_h_ssl = 0;
+            mbedtls_ssl_free(ssl);
             tcp_close(&g_tls.tcp);
             return NULL;
         }
     }
 
     /* Verify certificate */
-    uint32_t flags = mbedtls_ssl_get_verify_result(&g_tls.ssl);
+    uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
     if (flags != 0) {
         kputs("TLS: certificate verification failed (0x");
         kput_hex(flags);
         kputs(")\n");
-        mbedtls_ssl_close_notify(&g_tls.ssl);
-        mbedtls_ssl_free(&g_tls.ssl);
+        mbedtls_ssl_close_notify(ssl);
+        cfa_release(g_h_ssl); g_h_ssl = 0;
+        mbedtls_ssl_free(ssl);
         tcp_close(&g_tls.tcp);
         return NULL;
     }
 
     kputs("TLS: connected, ");
-    kputs(mbedtls_ssl_get_version(&g_tls.ssl));
+    kputs(mbedtls_ssl_get_version(ssl));
     kputs("\n");
 
     g_tls.active = 1;
@@ -315,15 +410,19 @@ have_ip:;
 int tls_send(tls_conn_t *conn, const void *data, int len)
 {
     if (!conn || !conn->active) return -1;
+    mbedtls_ssl_context *ssl = tls_ssl(conn);
+    if (!ssl) return -1;  /* MasQ denied */
 
-    return mbedtls_ssl_write(&conn->ssl, (const unsigned char *)data, len);
+    return mbedtls_ssl_write(ssl, (const unsigned char *)data, len);
 }
 
 int tls_recv(tls_conn_t *conn, void *buf, int max_len)
 {
     if (!conn || !conn->active) return -1;
+    mbedtls_ssl_context *ssl = tls_ssl(conn);
+    if (!ssl) return -1;  /* MasQ denied */
 
-    int ret = mbedtls_ssl_read(&conn->ssl, (unsigned char *)buf, max_len);
+    int ret = mbedtls_ssl_read(ssl, (unsigned char *)buf, max_len);
 
     /* Translate mbedTLS EOF to our convention (0 = EOF) */
     if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
@@ -336,11 +435,20 @@ int tls_recv(tls_conn_t *conn, void *buf, int max_len)
 void tls_close(tls_conn_t *conn)
 {
     if (!conn || !conn->active) return;
+    mbedtls_ssl_context *ssl = tls_ssl(conn);
 
     /* Send close_notify to peer */
-    mbedtls_ssl_close_notify(&conn->ssl);
-    mbedtls_ssl_free(&conn->ssl);
+    if (ssl) {
+        mbedtls_ssl_close_notify(ssl);
+        mbedtls_ssl_free(ssl);
+    }
     tcp_close(&conn->tcp);
+
+    /* Drop the CFA handle so any leaked references become stale. */
+    if (g_h_ssl) {
+        cfa_release(g_h_ssl);
+        g_h_ssl = 0;
+    }
 
     conn->active = 0;
     conn->tcp_connected = 0;

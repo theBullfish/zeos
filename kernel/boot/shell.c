@@ -43,6 +43,7 @@
 #include "timer.h"
 #include "signal.h"
 #include "chain.h"
+#include "cfa_handle.h"
 #include "chain_registry.h"
 #include "serial.h"
 #include "persona_filter.h"
@@ -2326,6 +2327,26 @@ vault_done:
     } else {
         kputs("not registered\n");
         fails++;
+    }
+
+    /* CFA handles: TLS state + VAULT blob must each be wrapped after
+     * tls_init() and vault_mount() have run. The selftest fails if
+     * either subsystem is unwrapped, since that would mean security-
+     * relevant memory is still escaping the MasQ tier check. */
+    kputs("  CFA handles ........... ");
+    {
+        int hc = cfa_handle_count();
+        kputs("count=");
+        kput_dec((uint64_t)hc);
+        /* Quick sanity: tls_init wraps g_ssl_conf, vault_mount wraps
+         * g_base, so we expect at least 2 live handles. */
+        if (hc >= 2) {
+            kputs("  PASS\n");
+            passes++;
+        } else {
+            kputs("  FAIL (expected >= 2: TLS + VAULT)\n");
+            fails++;
+        }
     }
 
     /* USB MSC: report presence + size in MB. */

@@ -5,6 +5,7 @@
  */
 
 #include "chain.h"
+#include "cfa_handle.h"
 #include "kprint.h"
 #include "timer.h"
 
@@ -240,7 +241,12 @@ int chain_resolve(int id)
 
     t_start = timer_read_tsc();
 
-    /* Run nodes in sequence, alternating scratch buffers */
+    /* Run nodes in sequence, alternating scratch buffers. Set the CFA
+     * observer to this chain id so any cfa_resolve() inside a node body
+     * gets MasQ-tier-checked against this chain's tier. */
+    int prev_observer = cfa_get_observer();
+    cfa_set_observer(id);
+
     input = (void *)scratch_a;
     for (i = 0; i < c->node_count; i++) {
         output = (i % 2 == 0) ? (void *)scratch_b : (void *)scratch_a;
@@ -248,6 +254,8 @@ int chain_resolve(int id)
             c->nodes[i].resolve(&c->nodes[i], input, output);
         input = output;
     }
+
+    cfa_set_observer(prev_observer);
 
     t_end = timer_read_tsc();
 

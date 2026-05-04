@@ -11,15 +11,20 @@
 
 #include "vault.h"
 #include "chain.h"
+#include "cfa_handle.h"
 #include "kprint.h"
 #include "heap.h"
 
 /* Global filesystem state */
 static struct vault_fs g_vault;
 
-/* The backing memory region */
+/* The backing memory region. The raw pointer is preserved so that
+ * format/mount can populate the blob, but every access during normal
+ * operation goes through the CFA handle so VAULT internal blobs are
+ * MasQ-tier-gated (INTERNAL). */
 static uint8_t *g_base;
 static uint64_t g_size;
+static cfa_handle_t g_h_base;  /* CFA wrap of g_base, INTERNAL tier */
 
 /* ── Helpers ──────────────────────────────────── */
 
@@ -71,9 +76,20 @@ static uint64_t read_tsc(void)
 
 /* ── Block management ─────────────────────────── */
 
+/* Resolve g_base through the CFA handle when wrapped. Pre-format
+ * (g_h_base == 0) we use the raw pointer so format/mount can populate
+ * the superblock; once wrapped, every block lookup is MasQ-checked. */
+static uint8_t *vault_base(void)
+{
+    if (!g_h_base) return g_base;
+    return (uint8_t *)cfa_resolve(g_h_base);
+}
+
 static uint8_t *block_ptr(uint32_t block_num)
 {
-    return g_base + (uint64_t)block_num * VAULT_BLOCK_SIZE;
+    uint8_t *base = vault_base();
+    if (!base) return (uint8_t *)0;  /* MasQ denied */
+    return base + (uint64_t)block_num * VAULT_BLOCK_SIZE;
 }
 
 static int bitmap_test(uint32_t block)
@@ -98,9 +114,11 @@ static int alloc_block(void)
 {
     for (uint32_t i = g_vault.super.data_start; i < g_vault.super.total_blocks; i++) {
         if (!bitmap_test(i)) {
+            uint8_t *bp = block_ptr(i);
+            if (!bp) return -1;  /* MasQ denied */
             bitmap_set(i);
             g_vault.super.free_blocks--;
-            v_memset(block_ptr(i), 0, VAULT_BLOCK_SIZE);
+            v_memset(bp, 0, VAULT_BLOCK_SIZE);
             return (int)i;
         }
     }
@@ -369,6 +387,24 @@ int vault_mount(void *base, uint64_t size)
     g_vault.device_blocks = sb->total_blocks;
 
     sb->mount_count++;
+
+    /* Wrap the backing blob in a CFA handle now that the layout is
+     * established. Future block_ptr() calls go through cfa_resolve()
+     * and inherit MasQ-tier checks. Tier INTERNAL: VAULT contents are
+     * private to internal/sovereign observers. */
+    if (!g_h_base) {
+        cfa_addr_t addr;
+        int j;
+        for (j = 0; j < 8; j++) addr.segments[j] = 0;
+        addr.segments[0] = 0x5A;        /* "VAULT" root segment */
+        addr.depth = 1;
+        addr.birth_tsc = read_tsc();
+        g_h_base = cfa_wrap(g_base, (size_t)g_size, addr, MASQ_INTERNAL);
+        if (!g_h_base) {
+            kputs("VAULT: cfa_wrap failed\n");
+            return -1;
+        }
+    }
 
     return 0;
 }
@@ -697,7 +733,9 @@ void vault_sync(void)
     /* In RAM-backed mode, superblock is already in memory.
      * When NVMe driver exists, this flushes to disk. */
     if (g_vault.mounted) {
-        v_memcpy(g_base, &g_vault.super, sizeof(struct vault_super));
+        uint8_t *base = vault_base();
+        if (base)
+            v_memcpy(base, &g_vault.super, sizeof(struct vault_super));
     }
 }
 
