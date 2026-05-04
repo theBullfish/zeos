@@ -39,11 +39,35 @@ session. Three sections, that's it.
   `Merge` node carrying its policy (All / Any / Quorum{n,m} /
   Fastest(N) / Within / By), never a DAG of independent edges. Comments
   at the top of `ast.rs` name the linear-default tells we explicitly
-  designed to NOT support. Hand-built AST for the top section of
-  `programs/02_log_monitor.zp` lives in `tests/ast_log_monitor.rs`
-  with the chord-rule canary `merge_is_one_node_not_three_flow_edges`
-  that fails first on any future parser lowering mistake. 47 tests
-  green.
+  designed to NOT support.
+
+- v3 lexer cleanup (commit `7e008b2`). 8/8 corpus clean — every .zp
+  file tokenizes with zero Error tokens. Added: HeatUp (↑), HeatDown
+  (↓), C-style string escapes (\" \\ \n \t \r \0), and `─...>`
+  long-form Flow arrow.
+
+- Parser landed (commits `2f8ac9b` + `02c7ebf`). Recursive descent over
+  a tokenized stream with whitespace/comments filtered, newlines
+  retained as statement separators at depth 0. **Vertical merge
+  coalescing** in parse_module folds `INPUT -> |` fragments and
+  `| policy | -> DOWNSTREAM` policy-only lines into a single
+  `Merge` node — the chord rule at the parser level. Also: BinExpr
+  / UnaryCmp / BinOp added to AST for comparison ops in arg
+  position (`message ~ "..."`, `gate(> 5x)`).
+
+  **`programs/02_log_monitor.zp` parses end-to-end** with 6
+  integration tests in `tests/parse_log_monitor.rs` asserting
+  structural properties — the all_lines merge has 3 inputs (chord
+  canary), the within(30s) merge has 2 inputs + Within policy +
+  downstream, the dashboard section produces ≥3 Tap statements.
+
+  Corpus parse coverage: **2/68** files (02_log_monitor.zp,
+  12_search_engine.zp). The other 66 exercise constructs the parser
+  doesn't yet handle — see Next up. None affect the chord rule.
+
+  `zplus-parse` CLI: `cd tools/zplus && cargo run --bin zplus-parse -- <file.zp>`.
+
+  **73 tests green** (54 unit + 19 integration).
 
 - v2 lexer landed (commit `0c4f710`). Adds 8 token kinds — Hex,
   HexColor, Dimension, ByteSize, TimePast, DevNull, TemplateString,
@@ -76,40 +100,58 @@ session. Three sections, that's it.
 
 ## Next up
 
-**Parser, smallest first cut.** AST is in. Lexer covers 65/68 files.
-The bridge from token stream → AST is the next thing.
+**Expand parser corpus coverage.** 02_log_monitor.zp is the green-light
+target and works. The other 66 .zp files trip the parser on
+straightforward additive features. None of these affect the AST shape
+or the chord rule — just adding cases. Suggested order, easiest first:
 
-Suggested smallest shippable increment:
+1. **Fork blocks `{ a, b, c }`.** Most common gap (~30 files use
+   forks). Add to `parse_chain_term`: on `LBrace`, parse
+   comma-separated chains, expect `RBrace`. AST already has
+   `Chain::Fork`. Test against `01_file_watcher.zp:535`.
 
-1. **Parse a single wire-declaration line** — `name : <chain>` where
-   `<chain>` is the simplest form: `Call` followed by zero or more
-   `Flow` to atom paths. Target: parse line 8 of
-   `programs/02_log_monitor.zp` (`syslog : fs("/var/log/syslog") -> lines`)
-   into the same `WireDecl` shape that `tests/ast_log_monitor.rs`
-   hand-built. Round-trip via `assert_eq!(parsed, hand_built)`.
-2. **Then merge resolution** — handle the vertical `-> |` /
-   `-> | -> name` block as one `Merge` node with `MergePolicy::All`.
-   This is where the chord rule first hits parser code; the canary
-   test in `ast_log_monitor.rs` will catch lowering mistakes.
-3. **Then the rest of `02_log_monitor.zp`** — gate(...), parse(...),
-   delta(...), rate(per: ...), within(...), on_silence(...),
-   vault.store(ttl: ...). Each adds Call shape variants but no new
-   chain-level operators.
+2. **Unit annotations `@ ident`.** Programs/16_scada_industrial.zp,
+   11_home_automation.zp, 22_precision_agriculture.zp use `position
+   @ percent`, `rate @ rpm`, `target_temp @ F`. Either: extend
+   `Atom` with `Atom::Unit { value, unit }`, or treat `@ Ident` as
+   a postfix annotation captured on the preceding chain term. Latter
+   is simpler.
 
-Defer until after `02_log_monitor.zp` parses end-to-end:
+3. **`N of M` and `2 of 5` in arg position.** programs/09_anomaly_detector.zp:50
+   `resonance(2 of 5, within: 5m)`. The "N of M" form already exists
+   in merge-policy parsing; lift it into arg-expression parsing as
+   well, with an AST `Chain::Quorum { n, m }`.
 
-- The three v3 lexer questions (↑ heat operator, `\"` string escapes,
-  `─...>` long-form arrow). They block 3 of 68 files; the 65 clean
-  files are enough to drive parser design.
-- `<-` actuator binding (used in 11/16/22 — different programs).
-- `<->` bidirectional (proposed only).
-- IR / lowering / codegen.
+4. **Fork branches with `mode(x): chain` syntax** (chirp.zp:137).
+   Treat as a "labeled fork branch" — extend `Chain::Fork` to
+   `Vec<ForkBranch>` where `ForkBranch { label: Option<Chain>, body: Chain }`.
 
-Open architectural question for the parser: should it produce a
-`Result<Module, Vec<ParseError>>` with error recovery (continue past
-syntax errors) or a `Result<Module, ParseError>` (fail fast)? The
-brief implies fast feedback matters; recommend fail-fast for v1 and
-add recovery only when the corpus surfaces the need.
+5. **Array literals `[ ... ]`** (shield.zp). Add `Atom::List(Vec<Chain>)`.
+
+6. **Hex / HexColor / Dimension / ByteSize / Bang / TimePast / DevNull
+   atoms in chain term position.** All exist in the AST; just need
+   the parser to recognize and convert. Some may already work — sweep
+   and verify.
+
+7. **Negation `!ident`** in arg position (zeros/arm_controller.zp:55).
+   Add `Chain::UnaryNot` or similar.
+
+8. **`<-` actuator binding** (16/11/22). Treat as a top-level
+   declaration metadata operator — `name : actuator(...) <- type @ unit`
+   could be a `WireDecl` extension `bound_inputs: Option<Chain>`.
+
+A simple metric for "done" — the corpus.rs smoke test gets a
+parse-coverage assertion: parses all 68 files cleanly. Right now
+only 2 do.
+
+Beyond the parser, deferred:
+
+- `<->` bidirectional (proposed only)
+- Type checking / typed ports (CHAIN_CONTRACT.md)
+- IR lowering, codegen, runtime
+
+The `<-` actuator-binding operator is the only AST shape change
+remaining. Everything else is additive.
 
 ---
 
