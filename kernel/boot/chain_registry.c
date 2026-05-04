@@ -31,7 +31,16 @@
 #include "serial.h"
 #include "hotplug.h"
 #include "suspend.h"
+#include "battery.h"
+#include "fat32.h"
+#include "vault.h"
 #include "kprint.h"
+
+/* Forward decls for resolves defined later in this file. */
+static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
+static void battery_state_resolve(chain_node_t *self, void *input, void *output);
+static void battery_ac_resolve(chain_node_t *self, void *input, void *output);
+static void battery_power_event_resolve(chain_node_t *self, void *input, void *output);
 
 /* ── System chain IDs ──────────────────────────────────────────── */
 
@@ -53,6 +62,8 @@ int CHAIN_KEYBOARD       = -1;
 int CHAIN_MOUSE          = -1;
 int CHAIN_SERIAL_IN      = -1;
 int CHAIN_POWER          = -1;
+int CHAIN_BATTERY        = -1;
+int CHAIN_TRASH_GC       = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -325,6 +336,110 @@ static void serial_input_event_resolve(chain_node_t *self,
 uint32_t chain_serial_in_total(void)
 {
     return s_serial_chars_decoded;
+}
+
+/* ── Battery chain resolves ─────────────────────────────────────── */
+/*
+ * Single poller wrapped as a 4-node pipeline so the chain reads
+ * naturally in the inspector:
+ *   acpi_poll       → calls battery_refresh() once per 4s
+ *   battery_state   → publishes per-battery state
+ *   ac_state        → publishes AC online flag
+ *   power_event_emit→ if any change, bumps CHAIN_BATTERY's vault_version
+ *
+ * Real work is in node 0; the rest are observation nodes.
+ */
+
+static int s_battery_changed;
+
+static void battery_acpi_poll_resolve(chain_node_t *self,
+                                      void *input, void *output)
+{
+    (void)self; (void)input;
+    int *out = (int *)output;
+    s_battery_changed = battery_refresh();
+    if (out) *out = s_battery_changed;
+}
+
+static void battery_state_resolve(chain_node_t *self,
+                                  void *input, void *output)
+{
+    (void)self;
+    int changed = input ? *(int *)input : s_battery_changed;
+    int *out = (int *)output;
+    if (out) *out = changed;
+}
+
+static void battery_ac_resolve(chain_node_t *self,
+                               void *input, void *output)
+{
+    (void)self;
+    int changed = input ? *(int *)input : s_battery_changed;
+    int *out = (int *)output;
+    if (out) *out = changed;
+}
+
+static void battery_power_event_resolve(chain_node_t *self,
+                                        void *input, void *output)
+{
+    (void)self;
+    int changed = input ? *(int *)input : s_battery_changed;
+    int *out = (int *)output;
+    if (out) *out = changed;
+    if (changed && CHAIN_BATTERY >= 0) {
+        chain_t *cb = chain_get(CHAIN_BATTERY);
+        if (cb) cb->vault_version++;
+    }
+}
+
+/* ── Trash garbage collector ─────────────────────────────────────
+ *
+ * CHAIN_TRASH_GC: low-frequency poller. Default cadence is ~1 hour
+ * with the current scheduler tps; resolve_interval_ticks is sized
+ * conservatively from the compositor's measured 432-800 tps. Each
+ * resolve checks the configured "/trash/auto-empty-days" key (32-bit
+ * little-endian days, default 30) and calls
+ * fat32_trash_empty_older_than(days * 86400). If FAT32 is not
+ * mounted or no wall clock is present, the resolve is a no-op. */
+
+static uint32_t s_trash_gc_default_days = 30;
+
+static uint32_t trash_gc_load_days(void)
+{
+    uint32_t days = 0;
+    if (vault_load_config("/trash/auto-empty-days", &days,
+                          sizeof(days)) == (int)sizeof(days)) {
+        if (days == 0 || days > 3650) days = s_trash_gc_default_days;
+        return days;
+    }
+    return s_trash_gc_default_days;
+}
+
+static void trash_gc_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)input;
+    int *out = (int *)output;
+    if (out) *out = 0;
+
+    if (!fat32_mounted()) return;
+
+    uint32_t days = trash_gc_load_days();
+    uint64_t cutoff = (uint64_t)days * 86400ULL;
+
+    int freed = fat32_trash_empty_older_than(cutoff);
+    if (freed > 0) {
+        if (CHAIN_TRASH_GC >= 0) {
+            chain_t *c = chain_get(CHAIN_TRASH_GC);
+            if (c) c->vault_version++;
+        }
+        kputs("[trash-gc] auto-emptied ");
+        kput_dec((uint64_t)freed);
+        kputs(" entries (>");
+        kput_dec((uint64_t)days);
+        kputs(" days)\n");
+    }
+    if (out) *out = freed;
 }
 
 /* ── Init ──────────────────────────────────────────────────────── */
@@ -603,6 +718,32 @@ int chain_registry_init(void)
          * counter via vault_version so MasQ records each S3 entry. */
         chain_t *cp = chain_get(CHAIN_POWER);
         if (cp) cp->resolve_interval_ticks = 256;
+    }
+
+    /* Battery: ACPI _BAT / _AC pattern-scan poller. Resolves slowly
+     * (every 240 ticks ≈ 4s) — battery state changes on a scale of
+     * minutes, no point burning ticks on it. The pipeline:
+     *   acpi_poll → battery_state → ac_state → power_event_emit
+     * battery_init() ran before chain_registry_init via main.c so
+     * presence is already determined; the resolve walks battery_refresh
+     * and bumps vault_version on a real change. */
+    battery_init();
+    CHAIN_BATTERY = chain_create("battery", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_BATTERY >= 0) {
+        chain_add_node(CHAIN_BATTERY, "acpi_poll",
+                       "acpi_tick", "battery_raw",
+                       battery_acpi_poll_resolve);
+        chain_add_node(CHAIN_BATTERY, "battery_state",
+                       "battery_raw", "battery_state",
+                       battery_state_resolve);
+        chain_add_node(CHAIN_BATTERY, "ac_state",
+                       "battery_state", "ac_state",
+                       battery_ac_resolve);
+        chain_add_node(CHAIN_BATTERY, "power_event_emit",
+                       "ac_state", "power_event",
+                       battery_power_event_resolve);
+        chain_t *cb = chain_get(CHAIN_BATTERY);
+        if (cb) cb->resolve_interval_ticks = 240;
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

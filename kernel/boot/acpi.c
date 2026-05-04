@@ -65,6 +65,31 @@ static acpi_madt_t g_madt;
 static acpi_fadt_info_t g_fadt;
 static int g_initialized = 0;
 
+/* Cached AML table list (DSDT + SSDTs). Populated during acpi_init so
+ * later subsystems (battery, thermal, EC) can pattern-scan AML without
+ * re-walking XSDT and re-mapping headers. */
+static acpi_aml_table_t g_aml_tables[ACPI_MAX_AML_TABLES];
+static int              g_aml_count = 0;
+
+static void aml_register(sdt_header_t *t)
+{
+    if (!t) return;
+    if (g_aml_count >= ACPI_MAX_AML_TABLES) return;
+    if (t->length <= sizeof(sdt_header_t)) return;
+    acpi_aml_table_t *e = &g_aml_tables[g_aml_count++];
+    e->aml = (const uint8_t *)(t + 1);
+    e->len = t->length - sizeof(sdt_header_t);
+    for (int i = 0; i < 4; i++) e->sig[i] = t->signature[i];
+}
+
+int acpi_aml_table_count(void) { return g_aml_count; }
+
+const acpi_aml_table_t *acpi_aml_table(int idx)
+{
+    if (idx < 0 || idx >= g_aml_count) return 0;
+    return &g_aml_tables[idx];
+}
+
 /* Forward decls — bodies are below acpi_madt() accessor. */
 typedef struct sdt_header_s sdt_header_t_fwd;
 static void parse_fadt_from_table(sdt_header_t *t);
@@ -207,6 +232,31 @@ int acpi_init(void *rsdp_ptr)
             got_madt = 1;
         } else if (sig_eq(t->signature, "FACP", 4)) {
             parse_fadt_from_table(t);
+        } else if (sig_eq(t->signature, "SSDT", 4)) {
+            aml_register(t);
+        }
+    }
+
+    /* Register DSDT (referenced by FADT, not in the root table list). */
+    if (g_fadt.valid) {
+        uint64_t dsdt_phys = g_fadt.x_dsdt_addr ? g_fadt.x_dsdt_addr
+                                                 : (uint64_t)g_fadt.dsdt_addr;
+        if (dsdt_phys) {
+            sdt_header_t *dsdt = map_sdt(dsdt_phys);
+            if (dsdt && sig_eq(dsdt->signature, "DSDT", 4)) {
+                /* Insert DSDT first so callers iterating prefer it. */
+                if (g_aml_count < ACPI_MAX_AML_TABLES) {
+                    /* Shift current entries up by one. */
+                    for (int i = g_aml_count; i > 0; i--) {
+                        g_aml_tables[i] = g_aml_tables[i - 1];
+                    }
+                    g_aml_count++;
+                    g_aml_tables[0].aml = (const uint8_t *)(dsdt + 1);
+                    g_aml_tables[0].len = dsdt->length - sizeof(sdt_header_t);
+                    for (int i = 0; i < 4; i++)
+                        g_aml_tables[0].sig[i] = dsdt->signature[i];
+                }
+            }
         }
     }
 

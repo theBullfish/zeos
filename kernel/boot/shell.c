@@ -62,6 +62,7 @@
 #include "tests.h"
 #include "suspend.h"
 #include "acpi.h"
+#include "battery.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -213,8 +214,11 @@ static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
 static void cmd_suspend(const char *args);
+static void cmd_battery(const char *args);
 static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
+static void cmd_volume(const char *args);
+static void cmd_mute(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
@@ -582,6 +586,7 @@ static const struct shell_cmd commands[] = {
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
     {"suspend", "ACPI S3 suspend-to-RAM (suspend [seconds]; default 5s RTC wake)", cmd_suspend, VIS_DEREZ},
+    {"battery", "battery + AC adapter status (ACPI _BAT/_AC)", cmd_battery, VIS_ALWAYS},
     {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
     {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
@@ -621,6 +626,8 @@ static const struct shell_cmd commands[] = {
     /* Full only — deep system commands */
     {"lspci",   "list PCI/PCIe devices (raw)",    cmd_lspci,   VIS_FULL},
     {"beep",    "play a 440 Hz tone via HDA audio", cmd_beep,   VIS_ALWAYS},
+    {"volume",  "show or set master volume (volume [0-100|+N|-N])", cmd_volume, VIS_ALWAYS},
+    {"mute",    "toggle master mute",              cmd_mute,    VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
     /* FAT32 (USB / SD / ESP / NVMe) read+write */
@@ -959,6 +966,63 @@ static void cmd_suspend(const char *args)
         kputs("[shell] suspend failed rc=");
         kput_dec((uint64_t)(uint32_t)(-rc));
         kputc('\n');
+    }
+}
+
+/* ── Battery / AC ──────────────────────────────────────────────── */
+
+static const char *bat_state_label(battery_state_t s)
+{
+    switch (s) {
+    case BAT_CHARGING:    return "charging";
+    case BAT_DISCHARGING: return "discharging";
+    case BAT_FULL:        return "full";
+    case BAT_CRITICAL:    return "CRITICAL";
+    default:              return "unknown";
+    }
+}
+
+static void cmd_battery(const char *args)
+{
+    (void)args;
+    /* AC line */
+    int ac = ac_online();
+    kputs("AC: ");
+    if      (ac == 1) kputs("connected\n");
+    else if (ac == 0) kputs("on battery\n");
+    else              kputs("unknown (no _AC device or method-only _PSR)\n");
+
+    int n = battery_count();
+    if (n == 0) {
+        kputs("Battery: not present (desktop, QEMU, or pre-init)\n");
+        return;
+    }
+    for (int i = 0; i < BATTERY_MAX; i++) {
+        kputs("Battery ");
+        kput_dec((uint64_t)i);
+        kputs(": ");
+        if (i >= n) {
+            kputs("not present\n");
+            continue;
+        }
+        const battery_info_t *b = battery_info(i);
+        if (!b) { kputs("error\n"); continue; }
+        if (!b->values_known) {
+            kputs("present, charge unknown (no AML evaluator for method-only _BIF/_BST)\n");
+            continue;
+        }
+        int pct = battery_percent(i);
+        if (pct >= 0) { kput_dec((uint64_t)pct); kputs("% "); }
+        else          { kputs("?% "); }
+        kputs(bat_state_label(b->state));
+        int mins = battery_remaining_minutes(i);
+        if (mins >= 0) {
+            kputs(", ~");
+            kput_dec((uint64_t)mins);
+            kputs(" minutes ");
+            kputs(b->state == BAT_CHARGING ? "to full" : "remaining");
+        }
+        kputs("\n");
     }
 }
 
@@ -2490,6 +2554,73 @@ static void cmd_beep(const char *args)
     else { kputs(" error rc="); kput_dec((uint64_t)(int64_t)rc); kputs("\n"); }
 }
 
+/* ── Master volume + mute ──────────────────────────────────────────
+ *
+ *   volume          show current
+ *   volume <0-100>  set absolute
+ *   volume +N       relative up   (clamps at 100)
+ *   volume -N       relative down (clamps at 0)
+ *   mute            toggle mute
+ *
+ * Both commands push the new state to the DAC + pin output amps via
+ * HDA verb 0x300 and persist to VAULT under /audio/volume. CHAIN_AUDIO
+ * vault_version bumps on every change.
+ */
+
+static void cmd_volume(const char *args)
+{
+    /* Skip leading whitespace. */
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == '\0') {
+        kputs("  master volume: ");
+        kput_dec((uint64_t)hda_audio_get_volume());
+        kputs("%");
+        if (hda_audio_get_muted()) kputs(" (muted)");
+        kputs("\n");
+        return;
+    }
+
+    int sign = 0;
+    if (*args == '+') { sign = +1; args++; }
+    else if (*args == '-') { sign = -1; args++; }
+
+    /* Parse digits. */
+    int n = 0, any = 0;
+    while (*args >= '0' && *args <= '9') {
+        n = n * 10 + (*args - '0');
+        args++;
+        any = 1;
+    }
+    if (!any) {
+        kputs("  usage: volume [0-100|+N|-N]\n");
+        return;
+    }
+
+    if (sign != 0) {
+        hda_audio_volume_step(sign * n);
+    } else {
+        hda_audio_set_volume(n);
+    }
+
+    kputs("  master volume: ");
+    kput_dec((uint64_t)hda_audio_get_volume());
+    kputs("%");
+    if (hda_audio_get_muted()) kputs(" (muted)");
+    kputs("\n");
+}
+
+static void cmd_mute(const char *args)
+{
+    (void)args;
+    hda_audio_toggle_mute();
+    kputs("  master ");
+    kputs(hda_audio_get_muted() ? "muted" : "unmuted");
+    kputs(" (");
+    kput_dec((uint64_t)hda_audio_get_volume());
+    kputs("%)\n");
+}
+
 /* Selftest kernel_fn for the MDE chain probe. The body is what
  * actually runs on the CPU backend: read the .answer field, return
  * it. Real work, real return value. */
@@ -2797,6 +2928,14 @@ vault_done:
     kputs("  Audio (HDA) ........... ");
     if (hda_ready())          kputs("HDA ready\n");
     else { kputs("controller not ready ("); kputs(hda_status()); kputs(")\n"); }
+
+    /* Master volume + mute — applied to DAC/pin amps via verb 0x300. */
+    kputs("  Audio volume .......... ");
+    kput_dec((uint64_t)hda_audio_get_volume());
+    kputs("% (");
+    kputs(hda_audio_get_muted() ? "muted" : "unmuted");
+    kputs(") — applied to DAC/pin amps\n");
+    passes++;
 
     if (CHAIN_AUDIO >= 0) {
         chain_t *ac = chain_get(CHAIN_AUDIO);
@@ -3162,6 +3301,40 @@ vault_done:
             kput_dec((uint64_t)chain_ok);
             kputs(")\n");
             fails++;
+        }
+    }
+
+    /* Battery: report presence and (if known) percent + state. On
+     * QEMU this prints "not present" and PASSes — no battery is
+     * the expected state for a default QEMU machine. Real laptop
+     * hardware exercises the AML scanner. */
+    kputs("  Battery ............... ");
+    {
+        int bn = battery_count();
+        int ac = ac_online();
+        if (bn == 0) {
+            kputs("not present (desktop or QEMU)");
+            if (ac == 1) kputs(" — AC online");
+            kputc('\n');
+            passes++;
+        } else {
+            int pct = battery_percent(0);
+            const battery_info_t *b = battery_info(0);
+            kput_dec((uint64_t)bn);
+            kputs(" battery present");
+            if (pct >= 0 && b) {
+                kputs(" (");
+                kput_dec((uint64_t)pct);
+                kputs("% ");
+                kputs(bat_state_label(b->state));
+                kputs(")");
+            } else {
+                kputs(" (charge unknown — method-only _BST)");
+            }
+            if      (ac == 1) kputs(" — AC online");
+            else if (ac == 0) kputs(" — on battery");
+            kputc('\n');
+            passes++;
         }
     }
 

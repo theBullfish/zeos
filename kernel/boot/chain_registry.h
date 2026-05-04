@@ -49,6 +49,8 @@ extern int CHAIN_KEYBOARD;
 extern int CHAIN_MOUSE;
 extern int CHAIN_SERIAL_IN;
 extern int CHAIN_POWER;
+extern int CHAIN_BATTERY;
+extern int CHAIN_TRASH_GC;
 
 /* Lifetime count of bytes the serial chain has decoded into kb_buf.
  * cmd_selftest samples this across a 100ms window to compute drain

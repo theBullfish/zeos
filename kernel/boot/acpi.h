@@ -98,4 +98,20 @@ const acpi_fadt_info_t *acpi_fadt(void);
  * carries the same value) into FACS. Returns 0 on success. */
 int acpi_set_wake_vector(uint32_t wake_paddr);
 
+/* ── AML table iteration ────────────────────────────────────────────
+ * Cached list of every AML-bearing table parsed at acpi_init time
+ * (DSDT + every SSDT). Battery, EC, thermal etc. all need to scan
+ * AML for named objects. We don't run a full AML interpreter — these
+ * pointers are raw byte buffers callers pattern-scan. */
+#define ACPI_MAX_AML_TABLES 16
+
+typedef struct {
+    const uint8_t *aml;     /* AML byte stream (after the SDT header) */
+    uint32_t       len;     /* bytes of AML */
+    char           sig[4];  /* "DSDT" or "SSDT" */
+} acpi_aml_table_t;
+
+int                     acpi_aml_table_count(void);
+const acpi_aml_table_t *acpi_aml_table(int idx);
+
 #endif /* ZEOS_ACPI_H */
