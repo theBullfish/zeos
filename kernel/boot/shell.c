@@ -26,6 +26,7 @@
 #include "fb.h"
 #include "keyboard.h"
 #include "pci.h"
+#include "msix.h"
 #include "pmm.h"
 #include "heap.h"
 #include "zplus.h"
@@ -2171,6 +2172,12 @@ vault_done:
             fails++;
         }
     }
+
+    /* MSI-X infrastructure */
+    kputs("  MSI-X: ready (");
+    kput_dec(msix_free_count());
+    kputs(" vectors free)\n");
+    passes++;
 
     /* HDA audio */
     kputs("  Audio (HDA) ........... ");
