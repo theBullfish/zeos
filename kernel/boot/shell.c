@@ -3528,22 +3528,31 @@ vault_done:
         fails++;
     }
 
-    /* CFA handles: TLS state + VAULT blob must each be wrapped after
-     * tls_init() and vault_mount() have run. The selftest fails if
-     * either subsystem is unwrapped, since that would mean security-
-     * relevant memory is still escaping the MasQ tier check. */
+    /* CFA handles: TLS state + VAULT blob + lockscreen PIN buffers
+     * must each be wrapped after tls_init(), vault_mount(), and
+     * lockscreen_init() have run. The selftest fails if any are
+     * unwrapped -- that means SOVEREIGN-tier kernel state is still
+     * escaping the MasQ tier check. */
     kputs("  CFA handles ........... ");
     {
         int hc = cfa_handle_count();
+        int ls = lockscreen_cfa_handle_count();
         kputs("count=");
         kput_dec((uint64_t)hc);
-        /* Quick sanity: tls_init wraps g_ssl_conf, vault_mount wraps
-         * g_base, so we expect at least 2 live handles. */
-        if (hc >= 2) {
+        kputs(" lockscreen=");
+        kput_dec((uint64_t)ls);
+        /* Expect: TLS conf + VAULT blob + 3 lockscreen PIN buffers. */
+        if (hc >= 5 && ls >= 3) {
             kputs("  PASS\n");
             passes++;
+        } else if (hc >= 2 && ls >= 2) {
+            /* Tolerate 2-handle lockscreen during the very first boot
+             * before enrollment has wrapped enroll_first; cold-boot
+             * gate triggers all three. */
+            kputs("  PASS (partial lockscreen wrap)\n");
+            passes++;
         } else {
-            kputs("  FAIL (expected >= 2: TLS + VAULT)\n");
+            kputs("  FAIL (expected TLS + VAULT + lockscreen)\n");
             fails++;
         }
     }

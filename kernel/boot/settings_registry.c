@@ -7,6 +7,8 @@
 
 #include "settings_registry.h"
 #include "kprint.h"
+#include "chain.h"
+#include "chain_registry.h"
 
 #include "hda.h"
 #include "brightness.h"
@@ -147,12 +149,235 @@ int settings_get(const char *name, char *out, int out_len)
     return e->getter(out, out_len);
 }
 
+/* ── Chain pipeline (CHAIN_SETTINGS) ───────────────────────────── */
+
+#define SETTINGS_OLD_MAX  64
+#define SETTINGS_NEW_MAX  64
+
+typedef struct {
+    const settings_entry_t *entry;
+    char                    name[SETTINGS_NAME_MAX];
+    char                    new_val[SETTINGS_NEW_MAX];
+    char                    old_val[SETTINGS_OLD_MAX];
+    int                     status;       /* 0 = ok, -1 = reject */
+    int                     applied;      /* 1 once apply node ran */
+} settings_change_t;
+
+static settings_change_t s_chg_pending;
+static int               s_chain_settings = -1;
+static uint32_t          s_settings_apply_total;
+
+/* String helpers local to chain resolves. */
+static void sc_strcpy(char *dst, int dst_len, const char *src)
+{
+    int i = 0;
+    if (dst_len <= 0) return;
+    if (src) {
+        while (src[i] && i < dst_len - 1) { dst[i] = src[i]; i++; }
+    }
+    dst[i] = '\0';
+}
+
+static int sc_int_pos(const char *s)
+{
+    int v = 0, any = 0;
+    if (!s) return -1;
+    if (*s == '-') return -1;
+    if (*s == '+') s++;
+    while (*s) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+        any = 1;
+        s++;
+    }
+    return any ? v : -1;
+}
+
+static int sc_int_signed(const char *s, int *out)
+{
+    if (!s || !*s) return -1;
+    int sign = 1;
+    if (*s == '-') { sign = -1; s++; }
+    else if (*s == '+') { s++; }
+    if (!*s) return -1;
+    int v = 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return -1;
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    *out = v * sign;
+    return 0;
+}
+
+static int kind_validate(settings_kind_t k, const char *v, const char *enum_labels)
+{
+    switch (k) {
+    case SK_STRING:    return v ? 0 : -1;
+    case SK_INT: {
+        int x;
+        return sc_int_signed(v, &x) == 0 ? 0 : -1;
+    }
+    case SK_INT_PCT: {
+        int x = sc_int_pos(v);
+        return (x >= 0 && x <= 100) ? 0 : -1;
+    }
+    case SK_INT_SECS: {
+        int x = sc_int_pos(v);
+        return (x >= 0) ? 0 : -1;
+    }
+    case SK_BOOL: {
+        int x;
+        if (sc_int_signed(v, &x) != 0) return -1;
+        return (x == 0 || x == 1) ? 0 : -1;
+    }
+    case SK_ENUM:
+        return sr_enum_index(enum_labels, v) >= 0 ? 0 : -1;
+    }
+    return -1;
+}
+
+static void settings_change_request_resolve(chain_node_t *self,
+                                            void *input, void *output)
+{
+    (void)self; (void)input;
+    settings_change_t *out = (settings_change_t *)output;
+    *out = s_chg_pending;
+}
+
+static void settings_validate_resolve(chain_node_t *self,
+                                      void *input, void *output)
+{
+    (void)self;
+    settings_change_t *in  = (settings_change_t *)input;
+    settings_change_t *out = (settings_change_t *)output;
+    *out = *in;
+
+    const settings_entry_t *e = in->entry;
+    if (!e || (e->flags & SETTINGS_FLAG_READONLY) || !e->setter) {
+        out->status = -1;
+        s_chg_pending.status = -1;
+        return;
+    }
+    if (kind_validate(e->kind, in->new_val, e->enum_labels) != 0) {
+        out->status = -1;
+        s_chg_pending.status = -1;
+        return;
+    }
+    out->status = 0;
+}
+
+static void settings_apply_resolve(chain_node_t *self,
+                                   void *input, void *output)
+{
+    (void)self;
+    settings_change_t *in  = (settings_change_t *)input;
+    settings_change_t *out = (settings_change_t *)output;
+    *out = *in;
+    if (in->status != 0) return;
+
+    const settings_entry_t *e = in->entry;
+
+    /* Capture prior value for the {key, old, new} provenance tuple. */
+    if (e->getter && (e->flags & SETTINGS_FLAG_WRITEONLY) == 0) {
+        char prev[SETTINGS_OLD_MAX];
+        prev[0] = '\0';
+        if (e->getter(prev, (int)sizeof(prev)) == 0) {
+            sc_strcpy(out->old_val, SETTINGS_OLD_MAX, prev);
+            sc_strcpy(s_chg_pending.old_val, SETTINGS_OLD_MAX, prev);
+        }
+    } else {
+        sc_strcpy(out->old_val, SETTINGS_OLD_MAX, "***");
+        sc_strcpy(s_chg_pending.old_val, SETTINGS_OLD_MAX, "***");
+    }
+
+    int rc = e->setter(in->new_val);
+    if (rc != 0) {
+        out->status = -1;
+        s_chg_pending.status = -1;
+        return;
+    }
+    out->applied = 1;
+    s_chg_pending.applied = 1;
+}
+
+static void settings_record_resolve(chain_node_t *self,
+                                    void *input, void *output)
+{
+    (void)self;
+    settings_change_t *in  = (settings_change_t *)input;
+    settings_change_t *out = (settings_change_t *)output;
+    *out = *in;
+    if (!in->applied || in->status != 0) return;
+
+    /* Bump CHAIN_SETTINGS.vault_version with the {key, old, new} tuple
+     * implicit in the chain resolve's TSC + this counter. masq_journal
+     * (block-chain term of art) records by vault_version delta; for
+     * settings the equivalent is the chain's vault_version itself. */
+    if (s_chain_settings >= 0) {
+        chain_t *c = chain_get(s_chain_settings);
+        if (c) c->vault_version++;
+    }
+    s_settings_apply_total++;
+
+    /* Mirror the new value into s_chg_pending so settings_set() can
+     * read the chain-resolved status when it returns. */
+    s_chg_pending.applied = 1;
+    s_chg_pending.status  = 0;
+}
+
+int settings_chain_register(int parent_chain_id)
+{
+    if (s_chain_settings >= 0) {
+        CHAIN_SETTINGS = s_chain_settings;
+        return s_chain_settings;
+    }
+    int id = chain_create("settings", parent_chain_id, MASQ_INTERNAL);
+    if (id < 0) return -1;
+    chain_add_node(id, "setting_change_request",
+                   "settings_request", "settings_change",
+                   settings_change_request_resolve);
+    chain_add_node(id, "validate",
+                   "settings_change", "settings_change",
+                   settings_validate_resolve);
+    chain_add_node(id, "apply",
+                   "settings_change", "settings_change",
+                   settings_apply_resolve);
+    chain_add_node(id, "record",
+                   "settings_change", "settings_change",
+                   settings_record_resolve);
+    s_chain_settings = id;
+    CHAIN_SETTINGS   = id;
+    return id;
+}
+
+uint32_t settings_chain_apply_total(void) { return s_settings_apply_total; }
+
 int settings_set(const char *name, const char *value)
 {
     const settings_entry_t *e = settings_find(name);
     if (!e) return -1;
     if (e->flags & SETTINGS_FLAG_READONLY) return -1;
     if (!e->setter) return -1;
+    if (!value) return -1;
+
+    /* Build the chain request. */
+    s_chg_pending.entry   = e;
+    s_chg_pending.status  = 0;
+    s_chg_pending.applied = 0;
+    sc_strcpy(s_chg_pending.name,    SETTINGS_NAME_MAX, name);
+    sc_strcpy(s_chg_pending.new_val, SETTINGS_NEW_MAX,  value);
+    s_chg_pending.old_val[0] = '\0';
+
+    if (s_chain_settings >= 0) {
+        (void)chain_resolve(s_chain_settings);
+        return (s_chg_pending.applied && s_chg_pending.status == 0) ? 0 : -1;
+    }
+
+    /* Pre-registration fallback: validate + apply directly so boot-time
+     * setters still work. After chain_registry_init, every set runs
+     * through the pipeline. */
+    if (kind_validate(e->kind, value, e->enum_labels) != 0) return -1;
     return e->setter(value);
 }
 
@@ -428,7 +653,6 @@ void settings_register_all(void)
     settings_register(&E_NET_DHCP);
     settings_register(&E_THEME_DARK);
 
-    (void)sr_enum_index; /* may be unused if no parser path uses it */
 }
 
 void settings_print_selftest_line(void)
@@ -439,5 +663,7 @@ void settings_print_selftest_line(void)
     kput_dec((uint64_t)total);
     kputs(" keys registered, ");
     kput_dec((uint64_t)live);
-    kputs(" from current modules\n");
+    kputs(" from current modules, chain applies=");
+    kput_dec((uint64_t)s_settings_apply_total);
+    kputs("\n");
 }

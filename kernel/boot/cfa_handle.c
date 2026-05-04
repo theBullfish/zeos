@@ -16,7 +16,7 @@
 #include "chain.h"
 #include "kprint.h"
 
-#define CFA_SLOT_COUNT  1024
+#define CFA_SLOT_COUNT  2048
 
 typedef struct {
     void        *ptr;

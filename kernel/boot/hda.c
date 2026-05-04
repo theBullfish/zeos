@@ -61,11 +61,19 @@ typedef struct {
     uint8_t  reserved;
 } hda_audio_persist_t;
 
-static struct {
-    int volume;          /* 0..100 */
-    int muted;           /* 0/1 */
-    int initialized;     /* set once we have a codec path */
-} g_audio = { .volume = 60, .muted = 0, .initialized = 0 };
+/* g_audio used to be a free-floating struct here; per CHAIN_CONTRACT
+ * it's now hosted on CHAIN_AUDIO's volume_filter node `state` pointer.
+ * The volume_filter_state_t struct (see below) holds {volume, muted,
+ * initialized} as its first three fields. We expose g_audio as an
+ * alias view through a helper that resolves the node state, so the
+ * existing apply_amps / persistence / fallback paths continue to work
+ * unchanged while every read AND write goes through the chain node. */
+static int *audio_volume_ptr(void);
+static int *audio_muted_ptr(void);
+static int *audio_initialized_ptr(void);
+#define G_AUDIO_VOLUME       (*audio_volume_ptr())
+#define G_AUDIO_MUTED        (*audio_muted_ptr())
+#define G_AUDIO_INITIALIZED  (*audio_initialized_ptr())
 
 #define HDA_GCAP       0x00
 #define HDA_GCTL       0x08
@@ -173,8 +181,23 @@ typedef struct {
 } pcm_source_state_t;
 
 typedef struct {
+    /* Canonical master volume / mute state (CHAIN_CONTRACT: lives on the
+     * chain node `state` pointer, not as a free static). */
+    int volume;          /* 0..100 */
+    int muted;           /* 0/1 */
+    int initialized;     /* set once we have a codec path */
+
     /* 0..256: 256 = unity, 0 = mute. Linear scale, fixed-point /256. */
     int gain_q8;
+
+    /* When non-zero, the next chain_resolve(CHAIN_AUDIO) commits the
+     * staged volume/mute change: applies to hardware via apply_amps,
+     * bumps vault_version, persists to VAULT. Set by hda_audio_set_*
+     * which then calls chain_resolve to drive the change through the
+     * pipeline rather than mutating state directly. */
+    int pending_change;
+    int pending_volume;
+    int pending_muted;
 } volume_filter_state_t;
 
 typedef struct {
@@ -192,9 +215,16 @@ typedef struct {
 } hda_dma_state_t;
 
 static pcm_source_state_t    s_pcm_source;
-static volume_filter_state_t s_volume_filter   = { .gain_q8 = 256 };
+static volume_filter_state_t s_volume_filter = {
+    .volume = 60, .muted = 0, .initialized = 0, .gain_q8 = 256,
+    .pending_change = 0, .pending_volume = 0, .pending_muted = 0,
+};
 static hda_pin_state_t       s_hda_pin;
 static hda_dma_state_t       s_hda_dma;
+
+static int *audio_volume_ptr(void)      { return &s_volume_filter.volume; }
+static int *audio_muted_ptr(void)       { return &s_volume_filter.muted; }
+static int *audio_initialized_ptr(void) { return &s_volume_filter.initialized; }
 
 static inline uint8_t  mr8 (uint32_t off) { return *(volatile uint8_t  *)(mmio + off); }
 static inline uint16_t mr16(uint32_t off) { return *(volatile uint16_t *)(mmio + off); }
@@ -572,7 +602,7 @@ static int hda_setup_stream(void)
 
     /* Mark the codec path live and push the current master volume +
      * mute state to the DAC and pin output amps. */
-    g_audio.initialized = 1;
+    G_AUDIO_INITIALIZED = 1;
     hda_audio_apply_amps();
 
     uint32_t pcap = codec_cmd(codec_addr, pin_nid, VERB_GET_PARAM, PARAM_PIN_CAP);
@@ -751,6 +781,23 @@ void hda_volume_filter_resolve(chain_node_t *self, void *input, void *output)
     hda_pcm_frame_t *in  = (hda_pcm_frame_t *)input;
     hda_pcm_frame_t *out = (hda_pcm_frame_t *)output;
 
+    /* Commit any pending volume/mute change first. This is how
+     * hda_audio_set_volume / hda_audio_set_muted propagate: they stage
+     * onto the node state and trigger a chain_resolve; the node owns
+     * the apply + provenance bump. */
+    if (st && st->pending_change) {
+        int v = st->pending_volume;
+        if (v < 0)   v = 0;
+        if (v > 100) v = 100;
+        st->volume = v;
+        st->muted  = st->pending_muted ? 1 : 0;
+        st->pending_change = 0;
+        hda_audio_apply_amps();
+        chain_t *cc = chain_get(CHAIN_AUDIO);
+        if (cc) cc->vault_version++;
+        (void)hda_audio_save_to_vault();
+    }
+
     *out = *in;                         /* pass-through descriptor */
     if (in->error || !in->samples)
         return;
@@ -762,8 +809,8 @@ void hda_volume_filter_resolve(chain_node_t *self, void *input, void *output)
      * double-attenuation. The shell `volume`/`mute` commands keep
      * gain_q8 in sync via hda_audio_apply_amps(). */
     int gain;
-    if (!g_audio.initialized) {
-        gain = g_audio.muted ? 0 : ((g_audio.volume * 256) / 100);
+    if (!G_AUDIO_INITIALIZED) {
+        gain = G_AUDIO_MUTED ? 0 : ((G_AUDIO_VOLUME * 256) / 100);
     } else {
         gain = (st ? st->gain_q8 : 256);
     }
@@ -891,17 +938,17 @@ void hda_audio_apply_amps(void)
     /* Software filter stays at unity once hardware amps are in charge.
      * If the codec path isn't initialized yet, mirror the level into
      * gain_q8 so the volume_filter resolve applies it in software. */
-    if (!g_audio.initialized) {
-        s_volume_filter.gain_q8 = g_audio.muted
+    if (!G_AUDIO_INITIALIZED) {
+        s_volume_filter.gain_q8 = G_AUDIO_MUTED
             ? 0
-            : ((g_audio.volume * 256) / 100);
+            : ((G_AUDIO_VOLUME * 256) / 100);
         return;
     }
 
     s_volume_filter.gain_q8 = 256;
 
-    uint16_t left  = amp_payload(1, g_audio.muted, g_audio.volume);
-    uint16_t right = amp_payload(0, g_audio.muted, g_audio.volume);
+    uint16_t left  = amp_payload(1, G_AUDIO_MUTED, G_AUDIO_VOLUME);
+    uint16_t right = amp_payload(0, G_AUDIO_MUTED, G_AUDIO_VOLUME);
 
     /* Push to DAC's output amp if it has one, and to the pin's output
      * amp if it has one. We always attempt both — the codec ignores a
@@ -922,37 +969,59 @@ void hda_audio_apply_amps(void)
     }
 }
 
-int hda_audio_get_volume(void) { return g_audio.volume; }
-int hda_audio_get_muted(void)  { return g_audio.muted; }
+int hda_audio_get_volume(void) { return G_AUDIO_VOLUME; }
+int hda_audio_get_muted(void)  { return G_AUDIO_MUTED; }
 
+/* Stage a volume / mute change onto CHAIN_AUDIO's volume_filter node
+ * state and drive the change through chain_resolve. The volume_filter
+ * resolve commits the staged values, calls apply_amps, bumps
+ * vault_version, and persists to VAULT.
+ *
+ * Pre-CHAIN_AUDIO-registration callers (early hda_audio_restore_from_vault)
+ * fall back to the direct mutation path so boot still works. After
+ * registration every change is a chain pass. */
 void hda_audio_set_volume(int pct)
 {
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
-    g_audio.volume = pct;
+
+    s_volume_filter.pending_volume = pct;
+    s_volume_filter.pending_muted  = s_volume_filter.muted;
+    s_volume_filter.pending_change = 1;
+
+    if (CHAIN_AUDIO >= 0) {
+        (void)chain_resolve(CHAIN_AUDIO);
+        return;
+    }
+    /* Fallback (very early boot, pre-registration). */
+    G_AUDIO_VOLUME = pct;
     hda_audio_apply_amps();
-    chain_t *c = chain_get(CHAIN_AUDIO);
-    if (c) c->vault_version++;
     (void)hda_audio_save_to_vault();
 }
 
 void hda_audio_set_muted(int muted)
 {
-    g_audio.muted = muted ? 1 : 0;
+    s_volume_filter.pending_volume = s_volume_filter.volume;
+    s_volume_filter.pending_muted  = muted ? 1 : 0;
+    s_volume_filter.pending_change = 1;
+
+    if (CHAIN_AUDIO >= 0) {
+        (void)chain_resolve(CHAIN_AUDIO);
+        return;
+    }
+    G_AUDIO_MUTED = muted ? 1 : 0;
     hda_audio_apply_amps();
-    chain_t *c = chain_get(CHAIN_AUDIO);
-    if (c) c->vault_version++;
     (void)hda_audio_save_to_vault();
 }
 
 void hda_audio_toggle_mute(void)
 {
-    hda_audio_set_muted(!g_audio.muted);
+    hda_audio_set_muted(!G_AUDIO_MUTED);
 }
 
 void hda_audio_volume_step(int delta)
 {
-    hda_audio_set_volume(g_audio.volume + delta);
+    hda_audio_set_volume(G_AUDIO_VOLUME + delta);
 }
 
 /* ── Persistence ───────────────────────────────────────────────────
@@ -967,8 +1036,8 @@ int hda_audio_save_to_vault(void)
     hda_audio_persist_t rec;
     rec.magic    = AUDIO_VAULT_MAGIC;
     rec.version  = (uint8_t)AUDIO_VAULT_VERSION;
-    rec.volume   = (uint8_t)g_audio.volume;
-    rec.muted    = (uint8_t)g_audio.muted;
+    rec.volume   = (uint8_t)G_AUDIO_VOLUME;
+    rec.muted    = (uint8_t)G_AUDIO_MUTED;
     rec.reserved = 0;
 
     /* mkdir is idempotent; ignore the return code. */
@@ -991,8 +1060,8 @@ int hda_audio_restore_from_vault(void)
     int v = rec.volume;
     if (v < 0)   v = 0;
     if (v > 100) v = 100;
-    g_audio.volume = v;
-    g_audio.muted  = rec.muted ? 1 : 0;
+    G_AUDIO_VOLUME = v;
+    G_AUDIO_MUTED  = rec.muted ? 1 : 0;
     hda_audio_apply_amps();
     return 0;
 }

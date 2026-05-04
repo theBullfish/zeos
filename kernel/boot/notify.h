@@ -133,6 +133,18 @@ const char *notify_mute_get(int idx);  /* NULL on OOB */
  *   "Notify ................ N history entries, DND=off\n" */
 void notify_print_selftest_line(void);
 
+/* Register CHAIN_NOTIFY (parent CHAIN_CPU, MASQ_INTERNAL) with the
+ * 4-node pipeline:
+ *   notify_emit_request -> dnd_filter -> history_sink -> toast_render
+ * Returns the new chain id, or -1 on failure. Idempotent -- subsequent
+ * calls return the existing id. */
+int  notify_chain_register(int parent_chain_id);
+
+/* Lifetime count of notifications that flowed through the chain
+ * (whether silenced or rendered). Selftest reads this to prove the
+ * pipeline is alive. */
+uint32_t notify_chain_emitted_total(void);
+
 /* ── Shell command implementations ──────────────────────────────────
  * Wired internally; need entries in shell.c's command table. */
 void notify_cmd_history(const char *args);

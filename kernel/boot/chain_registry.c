@@ -37,6 +37,9 @@
 #include "kprint.h"
 #include "idle.h"
 #include "lockscreen.h"
+#include "notify.h"
+#include "settings_registry.h"
+#include "brightness.h"
 #include "power_buttons.h"
 
 /* Forward decls for resolves defined later in this file. */
@@ -68,6 +71,9 @@ int CHAIN_POWER          = -1;
 int CHAIN_BATTERY        = -1;
 int CHAIN_TRASH_GC       = -1;
 int CHAIN_IDLE           = -1;
+int CHAIN_NOTIFY         = -1;
+int CHAIN_SETTINGS       = -1;
+int CHAIN_BRIGHTNESS     = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -783,6 +789,34 @@ int chain_registry_init(void)
     CHAIN_IDLE = idle_chain_register(CHAIN_CPU);
     if (CHAIN_IDLE < 0) {
         kputs("[chain_registry] WARN: idle chain registration failed\n");
+    }
+
+    /* CHAIN_NOTIFY: notification pipeline.
+     *   notify_emit_request -> dnd_filter -> history_sink -> toast_render
+     * Every notify_send flows through this chain after registration; the
+     * chain's vault_version bumps once per notification (history_sink),
+     * tying every toast/silenced event into MasQ provenance. */
+    CHAIN_NOTIFY = notify_chain_register(CHAIN_CPU);
+    if (CHAIN_NOTIFY < 0) {
+        kputs("[chain_registry] WARN: notify chain registration failed\n");
+    }
+
+    /* CHAIN_SETTINGS: every settings_set() request runs this pipeline.
+     *   setting_change_request -> validate -> apply -> record
+     * vault_version bumps on each accepted change so MasQ records the
+     * full {key, old, new} tuple as provenance. */
+    CHAIN_SETTINGS = settings_chain_register(CHAIN_CPU);
+    if (CHAIN_SETTINGS < 0) {
+        kputs("[chain_registry] WARN: settings chain registration failed\n");
+    }
+
+    /* CHAIN_BRIGHTNESS: backlight level filter. Holds canonical brightness
+     * state on the chain node's `state` pointer (per CHAIN_CONTRACT) so
+     * brightness changes ARE chain resolutions instead of static-variable
+     * mutations with after-the-fact vault_version bumps. */
+    CHAIN_BRIGHTNESS = brightness_chain_register(CHAIN_CPU);
+    if (CHAIN_BRIGHTNESS < 0) {
+        kputs("[chain_registry] WARN: brightness chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

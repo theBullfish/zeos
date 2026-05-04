@@ -50,4 +50,10 @@ int brightness_save_to_vault(void);
 /* Restore from VAULT. Returns 0 on success, -1 on miss/mismatch. */
 int brightness_restore_from_vault(void);
 
+/* Register CHAIN_BRIGHTNESS with the level_filter node. The node's
+ * `state` pointer hosts the canonical level/state struct so brightness
+ * mutations are chain resolutions, not raw static writes. Idempotent.
+ * Returns chain id or -1. */
+int brightness_chain_register(int parent_chain_id);
+
 #endif /* ZEOS_BRIGHTNESS_H */

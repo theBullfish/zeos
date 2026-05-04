@@ -22,7 +22,9 @@
 #include "timer.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "cfa_handle.h"
 #include "compositor.h"
+#include "idle.h"
 #include "keyboard.h"
 #include "serial.h"
 
@@ -41,15 +43,89 @@
 #define LOCK_ENROLL_PICK     1   /* prompt: "Set a PIN" */
 #define LOCK_ENROLL_CONFIRM  2   /* prompt: "Confirm PIN" */
 
-static char     g_stored_pin[LOCK_ENTRY_BUF];
-static char     g_entry[LOCK_ENTRY_BUF];
-static char     g_enroll_first[LOCK_ENTRY_BUF];
-static int      g_entry_len;
-static int      g_active;
-static int      g_flash_frames;          /* >0 = render red flash next draw */
-static int      g_enroll_phase;
-static uint32_t g_failed_attempts;
-static uint32_t g_unlock_count;
+/* The PIN buffers are allocated as static byte arrays then wrapped in
+ * CFA handles at MASQ_SOVEREIGN tier. Direct pointer access is only
+ * permitted via cfa_resolve(); REFERENCE/INTERNAL observers see NULL.
+ *
+ * `g_stored_pin_buf` holds the user's enrolled PIN (NUL-padded ASCII).
+ * `g_entry_buf`      holds the PIN currently being typed at the gate.
+ * `g_enroll_first_buf` holds the first half of the enrollment confirm.
+ *
+ * The handles are created lazily on first use (after CHAIN_IDLE has
+ * registered, so the SOVEREIGN-derived CFA address has a real parent
+ * to inherit from). Until then the raw arrays are accessed directly --
+ * which is fine because we're still in single-threaded boot.
+ */
+static char         g_stored_pin_buf[LOCK_ENTRY_BUF];
+static char         g_entry_buf[LOCK_ENTRY_BUF];
+static char         g_enroll_first_buf[LOCK_ENTRY_BUF];
+static cfa_handle_t g_stored_pin_h;
+static cfa_handle_t g_entry_h;
+static cfa_handle_t g_enroll_first_h;
+static int          g_entry_len;
+static int          g_active;
+static int          g_flash_frames;          /* >0 = render red flash next draw */
+static int          g_enroll_phase;
+static uint32_t     g_failed_attempts;
+static uint32_t     g_unlock_count;
+
+/* Resolve a PIN handle to its raw buffer. Falls back to the underlying
+ * static array when:
+ *   - the handle isn't wrapped yet (pre-CHAIN_IDLE-registration)
+ *   - the current observer can't perceive SOVEREIGN (e.g. inspector
+ *     calls into us during a probe). The fallback keeps the boot path
+ *     working; see cold_boot_gate for why we cannot afford a NULL here.
+ */
+static char *pin_resolve(cfa_handle_t h, char *fallback)
+{
+    if (h == 0) return fallback;
+    void *p = cfa_resolve(h);
+    return p ? (char *)p : fallback;
+}
+
+static void pin_wrap_handles(void)
+{
+    /* Idempotent. Derive a child CFA from CHAIN_IDLE if available, else
+     * a synthetic root rooted at the lockscreen module index 0xLO. */
+    cfa_addr_t base;
+    chain_t *idle = (idle_chain_id() >= 0) ? chain_get(idle_chain_id()) : (chain_t *)0;
+    if (idle) {
+        base = cfa_derive(&idle->addr, 0x10C);   /* 'LOC' */
+    } else {
+        for (int i = 0; i < 8; i++) base.segments[i] = 0;
+        base.segments[0] = 0x10C;
+        base.depth     = 1;
+        base.birth_tsc = timer_read_tsc();
+    }
+    if (g_stored_pin_h == 0) {
+        cfa_addr_t a = cfa_derive(&base, 1);
+        g_stored_pin_h = cfa_wrap(g_stored_pin_buf, sizeof(g_stored_pin_buf),
+                                  a, MASQ_SOVEREIGN);
+    }
+    if (g_entry_h == 0) {
+        cfa_addr_t a = cfa_derive(&base, 2);
+        g_entry_h = cfa_wrap(g_entry_buf, sizeof(g_entry_buf),
+                             a, MASQ_SOVEREIGN);
+    }
+    if (g_enroll_first_h == 0) {
+        cfa_addr_t a = cfa_derive(&base, 3);
+        g_enroll_first_h = cfa_wrap(g_enroll_first_buf, sizeof(g_enroll_first_buf),
+                                    a, MASQ_SOVEREIGN);
+    }
+}
+
+/* Constant-time PIN compare. Walks the FULL buffer regardless of when
+ * the first mismatch occurs so a side-channel observer can't time the
+ * comparison to learn the prefix. Both buffers are NUL-padded to
+ * LOCK_ENTRY_BUF; we walk the whole thing. */
+static int pin_compare_ct(const char *a, const char *b)
+{
+    unsigned diff = 0;
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) {
+        diff |= (unsigned)((unsigned char)a[i] ^ (unsigned char)b[i]);
+    }
+    return diff == 0;
+}
 
 /* ── Local string helpers (freestanding) ──────────────────────── */
 
@@ -68,6 +144,10 @@ static void ls_strncpy(char *dst, const char *src, int cap)
     dst[i] = '\0';
 }
 
+/* Retained for symmetry with other helpers; PIN compares now use the
+ * constant-time pin_compare_ct() instead. Declared so an inadvertent
+ * future call still works even though no current caller exists. */
+__attribute__((unused))
 static int ls_streq(const char *a, const char *b)
 {
     while (*a && *b) {
@@ -89,7 +169,16 @@ static void lockscreen_load_pin(void)
     uint8_t buf[LOCK_ENTRY_BUF];
     for (int i = 0; i < LOCK_ENTRY_BUF; i++) buf[i] = 0;
 
-    g_stored_pin[0] = '\0';
+    /* Make sure the SOVEREIGN-tier handles exist before we touch the
+     * underlying buffers. If the wrap fails (table full -- shouldn't
+     * happen during boot) we fall back to direct static access via
+     * pin_resolve() which returns the raw array. */
+    pin_wrap_handles();
+
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+    /* Zero entire buffer so pin_compare_ct stays well-defined regardless
+     * of how short the new PIN ends up being. */
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) stored[i] = '\0';
 
     int got = vault_read(LOCK_PIN_PATH, buf, sizeof(buf) - 1);
     if (got <= 0) {
@@ -103,23 +192,26 @@ static void lockscreen_load_pin(void)
     /* Sanitize: keep only leading digits up to MAX_LEN. */
     int n = 0;
     for (int i = 0; i < got && n < LOCK_PIN_MAX_LEN; i++) {
-        if (ls_is_digit((char)buf[i])) g_stored_pin[n++] = (char)buf[i];
+        if (ls_is_digit((char)buf[i])) stored[n++] = (char)buf[i];
         else if (buf[i] == 0) break;
     }
-    g_stored_pin[n] = '\0';
+    stored[n] = '\0';
     if (n < LOCK_PIN_MIN_LEN) {
         /* Stored PIN is corrupt -- forget it and require enrollment. */
         kputs("[lockscreen] stored PIN corrupt; clearing.\n");
-        g_stored_pin[0] = '\0';
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) stored[i] = '\0';
         (void)vault_delete(LOCK_PIN_PATH);
     }
 }
 
 void lockscreen_init(void)
 {
+    pin_wrap_handles();
+    char *entry = pin_resolve(g_entry_h, g_entry_buf);
+    char *first = pin_resolve(g_enroll_first_h, g_enroll_first_buf);
     g_entry_len = 0;
-    g_entry[0] = '\0';
-    g_enroll_first[0] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) first[i] = '\0';
     g_enroll_phase = LOCK_ENROLL_OFF;
     g_active = 0;
     g_flash_frames = 0;
@@ -130,7 +222,17 @@ void lockscreen_init(void)
 
 int lockscreen_pin_configured(void)
 {
-    return ls_strlen(g_stored_pin) >= LOCK_PIN_MIN_LEN;
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+    return ls_strlen(stored) >= LOCK_PIN_MIN_LEN;
+}
+
+int lockscreen_cfa_handle_count(void)
+{
+    int n = 0;
+    if (g_stored_pin_h)   n++;
+    if (g_entry_h)        n++;
+    if (g_enroll_first_h) n++;
+    return n;
 }
 
 int lockscreen_set_pin(const char *new_pin)
@@ -143,15 +245,20 @@ int lockscreen_set_pin(const char *new_pin)
     }
     if (n < LOCK_PIN_MIN_LEN || n > LOCK_PIN_MAX_LEN) return -1;
 
-    ls_strncpy(g_stored_pin, new_pin, LOCK_ENTRY_BUF);
-    int wrote = vault_write(LOCK_PIN_PATH, g_stored_pin, (uint32_t)n);
+    pin_wrap_handles();
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+    /* Wipe full buffer first so pin_compare_ct's tail is deterministic. */
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) stored[i] = '\0';
+    ls_strncpy(stored, new_pin, LOCK_ENTRY_BUF);
+    int wrote = vault_write(LOCK_PIN_PATH, stored, (uint32_t)n);
     if (wrote < 0) return -1;
     return 0;
 }
 
 int lockscreen_pin_clear(void)
 {
-    g_stored_pin[0] = '\0';
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) stored[i] = '\0';
     /* vault_delete returns 0 on success or already-absent; either way
      * the in-memory state is now empty. */
     (void)vault_delete(LOCK_PIN_PATH);
@@ -179,15 +286,18 @@ int cold_boot_login_set(int enabled)
 
 void lockscreen_show(void)
 {
+    pin_wrap_handles();
+    char *entry = pin_resolve(g_entry_h, g_entry_buf);
+    char *first = pin_resolve(g_enroll_first_h, g_enroll_first_buf);
     g_entry_len = 0;
-    g_entry[0] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
     g_active = 1;
     g_flash_frames = 0;
     /* If no PIN is configured, fall through to enrollment instead of
      * trapping the user at a validation prompt that nothing satisfies. */
     if (!lockscreen_pin_configured()) {
         g_enroll_phase = LOCK_ENROLL_PICK;
-        g_enroll_first[0] = '\0';
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) first[i] = '\0';
     } else {
         g_enroll_phase = LOCK_ENROLL_OFF;
     }
@@ -209,15 +319,20 @@ uint32_t lockscreen_unlock_count(void)    { return g_unlock_count; }
 
 static void enroll_reset_to_pick(void)
 {
+    char *entry = pin_resolve(g_entry_h, g_entry_buf);
+    char *first = pin_resolve(g_enroll_first_h, g_enroll_first_buf);
     g_enroll_phase = LOCK_ENROLL_PICK;
-    g_enroll_first[0] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) first[i] = '\0';
     g_entry_len = 0;
-    g_entry[0] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
     g_flash_frames = 12;
 }
 
 static void enroll_handle_enter(void)
 {
+    char *entry = pin_resolve(g_entry_h, g_entry_buf);
+    char *first = pin_resolve(g_enroll_first_h, g_enroll_first_buf);
+
     /* Validate length, store/confirm, then either advance or commit. */
     if (g_entry_len < LOCK_PIN_MIN_LEN || g_entry_len > LOCK_PIN_MAX_LEN) {
         g_flash_frames = 12;
@@ -227,26 +342,27 @@ static void enroll_handle_enter(void)
         kput_dec((uint64_t)LOCK_PIN_MAX_LEN);
         kputs(" digits\n");
         g_entry_len = 0;
-        g_entry[0] = '\0';
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
         return;
     }
 
     if (g_enroll_phase == LOCK_ENROLL_PICK) {
-        ls_strncpy(g_enroll_first, g_entry, LOCK_ENTRY_BUF);
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) first[i] = '\0';
+        ls_strncpy(first, entry, LOCK_ENTRY_BUF);
         g_entry_len = 0;
-        g_entry[0] = '\0';
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
         g_enroll_phase = LOCK_ENROLL_CONFIRM;
         return;
     }
 
-    /* CONFIRM phase. */
-    if (!ls_streq(g_entry, g_enroll_first)) {
+    /* CONFIRM phase. Constant-time compare across full buffer. */
+    if (!pin_compare_ct(entry, first)) {
         kputs("[lockscreen] enroll: confirm mismatch; restart\n");
         enroll_reset_to_pick();
         return;
     }
 
-    if (lockscreen_set_pin(g_enroll_first) < 0) {
+    if (lockscreen_set_pin(first) < 0) {
         kputs("[lockscreen] enroll: set_pin failed; restart\n");
         enroll_reset_to_pick();
         return;
@@ -257,11 +373,10 @@ static void enroll_handle_enter(void)
     g_unlock_count++;
     g_active = 0;
     g_entry_len = 0;
-    g_entry[0] = '\0';
-    g_enroll_first[0] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
+    for (int i = 0; i < LOCK_ENTRY_BUF; i++) first[i] = '\0';
     g_flash_frames = 0;
 
-    extern int idle_chain_id(void);
     int id = idle_chain_id();
     if (id >= 0) {
         chain_t *cc = chain_get(id);
@@ -275,10 +390,13 @@ void lockscreen_input(char c)
 {
     if (!g_active) return;
 
+    char *entry  = pin_resolve(g_entry_h,      g_entry_buf);
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+
     if (c == '\b') {
         if (g_entry_len > 0) {
             g_entry_len--;
-            g_entry[g_entry_len] = '\0';
+            entry[g_entry_len] = '\0';
         }
         return;
     }
@@ -291,17 +409,16 @@ void lockscreen_input(char c)
             return;
         }
 
-        if (ls_streq(g_entry, g_stored_pin)) {
+        if (pin_compare_ct(entry, stored)) {
             /* Unlock. */
             g_unlock_count++;
             g_active = 0;
             g_entry_len = 0;
-            g_entry[0] = '\0';
+            for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
             g_flash_frames = 0;
             kputs("[lockscreen] unlocked\n");
 
             /* Bump CHAIN_IDLE vault_version on success too. */
-            extern int idle_chain_id(void);
             int id = idle_chain_id();
             if (id >= 0) {
                 chain_t *cc = chain_get(id);
@@ -320,13 +437,12 @@ void lockscreen_input(char c)
         g_failed_attempts++;
         g_flash_frames = 12;     /* a few hundred ms of red border */
         g_entry_len = 0;
-        g_entry[0] = '\0';
+        for (int i = 0; i < LOCK_ENTRY_BUF; i++) entry[i] = '\0';
 
         kputs("[lockscreen] failed PIN attempt #");
         kput_dec((uint64_t)g_failed_attempts);
         kputc('\n');
 
-        extern int idle_chain_id(void);
         int id = idle_chain_id();
         if (id >= 0) {
             chain_t *cc = chain_get(id);
@@ -338,8 +454,8 @@ void lockscreen_input(char c)
     /* Accept digits only. */
     if (!ls_is_digit(c)) return;
     if (g_entry_len >= LOCK_PIN_MAX_LEN) return;
-    g_entry[g_entry_len++] = c;
-    g_entry[g_entry_len] = '\0';
+    entry[g_entry_len++] = c;
+    entry[g_entry_len] = '\0';
 }
 
 /* ── Drawing ──────────────────────────────────────────────────── */

@@ -32,6 +32,8 @@
 #include "acpi.h"
 #include "vault.h"
 #include "kprint.h"
+#include "chain.h"
+#include "chain_registry.h"
 
 #include <stdint.h>
 
@@ -58,14 +60,46 @@ typedef struct {
     uint8_t  reserved[2];
 } brightness_persist_t;
 
-/* ── Module state ──────────────────────────────────────────────── */
+/* ── Module state ──────────────────────────────────────────────── *
+ *
+ * Per CHAIN_CONTRACT every device-class chain holds its canonical state
+ * on the chain node's `state` pointer. The brightness pipeline has a
+ * single `level_filter` node; its `state` is brightness_state_t below.
+ * The macros G_* alias the canonical fields so the bulk of the existing
+ * brightness.c logic continues to compile unchanged. */
 
-static int      g_initialized = 0;
-static int      g_present     = 0;
-static int      g_settable    = 0;     /* _BCM Method discovered */
-static int      g_levels[BRIGHTNESS_MAX_LEVELS];
-static int      g_level_count = 0;
-static int      g_current_pct = 60;    /* default until VAULT restore */
+typedef struct {
+    int initialized;
+    int present;
+    int settable;
+    int levels[BRIGHTNESS_MAX_LEVELS];
+    int level_count;
+    int current_pct;        /* 0..100 */
+
+    /* Pending change request -- staged by brightness_set(), committed by
+     * the level_filter resolve. Carries a flag for whether the persist
+     * step + vault_version bump should run. */
+    int pending_change;
+    int pending_pct;
+} brightness_state_t;
+
+static brightness_state_t s_bri = {
+    .initialized = 0,
+    .present     = 0,
+    .settable    = 0,
+    .level_count = 0,
+    .current_pct = 60,
+    .pending_change = 0,
+    .pending_pct    = 0,
+};
+static int s_chain_brightness = -1;
+
+#define g_initialized   s_bri.initialized
+#define g_present       s_bri.present
+#define g_settable      s_bri.settable
+#define g_levels        s_bri.levels
+#define g_level_count   s_bri.level_count
+#define g_current_pct   s_bri.current_pct
 
 /* ── AML decode helpers (mirrors battery.c) ───────────────────── */
 
@@ -313,7 +347,10 @@ int brightness_get(void)
     return g_current_pct;
 }
 
-int brightness_set(int pct)
+/* Internal commit path -- runs the snap + persist + (future) _BCM
+ * eval. Called from the chain's level_filter resolve OR directly from
+ * the pre-registration fallback path in brightness_set(). */
+static int brightness_commit_pct(int pct)
 {
     if (!g_present) return -1;
     if (pct < 0)   pct = 0;
@@ -324,8 +361,6 @@ int brightness_set(int pct)
     int snapped_pct = level_to_pct(g_levels[idx]);
     g_current_pct = snapped_pct;
 
-    /* Always persist desired level so future boots / future interpreter
-     * landing pick it up. */
     (void)brightness_save_to_vault();
 
     if (!g_settable) {
@@ -338,6 +373,62 @@ int brightness_set(int pct)
     /* TODO: when an AML interpreter lands, evaluate _BCM(g_levels[idx]).
      * For now we record the desired raw level and report best-effort. */
     return 1;
+}
+
+static void brightness_level_filter_resolve(chain_node_t *self,
+                                            void *input, void *output)
+{
+    (void)input;
+    brightness_state_t *st = (brightness_state_t *)self->state;
+    int *ok = (int *)output;
+    if (ok) *ok = 0;
+    if (!st || !st->pending_change) return;
+
+    int pct = st->pending_pct;
+    st->pending_change = 0;
+
+    int rc = brightness_commit_pct(pct);
+    if (rc >= 0 && s_chain_brightness >= 0) {
+        chain_t *c = chain_get(s_chain_brightness);
+        if (c) c->vault_version++;
+    }
+    if (ok) *ok = (rc >= 0);
+}
+
+int brightness_chain_register(int parent_chain_id)
+{
+    if (s_chain_brightness >= 0) {
+        CHAIN_BRIGHTNESS = s_chain_brightness;
+        return s_chain_brightness;
+    }
+    int id = chain_create("brightness", parent_chain_id, MASQ_INTERNAL);
+    if (id < 0) return -1;
+    int n = chain_add_node(id, "level_filter",
+                           "brightness_request", "brightness_event",
+                           brightness_level_filter_resolve);
+    chain_t *c = chain_get(id);
+    if (c && n >= 0) c->nodes[n].state = &s_bri;
+    s_chain_brightness = id;
+    CHAIN_BRIGHTNESS   = id;
+    return id;
+}
+
+int brightness_set(int pct)
+{
+    if (!g_present) return -1;
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+
+    s_bri.pending_pct    = pct;
+    s_bri.pending_change = 1;
+
+    if (s_chain_brightness >= 0) {
+        (void)chain_resolve(s_chain_brightness);
+        return 1;
+    }
+    /* Fallback path before chain registration. */
+    s_bri.pending_change = 0;
+    return brightness_commit_pct(pct);
 }
 
 int brightness_step(int delta)

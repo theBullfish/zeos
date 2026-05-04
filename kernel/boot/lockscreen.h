@@ -47,6 +47,12 @@ int  lockscreen_pin_clear(void);
 uint32_t lockscreen_failed_attempts(void);
 uint32_t lockscreen_unlock_count(void);
 
+/* Number of CFA handles currently held by the lockscreen (3 once
+ * pin_wrap_handles has run: stored PIN + entry buffer + enroll-first
+ * confirm buffer). Selftest reads this to verify the SOVEREIGN-tier
+ * wrap actually happened. */
+int      lockscreen_cfa_handle_count(void);
+
 /* ── Cold-boot login ─────────────────────────────────────────────
  *
  * The same PIN overlay runs as a login gate at boot when

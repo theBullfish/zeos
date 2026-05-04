@@ -88,6 +88,20 @@ void settings_register_all(void);
 /* Selftest line printer — "Settings .............. N keys ..." */
 void settings_print_selftest_line(void);
 
+/* Register CHAIN_SETTINGS (parent CHAIN_CPU, MASQ_INTERNAL) with the
+ * 4-node pipeline:
+ *   setting_change_request -> validate -> apply -> record
+ *
+ * After registration, settings_set() routes through this chain. The
+ * chain's vault_version bumps once per accepted change so MasQ records
+ * every {key, old, new} mutation as provenance. Idempotent. Returns
+ * the new chain id, or -1 on failure. */
+int settings_chain_register(int parent_chain_id);
+
+/* Lifetime count of accepted setting changes that flowed through the
+ * chain. Selftest reads this to prove the pipeline is alive. */
+uint32_t settings_chain_apply_total(void);
+
 /* Kind label, e.g. "INT_PCT". Stable strings, no allocation. */
 const char *settings_kind_label(settings_kind_t k);
 

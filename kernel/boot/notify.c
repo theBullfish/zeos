@@ -16,6 +16,8 @@
 #include "anim.h"
 #include "timer.h"
 #include "access.h"
+#include "chain.h"
+#include "chain_registry.h"
 #include "compositor.h"
 #include "kprint.h"
 #include "vault.h"
@@ -547,6 +549,145 @@ static void register_settings(void) {
     (void)settings_register(&s_setting_dnd_end);
 }
 
+/* ── Chain pipeline (CHAIN_NOTIFY) ────────────────────────────────
+ *
+ * Pipeline: notify_emit_request -> dnd_filter -> history_sink -> toast_render
+ *
+ * Each notify_send() stages a notification_record_t in the chain's
+ * pending slot, then calls chain_resolve(CHAIN_NOTIFY). Every node in
+ * the pipeline sees the same struct via the scratch buffers; the final
+ * node performs the toast queue update (if was_silenced=0).
+ */
+
+typedef struct {
+    notification_record_t  rec;
+    notify_level_t         level;        /* duplicated from rec for fast paths */
+    int                    valid;
+    int                    queue_idx;    /* which g_notify.queue slot was used */
+} notify_chain_state_t;
+
+static notify_chain_state_t g_notify_chain;
+static uint32_t             g_notify_chain_total;
+static int                  s_chain_notify = -1;
+
+static void notify_emit_request_resolve(chain_node_t *self,
+                                        void *input, void *output)
+{
+    (void)self; (void)input;
+    notification_record_t *out = (notification_record_t *)output;
+    if (!g_notify_chain.valid) {
+        n_memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = g_notify_chain.rec;
+}
+
+static void dnd_filter_resolve(chain_node_t *self,
+                               void *input, void *output)
+{
+    (void)self;
+    notification_record_t *in  = (notification_record_t *)input;
+    notification_record_t *out = (notification_record_t *)output;
+    *out = *in;
+    if (!g_notify_chain.valid) return;
+    int silenced = notify_should_silence(g_notify_chain.level, in->source);
+    out->was_silenced = (uint8_t)(silenced ? 1 : 0);
+    g_notify_chain.rec.was_silenced = out->was_silenced;
+}
+
+static void history_sink_resolve(chain_node_t *self,
+                                 void *input, void *output)
+{
+    (void)self;
+    notification_record_t *in  = (notification_record_t *)input;
+    notification_record_t *out = (notification_record_t *)output;
+    *out = *in;
+    if (!g_notify_chain.valid) return;
+
+    history_append(in);
+
+    /* State change -- bump CHAIN_NOTIFY's vault_version so every
+     * notification is timestamped through MasQ. */
+    if (s_chain_notify >= 0) {
+        chain_t *c = chain_get(s_chain_notify);
+        if (c) c->vault_version++;
+    }
+}
+
+static void toast_render_resolve(chain_node_t *self,
+                                 void *input, void *output)
+{
+    (void)self;
+    notification_record_t *in  = (notification_record_t *)input;
+    notification_record_t *out = (notification_record_t *)output;
+    *out = *in;
+    if (!g_notify_chain.valid) {
+        return;
+    }
+
+    int idx = g_notify_chain.queue_idx;
+    if (idx < 0 || idx >= g_notify.count) {
+        g_notify_chain.valid = 0;
+        return;
+    }
+    notification_t *n = &g_notify.queue[idx];
+
+    /* CRITICAL bypasses everything -- show immediately. */
+    if (g_notify_chain.level == NOTIFY_CRITICAL) {
+        show_notification(idx);
+        g_notify_chain_total++;
+        g_notify_chain.valid = 0;
+        return;
+    }
+
+    /* Silenced: keep in history, mark queue entry read so batched
+     * surfacing skips it later. */
+    if (in->was_silenced) {
+        n->read = 1;
+        if (g_notify.unread > 0) g_notify.unread--;
+        g_notify_chain_total++;
+        g_notify_chain.valid = 0;
+        return;
+    }
+
+    /* Immediate mode: render now (unless Focus Mode swallows). Batch
+     * mode defers to notify_tick(). */
+    if (!g_notify.batch_mode && !focus_active()) {
+        show_notification(idx);
+    }
+    g_notify_chain_total++;
+    g_notify_chain.valid = 0;
+}
+
+int notify_chain_register(int parent_chain_id)
+{
+    if (s_chain_notify >= 0) {
+        CHAIN_NOTIFY = s_chain_notify;
+        return s_chain_notify;
+    }
+    int id = chain_create("notify", parent_chain_id, MASQ_INTERNAL);
+    if (id < 0) return -1;
+
+    chain_add_node(id, "notify_emit_request",
+                   "notify_request", "notification_record",
+                   notify_emit_request_resolve);
+    chain_add_node(id, "dnd_filter",
+                   "notification_record", "notification_record",
+                   dnd_filter_resolve);
+    chain_add_node(id, "history_sink",
+                   "notification_record", "notification_record",
+                   history_sink_resolve);
+    chain_add_node(id, "toast_render",
+                   "notification_record", "notification_event",
+                   toast_render_resolve);
+
+    s_chain_notify = id;
+    CHAIN_NOTIFY = id;
+    return id;
+}
+
+uint32_t notify_chain_emitted_total(void) { return g_notify_chain_total; }
+
 /* ── Public API ── */
 
 void notify_init(void) {
@@ -590,11 +731,9 @@ void notify_send(const char *text, const char *source, notify_level_t level) {
 
     /* If queue is full, drop oldest read notification */
     if (g_notify.count >= NOTIFY_MAX) {
-        /* Shift everything down, dropping index 0 */
         for (int i = 1; i < NOTIFY_MAX; i++)
             g_notify.queue[i - 1] = g_notify.queue[i];
         g_notify.count = NOTIFY_MAX - 1;
-        /* Recalculate unread */
         g_notify.unread = 0;
         for (int i = 0; i < g_notify.count; i++) {
             if (!g_notify.queue[i].read)
@@ -605,57 +744,44 @@ void notify_send(const char *text, const char *source, notify_level_t level) {
     int idx = g_notify.count;
     notification_t *n = &g_notify.queue[idx];
     n_memset(n, 0, sizeof(*n));
-
     n_strncpy(n->text, text ? text : "", NOTIFY_MAX_TEXT);
     n_strncpy(n->source, source ? source : "system", 32);
     n->level = level;
     n->timestamp = timer_read_tsc();
-    n->read = 0;
-    n->visible = 0;
     n->slide_x = (float)(TOAST_W + TOAST_MARGIN);
     n->anim_id = -1;
-
     g_notify.count++;
     g_notify.unread++;
 
-    /* Decide whether DND should silence the toast.
-     * Critical bypasses everything. */
+    /* Build the chain request. dnd_filter sets was_silenced; we leave
+     * it 0 here so the chain owns the decision. */
+    n_memset(&g_notify_chain.rec, 0, sizeof(g_notify_chain.rec));
+    g_notify_chain.rec.tod_unix = tod_now_unix();
+    g_notify_chain.rec.level    = (uint32_t)level;
+    n_strncpy(g_notify_chain.rec.source, n->source, NOTIFY_SOURCE_MAX);
+    n_strncpy(g_notify_chain.rec.title,  n->source, NOTIFY_TITLE_MAX);
+    n_strncpy(g_notify_chain.rec.body,   n->text,   NOTIFY_BODY_MAX);
+    g_notify_chain.level     = level;
+    g_notify_chain.queue_idx = idx;
+    g_notify_chain.valid     = 1;
+
+    if (s_chain_notify >= 0) {
+        (void)chain_resolve(s_chain_notify);
+        return;
+    }
+
+    /* Pre-registration fallback path -- runs the same logic inline so
+     * boot-time notifications still work before chain_registry_init has
+     * created CHAIN_NOTIFY. After registration, every notify flows
+     * through the chain. */
     int silenced = notify_should_silence(level, n->source);
-
-    /* Always log to history. */
-    notification_record_t rec;
-    n_memset(&rec, 0, sizeof(rec));
-    rec.tod_unix     = tod_now_unix();
-    rec.level        = (uint32_t)level;
-    n_strncpy(rec.source, n->source, NOTIFY_SOURCE_MAX);
-    n_strncpy(rec.title,  n->source, NOTIFY_TITLE_MAX);   /* title = source for now */
-    n_strncpy(rec.body,   n->text,   NOTIFY_BODY_MAX);
-    rec.dismissed    = 0;
-    rec.was_silenced = (uint8_t)(silenced ? 1 : 0);
-    history_append(&rec);
-
-    /* CRITICAL bypasses everything -- show immediately */
-    if (level == NOTIFY_CRITICAL) {
-        show_notification(idx);
-        return;
-    }
-
-    /* Silenced by DND (and not whitelisted): skip toast render but it's
-     * already in history. Mark as read so the batched path doesn't
-     * surface it later. */
-    if (silenced) {
-        n->read = 1;
-        if (g_notify.unread > 0) g_notify.unread--;
-        return;
-    }
-
-    /* Immediate mode: show right away (if not in Focus Mode) */
-    if (!g_notify.batch_mode) {
-        if (!focus_active())
-            show_notification(idx);
-    }
-
-    /* Batch mode: will be shown by notify_tick() when interval elapses */
+    g_notify_chain.rec.was_silenced = (uint8_t)(silenced ? 1 : 0);
+    history_append(&g_notify_chain.rec);
+    if (level == NOTIFY_CRITICAL)        { show_notification(idx); }
+    else if (silenced)                   { n->read = 1; if (g_notify.unread) g_notify.unread--; }
+    else if (!g_notify.batch_mode && !focus_active()) { show_notification(idx); }
+    g_notify_chain_total++;
+    g_notify_chain.valid = 0;
 }
 
 void notify_tick(void) {
@@ -898,6 +1024,8 @@ void notify_print_selftest_line(void) {
     if      (g_dnd_mode == DND_OFF)      kputs("off");
     else if (g_dnd_mode == DND_ON)       kputs("on");
     else                                  kputs("schedule");
+    kputs(", chain emits=");
+    kput_dec((uint64_t)g_notify_chain_total);
     kputc('\n');
 }
 

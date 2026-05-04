@@ -53,6 +53,9 @@ extern int CHAIN_BATTERY;
 /* CHAIN_POWER_INPUT is declared in power_buttons.h */
 extern int CHAIN_TRASH_GC;
 extern int CHAIN_IDLE;
+extern int CHAIN_NOTIFY;
+extern int CHAIN_SETTINGS;
+extern int CHAIN_BRIGHTNESS;
 
 /* Lifetime count of bytes the serial chain has decoded into kb_buf.
  * cmd_selftest samples this across a 100ms window to compute drain

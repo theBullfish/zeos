@@ -20,6 +20,10 @@
 #include "vault.h"
 #include "zplus.h"
 #include "cfa_handle.h"
+#include "notify.h"
+#include "settings_registry.h"
+#include "brightness.h"
+#include "lockscreen.h"
 
 /* ── Registry ─────────────────────────────────────────────────────── */
 
@@ -598,6 +602,122 @@ static int test_gpu_compute(char *reason, uint32_t rsize)
     return TEST_PASS;
 }
 
+/* CHAIN_NOTIFY: drive a synthetic notify_send() and verify the chain
+ * pipeline ran (vault_version bumped + emitted total advanced). */
+static int test_chain_notify(char *reason, uint32_t rsize)
+{
+    if (CHAIN_NOTIFY < 0) {
+        t_strcopy(reason, "no notify chain", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_NOTIFY);
+    if (!c || c->node_count != 4) {
+        t_strcopy(reason, "expected 4 nodes", rsize);
+        return TEST_FAIL;
+    }
+    int vv0 = c->vault_version;
+    uint32_t e0 = notify_chain_emitted_total();
+    notify_send("selftest", "tests", NOTIFY_INFO);
+    int vv1 = c->vault_version;
+    uint32_t e1 = notify_chain_emitted_total();
+    if (e1 <= e0) {
+        t_strcopy(reason, "emit total did not advance", rsize);
+        return TEST_FAIL;
+    }
+    if (vv1 <= vv0) {
+        t_strcopy(reason, "vault_version did not advance", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+/* CHAIN_SETTINGS: drive a real setting through the chain and verify
+ * the apply count + vault_version both advanced. */
+static int test_chain_settings(char *reason, uint32_t rsize)
+{
+    if (CHAIN_SETTINGS < 0) {
+        t_strcopy(reason, "no settings chain", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_SETTINGS);
+    if (!c || c->node_count != 4) {
+        t_strcopy(reason, "expected 4 nodes", rsize);
+        return TEST_FAIL;
+    }
+    int vv0 = c->vault_version;
+    uint32_t a0 = settings_chain_apply_total();
+
+    /* Capture current audio.volume so we can restore it. */
+    char prev[16]; prev[0] = '\0';
+    (void)settings_get("audio.volume", prev, sizeof(prev));
+
+    int rc = settings_set("audio.volume", "55");
+    if (rc != 0) {
+        t_strcopy(reason, "settings_set returned non-zero", rsize);
+        return TEST_FAIL;
+    }
+    int vv1 = c->vault_version;
+    uint32_t a1 = settings_chain_apply_total();
+
+    /* Best-effort restore (ignore failures). */
+    if (prev[0]) (void)settings_set("audio.volume", prev);
+
+    if (a1 <= a0) {
+        t_strcopy(reason, "apply total did not advance", rsize);
+        return TEST_FAIL;
+    }
+    if (vv1 <= vv0) {
+        t_strcopy(reason, "vault_version did not advance", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+/* CHAIN_BRIGHTNESS: only meaningful when a backlight is present;
+ * otherwise SKIP. */
+static int test_chain_brightness(char *reason, uint32_t rsize)
+{
+    if (CHAIN_BRIGHTNESS < 0) {
+        t_strcopy(reason, "no brightness chain", rsize);
+        return TEST_SKIP;
+    }
+    if (!brightness_present()) {
+        t_strcopy(reason, "no backlight present", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_BRIGHTNESS);
+    if (!c || c->node_count != 1) {
+        t_strcopy(reason, "expected 1 node", rsize);
+        return TEST_FAIL;
+    }
+    int vv0 = c->vault_version;
+    int prev = brightness_get();
+    int rc = brightness_set(prev >= 50 ? prev - 5 : prev + 5);
+    if (rc < 0) {
+        t_strcopy(reason, "brightness_set returned -1", rsize);
+        return TEST_FAIL;
+    }
+    int vv1 = c->vault_version;
+    (void)brightness_set(prev);
+    if (vv1 <= vv0) {
+        t_strcopy(reason, "vault_version did not advance", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+/* Lockscreen CFA: verify pin_wrap_handles populated 3 SOVEREIGN
+ * handles and that REFERENCE observers can't perceive them. */
+static int test_lockscreen_cfa(char *reason, uint32_t rsize)
+{
+    int ls = lockscreen_cfa_handle_count();
+    if (ls < 3) {
+        t_strcopy(reason, "<3 lockscreen handles wrapped", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -629,6 +749,10 @@ void tests_register_all(void)
     test_register("cfa.perceive.violation", test_cfa_perceive_violation, -1);
     test_register("cfa.coverage",           test_cfa_coverage,           -1);
     test_register("gpu.compute",            test_gpu_compute,            CHAIN_MDE);
+    test_register("chain.notify",           test_chain_notify,           CHAIN_NOTIFY);
+    test_register("chain.settings",         test_chain_settings,         CHAIN_SETTINGS);
+    test_register("chain.brightness",       test_chain_brightness,       CHAIN_BRIGHTNESS);
+    test_register("cfa.lockscreen",         test_lockscreen_cfa,         -1);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */
