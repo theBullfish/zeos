@@ -63,6 +63,7 @@
 #include "suspend.h"
 #include "acpi.h"
 #include "battery.h"
+#include "brightness.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -219,6 +220,7 @@ static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
 static void cmd_volume(const char *args);
 static void cmd_mute(const char *args);
+static void cmd_brightness(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
@@ -629,6 +631,7 @@ static const struct shell_cmd commands[] = {
     {"beep",    "play a 440 Hz tone via HDA audio", cmd_beep,   VIS_ALWAYS},
     {"volume",  "show or set master volume (volume [0-100|+N|-N])", cmd_volume, VIS_ALWAYS},
     {"mute",    "toggle master mute",              cmd_mute,    VIS_ALWAYS},
+    {"brightness", "show or set display brightness (brightness [0-100|+N|-N])", cmd_brightness, VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
     /* FAT32 (USB / SD / ESP / NVMe) read+write */
@@ -2623,6 +2626,69 @@ static void cmd_mute(const char *args)
     kputs("%)\n");
 }
 
+/* ── Display brightness ────────────────────────────────────────────
+ *
+ *   brightness          show current + supported levels
+ *   brightness <0-100>  set absolute (snaps to nearest supported)
+ *   brightness +N       relative up   (clamps at 100)
+ *   brightness -N       relative down (clamps at 0)
+ *
+ * Backed by ACPI _BCL/_BCM scan in brightness.c. On firmware where
+ * _BCM routes through SMI we persist the desired level but cannot
+ * drive the panel until an AML interpreter lands.
+ */
+static void cmd_brightness(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == '\0') {
+        if (!brightness_present()) {
+            kputs("  no backlight (desktop or QEMU virtio-gpu)\n");
+            return;
+        }
+        kputs("  brightness: ");
+        kput_dec((uint64_t)brightness_get());
+        kputs("%\n  supported levels: ");
+        int lv[BRIGHTNESS_MAX_LEVELS];
+        int n = brightness_levels(lv, BRIGHTNESS_MAX_LEVELS);
+        for (int i = 0; i < n; i++) {
+            if (i) kputc(' ');
+            kput_dec((uint64_t)lv[i]);
+        }
+        kputs(" (");
+        kput_dec((uint64_t)n);
+        kputs(" steps)\n");
+        return;
+    }
+
+    int sign = 0;
+    if (*args == '+') { sign = +1; args++; }
+    else if (*args == '-') { sign = -1; args++; }
+
+    int n = 0, any = 0;
+    while (*args >= '0' && *args <= '9') {
+        n = n * 10 + (*args - '0');
+        args++;
+        any = 1;
+    }
+    if (!any) {
+        kputs("  usage: brightness [0-100|+N|-N]\n");
+        return;
+    }
+
+    int rc;
+    if (sign != 0) rc = brightness_step(sign * n);
+    else           rc = brightness_set(n);
+
+    if (rc < 0) {
+        kputs("  no backlight available\n");
+        return;
+    }
+    kputs("  brightness: ");
+    kput_dec((uint64_t)brightness_get());
+    kputs("%\n");
+}
+
 /* Selftest kernel_fn for the MDE chain probe. The body is what
  * actually runs on the CPU backend: read the .answer field, return
  * it. Real work, real return value. */
@@ -3366,6 +3432,23 @@ vault_done:
             kputc('\n');
             passes++;
         }
+    }
+
+    /* Display brightness — ACPI _BCL/_BCM pattern scan. QEMU's
+     * virtio-gpu has no backlight surface; that's the expected state
+     * on a desktop / VM and PASSes. */
+    kputs("  Brightness ............ ");
+    if (brightness_present()) {
+        int lv[BRIGHTNESS_MAX_LEVELS];
+        int nlv = brightness_levels(lv, BRIGHTNESS_MAX_LEVELS);
+        kput_dec((uint64_t)brightness_get());
+        kputs("% (");
+        kput_dec((uint64_t)nlv);
+        kputs(" levels available)\n");
+        passes++;
+    } else {
+        kputs("no backlight (desktop or QEMU virtio-gpu)\n");
+        passes++;
     }
 
     kputs("  Persistence ........... ");

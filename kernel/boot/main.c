@@ -702,6 +702,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         (void)hda_audio_restore_from_vault();
     }
 
+    /* Display brightness — ACPI _BCL pattern-scan for supported levels
+     * and _BCM detection. Real laptops have a backlight; QEMU
+     * virtio-gpu doesn't (no _BCL package). Restore the last user
+     * preference from /display/brightness if persisted. */
+    {
+        extern void brightness_init(void);
+        extern int  brightness_restore_from_vault(void);
+        brightness_init();
+        (void)brightness_restore_from_vault();
+    }
+
     /* Z+ runtime registry — backs `chain ... { ... }` blocks declared
      * in user Z+ programs with persistent kernel chain entries. Idempotent. */
     {
