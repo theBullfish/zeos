@@ -1,21 +1,37 @@
 /*
  * Zeos — Kernel print (dual output)
+ *
+ * In normal mode, kputs/kputc write to BOTH the framebuffer console
+ * and the serial port. In splash mode (set by splash_init), fb output
+ * is suppressed so the splash stays clean; serial output is unchanged
+ * so the boot log is fully captured for debug.
  */
 
 #include "kprint.h"
 #include "fb.h"
 #include "serial.h"
+#include "timer.h"
+#include "timeofday.h"
 
 static int serial_ready;
+static int splash_mode;   /* 1 = serial-only, 0 = dual */
+static uint64_t s_first_tsc;  /* TSC at first kprint_log_prefix call -- "boot" anchor */
 
 void kprint_init(void)
 {
     serial_ready = 1;
+    splash_mode = 0;
+}
+
+void kprint_set_splash_mode(int on)
+{
+    splash_mode = on ? 1 : 0;
 }
 
 void kputc(char c)
 {
-    fb_putc(c);
+    if (!splash_mode)
+        fb_putc(c);
     if (serial_ready)
         serial_putc(c);
 }
@@ -23,7 +39,8 @@ void kputc(char c)
 void kputs(const char *s)
 {
     while (*s) {
-        fb_putc(*s);
+        if (!splash_mode)
+            fb_putc(*s);
         if (serial_ready)
             serial_putc(*s);
         s++;

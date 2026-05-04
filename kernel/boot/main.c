@@ -38,6 +38,7 @@
 #include "signal.h"
 #include "serial.h"
 #include "kprint.h"
+#include "splash.h"
 #include "shell.h"
 #include "usb_xhci.h"
 #include "usb_hid.h"
@@ -397,6 +398,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     serial_init();
     kprint_init();
 
+    /* Engage boot splash on the GOP framebuffer. From here through
+     * chain_registry_init the user sees a wordmark + progress bar
+     * instead of the kernel debug stream. Serial logs continue. */
+    splash_init();
+    splash_progress("boot services released", 4);
+
     kputs("================================================\n");
     kputs("  Zeos\n");
     kputs("  The first operating system with proprioception.\n");
@@ -459,6 +466,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     kputs("Zeos is alive.\n\n");
 
     /* Initialize physical memory manager */
+    splash_progress("PMM", 8);
     kputs("Initializing PMM... ");
     pmm_init(&boot_info.mmap, &boot_info.fb);
     if (pmm_free_pages() == 0)
@@ -469,11 +477,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     kputs(" MB total.\n");
 
     /* Initialize virtual memory */
+    splash_progress("VMM", 16);
     kputs("Setting up VMM... ");
     vmm_init();
     kputs("done (4GB identity + higher-half).\n");
 
     /* Initialize kernel heap */
+    splash_progress("heap", 24);
     kputs("Initializing heap... ");
     heap_init(512);  /* 2 MB initial heap (TLS handshake peak ~50 KB) */
     if (heap_total_bytes() == 0)
@@ -487,6 +497,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * Must happen BEFORE IDT init — IDT gates reference GDT selectors.
      * The TSS provides IST stacks for safe exception handling.
      */
+    splash_progress("GDT+IDT", 32);
     kputs("Loading GDT+TSS... ");
     gdt_init();
     kputs("done.\n");
@@ -497,6 +508,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     kputs("done (vectors 0x00-0x14 + 0x20-0x2F).\n");
 
     /* Initialize PCI (uses I/O ports, safe after IDT is up) */
+    splash_progress("PCI scan", 40);
     kputs("Scanning PCI bus... ");
     pci_init(boot_info.rsdp);
     int pci_count = pci_enumerate();
@@ -516,6 +528,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * because nobody acknowledges them. msix_dispatch() now writes
      * LAPIC EOI at the tail of every dispatch.
      */
+    splash_progress("ACPI / LAPIC / IOAPIC", 48);
     kputs("ACPI MADT... ");
     if (acpi_init(boot_info.rsdp) == 0) {
         kputs("ok ("); kput_dec((uint64_t)acpi_madt()->lapic_count);
@@ -540,6 +553,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Initialize xHCI (USB 3.x) host controller. Polling-based; safe
      * even before timer/IDT IRQs are wired. Enumerates root-hub ports
      * and reads the device descriptor of any attached device. */
+    splash_progress("USB xHCI", 56);
     if (xhci_init() == 0) {
         kputs("USB xHCI: ready (");
         kput_dec(xhci_device_count());
@@ -578,6 +592,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
 
     /* Block device dispatcher — picks NVMe, AHCI, or USB-MSC. */
+    splash_progress("block + audio + FAT32", 64);
     block_init();
 
     /* Intel HD Audio -- minimum-viable controller + one output stream.
@@ -602,6 +617,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     }
 
     /* Initialize keyboard */
+    splash_progress("input devices", 72);
     kputs("Initializing keyboard... ");
     keyboard_init();
     kputs("done.\n");
@@ -620,13 +636,26 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     __asm__ volatile("sti");
 
     /* Initialize timer (1000 Hz PIT + TSC calibration) */
+    splash_progress("timer calibration", 80);
     kputs("Calibrating timer... ");
     timer_init(1000);
     kputs("TSC freq: ");
     kput_dec(timer_tsc_freq() / 1000000);
     kputs(" MHz.\n");
 
+    /* Wall clock: read CMOS RTC and bind to TSC for fractional seconds.
+     * If CMOS is absent (some hypervisors) we'll print a TSC-only line
+     * here, then persistence_init() will try to load /time/last-known.bin
+     * and upgrade us to TOD_SRC_PERSISTED. */
+    {
+        extern void tod_init(void);
+        extern void tod_print_selftest_line(void);
+        tod_init();
+        tod_print_selftest_line();
+    }
+
     /* Initialize signal chain engine */
+    splash_progress("signals + VAULT", 88);
     kputs("Signal chain engine... ");
     sig_init();
     kputs("ready.\n\n");
@@ -647,10 +676,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * NIC discovery + system chains: compositor, panel, dock, desktop,
      * shell, browser, inspector, palette, AND audio -- the first hardware
      * driver in the native paradigm. See docs/PARADIGM_CONVERSION.md. */
+    splash_progress("chain registry", 95);
     {
         extern int chain_registry_init(void);
         chain_registry_init();
     }
+
+    /* Splash dismissed once the chain graph exists. From here the
+     * scheduler-driven shell takes over the framebuffer. */
+    splash_dismiss();
 
     /* With the registry built, replay the persisted snapshot onto the
      * live chains (B3 priors, vault_version, watchdog/backoff
