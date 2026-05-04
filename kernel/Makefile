@@ -76,6 +76,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/net_rtl8188eu.c \
            boot/block.c \
            boot/block_chain.c \
+           boot/mde_chain.c \
            boot/gpt.c \
            boot/fat32.c \
            boot/installer.c \

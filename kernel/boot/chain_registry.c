@@ -23,6 +23,7 @@
 #include "hda.h"
 #include "net_chain.h"
 #include "block_chain.h"
+#include "mde_chain.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -257,6 +258,14 @@ int chain_registry_init(void)
      * drives are enumerated when this chain registers. */
     if (block_chain_register(CHAIN_CPU) != 0) {
         kputs("[chain_registry] WARN: block chain registration failed\n");
+    }
+
+    /* MDE-as-a-chain: the routing engine itself exposed as a chain so
+     * userspace + Z+ can submit generic compute work via the same
+     * pipeline contract. CPU backend wired today; GPU/Goya/FPGA slots
+     * present in device_select for future drivers. */
+    if (mde_chain_register(CHAIN_CPU) != 0) {
+        kputs("[chain_registry] WARN: mde chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

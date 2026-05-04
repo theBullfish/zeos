@@ -38,5 +38,6 @@ extern int CHAIN_AUDIO;
 extern int CHAIN_NET_TX;
 extern int CHAIN_NET_RX;
 extern int CHAIN_BLOCK;
+extern int CHAIN_MDE;
 
 #endif /* ZEOS_CHAIN_REGISTRY_H */

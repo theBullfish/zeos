@@ -45,6 +45,7 @@
 #include "chain.h"
 #include "cfa_handle.h"
 #include "chain_registry.h"
+#include "mde_chain.h"
 #include "serial.h"
 #include "persona_filter.h"
 #include "persona_anim.h"
@@ -1245,6 +1246,18 @@ static const char zp_chain_native[] =
     "pulse ~> log\n"
     "chain heartbeat { pulse beat ring log }\n";
 
+/* compute_via_mde — Z+ dispatches a node's resolve through CHAIN_MDE.
+ * MDE picks the CPU backend, admits to the schedule (vault++), runs
+ * the kernel_fn, emits the result (vault++). */
+static const char zp_compute_via_mde[] =
+    "// Z+ submits compute work via CHAIN_MDE.\n"
+    "trigger : emit(1)\n"
+    "square  : input -> delta -> output\n"
+    "runner  : input -> compute.run(square)\n"
+    "log     : input -> tap.log\n"
+    "trigger -> runner -> log\n"
+    "chain workload { trigger runner log }\n";
+
 struct zp_builtin {
     const char *name;
     const char *desc;
@@ -1259,6 +1272,7 @@ static const struct zp_builtin builtins[] = {
     {"fork",     "fork demo — one source, three paths",             zp_fork},
     {"pipeline", "gate + math combined — transform then filter",    zp_pipeline},
     {"chain_native", "Z+ -> live kernel chains (audio + tap.log)",  zp_chain_native},
+    {"compute_via_mde", "Z+ submits compute through CHAIN_MDE",     zp_compute_via_mde},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -2119,6 +2133,16 @@ static void cmd_beep(const char *args)
     else { kputs(" error rc="); kput_dec((uint64_t)(int64_t)rc); kputs("\n"); }
 }
 
+/* Selftest kernel_fn for the MDE chain probe. The body is what
+ * actually runs on the CPU backend: read the .answer field, return
+ * it. Real work, real return value. */
+struct shell_mde_selftest_args { int answer; };
+int shell_mde_selftest_kfn(void *args)
+{
+    struct shell_mde_selftest_args *a = (struct shell_mde_selftest_args *)args;
+    return a ? a->answer : -1;
+}
+
 static void cmd_selftest(const char *args)
 {
     (void)args;
@@ -2338,6 +2362,60 @@ vault_done:
         chain_dump(CHAIN_NET_TX);
         chain_dump(CHAIN_NET_RX);
         if (tn == 4 && rn == 4) passes++; else fails++;
+    } else {
+        kputs("not registered\n");
+        fails++;
+    }
+
+    /* MDE chain: submit a trivial compute_request through CHAIN_MDE
+     * and verify (a) the kernel_fn really ran (rc=42), (b)
+     * vault_version bumped at least twice (schedule admit +
+     * result_emit completion), (c) the schedule slot was released
+     * (inflight=0 after submit). This is the chain-side proof that
+     * MDE is exposed AS a chain, not just routing infrastructure. */
+    kputs("  MDE chain ............. ");
+    if (CHAIN_MDE >= 0) {
+        chain_t *mc = chain_get(CHAIN_MDE);
+        int mn = mc ? mc->node_count : 0;
+        int vv_before = mc ? mc->vault_version : 0;
+        int infl_before = mde_chain_inflight();
+
+        /* Trivial real kernel_fn: returns args->answer. */
+        struct shell_mde_selftest_args thunk = { .answer = 42 };
+        mde_compute_request_t req = {
+            .kernel_fn   = shell_mde_selftest_kfn,
+            .args        = &thunk,
+            .rc          = 0,
+            .elapsed_tsc = 0,
+        };
+        int srv = mde_chain_submit(&req);
+        int vv_after = mc ? mc->vault_version : 0;
+        int infl_after = mde_chain_inflight();
+        int vv_delta = vv_after - vv_before;
+
+        kputs("nodes=");
+        kput_dec((uint64_t)mn);
+        kputs(", rc=");
+        kput_dec((uint64_t)(uint32_t)srv);
+        kputs(", vault_version ");
+        kput_dec((uint64_t)vv_before);
+        kputs("->");
+        kput_dec((uint64_t)vv_after);
+        kputs(", inflight ");
+        kput_dec((uint64_t)infl_before);
+        kputs("->");
+        kput_dec((uint64_t)infl_after);
+        kputs("\n");
+        chain_dump(CHAIN_MDE);
+
+        if (mn == 5 && srv == 42 && vv_delta >= 2 &&
+            req.rc == 42 && req.elapsed_tsc > 0 && infl_after == 0) {
+            kputs("  MDE chain submit ...... PASS\n");
+            passes++;
+        } else {
+            kputs("  MDE chain submit ...... FAIL\n");
+            fails++;
+        }
     } else {
         kputs("not registered\n");
         fails++;

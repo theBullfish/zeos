@@ -1,0 +1,21 @@
+// 31_compute_via_mde.zp
+// Z+ submits compute work through CHAIN_MDE.
+//
+// trigger fires a value (1). compute.run(square) packages the
+// square node's resolve as a kernel_fn and submits it through
+// CHAIN_MDE. MDE picks the CPU backend (the only one wired today),
+// admits to the schedule (vault_version++), executes the resolve,
+// emits the result (vault_version++). tap.log observes the result
+// on the way out.
+//
+// MasQ: every state change (admit + complete) bumps CHAIN_MDE
+// vault_version per the chain contract.
+
+trigger : emit(1)
+square  : input -> delta -> output
+runner  : input -> compute.run(square)
+log     : input -> tap.log
+
+trigger -> runner -> log
+
+chain workload { trigger runner log }

@@ -24,6 +24,7 @@
 #include "hda.h"
 #include "net_chain.h"
 #include "block_chain.h"
+#include "mde_chain.h"
 #include "vault.h"
 #include "kprint.h"
 
@@ -338,6 +339,7 @@ static int verb_to_type(const char *t, enum zp_node_type *out)
     if (zp_streq(t, "vault.put"))   { *out = ZP_VAULT_PUT;  return 1; }
     if (zp_streq(t, "vault.get"))   { *out = ZP_VAULT_GET;  return 1; }
     if (zp_streq(t, "tap.log"))     { *out = ZP_TAP_LOG;    return 1; }
+    if (zp_streq(t, "compute.run")) { *out = ZP_COMPUTE_RUN; return 1; }
     return 0;
 }
 
@@ -601,6 +603,17 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                         if (vt == ZP_VAULT_PUT || vt == ZP_VAULT_GET) {
                             lexer_token(lex, &p); /* key string */
                             if (p.type == TOK_STRING)
+                                zp_strcpy(prog->nodes[prog->node_count - 1].fmt,
+                                          p.text, ZP_MAX_STRING);
+                            while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
+                                   && p.type != TOK_EOF)
+                                lexer_token(lex, &p);
+                        } else if (vt == ZP_COMPUTE_RUN) {
+                            /* compute.run(target_node_ident) — record the
+                             * target name in fmt; resolved to a sig_idx
+                             * during compile. */
+                            lexer_token(lex, &p);
+                            if (p.type == TOK_IDENT)
                                 zp_strcpy(prog->nodes[prog->node_count - 1].fmt,
                                           p.text, ZP_MAX_STRING);
                             while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
@@ -1089,6 +1102,86 @@ static int zp_proc_vault_get(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
+/* compute.run(target) — submit a synchronous compute_request through
+ * CHAIN_MDE. The kernel_fn handed to MDE invokes the target Z+ node's
+ * resolve, threading the input value through and capturing its output.
+ * This completes the verb set so Z+ can dispatch arbitrary compute the
+ * same way it dispatches audio/net/fs/vault. */
+static int32_t zp_compute_target_chain[ZP_MAX_NODES]; /* target sig chain id */
+static int32_t zp_compute_target_idx[ZP_MAX_NODES];   /* target sig node idx */
+static int32_t zp_compute_input_val[ZP_MAX_NODES];    /* threaded value */
+static int32_t zp_compute_output_val[ZP_MAX_NODES];   /* result of node */
+
+typedef struct {
+    int      chain_id;
+    int      target_idx;
+    int32_t  input_val;
+    int32_t  output_val;
+} zp_compute_kfn_args_t;
+
+static int zp_compute_kfn(void *args_ptr)
+{
+    zp_compute_kfn_args_t *a = (zp_compute_kfn_args_t *)args_ptr;
+    if (!a) return -1;
+    struct sig_chain *sc = sig_get_chain(a->chain_id);
+    if (!sc) return -1;
+    if (a->target_idx < 0 || a->target_idx >= sc->node_count) return -1;
+    struct sig_node *target = &sc->nodes[a->target_idx];
+    if (!target->process) return -1;
+
+    /* Stage input/output buffers on the target node and run its
+     * resolve directly. We don't propagate along edges -- compute.run
+     * is a one-shot invocation, the result is read back here. */
+    sig_data_write_i32(&target->input, a->input_val);
+    target->output.size = 0;
+    int rc = target->process(target, &target->input, &target->output);
+    a->output_val = sig_data_read_i32(&target->output);
+    return rc;
+}
+
+static int zp_proc_compute_run(struct sig_node *node, struct sig_data *in,
+                                struct sig_data *out)
+{
+    int idx = node->id;
+    if (idx < 0 || idx >= ZP_MAX_NODES) {
+        sig_data_write_i32(out, 0);
+        return 0;
+    }
+    int32_t v = sig_data_read_i32(in);
+    zp_compute_input_val[idx] = v;
+    zp_compute_output_val[idx] = 0;
+
+    int target_chain = zp_compute_target_chain[idx];
+    int target_idx   = zp_compute_target_idx[idx];
+    if (target_chain < 0 || target_idx < 0) {
+        /* Target unresolved (parser/compile gap). Pass-through. */
+        sig_data_write_i32(out, v);
+        return 0;
+    }
+
+    zp_compute_kfn_args_t args = {
+        .chain_id   = target_chain,
+        .target_idx = target_idx,
+        .input_val  = v,
+        .output_val = 0,
+    };
+    mde_compute_request_t req = {
+        .kernel_fn   = zp_compute_kfn,
+        .args        = &args,
+        .rc          = 0,
+        .elapsed_tsc = 0,
+    };
+    int submit_rc = mde_chain_submit(&req);
+    zp_compute_output_val[idx] = args.output_val;
+    /* On submit failure, return 0 so the chain still flows. The
+     * CHAIN_MDE vault_version + B3 capture the failure. */
+    if (submit_rc < 0)
+        sig_data_write_i32(out, 0);
+    else
+        sig_data_write_i32(out, args.output_val);
+    return 0;
+}
+
 /* tap.log — pure observer. Logs the value to kprint and passes it through
  * unchanged so the chain can keep flowing. */
 static int zp_proc_tap_log(struct sig_node *node, struct sig_data *in,
@@ -1328,6 +1421,11 @@ int zp_compile(struct zp_program *prog)
             proc = zp_proc_tap_log;
             user_data = 0;
             break;
+        case ZP_COMPUTE_RUN:
+            proc = zp_proc_compute_run;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_MDE;
+            break;
         }
 
         int idx = sig_node_add(chain, decl->name, proc, user_data);
@@ -1359,7 +1457,30 @@ int zp_compile(struct zp_program *prog)
                 delta_history[idx] = 0;
                 delta_has_prev[idx] = 0;
             }
+            if (decl->type == ZP_COMPUTE_RUN) {
+                zp_compute_target_chain[idx] = -1;
+                zp_compute_target_idx[idx]   = -1;
+                zp_compute_input_val[idx]    = 0;
+                zp_compute_output_val[idx]   = 0;
+            }
         }
+    }
+
+    /* Resolve compute.run targets now that every node has a sig_idx. */
+    for (int i = 0; i < prog->node_count; i++) {
+        struct zp_node_decl *decl = &prog->nodes[i];
+        if (decl->type != ZP_COMPUTE_RUN) continue;
+        int self_idx = decl->sig_idx;
+        if (self_idx < 0 || self_idx >= ZP_MAX_NODES) continue;
+        int target = find_node(prog, decl->fmt);
+        if (target < 0) {
+            kputs("Z+ error: compute.run unknown target '");
+            kputs(decl->fmt);
+            kputs("'\n");
+            return -1;
+        }
+        zp_compute_target_chain[self_idx] = chain;
+        zp_compute_target_idx[self_idx]   = prog->nodes[target].sig_idx;
     }
 
     /* Create edges */

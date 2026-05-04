@@ -73,6 +73,7 @@ enum zp_node_type {
     ZP_VAULT_PUT,   /* vault.put   -> vault_save_config */
     ZP_VAULT_GET,   /* vault.get   -> vault_load_config */
     ZP_TAP_LOG,     /* tap.log     -> kprint side-channel observation */
+    ZP_COMPUTE_RUN, /* compute.run(node) -> CHAIN_MDE submit, kernel_fn = node's resolve */
 };
 
 /* A parsed node declaration */
