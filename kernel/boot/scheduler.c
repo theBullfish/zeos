@@ -10,17 +10,26 @@
  * chain->backoff_skip_threshold / chain->backoff_skip_every.
  *
  * MasQ records every tick with errors, slow-resolve incidents,
- * aggregate slow ticks (whole-tick budget overrun), and watchdog
- * kills (chains whose previous-tick resolve never returned in time).
+ * aggregate slow ticks (whole-tick budget overrun), preempt kills
+ * (chains hard-killed mid-resolve by the LAPIC timer), and post-hoc
+ * watchdog kills (defensive: chains whose deadline expired but
+ * preempt-longjmp itself faulted somehow).
  *
- * NOTE: Watchdog is post-hoc until LAPIC timer is wired; once
- * preemption lands the watchdog enforces forward progress.
+ * NOTE: Watchdog enforces forward progress via LAPIC timer +
+ * setjmp/longjmp. The post-hoc deadline sweep at start-of-tick is
+ * the defensive secondary path (covers the case where the longjmp
+ * itself faulted; should normally stay 0 on a healthy boot).
  *
- * PREEMPTION INTEGRATION POINT
- * When lapic.c provides lapic_timer_oneshot(), wire it here:
- *   - Before each chain_resolve(): arm timer for chain->watchdog_timeout_us
- *   - In timer ISR: if chain still resolving, longjmp out to scheduler_run loop
- * Until then, watchdog is post-hoc detection only.
+ * PREEMPTION INTEGRATION POINT — WIRED
+ * Per-resolve preemption uses LAPIC timer vector 0xEF:
+ *   1. scheduler_preempt_resolve() saves a setjmp checkpoint, sets
+ *      g_resolving_chain_id, arms lapic_timer_oneshot() for the
+ *      chain's watchdog_timeout_us, then calls chain_resolve().
+ *   2. On normal return: timer is disarmed, checkpoint cleared.
+ *   3. On timer expiry: lapic_timer_isr marks the chain CHAIN_ERROR,
+ *      bumps b3_beta, logs a preempt-kill record, EOIs the LAPIC,
+ *      and longjmps back to step 1's checkpoint with rc=1. The
+ *      scheduler then continues with the next chain.
  *
  * Idle: HLT until next interrupt. Wake: any IRQ-driven chain
  * (kbd, mouse, NIC RX, NVMe completion, GPU vsync) bumps a pending
@@ -43,6 +52,10 @@
 #include "kprint.h"
 #include "io.h"
 #include "lockscreen.h"
+#include "lapic.h"
+#include "idt.h"
+
+#define SCHED_PREEMPT_VECTOR 0xEFu
 
 #define SCHED_LOG_RING 256
 
@@ -50,6 +63,7 @@
 #define SLE_TICK         0u
 #define SLE_AGG_SLOW     1u
 #define SLE_WDOG_KILL    2u
+#define SLE_PREEMPT_KILL 3u
 
 typedef struct {
     uint8_t  kind;                  /* SLE_* */
@@ -90,7 +104,75 @@ static uint32_t s_live_chains_last;
 
 /* New aggregate counters. */
 static uint32_t s_agg_slow_total;     /* whole-tick budget overruns */
-static uint32_t s_watchdog_kills;     /* post-hoc watchdog kills */
+static uint32_t s_watchdog_kills;     /* post-hoc watchdog kills (defensive secondary) */
+static uint32_t s_preempt_kills;      /* LAPIC-timer-driven mid-resolve kills (primary) */
+
+/* ── Preemption state ─────────────────────────────────────────────────
+ * g_resolving_chain_id is the chain currently inside chain_resolve().
+ * The LAPIC timer ISR uses this to know whom to kill on expiry.
+ * -1 = no resolve in flight (timer fires here are spurious).
+ *
+ * g_preempt_jmpbuf is the setjmp checkpoint into scheduler_preempt_resolve.
+ * On timer expiry the ISR longjmps here with rc=1, abandoning the
+ * interrupted handler stack; the scheduler then continues normally.
+ */
+typedef uint64_t zeos_jmpbuf_t[8];   /* rbx, rbp, r12-r15, rsp, rip */
+static volatile int g_resolving_chain_id = -1;
+static zeos_jmpbuf_t g_preempt_jmpbuf;
+static volatile uint64_t g_resolve_arm_tsc;  /* tsc when timer was armed */
+/* g_preempt_armed reserved for future stale-timer race mitigation;
+ * currently the ISR relies solely on g_resolving_chain_id >= 0. */
+static volatile int g_preempt_armed = 0;
+
+/* Minimal x86_64 setjmp / longjmp for kernel use. We're freestanding
+ * so the libc versions aren't available. Save callee-saved regs + rsp
+ * + return rip; restore on longjmp. Ring 0 only. */
+/* NOTE: parameters appear unused to the compiler because we read them
+ * directly from %rdi/%rsi in the asm body. Suppress with #pragma. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+
+static __attribute__((returns_twice, naked, noinline))
+int zeos_setjmp(zeos_jmpbuf_t buf)
+{
+    __asm__ volatile(
+        "movq %%rbx, 0(%%rdi)\n"
+        "movq %%rbp, 8(%%rdi)\n"
+        "movq %%r12, 16(%%rdi)\n"
+        "movq %%r13, 24(%%rdi)\n"
+        "movq %%r14, 32(%%rdi)\n"
+        "movq %%r15, 40(%%rdi)\n"
+        "leaq 8(%%rsp), %%rax\n"      /* rsp at caller (pre-call) */
+        "movq %%rax, 48(%%rdi)\n"
+        "movq (%%rsp), %%rax\n"       /* return address */
+        "movq %%rax, 56(%%rdi)\n"
+        "xorl %%eax, %%eax\n"
+        "ret\n"
+        ::: "memory");
+}
+
+static __attribute__((noreturn, naked, noinline))
+void zeos_longjmp(zeos_jmpbuf_t buf, int rc)
+{
+    __asm__ volatile(
+        "movq 0(%%rdi),  %%rbx\n"
+        "movq 8(%%rdi),  %%rbp\n"
+        "movq 16(%%rdi), %%r12\n"
+        "movq 24(%%rdi), %%r13\n"
+        "movq 32(%%rdi), %%r14\n"
+        "movq 40(%%rdi), %%r15\n"
+        "movq 48(%%rdi), %%rsp\n"
+        "movq 56(%%rdi), %%rdx\n"      /* saved return rip into rdx */
+        "movl %%esi, %%eax\n"          /* rc */
+        "testl %%eax, %%eax\n"
+        "jnz 1f\n"
+        "movl $1, %%eax\n"             /* longjmp(0) -> return 1 */
+        "1:\n"
+        "jmp *%%rdx\n"
+        ::: "memory");
+}
+
+#pragma GCC diagnostic pop
 
 /* Per-chain cumulative timing for "top slow chain" reporting. */
 static uint64_t s_resolve_count[MAX_CHAINS];
@@ -118,6 +200,7 @@ uint32_t scheduler_errors_last(void)    { return s_errors_last; }
 uint32_t scheduler_slow_resolves_total(void) { return s_slow_resolves_total; }
 uint32_t scheduler_aggregate_slow_total(void) { return s_agg_slow_total; }
 uint32_t scheduler_watchdog_kills(void) { return s_watchdog_kills; }
+uint32_t scheduler_preempt_kills(void) { return s_preempt_kills; }
 
 void scheduler_init(void)
 {
@@ -131,6 +214,10 @@ void scheduler_init(void)
     s_live_chains_last = 0;
     s_agg_slow_total = 0;
     s_watchdog_kills = 0;
+    s_preempt_kills = 0;
+    g_resolving_chain_id = -1;
+    g_resolve_arm_tsc = 0;
+    g_preempt_armed = 0;
     for (int i = 0; i < MAX_CHAINS; i++) {
         s_skip_phase[i] = 0;
         s_resolve_count[i] = 0;
@@ -142,7 +229,14 @@ void scheduler_init(void)
     s_tick_avg_us_last = 0;
     kputs("[scheduler] chain resolution as scheduling primitive\n");
     kputs("[scheduler] quantum=1000us, B3 backoff enabled (per-chain tunable)\n");
-    kputs("[scheduler] watchdog=post-hoc (preemption pending LAPIC timer)\n");
+    kputs("[scheduler] preemption=LAPIC timer vec 0xEF + setjmp/longjmp\n");
+    kputs("[scheduler] watchdog=post-hoc (defensive secondary path)\n");
+
+    /* Install LAPIC timer ISR for preemption. The handler runs from
+     * the standard isr_dispatch path; on a real expiry it longjmps
+     * out (never returns), abandoning the interrupt stack frame. */
+    extern void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err);
+    idt_register((uint8_t)SCHED_PREEMPT_VECTOR, scheduler_lapic_timer_isr);
 }
 
 int scheduler_should_skip(int chain_id)
@@ -248,6 +342,133 @@ static void log_watchdog_kill(int chain_id, float ran_ms)
     e->kind = SLE_WDOG_KILL;
     e->top_ids[0] = (int16_t)chain_id;
     e->top_ms[0] = ran_ms;
+}
+
+static void log_preempt_kill(int chain_id, float ran_ms)
+{
+    sched_log_entry_t *e = log_alloc();
+    e->kind = SLE_PREEMPT_KILL;
+    e->top_ids[0] = (int16_t)chain_id;
+    e->top_ms[0] = ran_ms;
+}
+
+/* ── LAPIC preempt-timer ISR ──────────────────────────────────────────
+ * Called from isr_dispatch when vector 0xEF fires. If a chain_resolve
+ * is in flight (g_resolving_chain_id >= 0), the resolve hung past its
+ * watchdog budget: we mark the chain CHAIN_ERROR, bump b3_beta, log a
+ * preempt_kill, EOI the LAPIC, and longjmp back to the scheduler loop.
+ * Otherwise the timer fired after we already disarmed (race) -- EOI
+ * and return normally.
+ *
+ * NOTE: longjmp from inside an ISR is safe only because we're ring 0
+ * with no privilege transition; the iretq frame and pushed registers
+ * on the interrupted stack just become abandoned scratch space below
+ * the restored RSP. The LAPIC EOI must precede the longjmp so the
+ * next interrupt on this vector can be accepted.
+ */
+void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err)
+{
+    (void)vec; (void)err;
+
+    int id = g_resolving_chain_id;
+    if (id < 0) {
+        /* Spurious — timer fired after we'd already disarmed and the
+         * scheduler isn't currently inside any chain_resolve. EOI and
+         * return without longjmping. */
+        lapic_timer_disarm();
+        lapic_eoi();
+        return;
+    }
+
+    /* Defensive: clear state BEFORE the longjmp so a re-entrant
+     * timer can't double-fire through us. */
+    g_preempt_armed = 0;
+    g_resolving_chain_id = -1;
+    lapic_timer_disarm();
+
+    chain_t *c = chain_get(id);
+    uint64_t now_tsc = timer_read_tsc();
+    uint64_t freq = timer_tsc_freq();
+    float ran_ms = 0.0f;
+    if (freq > 0 && g_resolve_arm_tsc != 0) {
+        ran_ms = (float)(now_tsc - g_resolve_arm_tsc) * 1000.0f / (float)freq;
+    }
+
+    if (c) {
+        c->status = CHAIN_ERROR;
+        c->b3_beta += 1.0f;
+        c->b3_observations++;
+        c->watchdog_deadline_tsc = 0;
+    }
+
+    s_preempt_kills++;
+    log_preempt_kill(id, ran_ms);
+
+    kputs("[sched] preempted chain ");
+    kput_dec((uint64_t)id);
+    kputs(" \"");
+    kputs(c ? c->name : "?");
+    kputs("\" after ");
+    kput_dec((uint64_t)(ran_ms * 1000.0f));   /* us */
+    kputs("us\n");
+
+    lapic_eoi();
+
+    /* Bypass the rest of isr_dispatch + the assembly stub epilogue;
+     * resume directly at the setjmp checkpoint. The interrupt stack
+     * frame becomes unreachable but harmless. */
+    zeos_longjmp(g_preempt_jmpbuf, 1);
+}
+
+/* Wrap a single chain_resolve(id) with LAPIC-timer-driven preemption.
+ * Returns 0 on normal resolve completion, -1 if the resolve was
+ * preempted (chain has already been marked CHAIN_ERROR by the ISR). */
+int scheduler_preempt_resolve(int id)
+{
+    chain_t *c = chain_get(id);
+    if (!c) return chain_resolve(id);
+
+    /* Compute timer arm count in LAPIC ticks. If LAPIC isn't ready
+     * (calibration failed), fall through to unprotected resolve --
+     * post-hoc watchdog still catches hangs at next tick boundary. */
+    uint32_t to_us = c->watchdog_timeout_us;
+    if (to_us == 0) to_us = 100000;
+    uint32_t lt_per_us = lapic_ticks_per_us();
+    if (!lapic_ready() || lt_per_us == 0) {
+        return chain_resolve(id);
+    }
+
+    /* Cap the arm count so we don't overflow the 32-bit LAPIC init
+     * count register on absurdly large timeouts. */
+    uint64_t ticks64 = (uint64_t)to_us * (uint64_t)lt_per_us;
+    if (ticks64 > 0xFFFFFFFFULL) ticks64 = 0xFFFFFFFFULL;
+    if (ticks64 < 1) ticks64 = 1;
+
+    /* setjmp returns 0 on initial save, nonzero on longjmp from ISR. */
+    int rc = zeos_setjmp(g_preempt_jmpbuf);
+    if (rc != 0) {
+        /* Came back via the ISR — chain has been killed.
+         * State was cleared before the longjmp; just report. */
+        return -1;
+    }
+
+    g_resolve_arm_tsc = timer_read_tsc();
+    g_resolving_chain_id = id;
+    /* Set the armed flag last, just before the LAPIC write that
+     * actually starts the countdown. */
+    g_preempt_armed = 1;
+    lapic_timer_oneshot((uint32_t)ticks64, (uint8_t)SCHED_PREEMPT_VECTOR);
+
+    int err = chain_resolve(id);
+
+    /* Successful return — clear the armed flag FIRST so any pending
+     * stale interrupt the LAPIC has queued is treated as spurious by
+     * the ISR, then disarm the LVT. */
+    g_preempt_armed = 0;
+    lapic_timer_disarm();
+    g_resolving_chain_id = -1;
+    g_resolve_arm_tsc = 0;
+    return err;
 }
 
 /* Walk the chain registry: count LIVE chains, count chains whose last
@@ -555,6 +776,8 @@ void scheduler_log_dump(int last_n)
     kput_dec((uint64_t)s_agg_slow_total);
     kputs(" watchdog_kills=");
     kput_dec((uint64_t)s_watchdog_kills);
+    kputs(" preempt_kills=");
+    kput_dec((uint64_t)s_preempt_kills);
     kputc('\n');
 
     /* Walk back from head. */
@@ -605,6 +828,16 @@ void scheduler_log_dump(int last_n)
         }
         case SLE_WDOG_KILL: {
             kputs("  WDOG_KILL tick=");
+            kput_dec(e->tick);
+            kputs(" id=");
+            kput_dec((uint64_t)e->top_ids[0]);
+            kputs(" ran=");
+            kput_dec((uint64_t)e->top_ms[0]);
+            kputs("ms\n");
+            break;
+        }
+        case SLE_PREEMPT_KILL: {
+            kputs("  PREEMPT_KILL tick=");
             kput_dec(e->tick);
             kputs(" id=");
             kput_dec((uint64_t)e->top_ids[0]);

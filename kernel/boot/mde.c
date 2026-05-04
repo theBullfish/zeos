@@ -513,7 +513,11 @@ int mde_resolve_all(void)
          * to use (via mde_resolve_chain propagation). Here we just
          * resolve in order and track B3 outcomes.
          */
-        err = chain_resolve(id);
+        /* Wrap each chain_resolve() with LAPIC-timer-driven preemption.
+         * If the resolve hangs past chain->watchdog_timeout_us, the
+         * timer ISR longjmps back into scheduler_preempt_resolve which
+         * returns -1; the chain has already been marked CHAIN_ERROR. */
+        err = scheduler_preempt_resolve(id);
         if (c) c->last_resolved_tick = now_tick;
 
         /* Update B3 beliefs for this chain */

@@ -189,3 +189,12 @@ void lapic_timer_oneshot(uint32_t ticks, uint8_t vector)
     lapic_write(LAPIC_LVT_TIMER,  LAPIC_TIMER_ONESHOT | vector);
     lapic_write(LAPIC_TIMER_INIT, ticks);
 }
+
+void lapic_timer_disarm(void)
+{
+    if (!g_ready) return;
+    /* Zero init count first to halt any in-flight count, then mask the LVT
+     * so a residual armed expiry doesn't deliver after we cleared state. */
+    lapic_write(LAPIC_TIMER_INIT, 0);
+    lapic_write(LAPIC_LVT_TIMER,  LAPIC_LVT_MASKED);
+}

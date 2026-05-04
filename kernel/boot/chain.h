@@ -93,10 +93,10 @@ typedef struct chain {
 
     /* Scheduler watchdog -- post-hoc hang detection.
      * watchdog_deadline_tsc: armed before chain_resolve(); 0 = inactive.
-     * watchdog_timeout_us:   per-chain timeout, default 100000 (100ms).
-     * Once LAPIC timer is wired this becomes preemptive; until then the
-     * scheduler scans deadlines at the start of the NEXT tick and marks
-     * any chain whose deadline expired as CHAIN_ERROR. */
+     * watchdog_timeout_us:   per-chain timeout, default 500000 (500ms).
+     * Preemption uses the LAPIC timer (vector 0xEF) to longjmp out of a
+     * hung resolve; the post-hoc deadline sweep at start-of-tick is the
+     * defensive secondary path for the case where longjmp itself faults. */
     uint64_t        watchdog_deadline_tsc;
     uint32_t        watchdog_timeout_us;
 

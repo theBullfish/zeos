@@ -216,6 +216,10 @@ ISR_STUB_NOERR(0x2d)
 ISR_STUB_NOERR(0x2e)
 ISR_STUB_NOERR(0x2f)
 
+/* LAPIC timer preemption vector — 0xEF. Used by scheduler to preempt
+ * runaway chain_resolve() calls via setjmp/longjmp. */
+ISR_STUB_NOERR(0xef)
+
 /* MSI-X stubs (vectors 0x40-0x7F, 64 vectors) */
 ISR_STUB_NOERR(0x40) ISR_STUB_NOERR(0x41) ISR_STUB_NOERR(0x42) ISR_STUB_NOERR(0x43)
 ISR_STUB_NOERR(0x44) ISR_STUB_NOERR(0x45) ISR_STUB_NOERR(0x46) ISR_STUB_NOERR(0x47)
@@ -376,6 +380,11 @@ void idt_init(void)
         idt_set_gate(0x40 + i, (uint64_t)msix_stubs[i], IDT_GATE_INTERRUPT);
         idt[0x40 + i].selector = cs;
     }
+
+    /* LAPIC timer preemption vector at 0xEF — wired so the scheduler
+     * can arm a one-shot timer and longjmp out of a hung chain_resolve. */
+    idt_set_gate(0xEF, (uint64_t)isr_stub_0xef, IDT_GATE_INTERRUPT);
+    idt[0xEF].selector = cs;
 
     /* Initialize MSI-X subsystem (clear vector pool). */
     msix_init();

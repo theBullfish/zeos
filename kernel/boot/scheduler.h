@@ -45,6 +45,16 @@ uint32_t scheduler_aggregate_slow_total(void);
  * because their watchdog_deadline_tsc expired between resolves. */
 uint32_t scheduler_watchdog_kills(void);
 
+/* Preempt kills: chains hard-killed mid-resolve by the LAPIC timer ISR
+ * (vector 0xEF). Primary preemption path; should usually be 0. */
+uint32_t scheduler_preempt_kills(void);
+
+/* Resolve a single chain under LAPIC-timer preemption. Used by
+ * mde_resolve_all to wrap each chain_resolve() so a hung resolve can't
+ * eat the scheduler. Returns 0 on success, -1 on resolve error or
+ * preempt kill. */
+int scheduler_preempt_resolve(int id);
+
 /* Top slow chain across the lifetime of this run.
  *   *id_out  = chain id with the largest cumulative resolve time
  *              (-1 if no slow events yet)

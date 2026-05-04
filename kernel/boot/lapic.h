@@ -28,4 +28,7 @@ uint32_t lapic_ticks_per_us(void);
  * `ticks` is at the divider configured in lapic_init (16). */
 void     lapic_timer_oneshot(uint32_t ticks, uint8_t vector);
 
+/* Disarm a previously-armed timer (mask LVT, zero init count). Idempotent. */
+void     lapic_timer_disarm(void);
+
 #endif /* ZEOS_LAPIC_H */

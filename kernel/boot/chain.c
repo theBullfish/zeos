@@ -93,7 +93,7 @@ void chain_init(void)
         registry[i].parent_id = -1;
         registry[i].vault_version = 0;
         registry[i].watchdog_deadline_tsc = 0;
-        registry[i].watchdog_timeout_us   = 100000;  /* 100ms default */
+        registry[i].watchdog_timeout_us   = 500000;  /* 500ms default */
         registry[i].backoff_skip_threshold = 0.5f;
         registry[i].backoff_skip_every     = 4;
         registry[i].resolve_interval_ticks = 0;
@@ -156,7 +156,9 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     registry[slot].parent_id = parent_id;
     registry[slot].vault_version = 1;
     registry[slot].watchdog_deadline_tsc = 0;
-    registry[slot].watchdog_timeout_us   = 100000;  /* 100ms default */
+    registry[slot].watchdog_timeout_us   = 500000;  /* 500ms default; preempt
+                                                       only fires for clearly
+                                                       hung chains. */
     registry[slot].backoff_skip_threshold = 0.5f;
     registry[slot].backoff_skip_every     = 4;
     registry[slot].resolve_interval_ticks = 0;
