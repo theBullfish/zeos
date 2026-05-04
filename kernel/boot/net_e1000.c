@@ -12,6 +12,20 @@
  *
  * Polling-only for Alpha -- no interrupts.
  * Uses 16-entry descriptor rings for both TX and RX.
+ *
+ * KNOWN LIMITATION (QEMU 8.2.2):
+ *   The 82540EM emulator has a non-deterministic RX delivery race under
+ *   polling-only mode. DHCP DISCOVER goes out and OFFER comes back on the
+ *   wire (verified via filter-dump pcap), but TPR (Total Packets Received)
+ *   stays 0 in 7/8 runs even with correct ring discipline, RDH=0/RDT=N-1
+ *   init, RDTR/RADV=0, RAL/RAH programmed, BAM/UPE/MPE set. RXDCTL writes
+ *   are silently ignored on this model. Same flakiness on 82545EM/82544GC.
+ *   virtio-net is 100% reliable; use it for QEMU testing.
+ *   Real-hardware behavior (CN60 I219, server 82574L) is unaffected — this
+ *   is purely a QEMU emulator quirk under polling. Wiring MSI-X (TODO when
+ *   chain MSI-X migration lands) is the canonical fix.
+ *   See net_chain.c for the chain integration; this driver is the
+ *   hardware_dma backend only.
  */
 
 #include "net_e1000.h"
