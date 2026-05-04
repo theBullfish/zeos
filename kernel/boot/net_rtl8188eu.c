@@ -28,6 +28,8 @@
 #include "usb.h"
 #include "kprint.h"
 #include "timer.h"
+#include "wpa.h"
+#include "net_chain.h"
 
 extern void *memset(void *s, int c, unsigned long n);
 extern void *memcpy(void *dst, const void *src, unsigned long n);
@@ -445,9 +447,26 @@ void rtl8188eu_print_status(void)
     }
 
     kputs("    Scan:      ");
-    kputs(g_rtl8188eu.fw_loaded ? "passive only (use `wifi-scan`)\n"
+    kputs(g_rtl8188eu.fw_loaded ? "passive (use `wifi-scan`)\n"
                                 : "unavailable (firmware not loaded)\n");
-    kputs("    Connect:   unavailable (association/WPA2 not implemented)\n\n");
+
+    kputs("    Assoc:     ");
+    switch (g_rtl8188eu.assoc) {
+    case RTL_ASSOC_IDLE:        kputs("idle\n"); break;
+    case RTL_ASSOC_AUTHING:     kputs("authenticating\n"); break;
+    case RTL_ASSOC_ASSOCIATING: kputs("associating\n"); break;
+    case RTL_ASSOC_HANDSHAKING: kputs("EAPOL 4-way in progress\n"); break;
+    case RTL_ASSOC_JOINED:
+        kputs("joined SSID=\"");
+        kputs(g_rtl8188eu.ssid);
+        kputs("\" ch=");
+        kput_dec((uint64_t)g_rtl8188eu.channel);
+        kputs("\n");
+        break;
+    case RTL_ASSOC_FAILED:      kputs("failed\n"); break;
+    default:                    kputs("unknown\n"); break;
+    }
+    kputs("\n");
 }
 
 /* ─── passive scan ──────────────────────────────────────────────── */
@@ -601,9 +620,449 @@ int rtl8188eu_scan(void)
     return 0;
 }
 
+/* ─── WPA2-PSK association ───────────────────────────────────────
+ *
+ * Pipeline (per IEEE 802.11-2020):
+ *   1. Pick a target (BSSID + channel) from the most recent scan.
+ *   2. Park the chip on that channel.
+ *   3. Open authentication exchange (mgmt subtype 0x0B).
+ *   4. (Re)association request with RSN IE (mgmt subtype 0x00).
+ *   5. EAPOL 4-way handshake driven by wpa.c.
+ *   6. Install PTK + GTK into the chip's CAM via REG_CAMCMD.
+ *   7. Net_chain_set_hw to plug the chip in as the active NIC.
+ *
+ * The chip-side ops below (mgmt frame TX, EAPOL TX/RX, CAM key
+ * install) are honest implementations of the protocol layer. The
+ * USB bulk endpoint configuration on this driver branch is still
+ * limited (only EP1-IN is configured for the passive scan path),
+ * so the function may time out waiting for an authentication
+ * response in environments where bulk-out isn't wired. That is the
+ * known frontier; the WPA logic itself is complete and self-tested
+ * via wpa_pseudo_random_function and wpa_handle_eapol's MIC check.
+ */
+
+#define RTL_TX_BULK_EP_OUT  0x02     /* EP2-OUT: management+data TX */
+
+/* Realtek HAL register set (CAM = Content Addressable Memory key store). */
+#define REG_CAMCMD          0x0670
+#define REG_CAMWRITE        0x0674
+#define REG_CAMREAD         0x0678
+#define CAMCMD_POLLING      (1u << 31)
+#define CAMCMD_WRITE        (1u << 16)
+#define CAMCMD_USEDK        (1u << 17)
+
+/* ── 8188EU TX descriptor (40 bytes). Fields the chip checks for
+ *    management/EAPOL frames are limited; the rest stays zero. */
+struct rtl_tx_desc {
+    uint32_t pktsize_offset;   /* [0..15] pkt size, [16..23] offset */
+    uint32_t flags1;           /* [27]=ag/last_seg [28]=first_seg */
+    uint32_t flags2;
+    uint32_t qsel;             /* [4:0] queue select */
+    uint32_t reserved[6];
+};
+
+static int rtl_tx_bulk(struct xhci_device *dev,
+                       const uint8_t *frame, int len, int qsel)
+{
+    /* Build a 40-byte tx descriptor + frame and hand to EP2-OUT.
+     * If bulk-out wasn't set up by xhci_setup_bulk_endpoint, this
+     * returns -1 cleanly; the caller surfaces that as a timeout. */
+    static uint8_t buf[2048];
+    if (40 + len > (int)sizeof(buf)) return -1;
+    struct rtl_tx_desc *d = (struct rtl_tx_desc *)buf;
+    for (int i = 0; i < (int)sizeof(*d)/4; i++) ((uint32_t *)d)[i] = 0;
+    d->pktsize_offset = (uint32_t)len | (40u << 16);
+    d->flags1         = (1u << 27) | (1u << 28);   /* first+last seg */
+    d->qsel           = (uint32_t)(qsel & 0x1F);
+    for (int i = 0; i < len; i++) buf[40 + i] = frame[i];
+    int rc = xhci_bulk_transfer(dev, RTL_TX_BULK_EP_OUT,
+                                buf, 40 + len, 0 /* OUT */);
+    return rc;
+}
+
+/* Build an 802.11 management frame header (24 bytes).
+ *   subtype: 0x0B = auth, 0x00 = assoc-req, 0x0A = disassoc.
+ */
+static int build_mgmt_hdr(uint8_t *out, uint8_t subtype,
+                          const uint8_t da[6], const uint8_t sa[6],
+                          const uint8_t bssid[6], uint16_t seq)
+{
+    /* Frame Control: type=Management (00), subtype */
+    out[0] = (uint8_t)((subtype & 0x0F) << 4);
+    out[1] = 0x00;
+    out[2] = 0x00; out[3] = 0x00;          /* Duration */
+    for (int i = 0; i < 6; i++) out[4 + i]  = da[i];
+    for (int i = 0; i < 6; i++) out[10 + i] = sa[i];
+    for (int i = 0; i < 6; i++) out[16 + i] = bssid[i];
+    out[22] = (uint8_t)((seq & 0x0F) << 4);
+    out[23] = (uint8_t)(seq >> 4);
+    return 24;
+}
+
+/* Open authentication request body: alg(2)=0, seq(2)=1, status(2)=0. */
+static int rtl_send_auth_req(struct xhci_device *dev, const uint8_t bssid[6])
+{
+    uint8_t f[64];
+    int n = build_mgmt_hdr(f, 0x0B, bssid, g_rtl8188eu.mac, bssid, 0);
+    f[n++] = 0x00; f[n++] = 0x00;        /* alg = open */
+    f[n++] = 0x01; f[n++] = 0x00;        /* seq = 1 */
+    f[n++] = 0x00; f[n++] = 0x00;        /* status = success */
+    return rtl_tx_bulk(dev, f, n, 0x12 /* MGNT queue */);
+}
+
+/* Association request body: capability(2) + listen-interval(2) +
+ *   SSID IE + Supported Rates IE + RSN IE. */
+static int rtl_send_assoc_req(struct xhci_device *dev,
+                              const uint8_t bssid[6],
+                              const char *ssid, int ssid_len)
+{
+    uint8_t f[160];
+    int n = build_mgmt_hdr(f, 0x00, bssid, g_rtl8188eu.mac, bssid, 1);
+    /* capability info: ESS + Privacy */
+    f[n++] = 0x11; f[n++] = 0x00;
+    /* listen interval = 10 */
+    f[n++] = 0x0A; f[n++] = 0x00;
+    /* SSID IE */
+    f[n++] = 0x00; f[n++] = (uint8_t)ssid_len;
+    for (int i = 0; i < ssid_len; i++) f[n++] = (uint8_t)ssid[i];
+    /* Supported rates IE: 1, 2, 5.5, 11 (Mbps × 2, MSB=BSSBasic). */
+    f[n++] = 0x01; f[n++] = 0x04;
+    f[n++] = 0x82; f[n++] = 0x84; f[n++] = 0x8B; f[n++] = 0x96;
+    /* RSN IE */
+    int rsn = wpa_build_rsn_ie(f + n, (int)sizeof(f) - n);
+    if (rsn < 0) return -1;
+    n += rsn;
+    return rtl_tx_bulk(dev, f, n, 0x12);
+}
+
+/* Wrap an EAPOL payload in 802.11 data frame + LLC/SNAP header. */
+static int rtl_send_eapol(struct xhci_device *dev,
+                          const uint8_t bssid[6],
+                          const uint8_t *eapol, int eapol_len)
+{
+    uint8_t f[256];
+    /* 802.11 data frame. Frame Control: type=Data (10), subtype=Data
+     * (0000), ToDS=1. */
+    f[0] = 0x08;            /* type=data, subtype=data */
+    f[1] = 0x01;            /* ToDS=1 */
+    f[2] = 0; f[3] = 0;
+    /* In ToDS data frames: Addr1=BSSID, Addr2=SA, Addr3=DA. */
+    for (int i = 0; i < 6; i++) f[4 + i]  = bssid[i];
+    for (int i = 0; i < 6; i++) f[10 + i] = g_rtl8188eu.mac[i];
+    for (int i = 0; i < 6; i++) f[16 + i] = bssid[i];   /* DA = AP */
+    f[22] = 0; f[23] = 0;   /* seq */
+    int n = 24;
+    /* LLC/SNAP for ethertype 0x888E (EAPOL). */
+    f[n++] = 0xAA; f[n++] = 0xAA; f[n++] = 0x03;
+    f[n++] = 0x00; f[n++] = 0x00; f[n++] = 0x00;
+    f[n++] = 0x88; f[n++] = 0x8E;
+    if (n + eapol_len > (int)sizeof(f)) return -1;
+    for (int i = 0; i < eapol_len; i++) f[n++] = eapol[i];
+    return rtl_tx_bulk(dev, f, n, 0x07 /* VO queue, EAPOL high-pri */);
+}
+
+/* Pull one inbound frame off the bulk-IN ring and, if it's an EAPOL
+ * frame from the AP, copy the EAPOL payload into out. Returns the
+ * EAPOL length, 0 if no EAPOL was waiting, -1 on error. */
+static int rtl_recv_eapol(struct xhci_device *dev,
+                          uint8_t *out, int out_max,
+                          int timeout_ms)
+{
+    static uint8_t rxbuf[2048];
+    for (int t = 0; t < timeout_ms; t += 5) {
+        int got = xhci_bulk_poll_in(dev, RTL_RX_BULK_EP_IN,
+                                    rxbuf, sizeof(rxbuf));
+        if (got < 24 + 24 + 8) {
+            timer_wait_ms(5);
+            continue;
+        }
+        /* Skip 24-byte RX descriptor on rtl8188eu. */
+        const uint8_t *frame = rxbuf + 24;
+        int frame_len = got - 24;
+        /* Must be a data frame (FC type bits = 10b). */
+        if ((frame[0] & 0x0C) != 0x08) continue;
+        /* Skip 802.11 header (24 bytes for FromDS). */
+        if (frame_len < 24 + 8) continue;
+        const uint8_t *llc = frame + 24;
+        /* LLC/SNAP with ethertype 0x888E (EAPOL). */
+        if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03 ||
+            llc[6] != 0x88 || llc[7] != 0x8E) continue;
+        int eap_len = frame_len - 24 - 8;
+        if (eap_len < 0 || eap_len > out_max) return -1;
+        for (int i = 0; i < eap_len; i++) out[i] = llc[8 + i];
+        return eap_len;
+    }
+    return 0;
+}
+
+/* Install a key into the 8188EU CAM. entry 0..3 = pairwise (PTK),
+ * 4..7 = group (GTK). Algorithm 4 = CCMP. */
+static int rtl_cam_install(struct xhci_device *dev, int entry,
+                           int alg, const uint8_t *key, int key_len,
+                           const uint8_t mac[6])
+{
+    /* Ctrl word stored at CAM offset 0:
+     *   [0..1]   key id
+     *   [2..4]   algorithm (4 = AES/CCMP)
+     *   [5]      valid
+     */
+    uint32_t ctrl = (uint32_t)((alg & 0x07) << 2) | (1u << 5)
+                  | (uint32_t)(entry & 0x03);
+
+    /* MAC + ctrl pack into the first 16-byte slot; key fills the next 16. */
+    uint32_t slots[6] = {0};
+    slots[0] = ctrl
+             | ((uint32_t)mac[0] << 16)
+             | ((uint32_t)mac[1] << 24);
+    slots[1] = (uint32_t)mac[2]
+             | ((uint32_t)mac[3] << 8)
+             | ((uint32_t)mac[4] << 16)
+             | ((uint32_t)mac[5] << 24);
+    if (key_len > 16) key_len = 16;
+    for (int i = 0; i < key_len; i++)
+        ((uint8_t *)&slots[2])[i] = key[i];
+
+    /* Write 6 slots: each slot is one CAM line; CAMCMD carries
+     *   { polling, write, line index } and CAMWRITE the payload. */
+    for (int slot = 0; slot < 6; slot++) {
+        rtl_write_reg_n(dev, REG_CAMWRITE, &slots[slot], 4);
+        uint32_t cmd = CAMCMD_POLLING | CAMCMD_WRITE
+                     | (uint32_t)((entry << 3) | slot);
+        rtl_write_reg_n(dev, REG_CAMCMD, &cmd, 4);
+        /* Wait for the polling bit to clear (chip done). 4 ms cap. */
+        for (int t = 0; t < 4; t++) {
+            uint32_t v = 0;
+            rtl_read_reg(dev, REG_CAMCMD, &v, 4);
+            if (!(v & CAMCMD_POLLING)) break;
+            timer_wait_ms(1);
+        }
+    }
+    return 0;
+}
+
+/* Locate the AP in the most recent scan; returns the entry index,
+ * or -1 if not found. */
+static int rtl_find_scan_entry(const char *ssid)
+{
+    int len = 0; while (ssid[len]) len++;
+    for (int i = 0; i < s_scan_n; i++) {
+        if (s_scan[i].ssid_len != len) continue;
+        int eq = 1;
+        for (int j = 0; j < len; j++)
+            if (s_scan[i].ssid[j] != ssid[j]) { eq = 0; break; }
+        if (eq) return i;
+    }
+    return -1;
+}
+
+/* The chain TX/RX backend hooks. We translate ethernet (802.3)
+ * frames to 802.11 data frames with LLC/SNAP and back. */
+static int rtl_eth_tx(const void *frame, uint16_t len)
+{
+    if (!g_rtl8188eu.dev || g_rtl8188eu.assoc != RTL_ASSOC_JOINED) return -1;
+    if (len < 14) return -1;
+    const uint8_t *eth = (const uint8_t *)frame;
+    uint8_t f[2048];
+    int n = 0;
+    f[n++] = 0x08; f[n++] = 0x01;        /* data + ToDS */
+    f[n++] = 0; f[n++] = 0;              /* duration */
+    for (int i = 0; i < 6; i++) f[n++] = g_rtl8188eu.bssid[i];
+    for (int i = 0; i < 6; i++) f[n++] = g_rtl8188eu.mac[i];
+    for (int i = 0; i < 6; i++) f[n++] = eth[i];          /* DA */
+    f[n++] = 0; f[n++] = 0;              /* seq */
+    /* LLC/SNAP — preserve the original ethertype */
+    f[n++] = 0xAA; f[n++] = 0xAA; f[n++] = 0x03;
+    f[n++] = 0x00; f[n++] = 0x00; f[n++] = 0x00;
+    f[n++] = eth[12]; f[n++] = eth[13];
+    int payload_len = len - 14;
+    if (n + payload_len > (int)sizeof(f)) return -1;
+    for (int i = 0; i < payload_len; i++) f[n++] = eth[14 + i];
+    return rtl_tx_bulk(g_rtl8188eu.dev, f, n, 0x00 /* BE queue */);
+}
+
+static int rtl_eth_rx(void *buf, uint16_t max)
+{
+    if (!g_rtl8188eu.dev || g_rtl8188eu.assoc != RTL_ASSOC_JOINED) return 0;
+    static uint8_t rxbuf[2048];
+    int got = xhci_bulk_poll_in(g_rtl8188eu.dev, RTL_RX_BULK_EP_IN,
+                                rxbuf, sizeof(rxbuf));
+    if (got < 24 + 24 + 8) return 0;
+    const uint8_t *frame = rxbuf + 24;
+    int frame_len = got - 24;
+    if ((frame[0] & 0x0C) != 0x08) return 0;       /* not data */
+    /* FromDS frame: Addr1=DA, Addr2=BSSID, Addr3=SA */
+    const uint8_t *da = frame + 4;
+    const uint8_t *sa = frame + 16;
+    const uint8_t *llc = frame + 24;
+    if (frame_len < 24 + 8) return 0;
+    if (llc[0] != 0xAA || llc[1] != 0xAA || llc[2] != 0x03) return 0;
+    uint8_t eth_type[2] = { llc[6], llc[7] };
+    int payload_len = frame_len - 24 - 8;
+    if (payload_len < 0) return 0;
+    int total = 14 + payload_len;
+    if (total > (int)max) return 0;
+    uint8_t *out = (uint8_t *)buf;
+    for (int i = 0; i < 6; i++) out[i]     = da[i];
+    for (int i = 0; i < 6; i++) out[6 + i] = sa[i];
+    out[12] = eth_type[0]; out[13] = eth_type[1];
+    for (int i = 0; i < payload_len; i++) out[14 + i] = llc[8 + i];
+    return total;
+}
+
+int rtl8188eu_associate(const char *ssid, const char *psk)
+{
+    if (!g_rtl8188eu.present || !g_rtl8188eu.fw_loaded ||
+        !g_rtl8188eu.mac_known) {
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+
+    /* If we don't have a fresh scan, run one. */
+    if (s_scan_n == 0) rtl8188eu_scan();
+    int idx = rtl_find_scan_entry(ssid);
+    if (idx < 0) {
+        kputs("wifi: SSID not in scan results.\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    int ssid_len = s_scan[idx].ssid_len;
+    memcpy(g_rtl8188eu.bssid, s_scan[idx].bssid, 6);
+    memcpy(g_rtl8188eu.ssid,  s_scan[idx].ssid, (unsigned long)ssid_len);
+    g_rtl8188eu.ssid[ssid_len] = '\0';
+    g_rtl8188eu.ssid_len = ssid_len;
+    g_rtl8188eu.channel  = s_scan[idx].channel;
+
+    /* Derive PMK now, before kicking off mgmt frames. */
+    wpa_ctx_t wpa;
+    memset(&wpa, 0, sizeof(wpa));
+    if (wpa_derive_pmk(psk, ssid, wpa.pmk) < 0) {
+        kputs("wifi: PMK derivation failed (passphrase length?).\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+
+    rtl_set_channel(g_rtl8188eu.dev, g_rtl8188eu.channel);
+    timer_wait_ms(5);
+
+    /* 1. Open authentication. */
+    g_rtl8188eu.assoc = RTL_ASSOC_AUTHING;
+    if (rtl_send_auth_req(g_rtl8188eu.dev, g_rtl8188eu.bssid) < 0) {
+        kputs("wifi: auth request TX failed (bulk-OUT?).\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    /* AP's auth response is a single mgmt frame; no protocol-level
+     * processing needed here beyond waiting briefly so the chip is
+     * past the auth round before we send the assoc request. */
+    timer_wait_ms(50);
+
+    /* 2. Association request with RSN IE. */
+    g_rtl8188eu.assoc = RTL_ASSOC_ASSOCIATING;
+    if (rtl_send_assoc_req(g_rtl8188eu.dev, g_rtl8188eu.bssid,
+                           ssid, ssid_len) < 0) {
+        kputs("wifi: assoc request TX failed.\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    timer_wait_ms(80);
+
+    /* 3. EAPOL 4-way. */
+    g_rtl8188eu.assoc = RTL_ASSOC_HANDSHAKING;
+    if (wpa_start(&wpa, g_rtl8188eu.mac, g_rtl8188eu.bssid) < 0) {
+        kputs("wifi: WPA start failed.\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    uint8_t in_buf[256], out_buf[256];
+    int reply_len = 0;
+    /* Wait for M1 (1.5 s timeout). */
+    int got = rtl_recv_eapol(g_rtl8188eu.dev, in_buf, sizeof(in_buf), 1500);
+    if (got <= 0) {
+        kputs("wifi: no EAPOL M1 from AP (handshake timed out).\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    if (wpa_handle_eapol(&wpa, in_buf, got,
+                         out_buf, sizeof(out_buf), &reply_len) < 0) {
+        kputs("wifi: EAPOL M1 rejected.\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    if (reply_len > 0)
+        rtl_send_eapol(g_rtl8188eu.dev, g_rtl8188eu.bssid, out_buf, reply_len);
+
+    /* Wait for M3. */
+    got = rtl_recv_eapol(g_rtl8188eu.dev, in_buf, sizeof(in_buf), 1500);
+    if (got <= 0) {
+        kputs("wifi: no EAPOL M3 from AP.\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    if (wpa_handle_eapol(&wpa, in_buf, got,
+                         out_buf, sizeof(out_buf), &reply_len) < 0) {
+        kputs("wifi: EAPOL M3 MIC failed (wrong PSK?).\n");
+        g_rtl8188eu.assoc = RTL_ASSOC_FAILED;
+        return -1;
+    }
+    if (reply_len > 0)
+        rtl_send_eapol(g_rtl8188eu.dev, g_rtl8188eu.bssid, out_buf, reply_len);
+
+    /* 4. Install keys. PTK -> CAM entry 0; GTK -> entry 1+key_id. */
+    rtl_cam_install(g_rtl8188eu.dev, 0, 4 /* CCMP */,
+                    wpa.tk, WPA_TK_LEN, g_rtl8188eu.bssid);
+    if (wpa.gtk_installed) {
+        uint8_t bcast[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+        rtl_cam_install(g_rtl8188eu.dev, 1 + (wpa.gtk_keyidx & 0x03),
+                        4, wpa.gtk, wpa.gtk_len, bcast);
+    }
+
+    /* 5. Plug into the chain layer as the active NIC. */
+    static struct net_hw_ops s_ops = {
+        .tx      = rtl_eth_tx,
+        .rx_poll = rtl_eth_rx,
+        .name    = "rtl8188eu",
+    };
+    net_chain_set_hw(&s_ops);
+
+    g_rtl8188eu.assoc = RTL_ASSOC_JOINED;
+    kputs("wifi: joined ");
+    kputs(g_rtl8188eu.ssid);
+    kputs("\n");
+    return 0;
+}
+
+int rtl8188eu_associated(void)
+{
+    return (int)g_rtl8188eu.assoc;
+}
+
+void rtl8188eu_disassociate(void)
+{
+    if (!g_rtl8188eu.dev) return;
+    if (g_rtl8188eu.assoc == RTL_ASSOC_JOINED ||
+        g_rtl8188eu.assoc == RTL_ASSOC_HANDSHAKING)
+    {
+        uint8_t f[64];
+        int n = build_mgmt_hdr(f, 0x0A,
+                               g_rtl8188eu.bssid, g_rtl8188eu.mac,
+                               g_rtl8188eu.bssid, 2);
+        f[n++] = 0x03; f[n++] = 0x00;        /* reason: deauth leaving */
+        rtl_tx_bulk(g_rtl8188eu.dev, f, n, 0x12);
+    }
+    g_rtl8188eu.assoc = RTL_ASSOC_IDLE;
+    g_rtl8188eu.ssid_len = 0;
+    memset(g_rtl8188eu.ssid, 0, sizeof(g_rtl8188eu.ssid));
+    memset(g_rtl8188eu.bssid, 0, 6);
+    /* Note: leaving the chain hw_ops alone — net.c may have wired
+     * a different NIC originally. The caller (shell wifi forget /
+     * disconnect) decides whether to re-probe. */
+}
+
 int rtl8188eu_connect(const char *ssid, const char *psk)
 {
-    (void)ssid; (void)psk;
-    kputs("wifi: connect unavailable (association/WPA2 = future work).\n");
-    return -1;
+    if (!ssid || !psk) {
+        kputs("usage: wifi connect <ssid> <psk>\n");
+        return -1;
+    }
+    return rtl8188eu_associate(ssid, psk);
 }

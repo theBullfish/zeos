@@ -75,6 +75,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/usb_cdc.c \
            boot/usb_eth.c \
            boot/net_rtl8188eu.c \
+           boot/wpa.c \
            boot/block.c \
            boot/block_chain.c \
            boot/mde_chain.c \

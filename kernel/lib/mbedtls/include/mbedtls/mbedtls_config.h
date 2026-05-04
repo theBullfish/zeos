@@ -30,10 +30,13 @@
 #define MBEDTLS_AES_C
 #define MBEDTLS_GCM_C                  /* AES-GCM (TLS 1.3 cipher) */
 #define MBEDTLS_CCM_C
+#define MBEDTLS_SHA1_C                 /* WPA2 4-way handshake (HMAC-SHA1) */
 #define MBEDTLS_SHA256_C
 #define MBEDTLS_SHA384_C
 #define MBEDTLS_SHA512_C
 #define MBEDTLS_MD_C
+#define MBEDTLS_PKCS5_C                /* WPA2 PSK→PMK derivation (PBKDF2-HMAC) */
+#define MBEDTLS_NIST_KW_C              /* WPA2 GTK delivery (RFC 3394 unwrap) */
 #define MBEDTLS_HKDF_C                 /* TLS 1.3 key derivation */
 #define MBEDTLS_CIPHER_C
 #define MBEDTLS_BIGNUM_C

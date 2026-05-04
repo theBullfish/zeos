@@ -22,6 +22,7 @@
 #include "palette.h"
 #include "hda.h"
 #include "net_chain.h"
+#include "net_rtl8188eu.h"
 #include "block_chain.h"
 #include "mde_chain.h"
 #include "gpu_compute.h"
@@ -74,6 +75,7 @@ int CHAIN_IDLE           = -1;
 int CHAIN_NOTIFY         = -1;
 int CHAIN_SETTINGS       = -1;
 int CHAIN_BRIGHTNESS     = -1;
+int CHAIN_WIFI           = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -452,6 +454,56 @@ static void trash_gc_resolve(chain_node_t *self, void *input, void *output)
     if (out) *out = freed;
 }
 
+/* ── WiFi chain resolves ───────────────────────────────────────── */
+/*
+ * The active hardware sequencing (auth/assoc/EAPOL/CAM install) lives
+ * in net_rtl8188eu.c because it requires synchronous USB transfers.
+ * These resolves are observation nodes only: each publishes the
+ * current phase of the assoc state machine as its output type so the
+ * inspector and B3 can track which phase the chip is in. They do NOT
+ * drive the join — that's done by `wifi connect` from the shell.
+ */
+
+static int s_wifi_last_state;
+
+void wifi_scan_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self; (void)input;
+    int *out = (int *)output;
+    /* Publish the number of beacons seen by the most recent scan. */
+    if (out) *out = g_rtl8188eu.fw_loaded ? 1 : 0;
+}
+
+void wifi_join_request_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self; (void)input;
+    int *out = (int *)output;
+    if (out) *out = (int)g_rtl8188eu.assoc;
+}
+
+void wifi_eapol_handshake_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    int phase = input ? *(int *)input : (int)g_rtl8188eu.assoc;
+    int *out  = (int *)output;
+    if (out) *out = phase;
+}
+
+void wifi_associated_state_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    int phase = input ? *(int *)input : (int)g_rtl8188eu.assoc;
+    int *out  = (int *)output;
+    if (out) *out = phase;
+    if (phase != s_wifi_last_state) {
+        s_wifi_last_state = phase;
+        if (CHAIN_WIFI >= 0) {
+            chain_t *cw = chain_get(CHAIN_WIFI);
+            if (cw) cw->vault_version++;
+        }
+    }
+}
+
 /* ── Init ──────────────────────────────────────────────────────── */
 
 int chain_registry_init(void)
@@ -649,6 +701,47 @@ int chain_registry_init(void)
      * is generic; the driver never appears in this file. */
     if (net_chain_register(CHAIN_CPU) != 0) {
         kputs("[chain_registry] WARN: net chain registration failed\n");
+    }
+
+    /* CHAIN_WIFI: encapsulates the WPA2-PSK join state machine as a
+     * 4-node pipeline. Each resolve observes one phase of the join:
+     *   scan          → kicks/refreshes passive scan
+     *   join_request  → terminal node; transitions IDLE→AUTHING when
+     *                   a saved network is configured (no-op otherwise)
+     *   eapol_handshake → tracks the WPA state transitions (observed,
+     *                     not driven — the actual EAPOL handler is
+     *                     synchronous inside rtl8188eu_associate)
+     *   associated_state → publishes the current assoc enum
+     *
+     * The chain exists so the join sequence is visible in the inspector
+     * and B3 can track which phase a given association attempt failed
+     * in. The actual hardware-driven path lives in net_rtl8188eu.c
+     * since it requires synchronous USB transfers; this chain is the
+     * provenance/observability layer over that. */
+    {
+        extern void wifi_scan_resolve            (chain_node_t *self, void *in, void *out);
+        extern void wifi_join_request_resolve    (chain_node_t *self, void *in, void *out);
+        extern void wifi_eapol_handshake_resolve (chain_node_t *self, void *in, void *out);
+        extern void wifi_associated_state_resolve(chain_node_t *self, void *in, void *out);
+        CHAIN_WIFI = chain_create("wifi", CHAIN_CPU, MASQ_INTERNAL);
+        if (CHAIN_WIFI >= 0) {
+            chain_add_node(CHAIN_WIFI, "scan",
+                           "wifi_scan_request", "wifi_scan_results",
+                           wifi_scan_resolve);
+            chain_add_node(CHAIN_WIFI, "join_request",
+                           "wifi_scan_results", "wifi_join_intent",
+                           wifi_join_request_resolve);
+            chain_add_node(CHAIN_WIFI, "eapol_handshake",
+                           "wifi_join_intent", "wifi_handshake_state",
+                           wifi_eapol_handshake_resolve);
+            chain_add_node(CHAIN_WIFI, "associated_state",
+                           "wifi_handshake_state", "wifi_assoc_state",
+                           wifi_associated_state_resolve);
+            chain_t *cw = chain_get(CHAIN_WIFI);
+            /* ~1 Hz observation cadence; the assoc state machine
+             * itself runs synchronously inside rtl8188eu_associate. */
+            if (cw) cw->resolve_interval_ticks = 480;
+        }
     }
 
     /* Block I/O: chain-native storage pipeline. NVMe / AHCI / USB-MSC

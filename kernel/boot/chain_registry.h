@@ -56,6 +56,7 @@ extern int CHAIN_IDLE;
 extern int CHAIN_NOTIFY;
 extern int CHAIN_SETTINGS;
 extern int CHAIN_BRIGHTNESS;
+extern int CHAIN_WIFI;
 
 /* Lifetime count of bytes the serial chain has decoded into kb_buf.
  * cmd_selftest samples this across a 100ms window to compute drain

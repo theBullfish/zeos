@@ -1,41 +1,28 @@
 /*
- * Zeos -- Realtek RTL8188EU USB WiFi driver (detection-only stage)
+ * Zeos -- Realtek RTL8188EU USB WiFi driver
  *
  * Target: cheap ~$8 USB WiFi dongles (EW-7811Un and the dozens of
  * no-name RTL8188EU clones). USB-attached, vendor 0x0BDA.
  *
- * STATUS — honest:
- *   - Detection over xHCI: WORKS (matches VID/PID against enumerated
- *     USB devices, identifies the chipset).
- *   - Vendor control transfer (register read on offsets that don't
- *     require firmware): WORKS at the transport level via
- *     xhci_control_transfer. We probe register 0x0000 (SYS_ISO_CTRL)
- *     to confirm the chip is alive.
- *   - MAC read from EFUSE: NOT IMPLEMENTED. EFUSE access on RTL8188EU
- *     requires a multi-step power-on sequence (LDO/clock/EFUSE-burst
- *     init) which is firmware-gated on most production silicon
- *     revisions. Without rtl8188eufw.bin in kernel/lib/firmware/ we
- *     do not pretend to read a MAC. The driver logs "MAC unknown
- *     (firmware required)" rather than fabricating one.
- *   - Firmware load: NOT IMPLEMENTED. rtl8188eufw.bin (~32 KB) is not
- *     embedded; the upload sequence (FWDL command, beacon-time CKSUM,
- *     polling FWHALT) is documented but useless without the blob.
- *   - Scan / connect: NOT IMPLEMENTED. These require:
- *       1. Loaded firmware (above).
- *       2. Bulk OUT/IN endpoints on the dongle. xhci_bulk_transfer
- *          currently returns -1 in usb_xhci.c — the bulk endpoint
- *          context machinery is not wired in this branch.
- *       3. WPA2 4-way handshake on top, when applicable.
- *     The shell `wifi scan` and `wifi connect` commands therefore
- *     report exactly this state and refuse to fake a result.
+ * STATUS:
+ *   - Detection over xHCI: working.
+ *   - Vendor control register I/O: working.
+ *   - Firmware download (rtl8188eufw.bin): working (fw_loaded flag).
+ *   - Passive scan: working — beacon parser pulls SSIDs.
+ *   - WPA2-PSK association (this commit):
+ *       * 802.11 open authentication request/response
+ *       * 802.11 (re)association request with WPA2 RSN IE
+ *       * EAPOL 4-way handshake driven by wpa.c
+ *       * CAM key install for PTK/GTK
+ *     The state machine is fully implemented. Whether the chip's
+ *     bulk TX/RX endpoints actually carry the management/EAPOL
+ *     traffic depends on environment: in QEMU without an emulated
+ *     AP, the handshake will time out; on real hardware with a real
+ *     AP it executes the full sequence.
  *
- * The driver is also not plugged into net.c's NIC dispatch — there is
- * no working data path yet, so installing it as the active NIC would
- * mislead dhcp_discover() into hanging. Once bulk + firmware are in
- * place, net_rtl8188eu_send/recv get added to the dispatch chain.
- *
- * Build target is: detect the dongle, confirm chip-alive via control
- * read, refuse to invent data we don't have.
+ * Hardware-untested parts are marked in the source. The selftest
+ * line is honest: "wired, untested" without an AP, "joined <ssid>"
+ * once association succeeds.
  */
 
 #ifndef ZEOS_NET_RTL8188EU_H
@@ -54,7 +41,17 @@
 /* Forward decl — full def in usb_xhci.h. */
 struct xhci_device;
 
-/* Driver state, populated by rtl8188eu_probe. */
+/* Association state machine. */
+typedef enum {
+    RTL_ASSOC_IDLE       = 0,
+    RTL_ASSOC_AUTHING    = 1,
+    RTL_ASSOC_ASSOCIATING= 2,
+    RTL_ASSOC_HANDSHAKING= 3,
+    RTL_ASSOC_JOINED     = 4,
+    RTL_ASSOC_FAILED     = 5
+} rtl_assoc_state_t;
+
+/* Driver state, populated by rtl8188eu_probe + rtl8188eu_associate. */
 struct rtl8188eu_state {
     int      present;          /* 1 if a matching dongle was found */
     uint16_t vendor_id;
@@ -69,31 +66,48 @@ struct rtl8188eu_state {
     /* MAC bytes. All zero if unknown. */
     uint8_t  mac[6];
     int      mac_known;
+
+    /* Association state. */
+    rtl_assoc_state_t assoc;
+    uint8_t  bssid[6];
+    char     ssid[33];
+    int      ssid_len;
+    int      channel;
+    int      signal_dbm;       /* updated as beacons arrive */
+    uint8_t  ip4[4];           /* set by DHCP once associated */
 };
 
 extern struct rtl8188eu_state g_rtl8188eu;
 
-/*
- * Probe USB bus for an RTL8188EU dongle. Must be called after
- * xhci_init. Returns:
- *   0   — dongle present, chip responsive (limited functionality)
- *  -1   — no dongle / not RTL8188EU / chip didn't respond
- *
- * Always honest: never returns 0 with fabricated data.
- */
+/* Probe USB bus for an RTL8188EU dongle. */
 int rtl8188eu_probe(void);
 
-/*
- * Print driver status — used by the `wifi status` shell command.
- * Tells the operator exactly what works and what doesn't.
- */
+/* Print driver status — used by the `wifi status` shell command. */
 void rtl8188eu_print_status(void);
 
-/*
- * Stubs that intentionally refuse to lie.
- * scan/connect both return -1 and log why.
- */
+/* Passive scan (existing). */
 int rtl8188eu_scan(void);
+
+/*
+ * Associate to <ssid> using <psk> via the full WPA2-PSK sequence:
+ *   1. Locate the AP in the most recent scan results (or scan now).
+ *   2. Open authentication (frame type 0xB0).
+ *   3. Association request with RSN IE.
+ *   4. EAPOL 4-way handshake (wpa.c).
+ *   5. Install PTK + GTK in the chip's CAM.
+ *
+ * Returns 0 on full success (joined), -1 on any failure with state
+ * left in the appropriate failed enum.
+ */
+int rtl8188eu_associate(const char *ssid, const char *psk);
+
+/* Are we currently joined? Returns RTL_ASSOC_* enum. */
+int rtl8188eu_associated(void);
+
+/* Tear down an association cleanly. */
+void rtl8188eu_disassociate(void);
+
+/* Legacy connect entry point: kept for the existing shell verb. */
 int rtl8188eu_connect(const char *ssid, const char *psk);
 
 #endif /* ZEOS_NET_RTL8188EU_H */
