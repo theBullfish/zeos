@@ -60,6 +60,10 @@ int scheduler_set_backoff(int chain_id, float threshold, uint32_t every);
  * 100ms-or-similar window. Used by the selftest. */
 uint32_t scheduler_tps(void);
 
+/* Average wall-time per tick (microseconds), measured over the same
+ * rolling window as scheduler_tps. 0 before the first sample lands. */
+uint32_t scheduler_tick_avg_us(void);
+
 /* Print the last N MasQ tick records. Newest last. */
 void scheduler_log_dump(int last_n);
 

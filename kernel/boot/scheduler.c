@@ -97,6 +97,7 @@ static uint8_t  s_skip_phase[MAX_CHAINS];
 static uint64_t s_sample_tsc;       /* tsc at start of current sample */
 static uint64_t s_sample_tick;      /* tick count at start of sample  */
 static uint32_t s_tps_last;         /* last completed sample's tps    */
+static uint32_t s_tick_avg_us_last; /* last sample's avg tick duration */
 
 void scheduler_quantum_us(uint32_t us)
 {
@@ -132,6 +133,7 @@ void scheduler_init(void)
     s_sample_tsc = timer_read_tsc();
     s_sample_tick = 0;
     s_tps_last = 0;
+    s_tick_avg_us_last = 0;
     kputs("[scheduler] chain resolution as scheduling primitive\n");
     kputs("[scheduler] quantum=1000us, B3 backoff enabled (per-chain tunable)\n");
     kputs("[scheduler] watchdog=post-hoc (preemption pending LAPIC timer)\n");
@@ -319,6 +321,11 @@ uint32_t scheduler_tps(void)
     return s_tps_last;
 }
 
+uint32_t scheduler_tick_avg_us(void)
+{
+    return s_tick_avg_us_last;
+}
+
 static void update_tps_sample(uint64_t now_tsc)
 {
     uint64_t freq = timer_tsc_freq();
@@ -332,6 +339,11 @@ static void update_tps_sample(uint64_t now_tsc)
             /* tps = dticks * freq / dt */
             uint64_t tps = (dticks * freq) / dt;
             s_tps_last = (uint32_t)tps;
+            /* avg tick duration in us = (dt / dticks) / (freq/1e6) */
+            if (dticks > 0) {
+                uint64_t avg_us = (dt * 1000000ULL) / (dticks * freq);
+                s_tick_avg_us_last = (uint32_t)avg_us;
+            }
         }
         s_sample_tsc = now_tsc;
         s_sample_tick = s_tick;

@@ -8,6 +8,7 @@
 #include "mde.h"
 #include "b3.h"
 #include "kprint.h"
+#include "scheduler.h"
 
 /* ── Static state ───────────────────────────────────────────────── */
 
@@ -408,11 +409,17 @@ static void topo_visit(int chain_id)
         return;
 
     if (topo_color[chain_id] == TOPO_GRAY) {
-        /* Cycle detected */
+        /* Cycle detected. Only warn the first time we see this id; the
+         * per-tick spam was burning serial bandwidth (each kputs cost
+         * the budget overrun it claimed to be reporting). */
+        static uint8_t s_cycle_warned[MAX_CHAINS];
         if (!topo_cycle) {
-            kputs("[mde] WARNING: cycle detected at chain ");
-            kput_dec((uint64_t)chain_id);
-            kputc('\n');
+            if (!s_cycle_warned[chain_id]) {
+                s_cycle_warned[chain_id] = 1;
+                kputs("[mde] WARNING: cycle detected at chain ");
+                kput_dec((uint64_t)chain_id);
+                kputs(" (one-shot; further cycles silenced)\n");
+            }
             topo_cycle = 1;
         }
         return;
@@ -479,8 +486,26 @@ int mde_resolve_all(void)
 
     count = topo_sort();
 
+    /* Snapshot current scheduler tick once per pass for interval gating. */
+    uint64_t now_tick = scheduler_tick_count();
+
     for (i = 0; i < count; i++) {
         id = topo_order[i];
+
+        /*
+         * Async / rate-limited resolution: if this chain has a non-zero
+         * resolve_interval_ticks and not enough ticks have elapsed since
+         * its last resolve, skip it this pass. This is what decouples
+         * the compositor and per-display flush chains from the scheduler
+         * tick cadence so cheap chains can resolve at full rate.
+         */
+        c = chain_get(id);
+        if (c && c->resolve_interval_ticks > 0) {
+            uint64_t since = now_tick - c->last_resolved_tick;
+            if (since < (uint64_t)c->resolve_interval_ticks) {
+                continue;
+            }
+        }
 
         /*
          * Before resolving: if multiple chains produce the same type
@@ -489,6 +514,7 @@ int mde_resolve_all(void)
          * resolve in order and track B3 outcomes.
          */
         err = chain_resolve(id);
+        if (c) c->last_resolved_tick = now_tick;
 
         /* Update B3 beliefs for this chain */
         c = chain_get(id);

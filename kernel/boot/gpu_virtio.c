@@ -31,6 +31,7 @@
 #include "vmm.h"
 #include "fb.h"
 #include "kprint.h"
+#include "timer.h"
 #include "zeos_boot.h"
 #include <stdint.h>
 
@@ -283,6 +284,13 @@ typedef struct {
     uint32_t refresh_hz;
     uint32_t resource_id;            /* virtio resource id, 1-based. */
     int      chain_id;               /* CHAIN_DISPLAY_<n> */
+    /* Per-display vsync decoupling: skip a flush if the previous flush
+     * was less than min_flush_interval_us ago. Default = 16667us
+     * (60Hz). Higher-Hz panels can lower this; e-paper / low-power
+     * panels can raise it. Independent per scanout so a 144Hz monitor
+     * never blocks a 60Hz monitor. */
+    uint32_t min_flush_interval_us;
+    uint64_t last_flush_tsc;
     int      edid_valid;
     uint32_t edid_size;
     uint8_t  edid[256];              /* Block 0 + optional extension. */
@@ -591,6 +599,10 @@ static int gpu_get_display_info(gpu_dev_t *gd)
         s->edid_valid  = 0;
         s->edid_size   = 0;
         s->monitor_name[0] = 0;
+        /* 60Hz default flush rate; overridden once EDID parses a real
+         * refresh, or by a future per-scanout setter. */
+        s->min_flush_interval_us = 16667;
+        s->last_flush_tsc        = 0;
         if (s->enabled) n++;
     }
     /* num_scanouts is the largest enabled index + 1, but for our
@@ -811,11 +823,22 @@ static void virtio_dma_resolve(chain_node_t *self, void *input, void *output)
     *out_ok = 0;
     if (!*in_token) return;
 
-    /* state is a packed pointer-pair (gpu_dev_t*, scanout_idx) we
-     * stash via two fields: we use scanout_t *state and keep gpu via
-     * the parent. Look up by linear scan. */
     scanout_t *target = (scanout_t *)self->state;
     if (!target) return;
+
+    /* Per-display vsync gate: don't flush faster than the panel can
+     * actually scan out. Cheap TSC compare, no IO. Different displays
+     * keep independent intervals so a 144Hz panel doesn't bottleneck
+     * on a 60Hz one. */
+    uint64_t now = timer_read_tsc();
+    uint64_t freq = timer_tsc_freq();
+    if (target->min_flush_interval_us > 0 && freq > 0
+        && target->last_flush_tsc != 0) {
+        uint64_t elapsed_us = (now - target->last_flush_tsc) * 1000000ULL / freq;
+        if (elapsed_us < (uint64_t)target->min_flush_interval_us) {
+            return;  /* too soon: skip this flush */
+        }
+    }
 
     for (int gi = 0; gi < s_dev_count; gi++) {
         gpu_dev_t *gd = &s_devs[gi];
@@ -824,6 +847,7 @@ static void virtio_dma_resolve(chain_node_t *self, void *input, void *output)
             if (&gd->scanouts[si] == target) {
                 if (gpu_transfer_and_flush(gd, si) == 0) {
                     *out_ok = 1;
+                    target->last_flush_tsc = now;
                     chain_t *c = chain_get(target->chain_id);
                     if (c) c->vault_version++;
                 }
@@ -923,6 +947,11 @@ static int register_chain_hierarchy(gpu_dev_t *gd, int parent_id)
             if (n3 >= 0) c->nodes[n3].state = s;
             /* Bump for the EDID/mode-set events that just landed. */
             c->vault_version++;
+            /* Display chains resolve at most every 16 scheduler ticks;
+             * the per-scanout min_flush_interval_us is the second gate.
+             * Together they keep flushes bounded by both tick cadence
+             * and physical vsync. */
+            c->resolve_interval_ticks = 16;
         }
         s_total_scanouts++;
     }
@@ -1118,6 +1147,8 @@ int gpu_virtio_init(int parent_id)
             s_gop_sentinel.width = fb_width();
             s_gop_sentinel.height = fb_height();
             s_gop_sentinel.chain_id = s_gop_fallback_chain;
+            s_gop_sentinel.min_flush_interval_us = 16667;
+            s_gop_sentinel.last_flush_tsc = 0;
             chain_t *c = chain_get(s_gop_fallback_chain);
             if (c) {
                 for (int k = 0; k < c->node_count; k++) {
@@ -1125,6 +1156,9 @@ int gpu_virtio_init(int parent_id)
                         c->nodes[k].state = &s_gop_sentinel;
                 }
                 c->vault_version++;
+                /* GOP "flush" is a no-op but we still rate-limit the
+                 * resolve so vault_version doesn't tick at full speed. */
+                c->resolve_interval_ticks = 16;
             }
             kputs("[gpu_virtio] no virtio-gpu found -- GOP fallback chain registered\n");
         }

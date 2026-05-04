@@ -107,6 +107,17 @@ typedef struct chain {
      *                         floor. Default 4. Higher ratios scale up. */
     float           backoff_skip_threshold;
     uint32_t        backoff_skip_every;
+
+    /* Async resolution: rate-limit how often this chain is resolved.
+     *   resolve_interval_ticks = 0  -> resolve every scheduler tick
+     *                                  (default; matches old behavior).
+     *   resolve_interval_ticks = N  -> only resolve once every N ticks.
+     * The scheduler skips chains where (current_tick - last_resolved_tick)
+     * < resolve_interval_ticks. Used to decouple expensive draw chains
+     * (CHAIN_COMPOSITOR, CHAIN_DISPLAY_<n>) from the per-tick budget
+     * so cheap chains can resolve at full speed. */
+    uint32_t        resolve_interval_ticks;
+    uint64_t        last_resolved_tick;
 } chain_t;
 
 /* ── API ─────────────────────────────────────────────────────────── */

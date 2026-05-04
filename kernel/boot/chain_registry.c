@@ -60,10 +60,28 @@ static void compositor_mix_resolve(chain_node_t *self, void *input, void *output
 {
     (void)self;
     (void)input;
-    (void)output;
 
-    /* The compositor's job: draw all WM surfaces to the framebuffer */
+    /* Dirty-rect gate: if nothing has been pushed since the last
+     * resolve, skip the entire composite. wm_draw_all() is the
+     * 12-31ms hot spot — bypassing it when the UI is idle is what
+     * brings the scheduler tick back under budget. */
+    int dirty = compositor_consume_dirty();
+    int *ok = (int *)output;
+
+    if (dirty == 0) {
+        /* Tick the skip counter via the compositor module. */
+        extern void compositor_note_skip(void);
+        compositor_note_skip();
+        if (ok) *ok = 0;
+        return;
+    }
+
+    /* Real composite. */
     wm_draw_all();
+
+    extern void compositor_note_composite(void);
+    compositor_note_composite();
+    if (ok) *ok = 1;
 }
 
 static void panel_render_resolve(chain_node_t *self, void *input, void *output)
@@ -231,36 +249,53 @@ int chain_registry_init(void)
 
     /* ── Step 4: Register system chains ─────────────────────────── */
 
-    /* Compositor: mixes all surface outputs into the framebuffer */
+    /* Compositor: mixes all surface outputs into the framebuffer.
+     *
+     * Async: resolve_interval_ticks=16. With ~432-800 tps measured,
+     * 16 ticks ≈ 20-37ms ≈ 27-50 fps for the full composite, which is
+     * fine for desktop UI. The dirty-rect gate inside the resolve
+     * skips even that when nothing changed. The two together drop the
+     * compositor's per-tick cost from 12-31ms to <1us in the common
+     * idle case. */
     CHAIN_COMPOSITOR = chain_create("compositor", CHAIN_CPU, MASQ_INTERNAL);
     if (CHAIN_COMPOSITOR >= 0) {
         chain_add_node(CHAIN_COMPOSITOR, "mix",
                        "surface_output", "framebuffer",
                        compositor_mix_resolve);
+        chain_t *cc = chain_get(CHAIN_COMPOSITOR);
+        if (cc) cc->resolve_interval_ticks = 16;
     }
 
-    /* Panel: renders the top bar from chain status data */
+    /* Panel: renders the top bar from chain status data.
+     * Tied to compositor cadence (16 ticks ~ 27-50fps) — there is no
+     * point re-rendering the panel faster than the compositor flips. */
     CHAIN_PANEL = chain_create("panel", CHAIN_COMPOSITOR, MASQ_INTERNAL);
     if (CHAIN_PANEL >= 0) {
         chain_add_node(CHAIN_PANEL, "render",
                        "chain_status", "surface_output",
                        panel_render_resolve);
+        chain_t *cc = chain_get(CHAIN_PANEL);
+        if (cc) cc->resolve_interval_ticks = 16;
     }
 
-    /* Dock: renders the bottom launcher from chain list */
+    /* Dock: renders the bottom launcher from chain list. Same cadence. */
     CHAIN_DOCK = chain_create("dock", CHAIN_COMPOSITOR, MASQ_INTERNAL);
     if (CHAIN_DOCK >= 0) {
         chain_add_node(CHAIN_DOCK, "render",
                        "chain_list", "surface_output",
                        dock_render_resolve);
+        chain_t *cc = chain_get(CHAIN_DOCK);
+        if (cc) cc->resolve_interval_ticks = 16;
     }
 
-    /* Desktop: renders wallpaper + icons from icon data */
+    /* Desktop: renders wallpaper + icons from icon data. Same cadence. */
     CHAIN_DESKTOP = chain_create("desktop", CHAIN_COMPOSITOR, MASQ_INTERNAL);
     if (CHAIN_DESKTOP >= 0) {
         chain_add_node(CHAIN_DESKTOP, "render",
                        "icon_data", "surface_output",
                        desktop_render_resolve);
+        chain_t *cc = chain_get(CHAIN_DESKTOP);
+        if (cc) cc->resolve_interval_ticks = 16;
     }
 
     /* Shell: interprets input events into text output (standalone loop) */

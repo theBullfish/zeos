@@ -78,6 +78,20 @@ void compositor_dirty(int x, int y, int w, int h);
 /* Mark entire screen dirty */
 void compositor_dirty_all(void);
 
+/* Drain pending dirty rects and return how many composite-worthy
+ * regions were collected since the last call. Returns 0 if there is
+ * nothing to redraw (composite can be skipped). */
+int  compositor_consume_dirty(void);
+
+/* Number of dirty rects pushed since boot (for tickrate / selftest). */
+uint32_t compositor_dirty_pushes(void);
+
+/* Number of composite passes the compositor actually ran (post skip). */
+uint32_t compositor_composite_count(void);
+
+/* Number of composite passes skipped due to no dirty rects. */
+uint32_t compositor_composite_skips(void);
+
 /* Set wallpaper color */
 void compositor_set_wallpaper(uint32_t color);
 

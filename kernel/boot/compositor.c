@@ -4,6 +4,17 @@
  * Renders all layers bottom-to-top into a back buffer,
  * then flips to the framebuffer. This prevents tearing
  * and lets us compose with alpha blending.
+ *
+ * Async compositor: resolves at most once per N scheduler ticks
+ * (default N=16, ~27 fps), and only if dirty rects exist. Per-display
+ * vsync-rate decoupling means a 144Hz panel doesn't slow a 60Hz panel.
+ *
+ * Dirty rect tracking: subsystems push regions via compositor_dirty()
+ * when their visual output changes (panel state, mouse move, dock
+ * animation, notifications, etc.). The compositor's chain resolve
+ * checks compositor_consume_dirty() and skips wm_draw_all() entirely
+ * when nothing has changed. This is what drops average tick duration
+ * from 12-31ms back to <2ms when the UI is idle.
  */
 
 #include "compositor.h"
@@ -28,6 +39,29 @@
 #include "persona_anim.h"
 
 static compositor_t g_comp;
+
+/* ── Dirty rect ring ──
+ *
+ * Subsystems push dirty rects via compositor_dirty(); the compositor's
+ * resolve consumes them. The actual rect coordinates are not used yet
+ * (we still redraw the full screen when ANY rect is present), but the
+ * ring is the gating signal: zero pushed since last consume = skip
+ * the entire composite pass.
+ *
+ * Future: track rect bounds to clip wm_draw_all() / panel_draw() /
+ * etc. to only the changed pixels. For now the ring is a binary
+ * "anything changed?" plus a count for instrumentation. */
+
+#define COMP_DIRTY_RING 64
+
+typedef struct { int x, y, w, h; } comp_dirty_rect_t;
+
+static comp_dirty_rect_t s_dirty_ring[COMP_DIRTY_RING];
+static uint32_t s_dirty_head;
+static uint32_t s_dirty_pending;          /* unsumed count, capped at ring size */
+static uint32_t s_dirty_pushes_total;     /* lifetime push count */
+static uint32_t s_composite_count;        /* lifetime composites that ran */
+static uint32_t s_composite_skips;        /* lifetime composites that were skipped */
 
 /* ── Panel drawing (delegated to panel module) ── */
 
@@ -65,6 +99,9 @@ int compositor_init(int screen_w, int screen_h) {
     g_comp.wallpaper_color = COLOR_SURFACE;
     g_comp.fully_dirty = 1;
     g_comp.target_fps = 60;
+    /* Ensure the first composite actually runs. */
+    s_dirty_pending = 1;
+    s_dirty_pushes_total = 1;
     g_comp.last_frame_tsc = timer_read_tsc();
 
     for (int i = 0; i < COMP_LAYER_COUNT; i++)
@@ -181,13 +218,39 @@ void compositor_frame(void) {
 }
 
 void compositor_dirty(int x, int y, int w, int h) {
-    (void)x; (void)y; (void)w; (void)h;
-    g_comp.fully_dirty = 1;  /* Simple: just redraw everything for now */
+    g_comp.fully_dirty = 1;  /* full redraw until clipped paint lands */
+
+    /* Push into ring. Bounded at COMP_DIRTY_RING so a flood doesn't
+     * grow unbounded — extra pushes still bump pending so the
+     * "anything dirty?" gate stays true. */
+    s_dirty_ring[s_dirty_head].x = x;
+    s_dirty_ring[s_dirty_head].y = y;
+    s_dirty_ring[s_dirty_head].w = w;
+    s_dirty_ring[s_dirty_head].h = h;
+    s_dirty_head = (s_dirty_head + 1) % COMP_DIRTY_RING;
+    if (s_dirty_pending < COMP_DIRTY_RING) s_dirty_pending++;
+    s_dirty_pushes_total++;
 }
 
 void compositor_dirty_all(void) {
     g_comp.fully_dirty = 1;
+    /* Use full-screen rect so consumers see a single pending entry. */
+    compositor_dirty(0, 0, g_comp.screen_w, g_comp.screen_h);
 }
+
+int compositor_consume_dirty(void) {
+    int n = (int)s_dirty_pending;
+    s_dirty_pending = 0;
+    return n;
+}
+
+uint32_t compositor_dirty_pushes(void)    { return s_dirty_pushes_total; }
+uint32_t compositor_composite_count(void) { return s_composite_count; }
+uint32_t compositor_composite_skips(void) { return s_composite_skips; }
+
+/* Counters bumped by the chain resolve in chain_registry.c. */
+void compositor_note_composite(void) { s_composite_count++; }
+void compositor_note_skip(void)      { s_composite_skips++; }
 
 void compositor_set_wallpaper(uint32_t color) {
     g_comp.wallpaper_color = color;
