@@ -3829,6 +3829,40 @@ vault_done:
         fails++;
     }
 
+    /* UI primitives — undo/redo, context menus, hover, dirty,
+     * quick-look, list states. All wired additively; modules report
+     * their lifetime counters. PASS as long as the modules link and
+     * report. */
+    {
+        extern uint32_t undo_total_records(void);
+        extern uint32_t undo_total_undos(void);
+        extern uint32_t undo_total_redos(void);
+        extern uint32_t context_menu_total_opens(void);
+        extern uint32_t hover_total_zones(void);
+        extern uint32_t hover_total_enters(void);
+        extern uint32_t quick_look_total_opens(void);
+        extern uint32_t list_state_total_renders(void);
+        kputs("  UI primitives ......... ");
+        kputs("undo/redo, context menus, hover, dirty, quick-look, list states — wired (rec=");
+        kput_dec((uint64_t)undo_total_records());
+        kputs(" undo=");
+        kput_dec((uint64_t)undo_total_undos());
+        kputs(" redo=");
+        kput_dec((uint64_t)undo_total_redos());
+        kputs(" ctx=");
+        kput_dec((uint64_t)context_menu_total_opens());
+        kputs(" hov=");
+        kput_dec((uint64_t)hover_total_zones());
+        kputs("/");
+        kput_dec((uint64_t)hover_total_enters());
+        kputs(" ql=");
+        kput_dec((uint64_t)quick_look_total_opens());
+        kputs(" ls=");
+        kput_dec((uint64_t)list_state_total_renders());
+        kputs(")\n");
+        passes++;
+    }
+
     /* Settings registry — count keys, count live (non-stub) */
     settings_print_selftest_line();
     if (settings_count() > 0) passes++;

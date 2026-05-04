@@ -181,6 +181,62 @@ static void process_scancode(uint8_t scancode, int extended)
     }
 
     /*
+     * UI overlay intercept (additive, runs BEFORE keybinds dispatch).
+     * If a modal / quick look / context menu owns the focus, route the
+     * keystroke into it. Also handle Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y
+     * for the focused undo buffer.
+     */
+    if (!extended && !(scancode & 0x80)) {
+        extern int dirty_modal_active(void);
+        extern int dirty_modal_key(int);
+        extern int quick_look_active(void);
+        extern int quick_look_key(int);
+        extern int context_menu_active(void);
+        extern int context_menu_key(int);
+        extern int undo_handle_key(int, int);
+
+        uint8_t mods_now = keybinds_get_modifiers();
+        int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
+
+        /* Esc (scancode 0x01) closes overlays before anything else. */
+        if (scancode == 0x01) {
+            if (dirty_modal_active())  { dirty_modal_key(27);  return; }
+            if (quick_look_active())   { quick_look_key(27);   return; }
+            if (context_menu_active()) { context_menu_key(27); return; }
+        }
+
+        /* Space (0x39) opens / closes Quick Look only if it's already
+         * up — opening from a file list is the list's responsibility. */
+        if (scancode == 0x39 && quick_look_active()) {
+            quick_look_key(' ');
+            return;
+        }
+
+        /* Ctrl-Z (scancode 0x2C='z') / Ctrl-Y (scancode 0x15='y'). */
+        if ((mods_now & MOD_CTRL)) {
+            if (scancode == 0x2C) {  /* z */
+                if (undo_handle_key(0x1A, sh)) return;
+            }
+            if (scancode == 0x15) {  /* y */
+                if (undo_handle_key(0x19, 0)) return;
+            }
+        }
+
+        /* Generic key dispatch into modal / quick look / context menu
+         * for printable characters (Enter / S / D shortcuts). */
+        if (dirty_modal_active() || quick_look_active() ||
+            context_menu_active()) {
+            char ch = sh ? scancode_to_ascii_shift[scancode]
+                         : scancode_to_ascii[scancode];
+            if (ch) {
+                if (dirty_modal_active())  { dirty_modal_key(ch);  return; }
+                if (quick_look_active())   { quick_look_key(ch);   return; }
+                if (context_menu_active()) { context_menu_key(ch); return; }
+            }
+        }
+    }
+
+    /*
      * Pass every scancode to the keybinds system first.
      * It tracks modifier state (shift/ctrl/alt/super) internally
      * and matches key combos against the binding table.

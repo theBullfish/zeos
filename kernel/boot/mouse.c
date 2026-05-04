@@ -24,6 +24,39 @@
 #include "fb.h"
 #include "cursor.h"
 #include "idle.h"
+#include "ui_hover.h"
+#include "ui_context_menu.h"
+#include "ui_dirty.h"
+#include "quick_look.h"
+
+/* ── Forward: dispatch button events to UI overlays.
+ * Returns 1 if the event was consumed by an overlay (caller should
+ * suppress further routing). button: 1=left, 2=right, 3=middle. */
+static int mouse_ui_dispatch_down(int x, int y, int button) {
+    if (dirty_modal_active() && dirty_modal_mouse_down(x, y, button)) return 1;
+    if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
+    if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
+    if (button == 2) {
+        /* Right-click with no registered overlay: open a generic
+         * fallback menu so users always get *some* contextual action. */
+        static ctx_menu_item_t fallback[] = {
+            { "Refresh",   0, 0, 1 },
+            { "Copy",      0, 0, 0 },
+            { "Paste",     0, 0, 0 },
+            { "-",         0, 0, 1 },
+            { "Properties",0, 0, 1 },
+        };
+        context_menu_open(x, y, fallback, 5);
+        return 1;
+    }
+    return 0;
+}
+
+static void mouse_ui_dispatch_move(int x, int y) {
+    if (dirty_modal_active())  { dirty_modal_mouse_move(x, y); return; }
+    if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }
+    hover_dispatch(x, y);
+}
 
 /* ── 8042 controller ports ── */
 #define PS2_DATA_PORT    0x60
@@ -374,14 +407,23 @@ static void process_packet(void)
     /* Feed cursor system */
     cursor_move(g_mouse.x, g_mouse.y);
 
+    /* UI hover dispatch on every move (cheap; static array walk). */
+    mouse_ui_dispatch_move(g_mouse.x, g_mouse.y);
+
     /* Detect button edges and fire cursor press/release */
     uint8_t changed = g_mouse.buttons ^ g_mouse.prev_buttons;
 
     if (changed & MOUSE_BTN_LEFT) {
-        if (g_mouse.buttons & MOUSE_BTN_LEFT)
+        if (g_mouse.buttons & MOUSE_BTN_LEFT) {
+            mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 1);
             cursor_press();
-        else
+        } else {
             cursor_release();
+        }
+    }
+    if (changed & MOUSE_BTN_RIGHT) {
+        if (g_mouse.buttons & MOUSE_BTN_RIGHT)
+            mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 2);
     }
 }
 
@@ -460,12 +502,19 @@ void mouse_inject(int dx, int dy, uint8_t buttons)
     g_mouse.buttons = buttons & 0x07;
 
     cursor_move(g_mouse.x, g_mouse.y);
+    mouse_ui_dispatch_move(g_mouse.x, g_mouse.y);
 
     uint8_t changed = g_mouse.buttons ^ g_mouse.prev_buttons;
     if (changed & MOUSE_BTN_LEFT) {
-        if (g_mouse.buttons & MOUSE_BTN_LEFT)
+        if (g_mouse.buttons & MOUSE_BTN_LEFT) {
+            mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 1);
             cursor_press();
-        else
+        } else {
             cursor_release();
+        }
+    }
+    if (changed & MOUSE_BTN_RIGHT) {
+        if (g_mouse.buttons & MOUSE_BTN_RIGHT)
+            mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 2);
     }
 }

@@ -28,6 +28,9 @@
 #include "font.h"
 #include "heap.h"
 #include "kprint.h"
+#include "ui_context_menu.h"
+#include "ui_dirty.h"
+#include "quick_look.h"
 #include "dock.h"
 #include "panel.h"
 #include "persona.h"
@@ -205,6 +208,11 @@ void compositor_frame(void) {
     if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
         notify_tick();
         notify_draw();
+        /* Layer 4c: UI overlays (context menu, quick look, dirty modal).
+         * Drawn after notifications so a modal sits above a stale toast. */
+        context_menu_draw();
+        quick_look_draw();
+        dirty_modal_draw();
     }
 
     /* Night shift: warm tint over all rendered content, before cursor */
