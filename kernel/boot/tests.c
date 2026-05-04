@@ -24,6 +24,7 @@
 #include "settings_registry.h"
 #include "brightness.h"
 #include "lockscreen.h"
+#include "persistence.h"
 
 /* ── Registry ─────────────────────────────────────────────────────── */
 
@@ -718,6 +719,147 @@ static int test_lockscreen_cfa(char *reason, uint32_t rsize)
     return TEST_PASS;
 }
 
+/* Persistence: stale-snapshot defensive validation.
+ *
+ * Origin: boot regression where a v1 snapshot persisted by an earlier
+ * kernel revision survived into a build whose chain registry had
+ * shifted shape — persistence_apply_snapshot() then wrote stale priors
+ * into chains and the next chain_resolve faulted at RIP=0,
+ * CR2=0xffffffffc3000000. The fix bumped the snapshot schema to v2
+ * and added a CRC + per-record validation pipeline. This test
+ * exercises that pipeline with synthetic inputs to make sure a future
+ * regression turns into a TEST_FAIL instead of a panic.
+ *
+ * Mirrors the on-disk schema by including persistence.h; the test
+ * hook persistence_validate_snapshot_buffer() runs the loader's
+ * structural checks without touching live module state. */
+static int test_persistence_snapshot_defense(char *reason, uint32_t rsize)
+{
+    /* Local CRC32 mirror — same poly the loader uses. */
+    uint32_t (*crc32)(const void *, uint32_t) = 0;  /* unused; we use a manual loop below */
+    (void)crc32;
+
+    uint8_t buf[sizeof(persistence_snapshot_header_t)
+                + 2 * sizeof(persistence_chain_record_t)];
+    for (uint32_t i = 0; i < sizeof(buf); i++) buf[i] = 0;
+
+    persistence_snapshot_header_t *hdr = (persistence_snapshot_header_t *)buf;
+    hdr->magic       = PERSISTENCE_SNAPSHOT_MAGIC;
+    hdr->version     = PERSISTENCE_SNAPSHOT_VERSION;
+    hdr->saved_tsc   = 0xC0FFEEULL;
+    hdr->chain_count = 2;
+
+    persistence_chain_record_t *recs =
+        (persistence_chain_record_t *)(buf + sizeof(persistence_snapshot_header_t));
+
+    t_strcopy(recs[0].name, "ok-record-a", (int)sizeof(recs[0].name));
+    recs[0].parent_id = -1;
+    recs[0].tier = 1;            /* MASQ_INTERNAL */
+    recs[0].b3_alpha = 1.0f;
+    recs[0].b3_beta  = 1.0f;
+    recs[0].b3_observations = 0;
+    recs[0].vault_version = 0;
+    recs[0].watchdog_timeout_us = 500000;
+    recs[0].backoff_skip_threshold = 0.5f;
+    recs[0].backoff_skip_every = 4;
+
+    t_strcopy(recs[1].name, "ok-record-b", (int)sizeof(recs[1].name));
+    recs[1].parent_id = 5;
+    recs[1].tier = 0;            /* MASQ_SOVEREIGN */
+    recs[1].b3_alpha = 2.0f;
+    recs[1].b3_beta  = 0.5f;
+    recs[1].b3_observations = 7;
+    recs[1].vault_version = 3;
+    recs[1].watchdog_timeout_us = 1000000;
+    recs[1].backoff_skip_threshold = 0.7f;
+    recs[1].backoff_skip_every = 2;
+
+    /* Compute CRC inline (poly 0xEDB88320). Must match persistence.c. */
+    uint32_t total = sizeof(persistence_snapshot_header_t)
+                   + hdr->chain_count * (uint32_t)sizeof(persistence_chain_record_t);
+    uint32_t prefix = (uint32_t)((uint8_t *)&hdr->saved_tsc - buf);
+    {
+        uint32_t crc = 0xFFFFFFFFu;
+        for (uint32_t i = prefix; i < total; i++) {
+            crc ^= (uint32_t)buf[i];
+            for (int b = 0; b < 8; b++) {
+                uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
+                crc = (crc >> 1) ^ (0xEDB88320u & mask);
+            }
+        }
+        hdr->crc32 = ~crc;
+    }
+
+    /* (1) Well-formed input — both records should pass. */
+    int kept = persistence_validate_snapshot_buffer(buf, total);
+    if (kept != 2) {
+        t_strcopy(reason, "valid v2 snapshot rejected", rsize);
+        return TEST_FAIL;
+    }
+
+    /* (2) Corrupt magic — whole snapshot rejected. */
+    uint32_t saved_magic = hdr->magic;
+    hdr->magic = 0xDEADBEEFu;
+    if (persistence_validate_snapshot_buffer(buf, total) != 0) {
+        t_strcopy(reason, "bad magic accepted", rsize);
+        return TEST_FAIL;
+    }
+    hdr->magic = saved_magic;
+
+    /* (3) Wrong schema version — rejected (this is the v1->v2 path). */
+    uint32_t saved_ver = hdr->version;
+    hdr->version = 1;
+    if (persistence_validate_snapshot_buffer(buf, total) != 0) {
+        t_strcopy(reason, "v1 snapshot accepted under v2 kernel", rsize);
+        return TEST_FAIL;
+    }
+    hdr->version = saved_ver;
+
+    /* (4) chain_count bogus — rejected without overflow. */
+    uint32_t saved_n = hdr->chain_count;
+    hdr->chain_count = 0xFFFFFFFFu;
+    if (persistence_validate_snapshot_buffer(buf, total) != 0) {
+        t_strcopy(reason, "huge chain_count accepted", rsize);
+        return TEST_FAIL;
+    }
+    hdr->chain_count = saved_n;
+
+    /* (5) Bit-flip in payload — CRC must catch it. */
+    uint32_t saved_crc = hdr->crc32;
+    recs[0].b3_alpha = 99.0f;  /* mutate after CRC was computed */
+    if (persistence_validate_snapshot_buffer(buf, total) != 0) {
+        t_strcopy(reason, "payload bit-flip not caught by CRC", rsize);
+        return TEST_FAIL;
+    }
+    recs[0].b3_alpha = 1.0f;
+    hdr->crc32 = saved_crc;  /* restore for next sub-test */
+
+    /* (6) NaN in b3_alpha (re-CRC so this isolates the per-record
+     *     validator from the CRC check). */
+    {
+        union { float f; uint32_t u; } nan;
+        nan.u = 0x7FC00000u;  /* quiet NaN */
+        recs[0].b3_alpha = nan.f;
+
+        uint32_t crc = 0xFFFFFFFFu;
+        for (uint32_t i = prefix; i < total; i++) {
+            crc ^= (uint32_t)buf[i];
+            for (int b = 0; b < 8; b++) {
+                uint32_t mask = (uint32_t)(-(int32_t)(crc & 1u));
+                crc = (crc >> 1) ^ (0xEDB88320u & mask);
+            }
+        }
+        hdr->crc32 = ~crc;
+    }
+    if (persistence_validate_snapshot_buffer(buf, total) != 1) {
+        t_strcopy(reason, "NaN b3_alpha not rejected", rsize);
+        return TEST_FAIL;
+    }
+
+    /* All defense paths held. */
+    return TEST_PASS;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -753,6 +895,7 @@ void tests_register_all(void)
     test_register("chain.settings",         test_chain_settings,         CHAIN_SETTINGS);
     test_register("chain.brightness",       test_chain_brightness,       CHAIN_BRIGHTNESS);
     test_register("cfa.lockscreen",         test_lockscreen_cfa,         -1);
+    test_register("persistence.snapshot.defense", test_persistence_snapshot_defense, -1);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */
