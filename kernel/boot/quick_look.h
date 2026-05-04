@@ -7,7 +7,11 @@
  * pure presentation — no editing, no chain attached.
  *
  * Type detection:
- *   - PNG (signature 89 50 4E 47): rendered via lodepng
+ *   - PNG (signature 89 50 4E 47): full RGBA decode via lodepng,
+ *     input bytes pulled into a PMM-contiguous buffer, decoded RGBA
+ *     scaled nearest-neighbor to fit the preview rect. Capped at
+ *     1920x1080 — bigger images fall back to a metadata card.
+ *     JPEG / WebP / HEIC are future work (lodepng is PNG-only).
  *   - Plain text (first 4 bytes printable ASCII / NUL-padded): up to
  *     50 lines drawn directly
  *   - Otherwise: metadata card (size, modified time, mime sniff hex)
@@ -48,7 +52,9 @@ int  quick_look_mouse_down(int x, int y, int button);
 /* Draw. */
 void quick_look_draw(void);
 
-/* Counter for selftest. */
+/* Counters for selftest. */
 uint32_t quick_look_total_opens(void);
+uint32_t quick_look_total_decodes_ok(void);
+uint32_t quick_look_total_decodes_fail(void);
 
 #endif /* ZEOS_QUICK_LOOK_H */
