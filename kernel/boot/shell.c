@@ -146,6 +146,7 @@ static const char *skip_word(const char *s)
 
 static void cmd_help(const char *args);
 static void cmd_info(const char *args);
+static void cmd_display(const char *args);
 static void cmd_mem(const char *args);
 static void cmd_heap(const char *args);
 static void cmd_lspci(const char *args);
@@ -270,6 +271,7 @@ static const struct shell_cmd commands[] = {
     {"build",   "build and flash project",        cmd_build,   VIS_ZEROS},
     {"delta",   "measure timing delta",           cmd_delta,   VIS_ZEROS},
     {"info",    "system information",             cmd_info,    VIS_ZEROS},
+    {"display", "current resolution + monitor (EDID)", cmd_display, VIS_ALWAYS},
     {"mem",     "memory stats",                   cmd_mem,     VIS_ZEROS},
 
     /* DereZ persona — code/dev */
@@ -396,6 +398,58 @@ static void cmd_info(const char *args)
     kputs("Memory:      ");
     kput_dec(usable / (1024 * 1024));
     kputs(" MB usable\n");
+}
+
+static const char *pixel_format_name(uint32_t f)
+{
+    switch (f) {
+    case PixelRedGreenBlueReserved8BitPerColor:        return "RGB888";
+    case PixelBlueGreenRedReserved8BitPerColor: return "BGRX8888";
+    case PixelBitMask:                          return "BitMask";
+    case PixelBltOnly:                          return "BltOnly";
+    default:                                    return "unknown";
+    }
+}
+
+static void cmd_display(const char *args)
+{
+    (void)args;
+    kputs("Resolution:  ");
+    kput_dec(g_boot->fb.width);
+    kputs("x");
+    kput_dec(g_boot->fb.height);
+    kputs(" (pitch ");
+    kput_dec(g_boot->fb.pitch);
+    kputs(")\n");
+
+    kputs("Pixel fmt:   ");
+    kputs(pixel_format_name(g_boot->fb.pixel_format));
+    kputs(" (");
+    kput_dec(g_boot->fb.pixel_format);
+    kputs(")\n");
+
+    kputs("FB base:     0x");
+    kput_hex((uint64_t)(unsigned long)g_boot->fb.base);
+    kputs("  size=");
+    kput_dec(g_boot->fb.size / 1024);
+    kputs(" KB\n");
+
+    if (g_boot->display.edid_valid) {
+        kputs("Monitor:     ");
+        kputs(g_boot->display.mfr);
+        kputs(" product 0x");
+        kput_hex(g_boot->display.product_id);
+        kputs("\n");
+        kputs("Native:      ");
+        kput_dec(g_boot->display.native_w);
+        kputs("x");
+        kput_dec(g_boot->display.native_h);
+        kputs(" @ ");
+        kput_dec(g_boot->display.native_hz);
+        kputs(" Hz\n");
+    } else {
+        kputs("Monitor:     EDID not exposed by firmware\n");
+    }
 }
 
 static uint64_t read_tsc(void)

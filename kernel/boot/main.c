@@ -76,9 +76,148 @@ static void *find_rsdp(EFI_SYSTEM_TABLE *st)
 }
 
 /*
- * Acquire the GOP framebuffer.
+ * EDID protocols — UEFI 2.x §11.9. Either Active (current monitor) or
+ * Discovered (read from EDID block, may differ from active mode) is OK.
+ * Both have an identical layout: { UINT32 SizeOfEdid; UINT8 *Edid; }.
  */
-static EFI_STATUS init_gop(EFI_SYSTEM_TABLE *st, struct zeos_framebuffer *fb)
+typedef struct {
+    UINT32  SizeOfEdid;
+    UINT8  *Edid;
+} ZEOS_EFI_EDID_PROTOCOL;
+
+#define ZEOS_EFI_EDID_ACTIVE_GUID \
+    { 0xbd8c1056, 0x9f36, 0x44ec, \
+      { 0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86 } }
+#define ZEOS_EFI_EDID_DISCOVERED_GUID \
+    { 0x1c0c34f6, 0xd380, 0x41fa, \
+      { 0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa } }
+
+/*
+ * Parse a 128-byte EDID block 0. Returns 0 on success, -1 on bad checksum
+ * or invalid header. Fills mfr (3 chars + NUL), product_id, and the
+ * preferred-timing native_w/native_h/native_hz. Refresh is computed from
+ * the detailed timing descriptor (DTD #1 at offset 54).
+ */
+static int parse_edid(const UINT8 *e, struct zeos_display_info *d)
+{
+    /* Header: 00 FF FF FF FF FF FF 00 */
+    static const UINT8 hdr[8] = {0,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0};
+    for (int i = 0; i < 8; i++)
+        if (e[i] != hdr[i]) return -1;
+
+    /* Checksum: sum of all 128 bytes mod 256 == 0 */
+    UINT32 sum = 0;
+    for (int i = 0; i < 128; i++) sum += e[i];
+    if ((sum & 0xff) != 0) return -1;
+
+    /* Manufacturer ID: 2 big-endian bytes at offset 8, 5-bit per letter */
+    UINT16 mid = (UINT16)((e[8] << 8) | e[9]);
+    d->mfr[0] = (char)('@' + ((mid >> 10) & 0x1f));
+    d->mfr[1] = (char)('@' + ((mid >>  5) & 0x1f));
+    d->mfr[2] = (char)('@' + ( mid        & 0x1f));
+    d->mfr[3] = '\0';
+
+    d->product_id = (UINT16)(e[10] | (e[11] << 8));
+
+    /* Preferred Detailed Timing Descriptor at offset 54 */
+    const UINT8 *dtd = e + 54;
+    UINT32 hactive = dtd[2] | ((UINT32)(dtd[4] & 0xF0) << 4);
+    UINT32 hblank  = dtd[3] | ((UINT32)(dtd[4] & 0x0F) << 8);
+    UINT32 vactive = dtd[5] | ((UINT32)(dtd[7] & 0xF0) << 4);
+    UINT32 vblank  = dtd[6] | ((UINT32)(dtd[7] & 0x0F) << 8);
+    UINT32 pclk_10khz = (UINT32)dtd[0] | ((UINT32)dtd[1] << 8); /* in 10 kHz */
+
+    d->native_w = hactive;
+    d->native_h = vactive;
+    d->native_hz = 0;
+    UINT32 htotal = hactive + hblank;
+    UINT32 vtotal = vactive + vblank;
+    if (htotal && vtotal && pclk_10khz) {
+        /* refresh = pclk / (htotal * vtotal); pclk in Hz = pclk_10khz * 10000 */
+        UINT64 hz = (UINT64)pclk_10khz * 10000ULL / ((UINT64)htotal * vtotal);
+        d->native_hz = (UINT32)hz;
+    }
+
+    /* Copy the raw block */
+    for (int i = 0; i < 128; i++) d->edid[i] = e[i];
+    d->edid_valid = 1;
+    return 0;
+}
+
+/*
+ * Try to locate an EDID block and parse it. Tries Active first, then
+ * Discovered. On any failure leaves edid_valid == 0.
+ */
+static void try_read_edid(EFI_SYSTEM_TABLE *st, struct zeos_display_info *d)
+{
+    EFI_GUID active = ZEOS_EFI_EDID_ACTIVE_GUID;
+    EFI_GUID disc   = ZEOS_EFI_EDID_DISCOVERED_GUID;
+    ZEOS_EFI_EDID_PROTOCOL *e = NULL;
+    EFI_STATUS s;
+
+    d->edid_valid = 0;
+    d->mfr[0] = '\0';
+
+    s = uefi_call_wrapper(st->BootServices->LocateProtocol, 3,
+                          &active, NULL, (void **)&e);
+    if (EFI_ERROR(s) || !e || !e->Edid || e->SizeOfEdid < 128) {
+        e = NULL;
+        s = uefi_call_wrapper(st->BootServices->LocateProtocol, 3,
+                              &disc, NULL, (void **)&e);
+    }
+    if (EFI_ERROR(s) || !e || !e->Edid || e->SizeOfEdid < 128) {
+        Print(L"EDID not exposed\r\n");
+        return;
+    }
+
+    if (parse_edid(e->Edid, d) != 0) {
+        Print(L"EDID present but invalid\r\n");
+        return;
+    }
+
+    Print(L"Display: %c%c%c %04x, native %dx%d @ %d Hz\r\n",
+          d->mfr[0], d->mfr[1], d->mfr[2], d->product_id,
+          d->native_w, d->native_h, d->native_hz);
+}
+
+/*
+ * Score a candidate mode. Higher = better.
+ * Native (matches EDID) wins, then a fixed preference ladder, then area.
+ */
+static UINT64 mode_score(UINT32 w, UINT32 h,
+                         const struct zeos_display_info *d)
+{
+    if (d->edid_valid && w == d->native_w && h == d->native_h)
+        return (UINT64)1 << 60;
+
+    struct { UINT32 w, h; UINT64 bonus; } pref[] = {
+        {1920, 1080, (UINT64)1 << 50},
+        {1600,  900, (UINT64)1 << 49},
+        {1366,  768, (UINT64)1 << 48},
+        {1280,  800, (UINT64)1 << 47},
+        {1024,  768, (UINT64)1 << 46},
+    };
+    for (UINTN i = 0; i < sizeof(pref)/sizeof(pref[0]); i++)
+        if (w == pref[i].w && h == pref[i].h)
+            return pref[i].bonus + (UINT64)w * h;
+
+    /* Largest available — only the area term, well below the ladder */
+    return (UINT64)w * h;
+}
+
+static int pixel_format_usable(UINT32 fmt)
+{
+    return fmt == PixelRedGreenBlueReserved8BitPerColor ||
+           fmt == PixelBlueGreenRedReserved8BitPerColor;
+}
+
+/*
+ * Acquire GOP, enumerate modes, query EDID, pick the best mode, SetMode,
+ * then publish the resulting framebuffer to fb.
+ */
+static EFI_STATUS init_gop(EFI_SYSTEM_TABLE *st,
+                           struct zeos_framebuffer *fb,
+                           struct zeos_display_info *d)
 {
     EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
@@ -88,6 +227,42 @@ static EFI_STATUS init_gop(EFI_SYSTEM_TABLE *st, struct zeos_framebuffer *fb)
                                &gop_guid, NULL, (void **)&gop);
     if (EFI_ERROR(status) || !gop)
         return status;
+
+    /* Read EDID before mode selection so native timing influences scoring. */
+    try_read_edid(st, d);
+
+    UINT32 max_mode = gop->Mode->MaxMode;
+    UINT32 best_mode = gop->Mode->Mode;
+    UINT64 best_score = 0;
+    int best_found = 0;
+
+    for (UINT32 m = 0; m < max_mode; m++) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        UINTN info_sz = 0;
+        EFI_STATUS qs = uefi_call_wrapper(gop->QueryMode, 4,
+                                          gop, m, &info_sz, &info);
+        if (EFI_ERROR(qs) || !info)
+            continue;
+
+        if (!pixel_format_usable(info->PixelFormat))
+            continue;
+
+        UINT64 sc = mode_score(info->HorizontalResolution,
+                               info->VerticalResolution, d);
+        if (!best_found || sc > best_score) {
+            best_score = sc;
+            best_mode = m;
+            best_found = 1;
+        }
+    }
+
+    if (best_found && best_mode != gop->Mode->Mode) {
+        EFI_STATUS ss = uefi_call_wrapper(gop->SetMode, 2, gop, best_mode);
+        if (EFI_ERROR(ss)) {
+            Print(L"GOP SetMode(%d) failed (%r); keeping current mode\r\n",
+                  best_mode, ss);
+        }
+    }
 
     fb->base       = (uint32_t *)(UINTN)gop->Mode->FrameBufferBase;
     fb->size       = gop->Mode->FrameBufferSize;
@@ -160,7 +335,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
     /* Step 1: Framebuffer */
     Print(L"Acquiring GOP framebuffer... ");
-    status = init_gop(st, &boot_info.fb);
+    status = init_gop(st, &boot_info.fb, &boot_info.display);
     if (EFI_ERROR(status)) {
         Print(L"FAILED (status %r)\r\n", status);
         return status;

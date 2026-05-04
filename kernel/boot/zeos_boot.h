@@ -25,10 +25,26 @@ struct zeos_memory_map {
     uint64_t  map_key;       /* Key for ExitBootServices */
 };
 
+/*
+ * Display info captured from UEFI EDID before ExitBootServices.
+ * If edid_valid == 0, the EDID protocol wasn't exposed and the
+ * mfr/product/native fields are unset.
+ */
+struct zeos_display_info {
+    uint8_t   edid_valid;     /* 1 if EDID was read+checksum-validated */
+    uint8_t   edid[128];      /* Raw EDID block 0 (when valid) */
+    char      mfr[4];         /* 3-letter manufacturer code + NUL */
+    uint16_t  product_id;     /* EDID product ID (little-endian) */
+    uint32_t  native_w;       /* Preferred timing horizontal (pixels) */
+    uint32_t  native_h;       /* Preferred timing vertical (pixels) */
+    uint32_t  native_hz;      /* Preferred refresh rate (Hz, integer) */
+};
+
 struct zeos_boot_info {
-    struct zeos_framebuffer fb;
-    struct zeos_memory_map  mmap;
-    void                   *rsdp;   /* ACPI RSDP pointer */
+    struct zeos_framebuffer  fb;
+    struct zeos_memory_map   mmap;
+    void                    *rsdp;     /* ACPI RSDP pointer */
+    struct zeos_display_info display;  /* EDID + native timing */
 };
 
 #endif /* ZEOS_BOOT_H */
