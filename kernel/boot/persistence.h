@@ -20,8 +20,14 @@
 #include <stdint.h>
 
 /* On-disk schema version for the chain registry snapshot. Bump when
- * the persisted chain shape changes; older snapshots are discarded. */
-#define PERSISTENCE_SNAPSHOT_VERSION  1
+ * the persisted chain shape changes; older snapshots are discarded.
+ *
+ * v2 (2026-05-04): added crc32 to header + per-record sanity gating in
+ * load_snapshot_buffered() and parent_id consistency check in
+ * persistence_apply_snapshot(). Any v1 snapshot in an existing vault is
+ * discarded on first v2 boot — see boot fix in commit history.
+ */
+#define PERSISTENCE_SNAPSHOT_VERSION  2
 
 /* On-disk schema version for individual journal records. */
 #define PERSISTENCE_JOURNAL_VERSION   1
@@ -47,13 +53,20 @@ typedef struct {
     int32_t  new_vault_version;
 } persistence_journal_record_t;
 
-/* Snapshot file header. Followed by snapshot_count chain_record_t. */
+/* Snapshot file header. Followed by snapshot_count chain_record_t.
+ *
+ * crc32 covers all bytes from the start of `saved_tsc` through the end
+ * of the chain_record_t array (i.e. everything after the header's
+ * magic/version/crc32 prefix). Computed with the standard IEEE 802.3
+ * polynomial (0xEDB88320, reflected). Mismatch => snapshot discarded. */
 typedef struct {
     uint32_t magic;             /* 'ZCRS' = 0x5A435253 */
     uint32_t version;           /* PERSISTENCE_SNAPSHOT_VERSION */
+    uint32_t crc32;             /* covers everything after this field */
+    uint32_t reserved0;         /* keeps header 8-byte aligned for saved_tsc */
     uint64_t saved_tsc;
     uint32_t chain_count;
-    uint32_t reserved;
+    uint32_t reserved1;
 } persistence_snapshot_header_t;
 
 #define PERSISTENCE_SNAPSHOT_MAGIC    0x5A435253u
@@ -120,5 +133,22 @@ int      persistence_ready(void);
 /* Print the on-disk journal + snapshot stats. Used by the
  * 'persistence' shell command. */
 void     persistence_dump(void);
+
+/* ── Test hook ────────────────────────────────────────────────────────
+ * Runs the snapshot loader's validation pipeline on a caller-provided
+ * buffer (header + records, just like the on-disk layout). Used by the
+ * boot regression test to confirm that:
+ *   - a well-formed v2 snapshot loads cleanly,
+ *   - a corrupt header / mismatched CRC / out-of-range record is
+ *     rejected without panicking.
+ *
+ * Return: count of records that passed validation (0 if rejected as a
+ * whole snapshot, e.g. magic/version/CRC mismatch). Never panics on
+ * malformed input — that's the whole point.
+ *
+ * Note: does NOT touch g_pending_snapshot or any live state. Pure
+ * validation, side-effect-free.
+ */
+int persistence_validate_snapshot_buffer(const void *buf, uint32_t len);
 
 #endif /* ZEOS_PERSISTENCE_H */

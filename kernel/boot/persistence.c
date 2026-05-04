@@ -39,6 +39,42 @@ static zeos_spinlock_t g_persist_lock = ZEOS_SPINLOCK_INIT;
 
 /* ── Internal helpers (freestanding) ────────────────────────────── */
 
+/* Standard CRC-32 (IEEE 802.3, reflected, poly 0xEDB88320). Used to
+ * gate whole-snapshot acceptance — a single bit-flip anywhere in the
+ * snapshot payload trips the CRC and the snapshot is discarded.
+ *
+ * Implemented byte-at-a-time; this runs at most once per boot, on a
+ * buffer bounded by the static snapshot scratch. No table to keep the
+ * code surface small. */
+static uint32_t p_crc32(const void *data, uint32_t n)
+{
+    const uint8_t *p = (const uint8_t *)data;
+    uint32_t crc = 0xFFFFFFFFu;
+    for (uint32_t i = 0; i < n; i++) {
+        crc ^= (uint32_t)p[i];
+        for (int b = 0; b < 8; b++) {
+            uint32_t mask = -(int32_t)(crc & 1u);
+            crc = (crc >> 1) ^ (0xEDB88320u & mask);
+        }
+    }
+    return ~crc;
+}
+
+/* True if `f` is a finite, non-NaN, non-Inf, non-negative float in a
+ * sane range for B3 priors. Used to reject corrupt records without
+ * pulling <math.h>. We avoid touching the float in any way that would
+ * fault on a NaN payload. */
+static int p_finite_nonneg(float f)
+{
+    union { float f; uint32_t u; } cv;
+    cv.f = f;
+    uint32_t exp  = (cv.u >> 23) & 0xFFu;
+    uint32_t sign = (cv.u >> 31) & 0x1u;
+    if (sign != 0u)        return 0;  /* negative */
+    if (exp  == 0xFFu)     return 0;  /* Inf or NaN */
+    return 1;
+}
+
 static void p_memcpy(void *dst, const void *src, uint32_t n)
 {
     uint8_t *d = (uint8_t *)dst;
@@ -154,6 +190,45 @@ static void load_journal_into_ring(void)
 
 /* ── Snapshot load (boot, deferred apply) ───────────────────────── */
 
+/* Validate one chain_record_t. Returns 1 if usable, 0 if corrupt.
+ *
+ * A corrupt record is the signature of a stale snapshot mismatching
+ * the current chain registry shape (renamed slot, reordered enum,
+ * partial overwrite from an unrelated VAULT key). We treat any
+ * out-of-range field as fatal for that record — applying it would
+ * write garbage into a live chain's tunables and could feed bad B3
+ * priors into the scheduler's backoff math, which has been observed
+ * to send execution through stale code addresses on the next resolve.
+ */
+static int validate_chain_record(const persistence_chain_record_t *r)
+{
+    /* name must be NUL-terminated within the buffer. */
+    int has_nul = 0;
+    for (uint32_t i = 0; i < sizeof(r->name); i++) {
+        if (r->name[i] == '\0') { has_nul = 1; break; }
+    }
+    if (!has_nul) return 0;
+    if (r->name[0] == '\0') return 0;  /* empty name slot */
+
+    /* parent_id must be -1 (root) or a valid registry index. */
+    if (r->parent_id != -1 && (r->parent_id < 0 || r->parent_id >= 128))
+        return 0;
+
+    /* tier must be a valid enum. */
+    if (r->tier > (uint8_t)MASQ_REFERENCE) return 0;
+
+    /* B3 priors must be finite, non-negative. NaN/Inf/negative would
+     * make the scheduler's backoff_skip_threshold compare nonsensical. */
+    if (!p_finite_nonneg(r->b3_alpha))               return 0;
+    if (!p_finite_nonneg(r->b3_beta))                return 0;
+    if (!p_finite_nonneg(r->backoff_skip_threshold)) return 0;
+
+    if (r->b3_observations < 0)  return 0;
+    if (r->vault_version  < 0)   return 0;
+
+    return 1;
+}
+
 static void load_snapshot_buffered(void)
 {
     g_pending_count = 0;
@@ -180,22 +255,57 @@ static void load_snapshot_buffered(void)
         kput_dec((uint64_t)hdr->version);
         kputs(" != current v");
         kput_dec((uint64_t)PERSISTENCE_SNAPSHOT_VERSION);
-        kputs(" -- discarding\n");
+        kputs(" -- using fresh state\n");
+        return;
+    }
+
+    /* Sanity-cap chain_count BEFORE we use it for size math, so a
+     * corrupt header with chain_count=0xFFFFFFFF can't wrap the
+     * `expected` multiplication and slip a too-small buffer past the
+     * size check. */
+    if (hdr->chain_count > 128) {
+        kputs("[persistence] snapshot chain_count out of range -- discarding\n");
         return;
     }
 
     uint32_t expected = sizeof(persistence_snapshot_header_t)
                       + hdr->chain_count * (uint32_t)sizeof(persistence_chain_record_t);
-    if ((uint32_t)got < expected) return;
+    if ((uint32_t)got < expected) {
+        kputs("[persistence] snapshot truncated -- discarding\n");
+        return;
+    }
+
+    /* CRC covers everything after the magic/version/crc32/reserved0
+     * prefix: saved_tsc, chain_count, reserved1, and the record array. */
+    uint32_t prefix = (uint32_t)((uint8_t *)&hdr->saved_tsc - buf);
+    uint32_t crc_expected = hdr->crc32;
+    uint32_t crc_got      = p_crc32(buf + prefix, expected - prefix);
+    if (crc_got != crc_expected) {
+        kputs("[persistence] snapshot CRC mismatch -- discarding (stale or corrupt)\n");
+        return;
+    }
 
     persistence_chain_record_t *src =
         (persistence_chain_record_t *)(buf + sizeof(persistence_snapshot_header_t));
 
-    uint32_t n = hdr->chain_count;
-    if (n > 128) n = 128;
-
-    for (uint32_t i = 0; i < n; i++) g_pending_snapshot[i] = src[i];
-    g_pending_count = n;
+    /* Per-record validation. We accept the snapshot as a whole, then
+     * skip individual records that fail validation. A pile of failed
+     * records is logged once. */
+    uint32_t kept = 0;
+    uint32_t dropped = 0;
+    for (uint32_t i = 0; i < hdr->chain_count; i++) {
+        if (validate_chain_record(&src[i])) {
+            g_pending_snapshot[kept++] = src[i];
+        } else {
+            dropped++;
+        }
+    }
+    if (dropped) {
+        kputs("[persistence] dropped ");
+        kput_dec((uint64_t)dropped);
+        kputs(" corrupt snapshot record(s)\n");
+    }
+    g_pending_count = kept;
 }
 
 /* ── Public init ────────────────────────────────────────────────── */
@@ -244,6 +354,7 @@ int persistence_apply_snapshot(void)
     }
 
     uint32_t applied = 0;
+    uint32_t shape_skipped = 0;
     for (uint32_t i = 0; i < g_pending_count; i++) {
         persistence_chain_record_t *rec = &g_pending_snapshot[i];
 
@@ -254,19 +365,45 @@ int persistence_apply_snapshot(void)
             if (!c) continue;
             if (!p_streq(c->name, rec->name)) continue;
 
+            /* Shape consistency: a snapshot whose persisted parent_id
+             * disagrees with the live chain's parent_id describes a
+             * different topology — likely a renamed/relocated chain
+             * across kernel revisions. Skip rather than write tunables
+             * onto a same-name-but-different chain. parent_id == -1
+             * (root) is permissive: we don't reject root mismatches
+             * because chain_registry_init may have re-rooted some
+             * chains in-tree without the persisted record knowing. */
+            if (rec->parent_id != -1 && rec->parent_id != c->parent_id) {
+                shape_skipped++;
+                break;
+            }
+
             /* Restore mutable state. NEVER touch resolve fn pointers,
-             * node count, parent_id, addr, last_resolve_* (transient). */
+             * node count, parent_id, addr, last_resolve_* (transient).
+             *
+             * tier is also persisted but only restored if it matches
+             * the live chain's current tier; a tier downgrade in code
+             * (e.g. SOVEREIGN -> INTERNAL) must not be undone by the
+             * snapshot, which would re-elevate the chain's MasQ scope
+             * silently. */
+            if ((uint8_t)c->tier == rec->tier) {
+                c->tier = (masq_tier_t)rec->tier;
+            }
             c->b3_alpha               = rec->b3_alpha;
             c->b3_beta                = rec->b3_beta;
             c->b3_observations        = rec->b3_observations;
             c->vault_version          = rec->vault_version;
-            c->tier                   = (masq_tier_t)rec->tier;
             c->watchdog_timeout_us    = rec->watchdog_timeout_us;
             c->backoff_skip_threshold = rec->backoff_skip_threshold;
             c->backoff_skip_every     = rec->backoff_skip_every;
             applied++;
             break;
         }
+    }
+    if (shape_skipped) {
+        kputs("[persistence] skipped ");
+        kput_dec((uint64_t)shape_skipped);
+        kputs(" snapshot record(s) due to topology mismatch\n");
     }
     g_chains_restored = applied;
 
@@ -326,6 +463,8 @@ int persistence_save_snapshot_now(void)
     persistence_snapshot_header_t *hdr = (persistence_snapshot_header_t *)buf;
     hdr->magic     = PERSISTENCE_SNAPSHOT_MAGIC;
     hdr->version   = PERSISTENCE_SNAPSHOT_VERSION;
+    hdr->crc32     = 0;  /* placeholder, computed once payload is built */
+    hdr->reserved0 = 0;
     hdr->saved_tsc = timer_read_tsc();
 
     persistence_chain_record_t *records =
@@ -354,6 +493,11 @@ int persistence_save_snapshot_now(void)
 
     uint32_t total = sizeof(persistence_snapshot_header_t)
                    + n * (uint32_t)sizeof(persistence_chain_record_t);
+
+    /* CRC over everything after magic/version/crc32/reserved0. The
+     * loader recomputes this and discards the snapshot on mismatch. */
+    uint32_t prefix = (uint32_t)((uint8_t *)&hdr->saved_tsc - buf);
+    hdr->crc32 = p_crc32(buf + prefix, total - prefix);
 
     /* vault_write replaces the file (creates a new temporal version
      * if it already exists) -- exactly what we want for a single
@@ -389,6 +533,45 @@ void persistence_on_resolve_complete(void)
     if ((v % CHECKPOINT_EVERY) == 0) {
         (void)persistence_save_snapshot_now();
     }
+}
+
+/* ── Test hook: pure validation pipeline over caller-provided buffer ──
+ *
+ * Mirrors the structural checks in load_snapshot_buffered() but with
+ * NO side effects on module state — no g_pending_count touch, no log
+ * output of "loaded N records" claims. Used by the boot regression
+ * test in tests.c to prove that a malformed snapshot is rejected
+ * gracefully, not by triggering a fault.
+ */
+int persistence_validate_snapshot_buffer(const void *buf, uint32_t len)
+{
+    if (!buf) return 0;
+    if (len < sizeof(persistence_snapshot_header_t)) return 0;
+
+    const persistence_snapshot_header_t *hdr =
+        (const persistence_snapshot_header_t *)buf;
+
+    if (hdr->magic    != PERSISTENCE_SNAPSHOT_MAGIC)      return 0;
+    if (hdr->version  != PERSISTENCE_SNAPSHOT_VERSION)    return 0;
+    if (hdr->chain_count > 128)                           return 0;
+
+    uint32_t expected = sizeof(persistence_snapshot_header_t)
+                      + hdr->chain_count * (uint32_t)sizeof(persistence_chain_record_t);
+    if (len < expected) return 0;
+
+    uint32_t prefix = (uint32_t)((const uint8_t *)&hdr->saved_tsc - (const uint8_t *)buf);
+    uint32_t crc_got =
+        p_crc32((const uint8_t *)buf + prefix, expected - prefix);
+    if (crc_got != hdr->crc32) return 0;
+
+    const persistence_chain_record_t *src =
+        (const persistence_chain_record_t *)((const uint8_t *)buf
+                                             + sizeof(persistence_snapshot_header_t));
+    int kept = 0;
+    for (uint32_t i = 0; i < hdr->chain_count; i++) {
+        if (validate_chain_record(&src[i])) kept++;
+    }
+    return kept;
 }
 
 /* ── Accessors ───────────────────────────────────────────────────── */
