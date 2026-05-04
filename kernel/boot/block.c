@@ -45,10 +45,13 @@ int block_init(void)
         }
     }
 
-    if (ahci_init() == 0 && g_count < BLOCK_MAX_DRIVES) {
-        g_drives[g_count].kind = BLOCK_KIND_AHCI;
-        g_drives[g_count].sub_idx = 0;
-        g_count++;
+    if (ahci_init() == 0) {
+        int n = ahci_drive_count();
+        for (int i = 0; i < n && g_count < BLOCK_MAX_DRIVES; i++) {
+            g_drives[g_count].kind = BLOCK_KIND_AHCI;
+            g_drives[g_count].sub_idx = i;
+            g_count++;
+        }
     }
 
     if ((usb_msc_ready() || usb_msc_init() == 0) && g_count < BLOCK_MAX_DRIVES) {
@@ -89,12 +92,27 @@ int block_drive_info(int idx, block_drive_info_t *out)
             copy_str(out->model,  sizeof(out->model),  d->model);
             return 0;
         }
-        case BLOCK_KIND_AHCI:
-            out->sectors = ahci_num_blocks();
-            out->sector_size = ahci_block_size();
+        case BLOCK_KIND_AHCI: {
+            int sub = out->sub_idx;
+            uint64_t blocks = ahci_drive_blocks(sub);
+            uint32_t bs     = ahci_drive_block_size(sub);
+            int port        = ahci_drive_port(sub);
+            if (!bs) return -1;
+            out->sectors = blocks;
+            out->sector_size = bs;
             copy_str(out->serial, sizeof(out->serial), "");
-            copy_str(out->model,  sizeof(out->model),  "AHCI/SATA");
+            char m[44];
+            int j = 0;
+            const char *base = "AHCI port ";
+            while (base[j] && j < (int)sizeof(m) - 4) { m[j] = base[j]; j++; }
+            if (port < 0)        { m[j++] = '?'; }
+            else if (port < 10)  { m[j++] = '0' + port; }
+            else                 { m[j++] = '0' + (port / 10);
+                                   m[j++] = '0' + (port % 10); }
+            m[j] = '\0';
+            copy_str(out->model, sizeof(out->model), m);
             return 0;
+        }
         case BLOCK_KIND_USB_MSC:
             out->sectors = usb_msc_sector_count();
             out->sector_size = usb_msc_block_size();
@@ -111,7 +129,7 @@ int block_read_drive(int idx, uint64_t lba, uint32_t count, void *buf)
     drive_slot_t *s = &g_drives[idx];
     switch (s->kind) {
         case BLOCK_KIND_NVME:    return nvme_read_drive(s->sub_idx, lba, count, buf);
-        case BLOCK_KIND_AHCI:    return ahci_read(lba, count, buf);
+        case BLOCK_KIND_AHCI:    return ahci_read_drive(s->sub_idx, lba, count, buf);
         case BLOCK_KIND_USB_MSC: return usb_msc_read(lba, count, buf);
     }
     return -1;
@@ -123,7 +141,7 @@ int block_write_drive(int idx, uint64_t lba, uint32_t count, const void *buf)
     drive_slot_t *s = &g_drives[idx];
     switch (s->kind) {
         case BLOCK_KIND_NVME:    return nvme_write_drive(s->sub_idx, lba, count, buf);
-        case BLOCK_KIND_AHCI:    return ahci_write(lba, count, buf);
+        case BLOCK_KIND_AHCI:    return ahci_write_drive(s->sub_idx, lba, count, buf);
         case BLOCK_KIND_USB_MSC: return usb_msc_write(lba, count, buf);
     }
     return -1;
@@ -135,7 +153,7 @@ int block_flush_drive(int idx)
     drive_slot_t *s = &g_drives[idx];
     switch (s->kind) {
         case BLOCK_KIND_NVME:    return nvme_flush_drive(s->sub_idx);
-        case BLOCK_KIND_AHCI:    return ahci_flush();
+        case BLOCK_KIND_AHCI:    return ahci_flush_drive(s->sub_idx);
         case BLOCK_KIND_USB_MSC: return usb_msc_flush();
     }
     return -1;

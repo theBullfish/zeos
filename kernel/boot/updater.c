@@ -18,6 +18,7 @@
 #include "net_tls.h"
 #include "mbedtls/ssl.h"  /* for MBEDTLS_ERR_SSL_WANT_READ/WRITE */
 #include "nvme.h"
+#include "gpt.h"
 #include "fb.h"
 #include "font.h"
 #include "theme.h"
@@ -736,7 +737,7 @@ int updater_apply(void)
     uint32_t blk_size = dev->block_size;
     if (blk_size == 0) blk_size = 512;
 
-    /* ── Step 1: Read GPT header (LBA 1) ── */
+    /* ── Step 1+2: Read GPT, find ESP via shared gpt_* API ── */
 
     uint8_t *blk = (uint8_t *)kmalloc(blk_size);
     if (!blk) {
@@ -744,69 +745,44 @@ int updater_apply(void)
         return -1;
     }
 
-    if (nvme_read(1, 1, blk) != 0) {
+    /* Updater always targets the NVMe boot drive (block index 0 by
+     * dispatcher convention — NVMe enumerated first in block_init). */
+    const int boot_drive_idx = 0;
+
+    struct gpt_header gpt_hdr;
+    if (gpt_read_header(boot_drive_idx, &gpt_hdr) != 0) {
         set_error("Failed to read GPT header");
         kfree(blk);
         return -1;
     }
 
-    gpt_header_t *gpt = (gpt_header_t *)blk;
-
-    /* Verify GPT signature: "EFI PART" */
-    const uint8_t gpt_sig[8] = {'E','F','I',' ','P','A','R','T'};
-    if (!mem_eq(gpt->signature, gpt_sig, 8)) {
-        set_error("Invalid GPT signature");
-        kfree(blk);
-        return -1;
-    }
-
-    uint64_t part_entry_lba = gpt->part_entry_lba;
-    uint32_t num_parts      = gpt->num_parts;
-    uint32_t entry_size     = gpt->part_entry_size;
-
     kputs("UPDATER: GPT found, ");
-    kput_dec(num_parts);
+    kput_dec(gpt_hdr.num_parts);
     kputs(" partitions, entries at LBA ");
-    kput_dec(part_entry_lba);
+    kput_dec(gpt_hdr.part_entry_lba);
     kputs("\n");
 
-    /* ── Step 2: Find EFI System Partition ── */
-
-    uint64_t esp_start_lba = 0;
-    uint64_t esp_end_lba   = 0;
-    int entries_per_block = blk_size / entry_size;
-    if (entries_per_block == 0) entries_per_block = 1;
-
-    int found = 0;
-    for (uint32_t i = 0; i < num_parts && !found; i++) {
-        uint32_t block_idx = i / entries_per_block;
-        uint32_t entry_idx = i % entries_per_block;
-
-        if (nvme_read(part_entry_lba + block_idx, 1, blk) != 0) {
-            set_error("Failed to read partition entries");
-            kfree(blk);
-            return -1;
-        }
-
-        gpt_entry_t *ent = (gpt_entry_t *)(blk + entry_idx * entry_size);
-
-        if (mem_eq(ent->type_guid, ESP_TYPE_GUID, 16)) {
-            esp_start_lba = ent->first_lba;
-            esp_end_lba   = ent->last_lba;
-            found = 1;
-            kputs("UPDATER: ESP at LBA ");
-            kput_dec(esp_start_lba);
-            kputs(" - ");
-            kput_dec(esp_end_lba);
-            kputs("\n");
-        }
-    }
-
-    if (!found) {
+    int esp_idx = gpt_find_esp(boot_drive_idx);
+    if (esp_idx < 0) {
         set_error("EFI System Partition not found");
         kfree(blk);
         return -1;
     }
+
+    struct gpt_partition esp_part;
+    if (gpt_read_partition(boot_drive_idx, esp_idx, &esp_part) != 0) {
+        set_error("Failed to read ESP entry");
+        kfree(blk);
+        return -1;
+    }
+
+    uint64_t esp_start_lba = esp_part.first_lba;
+    uint64_t esp_end_lba   = esp_part.last_lba;
+    kputs("UPDATER: ESP at LBA ");
+    kput_dec(esp_start_lba);
+    kputs(" - ");
+    kput_dec(esp_end_lba);
+    kputs("\n");
 
     /* ── Step 3: Find BOOTX64.EFI in FAT32 ── */
 
