@@ -25,6 +25,11 @@ int keyboard_has_char(void);
  * state, and pushes ASCII into the shell buffer. */
 void keyboard_inject_scancode(uint8_t scancode, int extended);
 
+/* Inject an ASCII char straight into kb_buf -- used by sources that
+ * already produce ASCII (UART serial, future telnet/SSH consoles).
+ * Bypasses the scancode pipeline; modifier state is left untouched. */
+void keyboard_inject_char(char c);
+
 /* Non-blocking variant of keyboard_getc. Returns 1 + writes char if
  * one is queued, 0 otherwise. Used by the scheduler-driven shell pump. */
 int  keyboard_try_getc(char *out);

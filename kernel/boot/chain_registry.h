@@ -15,6 +15,8 @@
 #ifndef ZEOS_CHAIN_REGISTRY_H
 #define ZEOS_CHAIN_REGISTRY_H
 
+#include <stdint.h>
+
 /* Register all system chains and wire MDE routes.
  * Returns total chain count (hw + system), or -1 on error. */
 int chain_registry_init(void);
@@ -45,5 +47,11 @@ extern int CHAIN_GPU_0_DISPLAY;
 extern int CHAIN_DISPLAY_GOP;
 extern int CHAIN_KEYBOARD;
 extern int CHAIN_MOUSE;
+extern int CHAIN_SERIAL_IN;
+
+/* Lifetime count of bytes the serial chain has decoded into kb_buf.
+ * cmd_selftest samples this across a 100ms window to compute drain
+ * rate. */
+uint32_t chain_serial_in_total(void);
 
 #endif /* ZEOS_CHAIN_REGISTRY_H */

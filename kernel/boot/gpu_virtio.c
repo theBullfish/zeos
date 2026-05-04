@@ -1524,6 +1524,37 @@ int gpu_virtio_gop_fallback(int *out_chain_id)
     return 1;
 }
 
+/* Hotplug pump: re-poll GET_DISPLAY_INFO on every virtio-gpu device.
+ * Updates each scanout's enabled/width/height in-place. Boot-time
+ * register_chain_hierarchy already created CHAIN_DISPLAY_<n> for every
+ * scanout slot; the pump just records when enabled[] flips. Returns
+ * the number of devices successfully re-polled. */
+int gpu_virtio_hotplug_repoll(void)
+{
+    int ok = 0;
+    for (int i = 0; i < s_dev_count; i++) {
+        gpu_dev_t *gd = &s_devs[i];
+        if (!gd->ready) continue;
+        if (gpu_get_display_info(gd) == 0) ok++;
+    }
+    return ok;
+}
+
+/* Read raw enabled/width/height for (dev_idx, scanout_idx). Returns 0
+ * on success, -1 if out-of-range. enabled may be 0 even for a "valid"
+ * scanout slot. */
+int gpu_virtio_hotplug_scanout(int dev_idx, int scanout_idx,
+                               int *enabled, uint32_t *w, uint32_t *h)
+{
+    if (dev_idx < 0 || dev_idx >= s_dev_count) return -1;
+    if (scanout_idx < 0 || scanout_idx >= GPU_VIRTIO_MAX_SCANOUTS) return -1;
+    scanout_t *s = &s_devs[dev_idx].scanouts[scanout_idx];
+    if (enabled) *enabled = s->enabled ? 1 : 0;
+    if (w)       *w       = s->width;
+    if (h)       *h       = s->height;
+    return 0;
+}
+
 int gpu_virtio_present(void)
 {
     if (s_dev_count == 0) return 0;

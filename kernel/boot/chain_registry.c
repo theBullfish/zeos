@@ -28,6 +28,8 @@
 #include "gpu_virtio.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "serial.h"
+#include "hotplug.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -48,6 +50,12 @@ int CHAIN_GPU_0_DISPLAY  = -1;
 int CHAIN_DISPLAY_GOP    = -1;
 int CHAIN_KEYBOARD       = -1;
 int CHAIN_MOUSE          = -1;
+int CHAIN_SERIAL_IN      = -1;
+
+/* Per-tick counters published by the serial chain so cmd_selftest
+ * can sample drain rate over a 100ms window without reaching into
+ * the UART itself. */
+static volatile uint32_t s_serial_chars_decoded;
 
 /* ── Node resolve functions ────────────────────────────────────── */
 /*
@@ -221,6 +229,102 @@ static void mouse_event_resolve(chain_node_t *self, void *input, void *output)
     *out = decoded;
 }
 
+/* ── Serial-input chain resolves ───────────────────────────────── */
+/*
+ * CHAIN_SERIAL_IN: drains the COM1 RX ring (filled by the serial IRQ
+ * and a polling fallback inside serial_rx_pending), translates each
+ * byte to an ASCII input_event, and pushes it into the shared shell
+ * input buffer (kb_buf via keyboard_inject_char). MDE auto-routes
+ * input_event to CHAIN_SHELL and CHAIN_PALETTE the same way it does
+ * for CHAIN_KEYBOARD.
+ *
+ *   Pipeline:  serial_poll  →  ascii_decode  →  input_event
+ */
+
+#define SERIAL_CHAIN_RING 16
+typedef struct {
+    uint8_t  buf[SERIAL_CHAIN_RING];
+    int      count;
+} serial_poll_state_t;
+static serial_poll_state_t s_serial_poll;
+
+static void serial_poll_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    (void)input;
+
+    /* Calling serial_rx_pending() also tops up the RX ring from the
+     * UART FIFO so the polling fallback works on hosts where the
+     * COM1 IRQ never fires. */
+    int avail = serial_rx_pending();
+    s_serial_poll.count = 0;
+    if (avail <= 0) {
+        int *out = (int *)output;
+        if (out) *out = 0;
+        return;
+    }
+    while (s_serial_poll.count < SERIAL_CHAIN_RING) {
+        uint8_t b;
+        if (!serial_rx_pop(&b)) break;
+        s_serial_poll.buf[s_serial_poll.count++] = b;
+    }
+    int *out = (int *)output;
+    if (out) *out = s_serial_poll.count;
+}
+
+static void serial_ascii_decode_resolve(chain_node_t *self,
+                                        void *input, void *output)
+{
+    (void)self;
+    int n = input ? *(int *)input : s_serial_poll.count;
+    int produced = 0;
+    for (int i = 0; i < n && i < SERIAL_CHAIN_RING; i++) {
+        uint8_t b = s_serial_poll.buf[i];
+        char c;
+        /* Normalize line endings: bare CR or LF both map to '\n'. The
+         * shell pump treats '\n' as the dispatch trigger. */
+        if (b == 0x0D || b == 0x0A) {
+            c = '\n';
+        } else if (b == 0x7F) {
+            /* DEL → backspace; shell_pump_char handles '\b'. */
+            c = '\b';
+        } else if (b == 0x08) {
+            c = '\b';
+        } else if (b < 0x20 || b > 0x7E) {
+            /* Drop non-printable control bytes we don't translate. */
+            continue;
+        } else {
+            c = (char)b;
+        }
+        keyboard_inject_char(c);
+        produced++;
+    }
+    s_serial_poll.count = 0;
+    s_serial_chars_decoded += (uint32_t)produced;
+
+    int *out = (int *)output;
+    if (out) *out = produced;
+
+    if (produced > 0) {
+        chain_t *cc = chain_get(CHAIN_SERIAL_IN);
+        if (cc) cc->vault_version++;
+    }
+}
+
+static void serial_input_event_resolve(chain_node_t *self,
+                                       void *input, void *output)
+{
+    (void)self;
+    int decoded = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    if (out) *out = decoded;
+}
+
+uint32_t chain_serial_in_total(void)
+{
+    return s_serial_chars_decoded;
+}
+
 /* ── Init ──────────────────────────────────────────────────────── */
 
 int chain_registry_init(void)
@@ -344,6 +448,25 @@ int chain_registry_init(void)
                        kbd_event_resolve);
     }
 
+    /* Serial input: COM1 UART RX. The IRQ4 ISR (and a polling
+     * fallback inside serial_rx_pending) feed a small ring; the
+     * chain's three nodes drain it, decode ASCII, and emit
+     * input_event so MDE auto-routes serial keystrokes to the
+     * same downstream consumers as PS/2. Critical for headless /
+     * QEMU -serial stdio boots where the only console IS serial. */
+    CHAIN_SERIAL_IN = chain_create("serial_in", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_SERIAL_IN >= 0) {
+        chain_add_node(CHAIN_SERIAL_IN, "serial_poll",
+                       "uart_rx_event",  "byte_count",
+                       serial_poll_resolve);
+        chain_add_node(CHAIN_SERIAL_IN, "ascii_decode",
+                       "byte_count", "ser_decoded_count",
+                       serial_ascii_decode_resolve);
+        chain_add_node(CHAIN_SERIAL_IN, "input_event",
+                       "ser_decoded_count", "input_event",
+                       serial_input_event_resolve);
+    }
+
     /* Mouse: same shape as keyboard but for PS/2 mouse packets. */
     CHAIN_MOUSE = chain_create("mouse", CHAIN_CPU, MASQ_INTERNAL);
     if (CHAIN_MOUSE >= 0) {
@@ -445,6 +568,19 @@ int chain_registry_init(void)
             (void)gpu_virtio_gop_fallback(&gop_id);
             CHAIN_DISPLAY_GOP = gop_id;
         }
+    }
+
+    /* Hotplug pumps: PCI rescan, USB PORTSC poll, virtio-gpu HPD.
+     * Each runs every 4 ticks (~4ms) and emits attach/detach events
+     * into the hotplug ring with MasQ provenance. The boot-time
+     * enumeration paths (pci_enumerate, xhci_init, gpu_virtio_init)
+     * remain authoritative for first-boot discovery; this layer is
+     * purely additive. */
+    {
+        int hp = hotplug_init(CHAIN_CPU);
+        kputs("[chain_registry] hotplug pumps: ");
+        kput_dec((uint64_t)hp);
+        kputs("\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

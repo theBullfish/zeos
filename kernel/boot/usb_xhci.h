@@ -130,4 +130,13 @@ struct xhci_device *xhci_address_hub_device(struct xhci_device *parent,
 int xhci_mark_hub(struct xhci_device *hub, int num_ports, int mtt,
                   int think_time);
 
+/* Hotplug pump support (boot/hotplug.c). Read-only PORTSC access plus
+ * CSC acknowledgement. Returns 0 on success; -1 if controller absent
+ * or port out of range. xhci_hotplug_max_ports() returns 0 if no xHCI
+ * controller was bound at boot. */
+int  xhci_hotplug_max_ports(void);
+int  xhci_hotplug_port_status(int port, int *connected, int *speed, int *csc);
+void xhci_hotplug_ack_csc(int port);
+void xhci_hotplug_power_on_all_ports(void);
+
 #endif /* ZEOS_USB_XHCI_H */

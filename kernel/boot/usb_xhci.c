@@ -1646,3 +1646,68 @@ struct xhci_device *xhci_real_get_device(int index)
     if (index < 0 || index >= xhci.dev_count) return 0;
     return &xhci.devices[index];
 }
+
+/* ── Hotplug pump support ──────────────────────────────────────
+ *
+ * Read-only PORTSC accessors so the hotplug pump (boot/hotplug.c)
+ * can poll CSC + CCS without touching any xHCI state. The boot-time
+ * enumeration path in enumerate_root_ports() remains the only thing
+ * that mutates port reset / addressing.
+ */
+
+int xhci_hotplug_max_ports(void)
+{
+    if (!xhci.op_base) return 0;
+    return (int)xhci.max_ports;
+}
+
+/* port is 1-based. Returns 0 on success, fills *connected/*speed/*csc. */
+int xhci_hotplug_port_status(int port, int *connected, int *speed, int *csc)
+{
+    if (!xhci.op_base) return -1;
+    if (port < 1 || port > xhci.max_ports) return -1;
+    uint32_t psc = op_r32(XHCI_PORTSC(port));
+    if (connected) *connected = (psc & PORTSC_CCS) ? 1 : 0;
+    if (speed)     *speed     = (int)((psc & PORTSC_PSPEED_MASK) >> PORTSC_PSPEED_SHIFT);
+    if (csc)       *csc       = (psc & PORTSC_CSC) ? 1 : 0;
+    return 0;
+}
+
+/* Acknowledge (write-1-clear) the CSC bit on the given port. The hotplug
+ * pump calls this after recording a transition so the next poll sees the
+ * raw connect state without the latched change bit.
+ *
+ * PED is RW1C in xHCI 1.2 (write 1 to clear == disable). The naive
+ * "preserve psc, OR in CSC" pattern accidentally writes 1 back to PED
+ * and disables the port. Mask PED out alongside the change bits before
+ * setting CSC to clear, so the operation is purely about the CSC latch. */
+void xhci_hotplug_ack_csc(int port)
+{
+    if (!xhci.op_base) return;
+    if (port < 1 || port > xhci.max_ports) return;
+    uint32_t psc = op_r32(XHCI_PORTSC(port));
+    uint32_t v = (psc & ~(PORTSC_RW1C_MASK | PORTSC_PED)) | PORTSC_CSC;
+    op_w32(XHCI_PORTSC(port), v);
+}
+
+/* Ensure PORTSC.PP (Port Power) is set on every root-hub port so that
+ * subsequent device attaches register CCS / CSC. xhci_real_init's
+ * enumerate_root_ports only walks ports that already showed CCS at boot
+ * — newly powered ports never report attach until PP=1. The hotplug
+ * pump calls this once during seed so post-boot device_add is visible.
+ *
+ * No-op on controllers where PP is already 1 (the common case on most
+ * real silicon — qemu-xhci leaves PP=0 by default until software
+ * asserts it). */
+void xhci_hotplug_power_on_all_ports(void)
+{
+    if (!xhci.op_base) return;
+    for (int p = 1; p <= xhci.max_ports; p++) {
+        uint32_t psc = op_r32(XHCI_PORTSC(p));
+        if (psc & PORTSC_PP) continue;
+        /* Set PP without disturbing RW1C bits or accidentally writing
+         * 1 to PED (which would disable the port). */
+        uint32_t v = (psc & ~(PORTSC_RW1C_MASK | PORTSC_PED)) | PORTSC_PP;
+        op_w32(XHCI_PORTSC(p), v);
+    }
+}

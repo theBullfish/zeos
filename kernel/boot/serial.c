@@ -2,31 +2,108 @@
  * Zeos — Serial console (16550 UART)
  *
  * COM1 at 0x3F8, 115200 baud, 8N1.
- * No interrupts — polling TX only (debug output).
+ *
+ * TX: polling, used by kprint as the early debug channel.
+ *
+ * RX: interrupt-driven via IRQ4 (vector 0x24). The ISR drains the
+ *     UART RX FIFO into a small lock-free ring; CHAIN_SERIAL_IN's
+ *     resolve drains that ring into ASCII input_event records each
+ *     scheduler tick. A polling fallback also runs on every drain so
+ *     we still capture bytes if the IRQ never wires up (e.g. some
+ *     QEMU stdio configurations don't raise the COM1 IRQ on incoming
+ *     bytes — the LSR.DR bit is the source of truth either way).
  */
 
 #include "serial.h"
 #include "io.h"
+#include "idt.h"
 
 #define COM1 0x3F8
 
+/* ── RX ring ──────────────────────────────────────────────────────
+ * Power-of-two sized so head/tail wrap with a mask. Single producer
+ * (the IRQ handler / poll drain) and single consumer (the chain
+ * resolve), so a plain volatile pair is sufficient.
+ */
+#define SERIAL_RX_RING 64
+static volatile uint8_t  s_rx_ring[SERIAL_RX_RING];
+static volatile uint32_t s_rx_head;     /* writer */
+static volatile uint32_t s_rx_tail;     /* reader */
+static volatile uint32_t s_rx_dropped;  /* overflow counter */
+
+static inline void rx_push(uint8_t b)
+{
+    uint32_t next = (s_rx_head + 1u) & (SERIAL_RX_RING - 1u);
+    if (next == s_rx_tail) {
+        s_rx_dropped++;
+        return;
+    }
+    s_rx_ring[s_rx_head] = b;
+    s_rx_head = next;
+}
+
+/* Drain whatever is sitting in the UART RX FIFO into the ring. Safe
+ * to call from IRQ context or from the chain resolve. */
+static void serial_rx_drain_fifo(void)
+{
+    /* LSR bit 0 = Data Ready. Read up to 16 bytes per call to bound
+     * IRQ latency, more than enough for 16-byte FIFO depth. */
+    for (int i = 0; i < 16; i++) {
+        if (!(inb(COM1 + 5) & 0x01)) return;
+        uint8_t b = (uint8_t)inb(COM1 + 0);
+        rx_push(b);
+    }
+}
+
+static volatile uint32_t s_isr_count;
+static void serial_isr(uint64_t vector, uint64_t error_code)
+{
+    (void)vector;
+    (void)error_code;
+    s_isr_count++;
+    (void)inb(COM1 + 2);
+    serial_rx_drain_fifo();
+}
+uint32_t serial_isr_count_get(void) { return s_isr_count; }
+
 void serial_init(void)
 {
-    outb(COM1 + 1, 0x00);  /* Disable interrupts */
-    outb(COM1 + 3, 0x80);  /* Enable DLAB (set baud divisor) */
-    outb(COM1 + 0, 0x01);  /* Divisor 1 = 115200 baud */
-    outb(COM1 + 1, 0x00);
-    outb(COM1 + 3, 0x03);  /* 8 bits, no parity, 1 stop bit */
-    outb(COM1 + 2, 0xC7);  /* Enable FIFO, clear, 14-byte threshold */
-    outb(COM1 + 4, 0x0B);  /* IRQs enabled, RTS/DSR set */
+    s_rx_head = 0;
+    s_rx_tail = 0;
+    s_rx_dropped = 0;
 
-    /* Test: send a null byte and check loopback */
-    outb(COM1 + 4, 0x1E);  /* Loopback mode */
-    outb(COM1 + 0, 0xAE);  /* Send test byte */
-    if (inb(COM1 + 0) != 0xAE) {
-        /* Serial port doesn't exist or is broken — continue anyway */
+    /* TEMP DIAG: skip baud reprogramming to leave UEFI's settings alone */
+    outb(COM1 + 1, 0x00);  /* Disable interrupts during config */
+    /* FCR: enable FIFO, clear RX+TX, trigger=1 byte. 1-byte trigger
+     * minimizes latency for line-mode terminals (single-keystroke). */
+    outb(COM1 + 2, 0x07);
+    outb(COM1 + 4, 0x0F);  /* DTR/RTS asserted, OUT1+OUT2 enabled.
+                            * OUT2=1 routes the UART IRQ to the PIC;
+                            * required for IRQ4 to fire at all on PCs. */
+
+    /* Drain anything left in the RX FIFO from the loopback test or
+     * from firmware-side console handoff. Some QEMU configurations
+     * stop forwarding stdin until the FIFO has been read at least
+     * once. */
+    for (int i = 0; i < 16; i++) {
+        if (!(inb(COM1 + 5) & 0x01)) break;
+        (void)inb(COM1 + 0);
     }
-    outb(COM1 + 4, 0x0F);  /* Normal operation */
+
+    /* Enable RX-data-available interrupt (bit 0 of IER). RX timeout
+     * (bit 2) keeps us from sitting on a partial FIFO — the timeout
+     * fires after ~4 char-times of idle. */
+    outb(COM1 + 1, 0x05);
+}
+
+/* IRQ4 (COM1) wiring is separate from serial_init() because the IDT
+ * isn't initialized yet at the time main.c calls serial_init(). The
+ * caller (main.c) hooks this in after idt_init(). */
+void serial_irq_init(void)
+{
+    /* COM1 = IRQ4 = vector 0x24 (PIC remap base 0x20 + 4). */
+    idt_register(0x24, serial_isr);
+    pic_unmask(4);
 }
 
 static int serial_tx_ready(void)
@@ -71,13 +148,52 @@ void serial_put_hex(uint64_t val)
     serial_puts(p);
 }
 
-/* Returns 1 + char if a byte is waiting on the UART, 0 otherwise. */
+/* Returns 1 + char if a byte is waiting on the UART, 0 otherwise.
+ * Reads from the UART directly (legacy callers); does NOT touch the
+ * IRQ ring. New code uses serial_rx_pending / serial_rx_pop instead. */
 int serial_try_getc(char *out)
 {
     if (!(inb(COM1 + 5) & 0x01)) return 0;  /* RX data ready? */
     *out = (char)inb(COM1 + 0);
     return 1;
 }
+
+/* ── Chain RX API ────────────────────────────────────────────────
+ * CHAIN_SERIAL_IN's resolve calls these. */
+
+int serial_rx_pending(void)
+{
+    static uint32_t diag_last_isr = 0;
+    static uint32_t diag_count = 0;
+    if (diag_count < 5 || s_isr_count != diag_last_isr) {
+        diag_count++;
+        diag_last_isr = s_isr_count;
+        extern void kputs(const char *);
+        extern void kput_hex(uint64_t);
+        extern void kput_dec(uint64_t);
+        kputs("[ser_diag isr=");
+        kput_dec((uint64_t)s_isr_count);
+        kputs(" lsr=");
+        kput_hex((uint64_t)inb(COM1+5));
+        kputs(" head=");
+        kput_dec((uint64_t)s_rx_head);
+        kputs(" tail=");
+        kput_dec((uint64_t)s_rx_tail);
+        kputs("]\n");
+    }
+    serial_rx_drain_fifo();
+    return (int)((s_rx_head - s_rx_tail) & (SERIAL_RX_RING - 1u));
+}
+
+int serial_rx_pop(uint8_t *out)
+{
+    if (s_rx_tail == s_rx_head) return 0;
+    *out = s_rx_ring[s_rx_tail];
+    s_rx_tail = (s_rx_tail + 1u) & (SERIAL_RX_RING - 1u);
+    return 1;
+}
+
+uint32_t serial_rx_dropped(void) { return s_rx_dropped; }
 
 void serial_put_dec(uint64_t val)
 {

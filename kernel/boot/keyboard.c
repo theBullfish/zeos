@@ -233,6 +233,11 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
     kb_sc_push(scancode, extended);
 }
 
+void keyboard_inject_char(char c)
+{
+    kb_buf_push(c);
+}
+
 void keyboard_inject_scancode(uint8_t scancode, int extended)
 {
     /* USB HID boot keyboards translate HID usage codes to set-1

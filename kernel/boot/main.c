@@ -611,6 +611,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     mouse_init();
     kputs("done.\n");
 
+    /* Wire COM1 RX IRQ (IRQ4 / vector 0x24). The serial UART itself
+     * was configured in serial_init() earlier; this hooks the ISR
+     * that drains incoming bytes into the CHAIN_SERIAL_IN ring. */
+    serial_irq_init();
+
     /* Enable interrupts */
     __asm__ volatile("sti");
 

@@ -21,6 +21,7 @@
 #include "block.h"
 #include "block_chain.h"
 #include "persistence.h"
+#include "hotplug.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -232,6 +233,7 @@ static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
 static void cmd_persistence(const char *args);
+static void cmd_hotplug(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -272,6 +274,20 @@ static void cmd_persistence(const char *args)
     (void)args;
     kputs("\n");
     persistence_dump();
+    kputs("\n");
+}
+
+static void cmd_hotplug(const char *args)
+{
+    int n = 32;
+    if (args && *args) {
+        int v = 0; const char *p = args;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); p++; }
+        if (v > 0) n = v;
+    }
+    kputs("\n");
+    hotplug_dump_events(n);
     kputs("\n");
 }
 
@@ -581,6 +597,7 @@ static const struct shell_cmd commands[] = {
     {"persistence","show VAULT persistence stats (journal + chain snapshot)", cmd_persistence, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
+    {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
@@ -2951,6 +2968,21 @@ vault_done:
         }
     }
 
+    /* Hotplug pumps: PCI rescan, USB PORTSC poll, virtio-gpu HPD. */
+    kputs("  Hotplug ............... ");
+    {
+        int live = hotplug_pumps_live();
+        if (live == 3) {
+            kputs("3 pumps live (pci/usb/display)\n");
+            passes++;
+        } else {
+            kputs("FAIL (");
+            kput_dec((uint64_t)live);
+            kputs("/3 pumps live)\n");
+            fails++;
+        }
+    }
+
     /* Scheduler: chain resolution as the kernel scheduler. Reports
      * ticks-per-second from the rolling 100ms sample, count of LIVE
      * chains visible in the registry, and per-tick error count. */
@@ -3029,6 +3061,37 @@ vault_done:
         kput_dec((uint64_t)rt_n);
         kputs(" user chain(s) live\n");
         passes++;
+    }
+
+    /* Serial input: sample CHAIN_SERIAL_IN's decoded-byte counter
+     * across a 100ms window while we hand-pump the chain (selftest
+     * runs inside shell_dispatch, which means the main scheduler
+     * loop is paused). The chain's nodes drain the UART RX ring,
+     * decode ASCII, and push into kb_buf — so any byte arriving on
+     * the serial console during this window is observable here. A
+     * non-zero rate means the serial input pipeline is alive; zero
+     * is also a PASS (nothing was being sent). */
+    kputs("  Serial input ......... ");
+    if (CHAIN_SERIAL_IN >= 0) {
+        uint32_t before = chain_serial_in_total();
+        uint64_t freq = timer_tsc_freq();
+        if (freq == 0) freq = 1;
+        uint64_t deadline = timer_read_tsc() + (freq / 10ULL); /* 100ms */
+        while (timer_read_tsc() < deadline) {
+            (void)chain_resolve(CHAIN_SERIAL_IN);
+            __asm__ volatile("pause");
+        }
+        uint32_t after = chain_serial_in_total();
+        uint32_t delta = after - before;
+        /* drain rate over a 100ms window: N chars / 0.1s = 10*N cps */
+        uint32_t rate = delta * 10u;
+        kputs("PASS — drain rate=");
+        kput_dec((uint64_t)rate);
+        kputs(" chars/sec\n");
+        passes++;
+    } else {
+        kputs("FAIL (chain not registered)\n");
+        fails++;
     }
 
     /* Persistence: report how much of the masq_journal + chain

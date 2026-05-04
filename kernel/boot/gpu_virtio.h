@@ -83,4 +83,13 @@ int gpu_virtio_present(void);
  * survives across virtio + future Intel/AMD/NVIDIA drivers. */
 void gpu_virtio_dump_status(void);
 
+/* Hotplug pump support (boot/hotplug.c). gpu_virtio_hotplug_repoll()
+ * re-issues GET_DISPLAY_INFO on every bound device and refreshes the
+ * scanout state. gpu_virtio_hotplug_scanout() reads back the current
+ * enabled/width/height for a (dev, scanout) pair. Returns 0 on
+ * success, -1 on out-of-range. */
+int gpu_virtio_hotplug_repoll(void);
+int gpu_virtio_hotplug_scanout(int dev_idx, int scanout_idx,
+                               int *enabled, uint32_t *w, uint32_t *h);
+
 #endif /* ZEOS_GPU_VIRTIO_H */
