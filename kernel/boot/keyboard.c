@@ -10,6 +10,9 @@
 #include "idt.h"
 #include "io.h"
 #include "hda.h"
+#include "brightness.h"
+#include "idle.h"
+#include "lockscreen.h"
 
 /* Media-key scancodes (set 1, with the 0xE0 prefix flagged via the
  * `extended` arg to process_scancode). These are the "Multimedia"
@@ -18,6 +21,15 @@
 #define SC_EXT_VOL_UP     0x30
 #define SC_EXT_VOL_DOWN   0x2E
 #define SC_EXT_MUTE       0x20
+
+/* XF86MonBrightnessUp / XF86MonBrightnessDown — laptop firmware
+ * convention varies wildly; the most commonly observed PS/2 set-1
+ * extended codes are 0xE0 0x04 (up) and 0xE0 0x03 (down). Real
+ * laptops often emit the ACPI Notify path instead, which lands as a
+ * separate event — those will route through here once the ACPI
+ * hotkey driver lands. */
+#define SC_EXT_BRIGHT_UP    0x04
+#define SC_EXT_BRIGHT_DOWN  0x03
 
 #define KB_DATA_PORT    0x60
 #define KB_STATUS_PORT  0x64
@@ -164,6 +176,8 @@ static void process_scancode(uint8_t scancode, int extended)
         if (scancode == SC_EXT_VOL_UP)   { hda_audio_volume_step(+5); return; }
         if (scancode == SC_EXT_VOL_DOWN) { hda_audio_volume_step(-5); return; }
         if (scancode == SC_EXT_MUTE)     { hda_audio_toggle_mute();   return; }
+        if (scancode == SC_EXT_BRIGHT_UP)   { brightness_step(+10); return; }
+        if (scancode == SC_EXT_BRIGHT_DOWN) { brightness_step(-10); return; }
     }
 
     /*
@@ -228,8 +242,20 @@ static void process_scancode(uint8_t scancode, int extended)
     else if (caps_lock && c >= 'A' && c <= 'Z')
         c += 32;
 
-    if (c)
+    if (c) {
+        /* Every produced ASCII character is an input event. Bump the
+         * idle timer so the lock-on-idle state machine sees activity. */
+        idle_mark_active();
+
+        /* When the lock screen is the active modal, intercept input
+         * directly into the PIN entry instead of feeding kb_buf. The
+         * shell pump must not see characters typed at the lock prompt. */
+        if (lockscreen_active()) {
+            lockscreen_input(c);
+            return;
+        }
         kb_buf_push(c);
+    }
 }
 
 /*
@@ -257,6 +283,14 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
 
 void keyboard_inject_char(char c)
 {
+    /* Serial RX + any other ASCII source feeds into here. Treat each
+     * injected character as an input event for idle tracking, and let
+     * the lock screen intercept when it owns the modal. */
+    idle_mark_active();
+    if (lockscreen_active()) {
+        lockscreen_input(c);
+        return;
+    }
     kb_buf_push(c);
 }
 

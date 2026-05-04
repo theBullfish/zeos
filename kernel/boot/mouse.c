@@ -23,6 +23,7 @@
 #include "io.h"
 #include "fb.h"
 #include "cursor.h"
+#include "idle.h"
 
 /* ── 8042 controller ports ── */
 #define PS2_DATA_PORT    0x60
@@ -332,6 +333,11 @@ static void process_packet(void)
     if (status & ((1 << 6) | (1 << 7)))
         return;
 
+    /* Any packet -- movement or button -- is an input event for the
+     * idle/lock state machine. Mark active before decoding so a click
+     * on a BLANKED screen wakes us straight to the lock prompt. */
+    idle_mark_active();
+
     /* Sign-extend deltas */
     int dx = (int)packet[1];
     int dy = (int)packet[2];
@@ -433,6 +439,9 @@ const mouse_state_t *mouse_get_state(void)
 
 void mouse_inject(int dx, int dy, uint8_t buttons)
 {
+    /* USB HID path -- still an input event. */
+    idle_mark_active();
+
     /* USB HID boot mice already give us signed screen-coord deltas, so
      * skip the PS/2 sign-extension and Y inversion. */
     g_mouse.dx = dx;

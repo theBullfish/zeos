@@ -51,6 +51,7 @@ extern int CHAIN_SERIAL_IN;
 extern int CHAIN_POWER;
 extern int CHAIN_BATTERY;
 extern int CHAIN_TRASH_GC;
+extern int CHAIN_IDLE;
 
 /* Lifetime count of bytes the serial chain has decoded into kb_buf.
  * cmd_selftest samples this across a 100ms window to compute drain

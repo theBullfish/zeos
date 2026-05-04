@@ -210,9 +210,22 @@ void compositor_frame(void) {
     /* Night shift: warm tint over all rendered content, before cursor */
     theme_apply_night_shift();
 
-    /* Layer 5: Cursor (not yet a chain -- direct call) */
-    if (g_comp.layer_visible[COMP_LAYER_CURSOR])
-        cursor_draw();
+    /* Layer 5: Cursor (not yet a chain -- direct call). Suppressed
+     * while the lock screen owns the modal -- the spec calls out
+     * "cursor hidden" during LOCKED. */
+    {
+        extern int lockscreen_active(void);
+        if (g_comp.layer_visible[COMP_LAYER_CURSOR] && !lockscreen_active())
+            cursor_draw();
+    }
+
+    /* Layer 6: Idle/lock-on-idle post-overlay. Paints DIMMED tint or
+     * the lock screen card on top of everything else. No-op while
+     * IDLE_ACTIVE so this costs nothing in the steady state. */
+    {
+        extern void idle_post_overlay(void);
+        idle_post_overlay();
+    }
 
     g_comp.fully_dirty = 0;
 }

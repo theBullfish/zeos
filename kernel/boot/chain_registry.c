@@ -35,6 +35,8 @@
 #include "fat32.h"
 #include "vault.h"
 #include "kprint.h"
+#include "idle.h"
+#include "lockscreen.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -64,6 +66,7 @@ int CHAIN_SERIAL_IN      = -1;
 int CHAIN_POWER          = -1;
 int CHAIN_BATTERY        = -1;
 int CHAIN_TRASH_GC       = -1;
+int CHAIN_IDLE           = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -763,6 +766,15 @@ int chain_registry_init(void)
                        trash_gc_resolve);
         chain_t *ct = chain_get(CHAIN_TRASH_GC);
         if (ct) ct->resolve_interval_ticks = 1500000u;
+    }
+
+    /* Idle / lock-on-idle. The lock screen needs the PIN loaded from
+     * VAULT before the chain starts resolving, so initialize the
+     * lockscreen module first, then register CHAIN_IDLE. */
+    lockscreen_init();
+    CHAIN_IDLE = idle_chain_register(CHAIN_CPU);
+    if (CHAIN_IDLE < 0) {
+        kputs("[chain_registry] WARN: idle chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

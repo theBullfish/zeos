@@ -17,6 +17,7 @@
 #include "serial.h"
 #include "io.h"
 #include "idt.h"
+#include "idle.h"
 
 #define COM1 0x3F8
 
@@ -40,6 +41,12 @@ static inline void rx_push(uint8_t b)
     }
     s_rx_ring[s_rx_head] = b;
     s_rx_head = next;
+    /* UART RX is also an input source -- mark active so a serial
+     * console session keeps the screen awake. The decode-into-ASCII
+     * path further down ALSO calls idle_mark_active() via
+     * keyboard_inject_char, but bumping here ensures non-printable
+     * control bytes (which the ASCII decoder drops) still count. */
+    idle_mark_active();
 }
 
 /* Drain whatever is sitting in the UART RX FIFO into the ring. Safe

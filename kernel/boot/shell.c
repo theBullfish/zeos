@@ -221,6 +221,9 @@ static void cmd_beep(const char *args);
 static void cmd_volume(const char *args);
 static void cmd_mute(const char *args);
 static void cmd_brightness(const char *args);
+static void cmd_idle(const char *args);
+static void cmd_lock(const char *args);
+static void cmd_pin(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
@@ -632,6 +635,9 @@ static const struct shell_cmd commands[] = {
     {"volume",  "show or set master volume (volume [0-100|+N|-N])", cmd_volume, VIS_ALWAYS},
     {"mute",    "toggle master mute",              cmd_mute,    VIS_ALWAYS},
     {"brightness", "show or set display brightness (brightness [0-100|+N|-N])", cmd_brightness, VIS_ALWAYS},
+    {"idle",    "show/set idle timing (idle | idle dim|lock|blank <secs>)", cmd_idle,  VIS_ALWAYS},
+    {"lock",    "lock the screen now",            cmd_lock,    VIS_ALWAYS},
+    {"pin",     "set lock screen PIN (pin <new-pin>)", cmd_pin, VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
     /* FAT32 (USB / SD / ESP / NVMe) read+write */
@@ -2689,6 +2695,148 @@ static void cmd_brightness(const char *args)
     kputs("%\n");
 }
 
+/* ── Idle / lock-on-idle commands ────────────────────────────────
+ *
+ * `idle`              -- print thresholds + current state
+ * `idle dim <secs>`   -- set the dim threshold
+ * `idle lock <secs>`  -- set the lock threshold
+ * `idle blank <secs>` -- set the blank (scanout off) threshold
+ * `lock`              -- transition to LOCKED immediately
+ * `pin <new-pin>`     -- replace the stored PIN (digits, 4..16)
+ *
+ * Thresholds persist to VAULT under /idle/{dim,lock,blank}_secs and
+ * the PIN under /lock/pin. */
+
+#include "idle.h"
+#include "lockscreen.h"
+
+static const char *idle_state_label(idle_state_t s)
+{
+    switch (s) {
+    case IDLE_ACTIVE:  return "ACTIVE";
+    case IDLE_DIMMED:  return "DIMMED";
+    case IDLE_LOCKED:  return "LOCKED";
+    case IDLE_BLANKED: return "BLANKED";
+    }
+    return "?";
+}
+
+static int idle_parse_uint(const char *p, uint32_t *out)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p < '0' || *p > '9') return 0;
+    uint32_t v = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10u + (uint32_t)(*p - '0');
+        p++;
+        if (v > 86400u) return 0;
+    }
+    *out = v;
+    return 1;
+}
+
+static void cmd_idle(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == '\0') {
+        kputs("  idle dim_secs   = ");
+        kput_dec((uint64_t)idle_dim_secs());
+        kputc('\n');
+        kputs("  idle lock_secs  = ");
+        kput_dec((uint64_t)idle_lock_secs());
+        kputc('\n');
+        kputs("  idle blank_secs = ");
+        kput_dec((uint64_t)idle_blank_secs());
+        kputc('\n');
+        kputs("  current state   = ");
+        kputs(idle_state_label(idle_get_state()));
+        kputs(" (");
+        kput_dec(idle_seconds_since_input());
+        kputs("s since last input)\n");
+        kputs("  PIN configured  = ");
+        kputs(lockscreen_pin_configured() ? "yes" : "no");
+        kputc('\n');
+        return;
+    }
+
+    /* Sub-commands. */
+    const char *sub = args;
+    int nlen = 0;
+    while (sub[nlen] && sub[nlen] != ' ' && sub[nlen] != '\t') nlen++;
+    const char *rest = sub + nlen;
+
+    uint32_t v = 0;
+    if (nlen == 3 && sub[0]=='d' && sub[1]=='i' && sub[2]=='m') {
+        if (!idle_parse_uint(rest, &v) || idle_set_dim(v) < 0) {
+            kputs("  usage: idle dim <secs>\n");
+            return;
+        }
+        kputs("  dim_secs = ");
+        kput_dec((uint64_t)idle_dim_secs());
+        kputs(" (saved)\n");
+        return;
+    }
+    if (nlen == 4 && sub[0]=='l' && sub[1]=='o' && sub[2]=='c' && sub[3]=='k') {
+        if (!idle_parse_uint(rest, &v) || idle_set_lock(v) < 0) {
+            kputs("  usage: idle lock <secs>\n");
+            return;
+        }
+        kputs("  lock_secs = ");
+        kput_dec((uint64_t)idle_lock_secs());
+        kputs(" (saved)\n");
+        return;
+    }
+    if (nlen == 5 && sub[0]=='b' && sub[1]=='l' && sub[2]=='a'
+                  && sub[3]=='n' && sub[4]=='k') {
+        if (!idle_parse_uint(rest, &v) || idle_set_blank(v) < 0) {
+            kputs("  usage: idle blank <secs>\n");
+            return;
+        }
+        kputs("  blank_secs = ");
+        kput_dec((uint64_t)idle_blank_secs());
+        kputs(" (saved)\n");
+        return;
+    }
+
+    kputs("  usage: idle | idle dim|lock|blank <secs>\n");
+}
+
+static void cmd_lock(const char *args)
+{
+    (void)args;
+    if (!lockscreen_pin_configured()) {
+        kputs("  cannot lock: no PIN configured. Run `pin <new-pin>` first.\n");
+        return;
+    }
+    kputs("  locking screen\n");
+    idle_force_lock();
+}
+
+static void cmd_pin(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+    if (*args == '\0') {
+        kputs("  usage: pin <new-pin>   (4..16 digits)\n");
+        return;
+    }
+    /* Bound the input -- copy into a small stack buffer so we can
+     * NUL-terminate cleanly even if the user typed trailing garbage. */
+    char buf[24];
+    int n = 0;
+    while (args[n] && args[n] != ' ' && args[n] != '\t' && n < 22) {
+        buf[n] = args[n];
+        n++;
+    }
+    buf[n] = '\0';
+
+    if (lockscreen_set_pin(buf) < 0) {
+        kputs("  PIN must be 4..16 digits\n");
+        return;
+    }
+    kputs("  PIN updated and persisted to /lock/pin\n");
+}
+
 /* Selftest kernel_fn for the MDE chain probe. The body is what
  * actually runs on the CPU backend: read the .answer field, return
  * it. Real work, real return value. */
@@ -3449,6 +3597,28 @@ vault_done:
     } else {
         kputs("no backlight (desktop or QEMU virtio-gpu)\n");
         passes++;
+    }
+
+    /* Idle / lock-on-idle. Reports the configured thresholds plus
+     * whether a PIN is set. PASSes whenever the chain is registered
+     * and a PIN is configured (default '0000' on first boot, replaced
+     * via `pin <new>`). */
+    kputs("  Idle/lock ............. ");
+    {
+        kputs("dim=");
+        kput_dec((uint64_t)idle_dim_secs());
+        kputs("s, lock=");
+        kput_dec((uint64_t)idle_lock_secs());
+        kputs("s, blank=");
+        kput_dec((uint64_t)idle_blank_secs());
+        kputs("s, PIN=");
+        if (lockscreen_pin_configured()) {
+            kputs("set\n");
+            passes++;
+        } else {
+            kputs("MISSING\n");
+            fails++;
+        }
     }
 
     kputs("  Persistence ........... ");
