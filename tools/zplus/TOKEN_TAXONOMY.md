@@ -69,7 +69,7 @@ Frequency tiers:
 | `EQ` | `==` | `programs/15_trading_system.zp:119` | common |
 | `NE` | `!=` | corpus | rare |
 
-## 5. Arithmetic operators
+## 5. Arithmetic & boolean operators
 
 | Token | Lexeme | Example | Tier |
 |---|---|---|---|
@@ -78,9 +78,12 @@ Frequency tiers:
 | `STAR` | `*` | `programs/derez/hello_chain.zp:15` | common |
 | `SLASH` | `/` | path separator inside string literals; rare bare | rare |
 | `PERCENT` | `%` | corpus | rare |
+| `BANG` | `!` | `programs/zeros/arm_controller.zp:55` (`gate(!recording)`), `programs/derez/platform_run.zp:53` (`gate(!input_left, !input_right)`) | common (in zeros/ + derez/ subdirs) |
 
-> Boolean `&&` / `||` / `!` are **not present** in any program. Boolean logic
-> is expressed via keywords (`any`, `all`, `not`) and via gate composition.
+> Update 2026-05-04: bare `!` (boolean NOT) DOES appear in the corpus despite
+> the original FINDINGS doc saying it didn't — used in 5 files across `zeros/`,
+> `multimodal/`, and `derez/`. `&&` / `||` are still absent; boolean
+> conjunction/disjunction uses `any` / `all` keywords.
 
 ## 6. Range / fuzzy
 
@@ -234,10 +237,22 @@ discussion before reserving.
 |---|---|
 | `<->` bidirectional | comment at `programs/03_http_server.zp:110` |
 | `'...'` single-quoted strings | one occurrence inside template interpolation `programs/derez/bot_trainer.zp:80` — unclear whether this is real syntax or noise |
-| `&&` `\|\|` `!` boolean ops | absent everywhere |
+| `&&` `\|\|` boolean ops | absent everywhere |
 | `null` / `none` | not observed as a literal |
 | `true` / `false` literals | observed as bare `true` in `programs/chirp.zp:131` (`no_tap: true`); `false` not yet seen — lex as IDENT for now |
 | Block comments `/* */` | absent everywhere |
+
+### 13.1 Discovered post-survey (2026-05-04)
+
+Found while running the v2 lexer against the full corpus. Each is real
+syntax with multiple corpus citations; each needs a spec decision before
+v3 lexer work continues:
+
+| Item | Citations | Spec question |
+|---|---|---|
+| `\"` string escape | `programs/derez/forge_ide.zp:261` (LSP snippet templates) — 4 occurrences | Which escape set does Z+ support? Just `\"` and `\n`, or full C-style? |
+| `─...>` long-form Flow arrow | `programs/goya_fleet.zp:217` — `intake ────────────────────> \|` (20 occurrences in this one file) | Is `(─)+>` a synonym for `->` only in goya_fleet, or is this a real intentional alias for visual emphasis? |
+| `↑` heat-up postfix operator | `programs/chirp.zp:47` — `post.heat↑` | Is there also a `↓`? Are these unary or sugar for `+= 1` / `-= 1`? |
 
 ## 14. Lexer hazards (read this before writing the scanner)
 

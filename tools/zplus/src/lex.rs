@@ -23,11 +23,18 @@ pub enum TokenKind {
     Ident,
     Int,
     Float,
+    Hex,           // 0x68
     Duration,    // 30d, 5m, 300ms
     Ratio,       // 5x, 2.5x
     Sigma,       // 2σ, -2σ
     PercentLit,  // 10%
-    String,      // "..."
+    ByteSize,    // 200KB, 2MB, 1GB
+    Dimension,   // 1920x1080
+    HexColor,    // #29ADFF, #444
+    String,      // "..." with no interpolation
+    TemplateString, // "...{name}..." with at least one interpolation hole
+    TimePast,    // t-1, t-2 (no whitespace; parsed as one token in temporal contexts)
+    DevNull,     // /dev/null — sentinel discard sink
 
     // Multi-char arrows
     Sever,       // -x>
@@ -66,6 +73,7 @@ pub enum TokenKind {
     Star,
     Slash,
     Percent,
+    Bang,        // ! (boolean NOT — `gate(!recording)`)
 
     // Sentinel: lexer could not recognize the input here.
     Error,
@@ -152,6 +160,26 @@ impl<'a> Lexer<'a> {
             return Some(self.tok(TokenKind::LineComment, start));
         }
 
+        // /dev/null — single token (taxonomy §14.4)
+        if b == b'/' && self.starts_with_at(self.pos, b"/dev/null") {
+            self.pos += b"/dev/null".len();
+            return Some(self.tok(TokenKind::DevNull, start));
+        }
+
+        // Hex color: # followed by 1+ hex digits. Corpus uses 3-, 6-, and 8-digit
+        // forms. Match greedily up to 8 hex digits.
+        if b == b'#' && self.peek_at(1).map_or(false, is_hex_digit) {
+            self.pos += 1; // #
+            let mut count = 0;
+            while count < 8 {
+                match self.peek() {
+                    Some(c) if is_hex_digit(c) => { self.pos += 1; count += 1; }
+                    _ => break,
+                }
+            }
+            return Some(self.tok(TokenKind::HexColor, start));
+        }
+
         // Multi-char operators — order matters (taxonomy §14.1)
         // -x> must be checked before -> ; <-> before <- ; etc.
         if b == b'-' {
@@ -206,18 +234,30 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
             return Some(self.tok(TokenKind::Eq, start));
         }
-        if b == b'!' && self.peek_at(1) == Some(b'=') {
-            self.pos += 2;
-            return Some(self.tok(TokenKind::Ne, start));
+        if b == b'!' {
+            if self.peek_at(1) == Some(b'=') {
+                self.pos += 2;
+                return Some(self.tok(TokenKind::Ne, start));
+            }
+            self.pos += 1;
+            return Some(self.tok(TokenKind::Bang, start));
         }
 
-        // String literal — no escape handling in v1 (corpus has no escapes)
+        // String literal — no escape handling in v1 (corpus has no escapes).
+        // Detects interpolation holes `{...}` in the body and upgrades the
+        // kind to TemplateString. Hole-span extraction is deferred to the
+        // parser.
         if b == b'"' {
             self.pos += 1;
+            let mut has_hole = false;
             while let Some(c) = self.peek() {
                 self.pos += 1;
                 if c == b'"' {
-                    return Some(self.tok(TokenKind::String, start));
+                    let kind = if has_hole { TokenKind::TemplateString } else { TokenKind::String };
+                    return Some(self.tok(kind, start));
+                }
+                if c == b'{' {
+                    has_hole = true;
                 }
                 if c == b'\n' {
                     // Unterminated string — bail out as Error spanning what we read.
@@ -242,7 +282,8 @@ impl<'a> Lexer<'a> {
             return Some(self.lex_number(start));
         }
 
-        // Identifier
+        // Identifier (with t-1 / t-2 fold-in: bare `t` immediately followed
+        // by `-` and a digit becomes a single TimePast token. Taxonomy §14.3.)
         if is_ident_start(b) {
             while let Some(c) = self.peek() {
                 if is_ident_continue(c) {
@@ -250,6 +291,20 @@ impl<'a> Lexer<'a> {
                 } else {
                     break;
                 }
+            }
+            if &self.src[start..self.pos] == "t"
+                && self.peek() == Some(b'-')
+                && self.peek_at(1).map_or(false, |c| c.is_ascii_digit())
+            {
+                self.pos += 1; // -
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                return Some(self.tok(TokenKind::TimePast, start));
             }
             return Some(self.tok(TokenKind::Ident, start));
         }
@@ -290,6 +345,24 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_number(&mut self, start: usize) -> Token<'a> {
+        // Hex literal: 0x followed by 1+ hex digits. Must be checked before the
+        // Int / Ratio / Dimension paths so `0x68` doesn't lex as Int(0) +
+        // Ratio(x) or similar.
+        if self.peek() == Some(b'0')
+            && self.peek_at(1) == Some(b'x')
+            && self.peek_at(2).map_or(false, is_hex_digit)
+        {
+            self.pos += 2; // 0x
+            while let Some(c) = self.peek() {
+                if is_hex_digit(c) {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            return self.tok(TokenKind::Hex, start);
+        }
+
         // integer part
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
@@ -313,26 +386,61 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        // suffix detection (order matters: ms before m)
-        // duration suffixes
-        if self.peek() == Some(b'm') && self.peek_at(1) == Some(b's') {
+        // Suffix detection. Order matters (taxonomy §14.2):
+        //   1. ByteSize (KB/MB/GB/TB) — uppercase, two-char, must precede `m` Duration
+        //      otherwise `200MB` would split into Duration(200m? no, M is uppercase)
+        //      — actually `M` (uppercase) is not in the Duration suffix set, so the
+        //      conflict is only for lowercase `mb` if that ever appeared. Corpus is
+        //      uppercase only; we match uppercase only.
+        //   2. Duration ms (two-char) before single-char Duration s/m/h/d
+        //   3. Dimension (`x` followed by digit) vs Ratio (`x` not followed by digit)
+        //   4. PercentLit, Sigma
+        // Boundary rule: a numeric suffix (`s`, `m`, `h`, `d`, `ms`, `KB`,
+        // `MB`, `GB`, `TB`, `x`) only counts if the byte after the suffix is
+        // not an identifier-continue char. Otherwise the "suffix" is the start
+        // of an identifier and we fall back to plain Int/Float. This keeps
+        // typos like `0xZ` from lexing as `Ratio(0x) + Ident(Z)`.
+        if matches!(self.peek(), Some(b'K') | Some(b'M') | Some(b'G') | Some(b'T'))
+            && self.peek_at(1) == Some(b'B')
+            && self.at_boundary(2)
+        {
+            self.pos += 2;
+            return self.tok(TokenKind::ByteSize, start);
+        }
+        if self.peek() == Some(b'm') && self.peek_at(1) == Some(b's') && self.at_boundary(2) {
             self.pos += 2;
             return self.tok(TokenKind::Duration, start);
         }
-        if matches!(self.peek(), Some(b's') | Some(b'm') | Some(b'h') | Some(b'd')) {
+        if matches!(self.peek(), Some(b's') | Some(b'm') | Some(b'h') | Some(b'd'))
+            && self.at_boundary(1)
+        {
             self.pos += 1;
             return self.tok(TokenKind::Duration, start);
         }
         if self.peek() == Some(b'x') {
-            self.pos += 1;
-            return self.tok(TokenKind::Ratio, start);
+            // Dimension if a digit follows the x; otherwise Ratio (boundary-checked).
+            if self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+                self.pos += 1; // x
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                return self.tok(TokenKind::Dimension, start);
+            }
+            if self.at_boundary(1) {
+                self.pos += 1;
+                return self.tok(TokenKind::Ratio, start);
+            }
+            // x is the start of an identifier — fall through to Int/Float.
         }
         if self.peek() == Some(b'%') {
             self.pos += 1;
             return self.tok(TokenKind::PercentLit, start);
         }
-        // σ is U+03C3, UTF-8 bytes 0xCE 0xC3? Actually 0xCF 0x83. Verify.
-        // σ encodes as 0xCF 0x83 in UTF-8.
+        // σ encodes as UTF-8 bytes 0xCF 0x83.
         if self.peek() == Some(0xCF) && self.peek_at(1) == Some(0x83) {
             self.pos += 2;
             return self.tok(TokenKind::Sigma, start);
@@ -343,6 +451,17 @@ impl<'a> Lexer<'a> {
         } else {
             self.tok(TokenKind::Int, start)
         }
+    }
+
+    fn starts_with_at(&self, pos: usize, needle: &[u8]) -> bool {
+        self.bytes.get(pos..pos + needle.len()) == Some(needle)
+    }
+
+    /// True if the byte at `self.pos + offset` is absent or is not an
+    /// identifier-continuation character. Used to gate numeric suffixes so
+    /// they don't swallow the leading char of a following identifier.
+    fn at_boundary(&self, offset: usize) -> bool {
+        !self.peek_at(offset).map_or(false, is_ident_continue)
     }
 
     fn tok(&self, kind: TokenKind, start: usize) -> Token<'a> {
@@ -364,6 +483,10 @@ fn is_ident_start(b: u8) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     b == b'_' || b.is_ascii_alphanumeric()
+}
+
+fn is_hex_digit(b: u8) -> bool {
+    b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || (b'A'..=b'F').contains(&b)
 }
 
 fn utf8_char_len(first_byte: u8) -> usize {
@@ -548,5 +671,157 @@ mod tests {
         let src = "a -> b ~> c // comment\nd | e";
         let reconstructed: String = lex(src).iter().map(|t| t.text).collect();
         assert_eq!(reconstructed, src);
+    }
+
+    // ── v2 token kinds ────────────────────────────────────────────
+
+    /// Hex literal: 0x followed by hex digits — used heavily for I²C addresses.
+    #[test]
+    fn hex_literal() {
+        assert_eq!(non_trivia("0x68"), vec![(TokenKind::Hex, "0x68")]);
+        assert_eq!(non_trivia("0xCAFEBABE"), vec![(TokenKind::Hex, "0xCAFEBABE")]);
+        assert_eq!(non_trivia("0x1E"), vec![(TokenKind::Hex, "0x1E")]);
+    }
+
+    /// `0x` followed by non-hex falls back to Int(0) + Ident.
+    #[test]
+    fn hex_requires_hex_digit() {
+        assert_eq!(
+            non_trivia("0xZ"),
+            vec![(TokenKind::Int, "0"), (TokenKind::Ident, "xZ")]
+        );
+    }
+
+    /// HexColor: # followed by 1-8 hex digits. Corpus uses 3 (`#444`),
+    /// 6 (`#29ADFF`), 8 (RGBA) forms.
+    #[test]
+    fn hex_color() {
+        assert_eq!(non_trivia("#29ADFF"), vec![(TokenKind::HexColor, "#29ADFF")]);
+        assert_eq!(non_trivia("#444"),    vec![(TokenKind::HexColor, "#444")]);
+        assert_eq!(non_trivia("#FF6B35AA"), vec![(TokenKind::HexColor, "#FF6B35AA")]);
+    }
+
+    /// Bare `#` not followed by a hex digit is unrecognized — emits Error.
+    /// (No corpus program does this; but the lexer must not crash.)
+    #[test]
+    fn lone_hash_is_error() {
+        let toks = lex("# ");
+        assert_eq!(toks[0].kind, TokenKind::Error);
+    }
+
+    /// Taxonomy §14.2 — `5x` is Ratio, `1920x1080` is Dimension.
+    /// The `x` followed by a digit triggers Dimension.
+    #[test]
+    fn dimension_vs_ratio() {
+        assert_eq!(non_trivia("5x"), vec![(TokenKind::Ratio, "5x")]);
+        assert_eq!(non_trivia("1920x1080"), vec![(TokenKind::Dimension, "1920x1080")]);
+        // edge: 5x2 is a small dimension, not Ratio + Int
+        assert_eq!(non_trivia("5x2"), vec![(TokenKind::Dimension, "5x2")]);
+        // edge: 5x followed by space = Ratio
+        assert_eq!(
+            non_trivia("5x foo"),
+            vec![(TokenKind::Ratio, "5x"), (TokenKind::Ident, "foo")]
+        );
+    }
+
+    /// ByteSize: 200KB, 2MB, 1GB, 4TB.
+    #[test]
+    fn byte_size() {
+        assert_eq!(non_trivia("200KB"), vec![(TokenKind::ByteSize, "200KB")]);
+        assert_eq!(non_trivia("2MB"),   vec![(TokenKind::ByteSize, "2MB")]);
+        assert_eq!(non_trivia("1GB"),   vec![(TokenKind::ByteSize, "1GB")]);
+        assert_eq!(non_trivia("4TB"),   vec![(TokenKind::ByteSize, "4TB")]);
+    }
+
+    /// ByteSize must not collide with Duration `ms` (different case).
+    #[test]
+    fn duration_ms_does_not_collide_with_byte_size() {
+        assert_eq!(non_trivia("300ms"), vec![(TokenKind::Duration, "300ms")]);
+        assert_eq!(non_trivia("300MB"), vec![(TokenKind::ByteSize, "300MB")]);
+    }
+
+    /// Taxonomy §14.3 — `t-1` is one TimePast token; `t - 1` (with whitespace)
+    /// is three tokens; `timeline` is an Ident, not TimePast.
+    #[test]
+    fn time_past_one_token() {
+        assert_eq!(non_trivia("t-1"), vec![(TokenKind::TimePast, "t-1")]);
+        assert_eq!(non_trivia("t-2"), vec![(TokenKind::TimePast, "t-2")]);
+        assert_eq!(non_trivia("t-10"), vec![(TokenKind::TimePast, "t-10")]);
+    }
+
+    #[test]
+    fn time_with_whitespace_is_subtract() {
+        assert_eq!(
+            non_trivia("t - 1"),
+            vec![
+                (TokenKind::Ident, "t"),
+                (TokenKind::Minus, "-"),
+                (TokenKind::Int, "1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn timeline_is_identifier() {
+        assert_eq!(non_trivia("timeline"), vec![(TokenKind::Ident, "timeline")]);
+    }
+
+    /// Taxonomy §14.4 — `/dev/null` is one DevNull token, not 4 tokens.
+    #[test]
+    fn dev_null_one_token() {
+        assert_eq!(non_trivia("/dev/null"), vec![(TokenKind::DevNull, "/dev/null")]);
+        assert_eq!(
+            non_trivia("-> /dev/null"),
+            vec![(TokenKind::Flow, "->"), (TokenKind::DevNull, "/dev/null")]
+        );
+    }
+
+    /// Bare `/` not followed by `dev/null` is Slash.
+    #[test]
+    fn slash_alone_is_slash() {
+        assert_eq!(non_trivia("/foo"),
+            vec![(TokenKind::Slash, "/"), (TokenKind::Ident, "foo")]);
+    }
+
+    /// Template string: `"…{name}…"` becomes TemplateString. Plain string
+    /// without holes stays String.
+    #[test]
+    fn template_string_with_hole() {
+        assert_eq!(
+            non_trivia(r#""recordings/{timestamp}.mp4""#),
+            vec![(TokenKind::TemplateString, r#""recordings/{timestamp}.mp4""#)]
+        );
+        assert_eq!(
+            non_trivia(r#""{name}.pdf""#),
+            vec![(TokenKind::TemplateString, r#""{name}.pdf""#)]
+        );
+    }
+
+    #[test]
+    fn plain_string_without_hole_stays_string() {
+        assert_eq!(
+            non_trivia(r#""hello world""#),
+            vec![(TokenKind::String, r#""hello world""#)]
+        );
+    }
+
+    /// `//` inside a string is part of the string — strings are detected before
+    /// line comments at the dispatch level.
+    #[test]
+    fn slashes_inside_string_are_string_content() {
+        assert_eq!(
+            non_trivia(r#""http://example.com""#),
+            vec![(TokenKind::String, r#""http://example.com""#)]
+        );
+    }
+
+    /// Bang (`!`): boolean NOT. Used as `gate(!recording)` in zeros/, derez/.
+    /// Distinct from Ne (`!=`).
+    #[test]
+    fn bang_vs_ne() {
+        assert_eq!(non_trivia("!recording"),
+            vec![(TokenKind::Bang, "!"), (TokenKind::Ident, "recording")]);
+        assert_eq!(non_trivia("a != b"),
+            vec![(TokenKind::Ident, "a"), (TokenKind::Ne, "!="), (TokenKind::Ident, "b")]);
     }
 }
