@@ -508,6 +508,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         kput_dec(xhci_device_count());
         kputs(" device(s))\n");
 
+        /* Walk every hub reachable from the root and address each
+         * downstream device. Must run before HID/CDC/MSC bind so they
+         * see hub-attached devices when they iterate xhci devices. */
+        {
+            extern int usb_hub_init(void);
+            usb_hub_init();
+        }
+
         /* Probe enumerated USB devices for an RTL8188EU WiFi dongle.
          * Detection-only at this stage: see net_rtl8188eu.c for the
          * honest accounting of what's missing for a working link. */

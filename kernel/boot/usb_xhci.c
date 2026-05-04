@@ -635,7 +635,7 @@ static uint64_t xfer_enqueue(struct xhci_device *dev,
 }
 
 /* ── Control transfer on EP0 ─────────────────────────────────── */
-int xhci_control_transfer(struct xhci_device *dev,
+int xhci_real_control_transfer(struct xhci_device *dev,
                           struct usb_setup_packet *setup,
                           void *buf, int max_len)
 {
@@ -698,7 +698,7 @@ int xhci_control_transfer(struct xhci_device *dev,
 }
 
 /* ── Configuration descriptor + SET_CONFIGURATION ────────────── */
-int xhci_get_config_descriptor(struct xhci_device *dev, void *out, int max)
+int xhci_real_get_config_descriptor(struct xhci_device *dev, void *out, int max)
 {
     if (!dev || !out || max <= 0) return -1;
     uint8_t hdr[9];
@@ -708,16 +708,16 @@ int xhci_get_config_descriptor(struct xhci_device *dev, void *out, int max)
     sp.wValue = (USB_DT_CONFIG << 8) | 0;
     sp.wIndex = 0;
     sp.wLength = 9;
-    int g = xhci_control_transfer(dev, &sp, hdr, 9);
+    int g = xhci_real_control_transfer(dev, &sp, hdr, 9);
     if (g < 9) return -1;
     int total = hdr[2] | ((int)hdr[3] << 8);
     if (total > max) total = max;
     sp.wLength = (uint16_t)total;
-    int got = xhci_control_transfer(dev, &sp, out, total);
+    int got = xhci_real_control_transfer(dev, &sp, out, total);
     return got;
 }
 
-int xhci_set_configuration(struct xhci_device *dev, uint8_t config_value)
+int xhci_real_set_configuration(struct xhci_device *dev, uint8_t config_value)
 {
     if (!dev) return -1;
     struct usb_setup_packet sp;
@@ -726,7 +726,7 @@ int xhci_set_configuration(struct xhci_device *dev, uint8_t config_value)
     sp.wValue = config_value;
     sp.wIndex = 0;
     sp.wLength = 0;
-    int r = xhci_control_transfer(dev, &sp, 0, 0);
+    int r = xhci_real_control_transfer(dev, &sp, 0, 0);
     if (r < 0) return -1;
     dev->configuration = config_value;
     return 0;
@@ -773,7 +773,7 @@ static uint64_t bulk_ring_enqueue(struct xhci_bulk_ep *be,
     return phys;
 }
 
-int xhci_setup_bulk_endpoint(struct xhci_device *dev,
+int xhci_real_setup_bulk_endpoint(struct xhci_device *dev,
                              uint8_t ep_addr, uint16_t max_packet)
 {
     if (!dev || dev->slot_id == 0 || max_packet == 0) return -1;
@@ -848,7 +848,7 @@ int xhci_setup_bulk_endpoint(struct xhci_device *dev,
     return 0;
 }
 
-int xhci_bulk_transfer(struct xhci_device *dev, int ep_addr,
+int xhci_real_bulk_transfer(struct xhci_device *dev, int ep_addr,
                        void *buf, int len, int in)
 {
     if (!dev || dev->slot_id == 0 || len < 0) return -1;
@@ -912,7 +912,7 @@ int xhci_bulk_transfer(struct xhci_device *dev, int ep_addr,
     return xferred;
 }
 
-int xhci_bulk_poll_in(struct xhci_device *dev, int ep_addr, void *buf, int len)
+int xhci_real_bulk_poll_in(struct xhci_device *dev, int ep_addr, void *buf, int len)
 {
     if (!dev || !buf || len <= 0) return -1;
     if (!((uint8_t)ep_addr & 0x80)) return -1;
@@ -995,7 +995,7 @@ static void int_ep_arm(struct xhci_device *dev)
     db_ring(dev->slot_id, ie->dci);
 }
 
-int xhci_setup_interrupt_in(struct xhci_device *dev,
+int xhci_real_setup_interrupt_in(struct xhci_device *dev,
                             uint8_t ep_addr, uint16_t max_packet,
                             uint8_t interval)
 {
@@ -1081,7 +1081,7 @@ int xhci_setup_interrupt_in(struct xhci_device *dev,
     return 0;
 }
 
-int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len)
+int xhci_real_interrupt_poll(struct xhci_device *dev, void *buf, int len)
 {
     if (!dev || !buf || len <= 0) return -1;
     struct xhci_int_ep *ie = &dev->int_in;
@@ -1120,10 +1120,10 @@ int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len)
     return 0;
 }
 
-int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len)
+int xhci_real_interrupt_transfer(struct xhci_device *dev, void *buf, int len)
 {
     for (uint32_t i = 0; i < XHCI_POLL_LIMIT; i++) {
-        int r = xhci_interrupt_poll(dev, buf, len);
+        int r = xhci_real_interrupt_poll(dev, buf, len);
         if (r != 0) return r;
     }
     return -1;
@@ -1148,13 +1148,29 @@ static int address_device(struct xhci_device *dev)
     icc->add_flags = 0x3;
     icc->drop_flags = 0;
 
-    /* Slot Context */
+    /* Slot Context.
+     *   dword0[19:0]  Route String (0 = direct root-hub port)
+     *   dword0[23:20] Speed
+     *   dword0[25]    MTT  (hubs only)
+     *   dword0[26]    Hub bit
+     *   dword0[31:27] Context Entries
+     *   dword1[23:16] Root Hub Port Number
+     *   dword1[31:24] Number of Ports (hubs only)
+     *   dword2[7:0]   Parent Hub Slot ID  (LS/FS device behind HS hub)
+     *   dword2[15:8]  Parent Port Number
+     *   dword2[17:16] TT Think Time
+     */
     xhci_slot_ctx_t *slot = input_slot_of(dev->input_ctx);
-    /* Route String=0 (root hub direct), Speed in [23:20], Context Entries=1 in [31:27] */
-    slot->dword0 = ((uint32_t)dev->speed << 20) | (1U << 27);
-    /* Root Hub Port Number in [23:16] */
+    slot->dword0 = (dev->route_string & 0xFFFFFU) |
+                   ((uint32_t)dev->speed << 20) | (1U << 27);
     slot->dword1 = ((uint32_t)dev->port << 16);
-    slot->dword2 = 0;
+    if (dev->parent_hub_slot &&
+        (dev->speed == USB_SPEED_FULL || dev->speed == USB_SPEED_LOW)) {
+        slot->dword2 = ((uint32_t)dev->parent_hub_slot & 0xFF) |
+                       (((uint32_t)dev->parent_port & 0xFF) << 8);
+    } else {
+        slot->dword2 = 0;
+    }
     slot->dword3 = 0;
 
     /* EP0 Context (DCI 1) */
@@ -1240,8 +1256,52 @@ static int read_device_descriptor(struct xhci_device *dev,
     sp.wValue = (USB_DT_DEVICE << 8) | 0;
     sp.wIndex = 0;
     sp.wLength = (uint16_t)len;
-    int got = xhci_control_transfer(dev, &sp, out, len);
+    int got = xhci_real_control_transfer(dev, &sp, out, len);
     return got;
+}
+
+/* ── Post-Address-Device descriptor probe ───────────────────── */
+/* Read first 8 bytes of device descriptor (real MPS0) then full 18-byte
+ * descriptor; cache identifying fields. Used by both root-hub and hub
+ * enumeration paths. */
+static int probe_device_descriptors(struct xhci_device *dev)
+{
+    uint8_t small[8];
+    memset(small, 0, sizeof(small));
+    struct usb_setup_packet sp;
+    sp.bmRequestType = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
+    sp.bRequest = USB_REQ_GET_DESCRIPTOR;
+    sp.wValue = (USB_DT_DEVICE << 8);
+    sp.wIndex = 0;
+    sp.wLength = 8;
+    int g = xhci_real_control_transfer(dev, &sp, small, 8);
+    if (g >= 8) dev->max_packet_size0 = small[7];
+
+    struct usb_device_descriptor desc;
+    memset(&desc, 0, sizeof(desc));
+    int got = read_device_descriptor(dev, &desc, 18);
+    if (got >= 18) {
+        dev->vendor_id    = desc.idVendor;
+        dev->product_id   = desc.idProduct;
+        dev->bcd_usb      = desc.bcdUSB;
+        dev->dev_class    = desc.bDeviceClass;
+        dev->dev_subclass = desc.bDeviceSubClass;
+        dev->dev_protocol = desc.bDeviceProtocol;
+        kputs("[xhci]   VID=");
+        kput_hex(desc.idVendor);
+        kputs(" PID=");
+        kput_hex(desc.idProduct);
+        kputs(" class=");
+        kput_hex(desc.bDeviceClass);
+        kputs(" mps0=");
+        kput_dec(dev->max_packet_size0);
+        kputs("\n");
+        return 0;
+    }
+    kputs("[xhci]   GET_DESCRIPTOR(Device) failed (");
+    kput_dec(got < 0 ? 0 : (uint32_t)got);
+    kputs(" bytes)\n");
+    return -1;
 }
 
 /* ── Root-hub port enumeration ───────────────────────────────── */
@@ -1254,6 +1314,7 @@ static void enumerate_root_ports(void)
 
         struct xhci_device *dev = &xhci.devices[xhci.dev_count];
         memset(dev, 0, sizeof(*dev));
+        dev->hc_kind = HC_KIND_XHCI;
         dev->port = p;
 
         if (port_reset(p) != 0) {
@@ -1271,53 +1332,130 @@ static void enumerate_root_ports(void)
         kputs("\n");
 
         if (address_device(dev) != 0) continue;
-
-        /* Read first 8 bytes of device descriptor to learn real MPS0 */
-        uint8_t small[8];
-        memset(small, 0, sizeof(small));
-        struct usb_setup_packet sp;
-        sp.bmRequestType = USB_DIR_IN | USB_TYPE_STANDARD | USB_RECIP_DEVICE;
-        sp.bRequest = USB_REQ_GET_DESCRIPTOR;
-        sp.wValue = (USB_DT_DEVICE << 8);
-        sp.wIndex = 0;
-        sp.wLength = 8;
-        int g = xhci_control_transfer(dev, &sp, small, 8);
-        if (g >= 8) {
-            dev->max_packet_size0 = small[7];
-        }
-
-        /* Now full 18-byte descriptor */
-        struct usb_device_descriptor desc;
-        memset(&desc, 0, sizeof(desc));
-        int got = read_device_descriptor(dev, &desc, 18);
-        if (got >= 18) {
-            dev->vendor_id    = desc.idVendor;
-            dev->product_id   = desc.idProduct;
-            dev->bcd_usb      = desc.bcdUSB;
-            dev->dev_class    = desc.bDeviceClass;
-            dev->dev_subclass = desc.bDeviceSubClass;
-            dev->dev_protocol = desc.bDeviceProtocol;
-            kputs("[xhci]   VID=");
-            kput_hex(desc.idVendor);
-            kputs(" PID=");
-            kput_hex(desc.idProduct);
-            kputs(" class=");
-            kput_hex(desc.bDeviceClass);
-            kputs(" mps0=");
-            kput_dec(dev->max_packet_size0);
-            kputs("\n");
-        } else {
-            kputs("[xhci]   GET_DESCRIPTOR(Device) failed (");
-            kput_dec(got < 0 ? 0 : (uint32_t)got);
-            kputs(" bytes)\n");
-        }
-
+        probe_device_descriptors(dev);
         xhci.dev_count++;
     }
 }
 
+/* ── Hub-aware Address Device (public) ───────────────────────── */
+/* Compute the route string for a device hanging off `parent` at the
+ * parent's downstream port `parent_port`. xHCI 1.2 §4.5.2 / Table 6-4 —
+ * each tier adds a nibble at the next-higher 4-bit position. */
+static uint32_t compute_route(uint32_t parent_route, int parent_port)
+{
+    if (parent_port < 1) parent_port = 1;
+    if (parent_port > 15) parent_port = 15;
+    for (int i = 0; i < 5; i++) {
+        uint32_t shift = (uint32_t)i * 4;
+        if (((parent_route >> shift) & 0xF) == 0) {
+            return (parent_route & ~(0xFU << shift)) |
+                   ((uint32_t)(parent_port & 0xF) << shift);
+        }
+    }
+    /* Out of nibbles (>5 tiers) -- return as-is; downstream not reachable. */
+    return parent_route;
+}
+
+struct xhci_device *xhci_real_address_hub_device(struct xhci_device *parent,
+                                                 int parent_port, int speed)
+{
+    if (!parent || parent->slot_id == 0 || parent_port < 1) return 0;
+    if (xhci.dev_count >= XHCI_MAX_DEVICES) return 0;
+
+    struct xhci_device *dev = &xhci.devices[xhci.dev_count];
+    memset(dev, 0, sizeof(*dev));
+
+    dev->hc_kind = HC_KIND_XHCI;
+    /* Root Hub Port Number stays the parent's: it identifies the root
+     * port. The route-string identifies the path from there. */
+    dev->port = parent->port;
+    dev->speed = speed;
+    dev->route_string = compute_route(parent->route_string, parent_port);
+    dev->parent_port = (uint8_t)parent_port;
+
+    /* For LS/FS devices behind a HS hub (TT split transactions), point
+     * at the closest HS hub. */
+    if (speed == USB_SPEED_FULL || speed == USB_SPEED_LOW) {
+        if (parent->speed == USB_SPEED_HIGH ||
+            parent->speed == USB_SPEED_SUPER ||
+            parent->speed == USB_SPEED_SUPER_PLUS) {
+            dev->parent_hub_slot = (uint8_t)parent->slot_id;
+        } else {
+            dev->parent_hub_slot = parent->parent_hub_slot;
+        }
+    } else {
+        dev->parent_hub_slot = 0;
+    }
+
+    if (address_device(dev) != 0) {
+        if (dev->slot_id) xhci.dcbaa[dev->slot_id] = 0;
+        memset(dev, 0, sizeof(*dev));
+        return 0;
+    }
+    probe_device_descriptors(dev);
+    xhci.dev_count++;
+    return dev;
+}
+
+/* Mark an already-addressed device as a hub. Required by the spec
+ * (and enforced by QEMU) before the controller will route Address
+ * Device commands through it. Tries Evaluate Context first, falls
+ * back to Configure Endpoint. */
+int xhci_real_mark_hub(struct xhci_device *hub, int num_ports, int mtt,
+                       int think_time)
+{
+    if (!hub || hub->slot_id == 0 || !hub->input_ctx) return -1;
+    if (num_ports < 1 || num_ports > 255) return -1;
+
+    xhci_input_ctrl_ctx_t *icc = input_ctrl_of(hub->input_ctx);
+    icc->drop_flags = 0;
+    icc->add_flags = 0x1;  /* Slot Context only */
+
+    xhci_slot_ctx_t *slot = input_slot_of(hub->input_ctx);
+    uint32_t d0 = (hub->route_string & 0xFFFFFU) |
+                  ((uint32_t)hub->speed << 20) |
+                  (1U << 27) |     /* Context Entries = 1 */
+                  (1U << 26);      /* Hub */
+    if (mtt) d0 |= (1U << 25);
+    slot->dword0 = d0;
+    slot->dword1 = ((uint32_t)hub->port << 16) |
+                   ((uint32_t)num_ports << 24);
+    if (hub->parent_hub_slot &&
+        (hub->speed == USB_SPEED_FULL || hub->speed == USB_SPEED_LOW)) {
+        slot->dword2 = ((uint32_t)hub->parent_hub_slot & 0xFF) |
+                       (((uint32_t)hub->parent_port & 0xFF) << 8) |
+                       (((uint32_t)think_time & 0x3U) << 16);
+    } else {
+        slot->dword2 = ((uint32_t)think_time & 0x3U) << 16;
+    }
+    slot->dword3 = 0;
+
+    uint64_t in_phys = (uint64_t)(uintptr_t)hub->input_ctx;
+    uint32_t ctrl = TRB_TYPE(TRB_EVALUATE_CONTEXT) |
+                    ((uint32_t)hub->slot_id << 24);
+    uint64_t cmd_phys = cmd_issue((uint32_t)(in_phys & 0xFFFFFFFFU),
+                                  (uint32_t)(in_phys >> 32),
+                                  0, ctrl);
+    int code = cmd_wait(cmd_phys, 0);
+    if (code != 1) {
+        ctrl = TRB_TYPE(TRB_CONFIGURE_ENDPOINT) |
+               ((uint32_t)hub->slot_id << 24);
+        cmd_phys = cmd_issue((uint32_t)(in_phys & 0xFFFFFFFFU),
+                             (uint32_t)(in_phys >> 32),
+                             0, ctrl);
+        code = cmd_wait(cmd_phys, 0);
+        if (code != 1) {
+            kputs("[xhci] mark_hub failed code=");
+            kput_hex(code);
+            kputs("\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* ── Public API ──────────────────────────────────────────────── */
-int xhci_init(void)
+int xhci_real_init(void)
 {
     memset(&xhci, 0, sizeof(xhci));
 
@@ -1489,7 +1627,7 @@ int xhci_init(void)
     return 0;
 }
 
-struct xhci_device *xhci_find_device(uint16_t vid, uint16_t pid)
+struct xhci_device *xhci_real_find_device(uint16_t vid, uint16_t pid)
 {
     for (int i = 0; i < xhci.dev_count; i++) {
         struct xhci_device *d = &xhci.devices[i];
@@ -1501,9 +1639,9 @@ struct xhci_device *xhci_find_device(uint16_t vid, uint16_t pid)
     return 0;
 }
 
-int xhci_device_count(void) { return xhci.dev_count; }
+int xhci_real_device_count(void) { return xhci.dev_count; }
 
-struct xhci_device *xhci_get_device(int index)
+struct xhci_device *xhci_real_get_device(int index)
 {
     if (index < 0 || index >= xhci.dev_count) return 0;
     return &xhci.devices[index];

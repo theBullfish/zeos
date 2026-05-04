@@ -11,6 +11,7 @@
 #include "panic.h"
 #include "io.h"
 #include "fb.h"
+#include "msix.h"
 
 /* IDT entry — 16 bytes in long mode */
 struct idt_entry {
@@ -65,7 +66,10 @@ void idt_set_gate_ext(uint8_t vector, uint64_t handler_addr,
  */
 void isr_dispatch(uint64_t vector, uint64_t error_code)
 {
-    if (vector < IDT_ENTRIES && handlers[vector]) {
+    if (vector >= 0x40 && vector < 0x80) {
+        /* MSI-X delivery range — dispatch through the vector pool. */
+        msix_dispatch((int)vector);
+    } else if (vector < IDT_ENTRIES && handlers[vector]) {
         handlers[vector](vector, error_code);
     } else if (vector < 0x20) {
         /* Unhandled CPU exception — panic with register capture */
@@ -212,6 +216,24 @@ ISR_STUB_NOERR(0x2d)
 ISR_STUB_NOERR(0x2e)
 ISR_STUB_NOERR(0x2f)
 
+/* MSI-X stubs (vectors 0x40-0x7F, 64 vectors) */
+ISR_STUB_NOERR(0x40) ISR_STUB_NOERR(0x41) ISR_STUB_NOERR(0x42) ISR_STUB_NOERR(0x43)
+ISR_STUB_NOERR(0x44) ISR_STUB_NOERR(0x45) ISR_STUB_NOERR(0x46) ISR_STUB_NOERR(0x47)
+ISR_STUB_NOERR(0x48) ISR_STUB_NOERR(0x49) ISR_STUB_NOERR(0x4a) ISR_STUB_NOERR(0x4b)
+ISR_STUB_NOERR(0x4c) ISR_STUB_NOERR(0x4d) ISR_STUB_NOERR(0x4e) ISR_STUB_NOERR(0x4f)
+ISR_STUB_NOERR(0x50) ISR_STUB_NOERR(0x51) ISR_STUB_NOERR(0x52) ISR_STUB_NOERR(0x53)
+ISR_STUB_NOERR(0x54) ISR_STUB_NOERR(0x55) ISR_STUB_NOERR(0x56) ISR_STUB_NOERR(0x57)
+ISR_STUB_NOERR(0x58) ISR_STUB_NOERR(0x59) ISR_STUB_NOERR(0x5a) ISR_STUB_NOERR(0x5b)
+ISR_STUB_NOERR(0x5c) ISR_STUB_NOERR(0x5d) ISR_STUB_NOERR(0x5e) ISR_STUB_NOERR(0x5f)
+ISR_STUB_NOERR(0x60) ISR_STUB_NOERR(0x61) ISR_STUB_NOERR(0x62) ISR_STUB_NOERR(0x63)
+ISR_STUB_NOERR(0x64) ISR_STUB_NOERR(0x65) ISR_STUB_NOERR(0x66) ISR_STUB_NOERR(0x67)
+ISR_STUB_NOERR(0x68) ISR_STUB_NOERR(0x69) ISR_STUB_NOERR(0x6a) ISR_STUB_NOERR(0x6b)
+ISR_STUB_NOERR(0x6c) ISR_STUB_NOERR(0x6d) ISR_STUB_NOERR(0x6e) ISR_STUB_NOERR(0x6f)
+ISR_STUB_NOERR(0x70) ISR_STUB_NOERR(0x71) ISR_STUB_NOERR(0x72) ISR_STUB_NOERR(0x73)
+ISR_STUB_NOERR(0x74) ISR_STUB_NOERR(0x75) ISR_STUB_NOERR(0x76) ISR_STUB_NOERR(0x77)
+ISR_STUB_NOERR(0x78) ISR_STUB_NOERR(0x79) ISR_STUB_NOERR(0x7a) ISR_STUB_NOERR(0x7b)
+ISR_STUB_NOERR(0x7c) ISR_STUB_NOERR(0x7d) ISR_STUB_NOERR(0x7e) ISR_STUB_NOERR(0x7f)
+
 /*
  * Remap the 8259 PIC.
  * IRQ 0-7  → vectors 0x20-0x27
@@ -330,6 +352,33 @@ void idt_init(void)
         idt_set_gate(0x20 + i, (uint64_t)irq_stubs[i], IDT_GATE_INTERRUPT);
         idt[0x20 + i].selector = cs;
     }
+
+    /* ── MSI-X stubs (vectors 0x40-0x7F) ────────────────────── */
+    stub_fn msix_stubs[64] = {
+        isr_stub_0x40, isr_stub_0x41, isr_stub_0x42, isr_stub_0x43,
+        isr_stub_0x44, isr_stub_0x45, isr_stub_0x46, isr_stub_0x47,
+        isr_stub_0x48, isr_stub_0x49, isr_stub_0x4a, isr_stub_0x4b,
+        isr_stub_0x4c, isr_stub_0x4d, isr_stub_0x4e, isr_stub_0x4f,
+        isr_stub_0x50, isr_stub_0x51, isr_stub_0x52, isr_stub_0x53,
+        isr_stub_0x54, isr_stub_0x55, isr_stub_0x56, isr_stub_0x57,
+        isr_stub_0x58, isr_stub_0x59, isr_stub_0x5a, isr_stub_0x5b,
+        isr_stub_0x5c, isr_stub_0x5d, isr_stub_0x5e, isr_stub_0x5f,
+        isr_stub_0x60, isr_stub_0x61, isr_stub_0x62, isr_stub_0x63,
+        isr_stub_0x64, isr_stub_0x65, isr_stub_0x66, isr_stub_0x67,
+        isr_stub_0x68, isr_stub_0x69, isr_stub_0x6a, isr_stub_0x6b,
+        isr_stub_0x6c, isr_stub_0x6d, isr_stub_0x6e, isr_stub_0x6f,
+        isr_stub_0x70, isr_stub_0x71, isr_stub_0x72, isr_stub_0x73,
+        isr_stub_0x74, isr_stub_0x75, isr_stub_0x76, isr_stub_0x77,
+        isr_stub_0x78, isr_stub_0x79, isr_stub_0x7a, isr_stub_0x7b,
+        isr_stub_0x7c, isr_stub_0x7d, isr_stub_0x7e, isr_stub_0x7f,
+    };
+    for (int i = 0; i < 64; i++) {
+        idt_set_gate(0x40 + i, (uint64_t)msix_stubs[i], IDT_GATE_INTERRUPT);
+        idt[0x40 + i].selector = cs;
+    }
+
+    /* Initialize MSI-X subsystem (clear vector pool). */
+    msix_init();
 
     /* Remap PIC before enabling interrupts */
     pic_remap();

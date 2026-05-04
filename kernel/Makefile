@@ -64,6 +64,10 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/ahci.c \
            boot/hda.c \
            boot/usb_xhci.c \
+           boot/usb_ehci.c \
+           boot/usb_hc.c \
+           boot/usb_hub.c \
+           boot/msix.c \
            boot/usb_msc.c \
            boot/usb_hid.c \
            boot/usb_cdc.c \

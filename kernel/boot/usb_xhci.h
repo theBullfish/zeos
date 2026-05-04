@@ -17,7 +17,14 @@
 #include <stdint.h>
 #include "usb.h"
 
-#define XHCI_MAX_DEVICES 8
+/* Includes hub-attached devices: a typical laptop-internal hub plus an
+ * external 4-port hub with kbd/mouse/disk needs ~10 slots. */
+#define XHCI_MAX_DEVICES 16
+
+/* Host controller kind tag — used by the usb_hc.c dispatch layer so the
+ * xhci_* public API transparently routes to EHCI for legacy systems. */
+#define HC_KIND_XHCI    1
+#define HC_KIND_EHCI    2
 
 /* Per-device interrupt-IN endpoint state (HID). */
 struct xhci_int_ep {
@@ -53,6 +60,8 @@ struct xhci_bulk_ep {
 #define XHCI_MAX_BULK_EPS 4
 
 struct xhci_device {
+    int      hc_kind;            /* HC_KIND_XHCI or HC_KIND_EHCI */
+    void    *hc_priv;            /* HC-specific per-device state (EHCI) */
     int      slot_id;
     int      port;
     int      speed;
@@ -65,6 +74,9 @@ struct xhci_device {
     uint8_t  dev_protocol;
     uint8_t  max_packet_size0;
     uint8_t  configuration;
+    uint32_t route_string;
+    uint8_t  parent_hub_slot;
+    uint8_t  parent_port;
     void    *input_ctx;
     void    *device_ctx;
     void    *ep0_ring;
@@ -99,5 +111,23 @@ int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len);
 
 int xhci_device_count(void);
 struct xhci_device *xhci_get_device(int index);
+
+/* Hub support — implemented in usb_xhci.c, dispatched by usb_hc.c.
+ *
+ * xhci_address_hub_device() addresses a downstream device discovered
+ * behind an existing hub. parent is the already-addressed hub device,
+ * parent_port is the 1-based downstream hub port the new device is
+ * attached to, and speed is the USB_SPEED_* code determined from the
+ * hub's Get Port Status response. Returns the new xhci_device on
+ * success (also appended to the device list), 0 on failure.
+ *
+ * xhci_mark_hub() updates an already-addressed device's slot context
+ * to flag it as a hub (Hub bit + Number of Ports + MTT/TT think time)
+ * via Evaluate Context. Required before the controller will route
+ * Address Device commands through this hub. */
+struct xhci_device *xhci_address_hub_device(struct xhci_device *parent,
+                                            int parent_port, int speed);
+int xhci_mark_hub(struct xhci_device *hub, int num_ports, int mtt,
+                  int think_time);
 
 #endif /* ZEOS_USB_XHCI_H */
