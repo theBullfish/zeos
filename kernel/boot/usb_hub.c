@@ -6,10 +6,11 @@
  * port, then asks the xHCI driver to address the new downstream device
  * with the correct Route String + parent-hub TT context.
  *
- * One-level recursion: a hub behind another hub is brought up but its
- * downstream ports are not walked. Multi-tier topologies are documented
- * as future work — the route-string + parent-hub plumbing in
- * usb_xhci.c already supports up to 5 tiers per spec.
+ * Full multi-tier recursion: when a downstream device reports class
+ * 0x09 (hub), we recurse into it and enumerate its downstream ports
+ * too. The xHCI 1.2 route string is 20 bits = 5 nibbles = 5 tiers max,
+ * so we refuse to descend past tier 5 and log a depth-limit message.
+ * Each hub's bPwrOn2PwrGood is honoured for the power-on settle delay.
  */
 
 #include "usb_hub.h"
@@ -18,6 +19,12 @@
 #include "kprint.h"
 
 extern void *memset(void *s, int c, unsigned long n);
+
+/* xHCI 1.2 §4.5.2 — route string is 20 bits, one nibble per tier. */
+#define USB_HUB_MAX_TIER 5
+
+/* Tracks the deepest tier reached during the most recent walk. */
+static int g_usb_hub_max_tier = 0;
 
 /* ── Hub class constants (USB 2.0 §11.24, USB 3.x §10.16) ─────── */
 #define USB_CLASS_HUB                   0x09
@@ -217,9 +224,16 @@ static int device_is_hub(struct xhci_device *d)
     return 0;
 }
 
-/* ── Walk one hub: power ports, reset connected ports, address ── */
-static int enumerate_hub(struct xhci_device *hub, int recurse_depth)
+/* ── Walk one hub: power ports, reset connected ports, address ──
+ *
+ * `tier` is the hub's own tier (1 for a hub plugged into a root port,
+ * 2 for a hub plugged into a tier-1 hub, etc.). Devices the hub
+ * addresses live at tier+1. The xHCI route-string caps at tier 5; if
+ * we'd produce a child past tier 5 we refuse to descend further. */
+static int enumerate_hub(struct xhci_device *hub, int tier)
 {
+    if (tier > g_usb_hub_max_tier) g_usb_hub_max_tier = tier;
+
     /* Configure the hub if its class driver needs it. SET_CONFIGURATION
      * is harmless if the device was already configured. */
     if (hub->configuration == 0) {
@@ -317,11 +331,21 @@ static int enumerate_hub(struct xhci_device *hub, int recurse_depth)
         }
         new_devices++;
 
-        /* If the child is itself a hub, recurse one level. Beyond depth
-         * 1 we stop — multi-tier topologies are documented as future
-         * work. The xHCI route-string plumbing already supports it. */
-        if (recurse_depth < 1 && device_is_hub(child)) {
-            new_devices += enumerate_hub(child, recurse_depth + 1);
+        /* Track the tier the child lives at. */
+        int child_tier = tier + 1;
+        if (child_tier > g_usb_hub_max_tier)
+            g_usb_hub_max_tier = child_tier;
+
+        /* If the child is itself a hub, recurse — but only as long as
+         * its downstream children would still fit inside the 5-nibble
+         * route string. A hub at tier 5 cannot address further
+         * devices because tier-6 nibbles don't exist. */
+        if (device_is_hub(child)) {
+            if (child_tier >= USB_HUB_MAX_TIER) {
+                kputs("USB: hub depth limit reached\n");
+            } else {
+                new_devices += enumerate_hub(child, child_tier);
+            }
         }
     }
     return new_devices;
@@ -331,6 +355,7 @@ static int enumerate_hub(struct xhci_device *hub, int recurse_depth)
 int usb_hub_init(void)
 {
     int total = 0;
+    g_usb_hub_max_tier = 0;
     /* Snapshot the pre-existing device count so we don't iterate into
      * children we just appended. */
     int n = xhci_device_count();
@@ -338,12 +363,33 @@ int usb_hub_init(void)
         struct xhci_device *d = xhci_get_device(i);
         if (!d) continue;
         if (!device_is_hub(d)) continue;
-        total += enumerate_hub(d, 0);
+        /* A hub picked up by xhci_init() sits at tier 1 — root port is
+         * tier 0, the hub itself is tier 1, its downstream devices at
+         * tier 2, and so on. */
+        total += enumerate_hub(d, 1);
     }
     if (total > 0) {
         kputs("[hub] ");
         kput_dec(total);
-        kputs(" downstream device(s) addressed\n");
+        kputs(" downstream device(s) addressed, max tier=");
+        kput_dec(g_usb_hub_max_tier);
+        kputs("\n");
     }
     return total;
+}
+
+int usb_hub_max_tier(void)
+{
+    return g_usb_hub_max_tier;
+}
+
+int usb_hub_enumerate_downstream(struct xhci_device *hub, int tier)
+{
+    if (!hub) return 0;
+    if (tier < 1) tier = 1;
+    if (tier > USB_HUB_MAX_TIER) {
+        kputs("USB: hub depth limit reached\n");
+        return 0;
+    }
+    return enumerate_hub(hub, tier);
 }

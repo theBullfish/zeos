@@ -20,7 +20,19 @@
 
 #include <stdint.h>
 
+struct xhci_device;
+
 /* Returns the number of new devices addressed behind hubs. */
 int usb_hub_init(void);
+
+/* Returns the maximum hub tier depth observed during the most recent
+ * usb_hub_init() walk. Tier 0 = root port; tier 1 = first hub level;
+ * the xHCI route-string format caps useful depth at 5. */
+int usb_hub_max_tier(void);
+
+/* Walk a single hub's downstream ports, addressing children and
+ * recursing into nested hubs. `tier` is the hub's own tier (1 for a
+ * root-port hub). Returns number of devices addressed. */
+int usb_hub_enumerate_downstream(struct xhci_device *hub, int tier);
 
 #endif /* ZEOS_USB_HUB_H */

@@ -17,6 +17,7 @@
 
 #include "shell.h"
 #include "usb_msc.h"
+#include "usb_hub.h"
 #include "block.h"
 #include "nvme.h"
 #include "ahci.h"
@@ -2196,6 +2197,19 @@ vault_done:
         passes++;
     } else {
         kputs("SKIP (no device)\n");
+    }
+
+    /* USB hub topology: report deepest tier the hub walker reached. */
+    kputs("  USB hub depth ......... ");
+    {
+        int td = usb_hub_max_tier();
+        if (td <= 0) {
+            kputs("no hubs\n");
+        } else {
+            kputs("tier ");
+            kput_dec(td);
+            kputs("\n");
+        }
     }
 
     kputs("  ──────────────\n  ");
