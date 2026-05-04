@@ -180,10 +180,21 @@ int msix_enable(struct pci_device *dev, int num_vectors)
 
     uint64_t table_phys = bar_base + off;
 
-    /* Map the MSI-X table region. Max 2048 entries × 16 B = 32 KiB. */
+    /* Map the MSI-X table region. Max 2048 entries × 16 B = 32 KiB.
+     *
+     * The first 4 GiB are identity-mapped via 2 MiB huge pages by vmm_init,
+     * so any table_phys < 4 GiB is already reachable, writable, and the
+     * device MMIO BAR (e.g. NVMe BAR0) is already mapped there. Calling
+     * vmm_map_range on a virtual address whose PD entry is a 2 MiB huge
+     * page would corrupt the huge-page mapping (the helper assumes 4 KiB
+     * PT pages). Skip the remap in that case — the existing identity
+     * mapping is sufficient for posted MSI writes in QEMU. For real
+     * silicon BARs above 4 GiB, install a fresh 4 KiB mapping. */
     {
         uint64_t base_page = table_phys & ~0xFFFULL;
-        vmm_map_range(base_page, base_page, 8, PTE_WRITABLE | PTE_NOCACHE);
+        if (base_page >= 0x100000000ULL) {
+            vmm_map_range(base_page, base_page, 8, PTE_WRITABLE | PTE_NOCACHE);
+        }
     }
 
     struct msix_device_state *st = find_state(dev);
@@ -243,6 +254,14 @@ int msix_set_handler(struct pci_device *dev, int entry, void (*handler)(void))
     if (v < MSIX_VECTOR_BASE || v >= MSIX_VECTOR_TOP) return -1;
     g_vector_handlers[v - MSIX_VECTOR_BASE] = handler;
     return 0;
+}
+
+int msix_entry_vector(struct pci_device *dev, int entry)
+{
+    struct msix_device_state *st = find_state(dev);
+    if (!st) return -1;
+    if (entry < 0 || entry >= st->num_entries) return -1;
+    return st->vectors[entry];
 }
 
 void msix_disable(struct pci_device *dev)

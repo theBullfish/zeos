@@ -21,6 +21,9 @@ int  msix_alloc_vector(void (*handler)(void));
 void msix_free_vector(int vec);
 int  msix_enable(struct pci_device *dev, int num_vectors);
 int  msix_set_handler(struct pci_device *dev, int entry, void (*handler)(void));
+/* Return the kernel interrupt vector (0x40-0x7F) bound to entry N on dev,
+ * or -1 if unbound / unknown. */
+int  msix_entry_vector(struct pci_device *dev, int entry);
 void msix_disable(struct pci_device *dev);
 int  msix_free_count(void);
 void msix_dispatch(int vec);

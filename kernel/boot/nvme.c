@@ -1,11 +1,15 @@
 /*
  * Zeos -- NVMe Block Device Driver (multi-drive, multi-queue)
  *
- * Polling only. Walks the PCI bus and brings up every NVMe controller
- * it finds. Each drive gets an admin queue plus up to NVME_IO_QUEUES
- * I/O queue pairs (capped by MQES). Round-robin I/O across queues.
- * If extra queues won't come up the drive falls back to whatever did,
- * never less than 1.
+ * Walks the PCI bus and brings up every NVMe controller it finds.
+ * Each drive gets an admin queue plus up to NVME_IO_QUEUES I/O queue
+ * pairs (capped by MQES). Round-robin I/O across queues. If extra
+ * queues won't come up the drive falls back to whatever did, never
+ * less than 1.
+ *
+ * MSI-X driven completion when supported, with 50µs short-poll fallback
+ * for any missed interrupts (defense-in-depth). Polling-only fallback
+ * preserved if MSI-X enable fails. LAPIC EOI is automatic via msix.c.
  */
 
 #include "nvme.h"
@@ -15,6 +19,8 @@
 #include "heap.h"
 #include "kprint.h"
 #include "vmm.h"
+#include "msix.h"
+#include "timer.h"
 
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *s, int c, unsigned long n);
@@ -76,7 +82,12 @@ typedef struct {
 static nvme_dev_t g_drives[NVME_MAX_DRIVES];
 static int g_drive_count = 0;
 
+/* Reverse map: MSI-X vector -> drive index. Vectors live in 0x40-0x7F.
+ * -1 means unused. Populated when msix_set_handler succeeds. */
+static int g_vec2drive[0x80];
+
 #define NVME_POLL_LIMIT  100000000U
+#define NVME_IO_TIMEOUT_TSC_FALLBACK_HZ 1000000ULL  /* assume 1 GHz if no TSC */
 
 static inline uint32_t nvme_read32(nvme_dev_t *d, uint32_t off)
 { return *(volatile uint32_t *)((uint8_t *)d->regs + off); }
@@ -113,13 +124,103 @@ static int admin_cmd(nvme_dev_t *d, nvme_cmd_t *cmd)
     return -1;
 }
 
+/* Drain any ready CQEs on q. Returns number drained. Updates last_status /
+ * last_cmd_id to the most recent completion seen. Safe to call from both
+ * ISR and submitter context — the CQ phase + head are owned by the queue
+ * struct, and the submitter holds the queue while waiting. */
+static int drain_cq(nvme_dev_t *d, nvme_ioq_t *q)
+{
+    volatile nvme_cqe_t *iocq = (volatile nvme_cqe_t *)q->cq;
+    int drained = 0;
+    for (;;) {
+        volatile nvme_cqe_t *cqe = &iocq[q->cq_head];
+        uint16_t st = cqe->status;
+        if ((st & 1) != q->cq_phase) break;
+        q->last_status = (st >> 1) & 0x7FFF;
+        q->last_cmd_id = cqe->command_id;
+        q->cq_head = (q->cq_head + 1) % NVME_IO_QSIZE;
+        if (q->cq_head == 0) q->cq_phase ^= 1;
+        ring_cq(d, q->qid, q->cq_head);
+        drained++;
+    }
+    if (drained) q->pending_completion = 0;
+    return drained;
+}
+
+/* Per-drive ISR: walk every active I/O CQ on this drive and drain it.
+ * One MSI-X vector per drive aggregates all 4 I/O CQs (all created with
+ * IV=0 in CDW11), so any of them may have new entries when the vector
+ * fires. LAPIC EOI is performed by msix_dispatch() after this returns. */
+static void nvme_drive_isr(int drive_idx)
+{
+    if (drive_idx < 0 || drive_idx >= NVME_MAX_DRIVES) return;
+    nvme_dev_t *d = &g_drives[drive_idx];
+    if (!d->ready) return;
+    for (int qi = 0; qi < d->io_queue_count; qi++) {
+        nvme_ioq_t *q = &d->ioq[qi];
+        if (!q->active) continue;
+        (void)drain_cq(d, q);
+    }
+}
+
+/* Per-vector trampolines. msix_set_handler takes a void(*)(void), so we
+ * fan out through fixed-arity stubs that know which drive they own. */
+static void nvme_isr_drive0(void) { nvme_drive_isr(0); }
+static void nvme_isr_drive1(void) { nvme_drive_isr(1); }
+static void nvme_isr_drive2(void) { nvme_drive_isr(2); }
+static void nvme_isr_drive3(void) { nvme_drive_isr(3); }
+static void nvme_isr_drive4(void) { nvme_drive_isr(4); }
+static void nvme_isr_drive5(void) { nvme_drive_isr(5); }
+static void nvme_isr_drive6(void) { nvme_drive_isr(6); }
+static void nvme_isr_drive7(void) { nvme_drive_isr(7); }
+static void (*const g_drive_isr[NVME_MAX_DRIVES])(void) = {
+    nvme_isr_drive0, nvme_isr_drive1, nvme_isr_drive2, nvme_isr_drive3,
+    nvme_isr_drive4, nvme_isr_drive5, nvme_isr_drive6, nvme_isr_drive7,
+};
+
 static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
 {
     nvme_cmd_t *iosq = (nvme_cmd_t *)q->sq;
     cmd->command_id = q->cmd_id++;
     memcpy(&iosq[q->sq_tail], cmd, sizeof(nvme_cmd_t));
     q->sq_tail = (q->sq_tail + 1) % NVME_IO_QSIZE;
+    /* Arm the wait flag BEFORE ringing the doorbell so a fast ISR can
+     * clear it as soon as the controller posts. The ISR clears to 0;
+     * we set to 1 (pending) here. */
+    q->pending_completion = 1;
     ring_sq(d, q->qid, q->sq_tail);
+
+    if (d->msix_vector >= 0) {
+        /* MSI-X path: the ISR is the sole drainer. Submitter only
+         * waits on pending_completion to avoid racing the ISR for
+         * q->cq_head / q->cq_phase. Short-poll for ~50µs to cover
+         * synchronous QEMU completions; if the flag isn't cleared
+         * (interrupt missed), drain under cli as defense-in-depth.
+         * Hard deadline: 5 seconds. */
+        uint64_t tsc_hz = timer_tsc_freq();
+        if (!tsc_hz) tsc_hz = NVME_IO_TIMEOUT_TSC_FALLBACK_HZ;
+        uint64_t deadline_short = timer_read_tsc() + (tsc_hz / 1000000ULL) * 50ULL;
+        while (timer_read_tsc() < deadline_short) {
+            if (!q->pending_completion) return (int)q->last_status;
+            __asm__ volatile("pause");
+        }
+        /* Long path: ~50µs slices up to 5 seconds. Each slice does
+         * one cli-protected drain to recover from a missed interrupt
+         * (defense-in-depth) without racing the ISR. */
+        uint64_t deadline_long = timer_read_tsc() + tsc_hz * 5ULL;
+        while (timer_read_tsc() < deadline_long) {
+            if (!q->pending_completion) return (int)q->last_status;
+            __asm__ volatile("cli");
+            int n = drain_cq(d, q);
+            __asm__ volatile("sti");
+            if (n > 0) return (int)q->last_status;
+            for (int i = 0; i < 256; i++) __asm__ volatile("pause");
+        }
+        kputs("[nvme] I/O timeout (msix)\n");
+        return -1;
+    }
+
+    /* Polling fallback path. */
     nvme_cqe_t *iocq = (nvme_cqe_t *)q->cq;
     for (uint32_t i = 0; i < NVME_POLL_LIMIT; i++) {
         nvme_cqe_t *cqe = &iocq[q->cq_head];
@@ -128,6 +229,7 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
         q->cq_head = (q->cq_head + 1) % NVME_IO_QSIZE;
         if (q->cq_head == 0) q->cq_phase ^= 1;
         ring_cq(d, q->qid, q->cq_head);
+        q->pending_completion = 0;
         return (int)status;
     }
     kputs("[nvme] I/O timeout\n");
@@ -222,7 +324,10 @@ static int bring_up(nvme_dev_t *d, struct pci_device *pdev)
         if (st & NVME_CSTS_RDY) break;
         if (i == NVME_POLL_LIMIT - 1) { kputs("[nvme] enable timeout\n"); return -1; }
     }
+    /* Mask all pin/MSI sources by default; MSI-X (if enabled below)
+     * has its own per-entry mask bits and is unaffected by INTMS. */
     nvme_write32(d, NVME_REG_INTMS, 0xFFFFFFFF);
+    d->msix_vector = -1;
     uint64_t idp = pmm_alloc();
     if (!idp) return -1;
     void *idbuf = (void *)(uintptr_t)idp;
@@ -264,6 +369,36 @@ static int bring_up(nvme_dev_t *d, struct pci_device *pdev)
         want = 1;
     }
     d->io_queue_count = 0; d->io_rr = 0;
+
+    /* Try to bring up MSI-X. msix_enable allocates 1 vector and programs
+     * the table entry; we then install the per-drive handler. One vector
+     * aggregates all I/O CQs on this drive (ISR walks each one). On any
+     * failure, drop to polling cleanly. */
+    {
+        int en = msix_enable(pdev, 1);
+        if (en == 0) {
+            if (msix_set_handler(pdev, 0, g_drive_isr[d->slot]) == 0) {
+                int v = msix_entry_vector(pdev, 0);
+                d->msix_vector = v;
+                if (v >= 0 && v < (int)(sizeof(g_vec2drive)/sizeof(g_vec2drive[0])))
+                    g_vec2drive[v] = d->slot;
+                kputs("[nvme] drive ");
+                kput_dec(d->slot);
+                kputs(" MSI-X vec=");
+                kput_hex(v);
+                kputs("\n");
+            } else {
+                kputs("[nvme] msix_set_handler failed -> polling\n");
+                msix_disable(pdev);
+                d->msix_vector = -1;
+            }
+        } else {
+            kputs("[nvme] msix_enable rc="); kput_dec(en);
+            kputs(" -> polling\n");
+            d->msix_vector = -1;
+        }
+    }
+
     for (int qi = 0; qi < want; qi++) {
         nvme_ioq_t *q = &d->ioq[qi];
         memset(q, 0, sizeof(*q));
@@ -278,7 +413,11 @@ static int bring_up(nvme_dev_t *d, struct pci_device *pdev)
             c.opcode = NVME_ADMIN_CREATE_IO_CQ;
             c.prp1 = cqp;
             c.cdw10 = ((NVME_IO_QSIZE - 1) << 16) | q->qid;
-            c.cdw11 = 1;
+            /* CDW11: [31:16]=IV, [1]=IEN, [0]=PC. Use vector 0 (the per-
+             * drive aggregate) when MSI-X is up; leave IEN clear in the
+             * polling fallback so completions don't queue at the LAPIC. */
+            c.cdw11 = 1u;
+            if (d->msix_vector >= 0) c.cdw11 |= (1u << 1);  /* IEN */
             int s = admin_cmd(d, &c);
             if (s != 0) {
                 kputs("[nvme] CreateCQ "); kput_dec(q->qid);
@@ -322,6 +461,8 @@ int nvme_init(void)
 {
     memset(g_drives, 0, sizeof(g_drives));
     g_drive_count = 0;
+    for (int i = 0; i < (int)(sizeof(g_vec2drive)/sizeof(g_vec2drive[0])); i++)
+        g_vec2drive[i] = -1;
     kputs("[nvme] scanning PCI for NVMe controllers...\n");
     int n = pci_device_count();
     for (int i = 0; i < n && g_drive_count < NVME_MAX_DRIVES; i++) {
@@ -331,6 +472,7 @@ int nvme_init(void)
         nvme_dev_t *d = &g_drives[g_drive_count];
         memset(d, 0, sizeof(*d));
         d->slot = g_drive_count;
+        d->msix_vector = -1;
         if (bring_up(d, p) == 0) g_drive_count++;
         else { kputs("[nvme] drive bring-up failed, continuing\n"); memset(d, 0, sizeof(*d)); }
     }

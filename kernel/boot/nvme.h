@@ -19,6 +19,11 @@ typedef struct {
     int cq_head;
     int cq_phase;
     uint16_t cmd_id;
+    /* MSI-X completion signaling. ISR clears this flag after draining
+     * the CQ; submitter waits on it with short-poll fallback. */
+    volatile uint32_t pending_completion;
+    volatile uint16_t last_status;
+    volatile uint16_t last_cmd_id;
 } nvme_ioq_t;
 typedef struct {
     int slot;
@@ -45,6 +50,10 @@ typedef struct {
     uint8_t pci_bus;
     uint8_t pci_dev;
     uint8_t pci_func;
+    /* MSI-X completion. msix_vector >= 0 = interrupt-driven I/O CQ
+     * draining; -1 = polling fallback. One vector per drive aggregates
+     * all I/O CQs (ISR walks every CQ on this drive). */
+    int msix_vector;
 } nvme_dev_t;
 int nvme_init(void);
 int nvme_drive_count(void);
