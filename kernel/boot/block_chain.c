@@ -28,7 +28,11 @@
 #include "timer.h"
 #include "timeofday.h"
 #include "persistence.h"
+#include "spinlock.h"
 #include <stdint.h>
+
+/* Single ring; multiple cores writing at once would corrupt it. */
+static zeos_spinlock_t g_journal_lock = ZEOS_SPINLOCK_INIT;
 
 /* ── Public chain ID ───────────────────────────────────────────── */
 
@@ -92,6 +96,7 @@ static uint64_t      s_journal_total;     /* monotonic; index = total % CAP */
 static void journal_append(int drive_id, uint64_t lba, uint32_t count,
                            int op, int prior_vv, int new_vv)
 {
+    spin_lock(&g_journal_lock);
     int slot = (int)(s_journal_total % BLOCK_JOURNAL_CAP);
     uint64_t tsc = timer_read_tsc();
     s_journal[slot].tsc                 = tsc;
@@ -102,10 +107,10 @@ static void journal_append(int drive_id, uint64_t lba, uint32_t count,
     s_journal[slot].prior_vault_version = prior_vv;
     s_journal[slot].new_vault_version   = new_vv;
     s_journal_total++;
+    spin_unlock(&g_journal_lock);
 
-    /* Mirror to VAULT so the record survives a reboot. The
-     * persistence layer no-ops until vault is mounted + initialized;
-     * before that point we still keep the in-RAM record. */
+    /* Mirror to VAULT so the record survives a reboot. Outside the
+     * journal lock — persistence has its own lock and may take vault. */
     persistence_journal_append(tsc, drive_id, lba, count, op,
                                prior_vv, new_vv);
 }
@@ -122,6 +127,7 @@ void block_chain_journal_replay_record(uint64_t tsc, int drive_id,
                                        uint64_t lba, uint32_t count,
                                        int op, int prior_vv, int new_vv)
 {
+    spin_lock(&g_journal_lock);
     int slot = (int)(s_journal_total % BLOCK_JOURNAL_CAP);
     s_journal[slot].tsc                 = tsc;
     s_journal[slot].lba                 = lba;
@@ -131,6 +137,7 @@ void block_chain_journal_replay_record(uint64_t tsc, int drive_id,
     s_journal[slot].prior_vault_version = prior_vv;
     s_journal[slot].new_vault_version   = new_vv;
     s_journal_total++;
+    spin_unlock(&g_journal_lock);
 }
 
 uint64_t block_chain_journal_total(void) { return s_journal_total; }

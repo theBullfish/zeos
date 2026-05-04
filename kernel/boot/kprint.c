@@ -12,10 +12,17 @@
 #include "serial.h"
 #include "timer.h"
 #include "timeofday.h"
+#include "spinlock.h"
 
 static int serial_ready;
 static int splash_mode;   /* 1 = serial-only, 0 = dual */
 static uint64_t s_first_tsc;  /* TSC at first kprint_log_prefix call -- "boot" anchor */
+
+/* IRQ-safe lock: kputs may be called from the LAPIC timer ISR (preempt
+ * path) on the same CPU that's currently mid-write. spin_lock_irqsave
+ * disables IF for the critical section so the ISR can't be re-entered
+ * while we hold the lock. */
+static zeos_spinlock_t g_kprint_lock = ZEOS_SPINLOCK_INIT;
 
 void kprint_init(void)
 {
@@ -30,14 +37,17 @@ void kprint_set_splash_mode(int on)
 
 void kputc(char c)
 {
+    uint64_t f = spin_lock_irqsave(&g_kprint_lock);
     if (!splash_mode)
         fb_putc(c);
     if (serial_ready)
         serial_putc(c);
+    spin_unlock_irqrestore(&g_kprint_lock, f);
 }
 
 void kputs(const char *s)
 {
+    uint64_t f = spin_lock_irqsave(&g_kprint_lock);
     while (*s) {
         if (!splash_mode)
             fb_putc(*s);
@@ -45,6 +55,7 @@ void kputs(const char *s)
             serial_putc(*s);
         s++;
     }
+    spin_unlock_irqrestore(&g_kprint_lock, f);
 }
 
 void kput_hex(uint64_t val)

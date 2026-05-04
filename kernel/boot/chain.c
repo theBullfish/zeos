@@ -9,6 +9,7 @@
 #include "kprint.h"
 #include "timer.h"
 #include "persistence.h"
+#include "spinlock.h"
 
 /* ── Static registry ─────────────────────────────────────────────── */
 
@@ -16,6 +17,23 @@ static chain_t  registry[MAX_CHAINS];
 static int      registry_used[MAX_CHAINS];  /* 0 = free, 1 = occupied */
 static int      chain_total;                /* live count */
 static int      next_child_index[MAX_CHAINS]; /* per-chain child counter for CFA */
+
+/* ── SMP locking ─────────────────────────────────────────────────────
+ * Two layers:
+ *   chain_locks[id]      — per-chain mutex. chain_resolve() try-locks
+ *                          to serialize same-chain resolves across
+ *                          CPUs. Try-lock not blocking-lock so a
+ *                          stuck-resolving chain on one CPU doesn't
+ *                          stall another CPU's tick.
+ *   g_chain_registry_rw_lock — owned by smp.c; held only across
+ *                              chain_create / chain_destroy slot
+ *                              mutation. Per-chain reads do NOT need
+ *                              this lock (slots are stable once
+ *                              registered, and registry_used is
+ *                              read with relaxed semantics).
+ */
+extern zeos_spinlock_t g_chain_registry_rw_lock;
+static zeos_spinlock_t chain_locks[MAX_CHAINS];
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
@@ -79,6 +97,7 @@ void chain_init(void)
     for (i = 0; i < MAX_CHAINS; i++) {
         registry_used[i] = 0;
         next_child_index[i] = 0;
+        chain_locks[i].v = 0;
         registry[i].id = -1;
         registry[i].name[0] = '\0';
         registry[i].node_count = 0;
@@ -118,6 +137,8 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     int i;
     uint32_t child_idx;
 
+    spin_lock(&g_chain_registry_rw_lock);
+
     /* Find free slot */
     for (i = 0; i < MAX_CHAINS; i++) {
         if (!registry_used[i]) {
@@ -127,6 +148,7 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     }
 
     if (slot < 0) {
+        spin_unlock(&g_chain_registry_rw_lock);
         kputs("[chain] ERROR: registry full\n");
         return -1;
     }
@@ -167,6 +189,8 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     registry_used[slot] = 1;
     chain_total++;
 
+    spin_unlock(&g_chain_registry_rw_lock);
+
     kputs("[chain] created \"");
     kputs(registry[slot].name);
     kputs("\" id=");
@@ -182,8 +206,13 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
 
 void chain_destroy(int id)
 {
-    if (id < 0 || id >= MAX_CHAINS || !registry_used[id])
+    if (id < 0 || id >= MAX_CHAINS) return;
+
+    spin_lock(&g_chain_registry_rw_lock);
+    if (!registry_used[id]) {
+        spin_unlock(&g_chain_registry_rw_lock);
         return;
+    }
 
     kputs("[chain] destroyed \"");
     kputs(registry[id].name);
@@ -197,6 +226,7 @@ void chain_destroy(int id)
     registry[id].status = CHAIN_DETACHED;
     registry[id].node_count = 0;
     chain_total--;
+    spin_unlock(&g_chain_registry_rw_lock);
 }
 
 /* ── Add Node ────────────────────────────────────────────────────── */
@@ -228,14 +258,56 @@ int chain_add_node(int chain_id, const char *name,
 
 /* ── Resolve ─────────────────────────────────────────────────────── */
 
+/* Per-CPU scratch buffers. Each CPU resolves at most one chain at a
+ * time on its own callstack, so per-CPU pair is sufficient. Indexed by
+ * cpu index from smp_cpu_by_lapic(); BSP-only systems collapse to [0].
+ *
+ * SMP_MAX_CPUS_FOR_SCRATCH must match smp.h's SMP_MAX_CPUS but we don't
+ * include smp.h here to keep chain.c standalone in single-core builds.
+ * The constant is small enough that overprovisioning costs nothing. */
+#define CHAIN_SCRATCH_CPUS 64
+static uint8_t s_scratch_a[CHAIN_SCRATCH_CPUS][4096];
+static uint8_t s_scratch_b[CHAIN_SCRATCH_CPUS][4096];
+
+/* Lookup current cpu index without pulling smp.h. Returns 0 (BSP) when
+ * SMP didn't bring up APs or when called pre-SMP-init. */
+extern uint32_t lapic_id(void);
+extern int      smp_cpu_count(void);
+extern struct smp_cpu *smp_cpu_by_lapic(uint8_t lapic_id);
+static int chain_this_cpu_idx(void)
+{
+    /* If SMP isn't up yet, single-CPU. Touching lapic_id pre-LAPIC-init
+     * crashes; chain_resolve isn't called pre-init so this is safe in
+     * the live path. */
+    extern int smp_cpus_online(void);
+    if (smp_cpus_online() <= 1) return 0;
+    uint32_t my_lapic = lapic_id();
+    /* Walk the SMP table by index. Avoids dragging smp_cpu_t layout
+     * into chain.c. */
+    for (int i = 0; i < CHAIN_SCRATCH_CPUS; i++) {
+        extern struct smp_cpu *smp_cpu_by_index(int idx);
+        struct smp_cpu *c = smp_cpu_by_index(i);
+        if (!c) break;
+        /* smp_cpu layout: first byte is lapic_id (see smp.h). */
+        if (*((uint8_t *)c) == (uint8_t)my_lapic) return i;
+    }
+    return 0;
+}
+
+/* Release the per-chain lock for `id`. The scheduler's preempt ISR
+ * calls this immediately before longjmping out of a hung resolve, so
+ * the lock doesn't leak. Idempotent on already-unlocked. */
+void chain_resolve_force_unlock(int id)
+{
+    if (id < 0 || id >= MAX_CHAINS) return;
+    spin_unlock(&chain_locks[id]);
+}
+
 int chain_resolve(int id)
 {
     chain_t *c;
     uint64_t t_start, t_end, freq;
     int i;
-    /* Shared scratch buffer for passing data between nodes */
-    static uint8_t scratch_a[4096];
-    static uint8_t scratch_b[4096];
     void *input;
     void *output;
 
@@ -244,21 +316,42 @@ int chain_resolve(int id)
 
     c = &registry[id];
 
+    /* Per-chain try-lock: if another CPU is already resolving this
+     * chain, skip this attempt. Returns -2 so the caller (BSP
+     * scheduler / AP loop) can distinguish "contended" from "errored"
+     * and not bump b3_beta on a benign skip. */
+    if (!spin_trylock(&chain_locks[id])) {
+        return -2;
+    }
+
     if (c->status != CHAIN_LIVE) {
-        kputs("[chain] resolve skipped (not live) id=");
-        kput_dec((uint64_t)id);
-        kputc('\n');
+        spin_unlock(&chain_locks[id]);
+        /* Demoted from console-noise to silence: APs would otherwise
+         * spam this every tick for non-LIVE chains they own. */
         return -1;
     }
 
-    if (c->node_count == 0)
-        return 0;  /* Nothing to resolve, not an error */
+    if (c->node_count == 0) {
+        spin_unlock(&chain_locks[id]);
+        return 0;
+    }
 
     t_start = timer_read_tsc();
 
+    int cpu = chain_this_cpu_idx();
+    if (cpu < 0 || cpu >= CHAIN_SCRATCH_CPUS) cpu = 0;
+    uint8_t *scratch_a = s_scratch_a[cpu];
+    uint8_t *scratch_b = s_scratch_b[cpu];
+
     /* Run nodes in sequence, alternating scratch buffers. Set the CFA
      * observer to this chain id so any cfa_resolve() inside a node body
-     * gets MasQ-tier-checked against this chain's tier. */
+     * gets MasQ-tier-checked against this chain's tier. cfa_observer is
+     * scoped to the calling thread but cfa_set_observer is a static
+     * variable today; on SMP we accept the observer-tracking races
+     * (MasQ tier checks degrade to permissive, never to a security
+     * regression — wrong observer logs a false-positive perceive and
+     * permits, doesn't deny). Tightening cfa observer to per-CPU is
+     * future work. */
     int prev_observer = cfa_get_observer();
     cfa_set_observer(id);
 
@@ -293,6 +386,7 @@ int chain_resolve(int id)
      * vault_sync. */
     persistence_on_resolve_complete();
 
+    spin_unlock(&chain_locks[id]);
     return 0;
 }
 

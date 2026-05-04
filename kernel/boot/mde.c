@@ -489,8 +489,20 @@ int mde_resolve_all(void)
     /* Snapshot current scheduler tick once per pass for interval gating. */
     uint64_t now_tick = scheduler_tick_count();
 
+    /* SMP partition: BSP owns chains where (id % cpus_online) == 0.
+     * APs own the rest and resolve them in their own ap_scheduler_loop.
+     * Single-core boots collapse to "BSP owns everything". */
+    extern int smp_partition_active(void);
+    extern int smp_chain_owner(int chain_id);
+    int partition_on = smp_partition_active();
+
     for (i = 0; i < count; i++) {
         id = topo_order[i];
+
+        if (partition_on && smp_chain_owner(id) != 0) {
+            /* AP owns this chain; BSP skips. */
+            continue;
+        }
 
         /*
          * Async / rate-limited resolution: if this chain has a non-zero
@@ -518,11 +530,13 @@ int mde_resolve_all(void)
          * timer ISR longjmps back into scheduler_preempt_resolve which
          * returns -1; the chain has already been marked CHAIN_ERROR. */
         err = scheduler_preempt_resolve(id);
-        if (c) c->last_resolved_tick = now_tick;
+        if (c && err != -2) c->last_resolved_tick = now_tick;
 
-        /* Update B3 beliefs for this chain */
+        /* Update B3 beliefs for this chain. -2 == SMP contention (the
+         * other CPU is mid-resolve); not a success or failure, just
+         * skip the B3 update. */
         c = chain_get(id);
-        if (c) {
+        if (c && err != -2) {
             mde_chain_to_b3(c, &tmp);
             if (err == 0) {
                 b3_observe(&tmp, 1);
@@ -534,7 +548,7 @@ int mde_resolve_all(void)
             c->b3_observations = tmp.observations;
         }
 
-        if (err != 0)
+        if (err != 0 && err != -2)
             errors++;
     }
 

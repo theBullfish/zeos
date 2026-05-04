@@ -401,6 +401,11 @@ void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err)
         c->watchdog_deadline_tsc = 0;
     }
 
+    /* Critical: release the per-chain SMP try-lock that chain_resolve
+     * acquired before we abandon its stack. Without this, the chain
+     * stays "in flight" forever and every future try-lock skips it. */
+    chain_resolve_force_unlock(id);
+
     s_preempt_kills++;
     log_preempt_kill(id, ran_ms);
 

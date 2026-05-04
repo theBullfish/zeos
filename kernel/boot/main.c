@@ -732,14 +732,9 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         persistence_apply_snapshot();
     }
 
-    /* Release APs from their pre-partition spin. From here APs walk
-     * the chain registry and resolve chains where (id % cpu_count)
-     * matches their cpu index. The BSP's scheduler_run will skip the
-     * AP-owned chains automatically. */
-    {
-        extern void smp_partition_activate(void);
-        smp_partition_activate();
-    }
+    /* (Partition activation deferred until after scheduler_init() so
+     * the BSP-only init paths below run single-threaded. Activation
+     * happens immediately before scheduler_run() takes over.) */
 
     /* Restore master audio volume + mute from VAULT (/audio/volume).
      * Default 60/unmuted on first boot. Pushes verb 0x300 to the DAC
@@ -802,6 +797,27 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         extern void scheduler_init(void);
         scheduler_init();
+    }
+
+    /* Now that all single-threaded init is done, release APs from
+     * their pre-partition spin. From here APs walk the chain registry
+     * and resolve chains where (id % cpu_count) matches their cpu
+     * index. BSP's scheduler_run skips AP-owned chains automatically. */
+    {
+        extern void smp_partition_activate(void);
+        extern void smp_print_selftest_line(void);
+        extern uint32_t smp_cpu_tps(int cpu_idx);
+        extern int smp_cpus_online(void);
+        extern void smp_refresh_tps_sample_pub(void);
+
+        smp_partition_activate();
+        /* Prime the rolling TPS sample, settle 250ms so APs accumulate
+         * ticks, refresh the sample again, then print. Without the
+         * priming step the first refresh has zero history and the line
+         * always reports 0 tps. */
+        smp_refresh_tps_sample_pub();
+        timer_wait_ms(250);
+        smp_print_selftest_line();
     }
 
     /* Enter shell — initializes shell state then hands off to

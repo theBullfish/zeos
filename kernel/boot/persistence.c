@@ -28,8 +28,14 @@
 #include "chain.h"
 #include "kprint.h"
 #include "timer.h"
+#include "spinlock.h"
 
 #include <stdint.h>
+
+/* Coarse lock for snapshot save + journal-append-to-VAULT. Idempotent
+ * flush — multiple cores arriving at the checkpoint counter at once
+ * collapse to one save. */
+static zeos_spinlock_t g_persist_lock = ZEOS_SPINLOCK_INIT;
 
 /* ── Internal helpers (freestanding) ────────────────────────────── */
 
@@ -288,10 +294,12 @@ void persistence_journal_append(uint64_t tsc, int drive_id, uint64_t lba,
     rec.prior_vault_version = prior_vv;
     rec.new_vault_version   = new_vv;
 
+    spin_lock(&g_persist_lock);
     /* vault_append creates the file on first call. The append-mode
      * path inside VAULT extends the existing inode without minting a
      * new temporal version, which is what we want for a log. */
     (void)vault_append(PERSISTENCE_JOURNAL_PATH, &rec, sizeof(rec));
+    spin_unlock(&g_persist_lock);
 
     /* Eviction: VAULT_DIRECT_BLOCKS * VAULT_BLOCK_SIZE = 12 * 4096 =
      * 48 KiB cap on a single inode in the current VAULT impl. That
@@ -308,6 +316,7 @@ void persistence_journal_append(uint64_t tsc, int drive_id, uint64_t lba,
 int persistence_save_snapshot_now(void)
 {
     if (!g_ready) return -1;
+    spin_lock(&g_persist_lock);
 
     /* Build the snapshot in a stack buffer. */
     static uint8_t buf[sizeof(persistence_snapshot_header_t) +
@@ -350,19 +359,20 @@ int persistence_save_snapshot_now(void)
      * if it already exists) -- exactly what we want for a single
      * rolling snapshot key. */
     int wrote = vault_write(PERSISTENCE_SNAPSHOT_PATH, buf, total);
-    if (wrote < 0) return -1;
+    if (wrote < 0) {
+        spin_unlock(&g_persist_lock);
+        return -1;
+    }
 
-    /* Push the dirty RAM image down to the persistent backing drive.
-     * Without this the snapshot lives only in the RAM-resident VAULT
-     * and dies at reboot, defeating the whole point. */
+    /* Push the dirty RAM image down to the persistent backing drive. */
     vault_sync();
 
     g_snapshot_saves++;
     g_last_save_tsc = hdr->saved_tsc;
 
-    /* Sink the current wall clock too -- so a CMOS-less reboot can
-     * restore a low-fidelity time instead of starting at 1970. */
+    /* Sink the current wall clock too. */
     tod_persist_save();
+    spin_unlock(&g_persist_lock);
     return 0;
 }
 
@@ -372,8 +382,11 @@ void persistence_on_resolve_complete(void)
 {
     if (!g_ready) return;
 
-    g_resolve_count++;
-    if ((g_resolve_count % CHECKPOINT_EVERY) == 0) {
+    /* Atomic increment + threshold check; only one CPU's increment
+     * crosses the boundary so save runs exactly once per CHECKPOINT_EVERY
+     * resolves regardless of which core hit the boundary. */
+    uint64_t v = (uint64_t)__sync_add_and_fetch(&g_resolve_count, 1);
+    if ((v % CHECKPOINT_EVERY) == 0) {
         (void)persistence_save_snapshot_now();
     }
 }

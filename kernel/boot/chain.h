@@ -136,8 +136,18 @@ int      chain_add_node(int chain_id, const char *name,
                         const char *input_type, const char *output_type,
                         void (*resolve_fn)(chain_node_t *self, void *input, void *output));
 
-/* Run all nodes in sequence, measure time, update B3. Returns 0 on success. */
+/* Run all nodes in sequence, measure time, update B3.
+ * Returns:
+ *    0 on success
+ *   -1 on per-chain error (not LIVE, invalid id, etc.)
+ *   -2 if another CPU is already resolving this chain (try-lock fail);
+ *      callers should treat as a benign skip, not a B3 failure. */
 int      chain_resolve(int id);
+
+/* Release the per-chain SMP lock for `id`. ONLY for the scheduler's
+ * preempt ISR before longjmping out of a hung resolve — never call
+ * directly from chain code. Idempotent if the lock isn't held. */
+void     chain_resolve_force_unlock(int id);
 
 /* Get pointer to chain by id. Returns NULL if invalid. */
 chain_t *chain_get(int id);

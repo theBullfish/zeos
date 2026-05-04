@@ -15,6 +15,12 @@
 #include "kprint.h"
 #include "heap.h"
 #include "block.h"
+#include "spinlock.h"
+
+/* Coarse VAULT lock. inode_ptr resolution behind cfa_handle already
+ * serializes the MasQ check, but the underlying block writes do not.
+ * Held across vault_write / vault_read / vault_append / vault_sync. */
+static zeos_spinlock_t g_vault_lock = ZEOS_SPINLOCK_INIT;
 
 /* Global filesystem state */
 static struct vault_fs g_vault;
@@ -517,17 +523,20 @@ int vault_mkdir(const char *path, uint32_t tier)
 int vault_write(const char *path, const void *data, uint32_t size)
 {
     if (!g_vault.mounted) return -1;
+    spin_lock(&g_vault_lock);
 
     int ino = resolve_path(path, 0, 0);
     if (ino < 0) {
         /* File doesn't exist — create it */
         ino = vault_create(path, VAULT_TIER_INTERNAL);
-        if (ino < 0) return -1;
+        if (ino < 0) { spin_unlock(&g_vault_lock); return -1; }
     }
 
     struct vault_inode *node = inode_ptr((uint32_t)ino);
-    if (!node || node->type != VAULT_TYPE_FILE)
+    if (!node || node->type != VAULT_TYPE_FILE) {
+        spin_unlock(&g_vault_lock);
         return -1;
+    }
 
     /* If file already has data, create a new version */
     if (node->size > 0 && node->blocks > 0) {
@@ -566,19 +575,23 @@ int vault_write(const char *path, const void *data, uint32_t size)
     node->blocks = blocks_needed;
     node->modified_tsc = read_tsc();
 
+    spin_unlock(&g_vault_lock);
     return (int)written;
 }
 
 int vault_read(const char *path, void *buf, uint32_t size)
 {
     if (!g_vault.mounted) return -1;
+    spin_lock(&g_vault_lock);
 
     int ino = resolve_path(path, 0, 0);
-    if (ino < 0) return -1;
+    if (ino < 0) { spin_unlock(&g_vault_lock); return -1; }
 
     struct vault_inode *node = inode_ptr((uint32_t)ino);
-    if (!node || node->type != VAULT_TYPE_FILE)
+    if (!node || node->type != VAULT_TYPE_FILE) {
+        spin_unlock(&g_vault_lock);
         return -1;
+    }
 
     uint32_t to_read = node->size;
     if (to_read > size) to_read = size;
@@ -592,6 +605,7 @@ int vault_read(const char *path, void *buf, uint32_t size)
         read_total += chunk;
     }
 
+    spin_unlock(&g_vault_lock);
     return (int)read_total;
 }
 
@@ -659,16 +673,19 @@ int vault_list(const char *path, struct vault_dirent *entries, int max_entries)
 int vault_append(const char *path, const void *data, uint32_t size)
 {
     if (!g_vault.mounted) return -1;
+    spin_lock(&g_vault_lock);
 
     int ino = resolve_path(path, 0, 0);
     if (ino < 0) {
         ino = vault_create(path, VAULT_TIER_INTERNAL);
-        if (ino < 0) return -1;
+        if (ino < 0) { spin_unlock(&g_vault_lock); return -1; }
     }
 
     struct vault_inode *node = inode_ptr((uint32_t)ino);
-    if (!node || node->type != VAULT_TYPE_FILE)
+    if (!node || node->type != VAULT_TYPE_FILE) {
+        spin_unlock(&g_vault_lock);
         return -1;
+    }
 
     /* Find the last block and offset within it */
     uint32_t offset_in_block = node->size % VAULT_BLOCK_SIZE;
@@ -697,6 +714,7 @@ int vault_append(const char *path, const void *data, uint32_t size)
 
     node->size += written;
     node->modified_tsc = read_tsc();
+    spin_unlock(&g_vault_lock);
     return (int)written;
 }
 
@@ -853,6 +871,7 @@ int vault_persist_flush(void)
 
 void vault_sync(void)
 {
+    spin_lock(&g_vault_lock);
     /* In RAM-backed mode, superblock is already in memory.
      * When NVMe driver exists, this flushes to disk. */
     if (g_vault.mounted) {
@@ -864,6 +883,7 @@ void vault_sync(void)
     /* Mirror the whole region to the bound block device (if any) so
      * the next boot can resume from disk. */
     (void)vault_persist_flush();
+    spin_unlock(&g_vault_lock);
 }
 
 /* ── Chain Persistence ───────────────────────────── */
