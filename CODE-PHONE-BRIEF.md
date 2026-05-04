@@ -134,3 +134,37 @@ vectors. Come back fresh next session.
    `## Next up`.
 3. Read `ADDED_FEATURES.md`. If missing, add the header row.
 4. Begin work on `## Next up`. Don't ask permission.
+
+## Sister repos (clone if you need cross-repo context)
+
+These are the substrate Zeos plugs into. Clone any of them as siblings of
+`zeos/` if a task references them. Don't commit cross-repo edits from a
+zeos session — open each sister repo's own session for that.
+
+| Repo | URL | Why you'd reach for it |
+|------|-----|------------------------|
+| **b3** | `https://github.com/theBullfish/b3.git` | Brad's Bayesian Balance — the decision engine MDE consults. Has its own README. |
+| **mde** | `https://github.com/theBullfish/mde.git` | Model Decomposition Engine — Layer 5 of the TRISAverse stack. Federation orchestrator + fusion engine + HSL device drivers + entangler. The chord-resolution primitive lives here (`src/mde/fusion/engine.py`). |
+| **cde** | `https://github.com/theBullfish/cde.git` | Codex Decomposition Engine — universal stream decomposition (PCIe/NVMe decoders, node graph). Forked from MDE. |
+| **zignal** | `git@github.com:theBullfish/zignal.git` | Signal-graph notation + knowledge graph. Doctrine of Zignal-as-context-compression. |
+
+If a task says "consult MDE" or "register through B3", clone the relevant
+repo. Don't reverse-engineer behavior that's already documented there.
+
+## Inputs already in this repo
+
+You don't need to clone anything to start. The Z+ language is implicitly
+specified by what's already here:
+
+- `programs/*.zp` — 27 real Z+ programs (30–130 lines each), industries
+  ranging from log monitor to power grid to autonomous vehicle.
+- `programs/FINDINGS.md` — what works across all 27, the universal
+  pattern (`signal in → preprocess → score/filter → route → signal out`),
+  the confirmed operator vocabulary (`->`, `~>`, `|`, `{}`, `gate()`,
+  `knee`).
+- `programs/zindex_studio.zp`, `programs/chirp.zp`, `programs/zpm.zp`,
+  `programs/shield.zp`, `programs/goya_fleet.zp` — domain-specific Z+
+  programs, useful as compiler test cases.
+
+The compiler's job is to compile what's already there. Don't reinvent
+syntax. When in doubt about a construct, grep `programs/` for examples.
