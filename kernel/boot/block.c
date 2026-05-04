@@ -8,6 +8,8 @@
  */
 
 #include "block.h"
+#include "block_chain.h"
+#include "chain_registry.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "usb_msc.h"
@@ -123,7 +125,15 @@ int block_drive_info(int idx, block_drive_info_t *out)
     return -1;
 }
 
-int block_read_drive(int idx, uint64_t lba, uint32_t count, void *buf)
+/* Compat shims: every legacy caller (FAT32, GPT, vault_disk, installer,
+ * lsdrives) routes through the chain. block_chain_submit returns -1 if
+ * the chain isn't registered yet, in which case we fall back to the
+ * direct dispatch -- this only covers the brief window between
+ * block_init() and chain_registry_init(). After registry init every
+ * block I/O carries a journal record (writes) or chain-traversal
+ * receipt (reads). */
+
+static int block_direct_read(int idx, uint64_t lba, uint32_t count, void *buf)
 {
     if (idx < 0 || idx >= g_count) return -1;
     drive_slot_t *s = &g_drives[idx];
@@ -135,7 +145,7 @@ int block_read_drive(int idx, uint64_t lba, uint32_t count, void *buf)
     return -1;
 }
 
-int block_write_drive(int idx, uint64_t lba, uint32_t count, const void *buf)
+static int block_direct_write(int idx, uint64_t lba, uint32_t count, const void *buf)
 {
     if (idx < 0 || idx >= g_count) return -1;
     drive_slot_t *s = &g_drives[idx];
@@ -147,7 +157,7 @@ int block_write_drive(int idx, uint64_t lba, uint32_t count, const void *buf)
     return -1;
 }
 
-int block_flush_drive(int idx)
+static int block_direct_flush(int idx)
 {
     if (idx < 0 || idx >= g_count) return -1;
     drive_slot_t *s = &g_drives[idx];
@@ -157,6 +167,29 @@ int block_flush_drive(int idx)
         case BLOCK_KIND_USB_MSC: return usb_msc_flush();
     }
     return -1;
+}
+
+int block_read_drive(int idx, uint64_t lba, uint32_t count, void *buf)
+{
+    if (idx < 0 || idx >= g_count) return -1;
+    if (CHAIN_BLOCK < 0) return block_direct_read(idx, lba, count, buf);
+    return block_chain_submit(idx, lba, count, BLOCK_OP_READ, buf);
+}
+
+int block_write_drive(int idx, uint64_t lba, uint32_t count, const void *buf)
+{
+    if (idx < 0 || idx >= g_count) return -1;
+    if (CHAIN_BLOCK < 0) return block_direct_write(idx, lba, count, buf);
+    /* Chain takes void* -- write op preserves const semantics
+     * because hardware_dma_resolve casts back to const for write paths. */
+    return block_chain_submit(idx, lba, count, BLOCK_OP_WRITE, (void *)buf);
+}
+
+int block_flush_drive(int idx)
+{
+    if (idx < 0 || idx >= g_count) return -1;
+    if (CHAIN_BLOCK < 0) return block_direct_flush(idx);
+    return block_chain_submit(idx, 0, 0, BLOCK_OP_FLUSH, (void *)0);
 }
 
 int block_read(uint64_t lba, uint32_t count, void *buf)        { return block_read_drive(0, lba, count, buf); }

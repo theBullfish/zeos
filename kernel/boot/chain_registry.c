@@ -22,6 +22,7 @@
 #include "palette.h"
 #include "hda.h"
 #include "net_chain.h"
+#include "block_chain.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -246,6 +247,16 @@ int chain_registry_init(void)
      * is generic; the driver never appears in this file. */
     if (net_chain_register(CHAIN_CPU) != 0) {
         kputs("[chain_registry] WARN: net chain registration failed\n");
+    }
+
+    /* Block I/O: chain-native storage pipeline. NVMe / AHCI / USB-MSC
+     * drivers are the hardware_dma backend, dispatched by the
+     * addressing node. masq_journal records every write with prior
+     * vault_version so temporal provenance is preserved across the
+     * whole storage tier. block_init() already ran during boot, so the
+     * drives are enumerated when this chain registers. */
+    if (block_chain_register(CHAIN_CPU) != 0) {
+        kputs("[chain_registry] WARN: block chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

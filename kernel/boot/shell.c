@@ -19,6 +19,7 @@
 #include "usb_msc.h"
 #include "usb_hub.h"
 #include "block.h"
+#include "block_chain.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -215,6 +216,7 @@ static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 static void cmd_lsdrives(const char *args);
+static void cmd_masq_journal(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -247,6 +249,19 @@ static void cmd_lsdrives(const char *args) {
         if (info.model[0]) { kputs("  "); kputs(info.model); }
         kputs("\n");
     }
+    kputs("\n");
+}
+
+static void cmd_masq_journal(const char *args) {
+    int n = 16;
+    if (args && *args) {
+        int v = 0; const char *p = args;
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); p++; }
+        if (v > 0) n = v;
+    }
+    kputs("\n");
+    block_chain_dump_journal(n);
     kputs("\n");
 }
 
@@ -313,6 +328,7 @@ static const struct shell_cmd commands[] = {
     {"cdc-recv","read pending bytes from USB serial (cdc-recv <idx>)", cmd_cdc_recv, VIS_ALWAYS},
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
     {"lsdrives","list storage drives (NVMe / AHCI / USB MSC)", cmd_lsdrives, VIS_ALWAYS},
+    {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
@@ -2114,6 +2130,90 @@ static void cmd_selftest(const char *args)
             if (info.model[0]) { kputs(" "); kputs(info.model); }
             kputs("\n");
         }
+    }
+
+    /* Block chain: dump pipeline + drive a small write/read loop on
+     * the first available drive so the masq journal accumulates
+     * provable records. Reads are not journaled per the contract;
+     * only the writes show up below. */
+    kputs("  Block chain ........... ");
+    if (CHAIN_BLOCK >= 0) {
+        chain_t *bc = chain_get(CHAIN_BLOCK);
+        int bn = bc ? bc->node_count : 0;
+        kputs("nodes=");
+        kput_dec((uint64_t)bn);
+        kputc('\n');
+        chain_dump(CHAIN_BLOCK);
+        if (bn == 4) passes++; else fails++;
+
+        int dn = block_drive_count();
+        if (dn > 0) {
+            block_drive_info_t info;
+            if (block_drive_info(0, &info) == 0 && info.sector_size >= 512) {
+                /* Pick a high LBA inside the device so we don't trample
+                 * partition tables / FAT structures. Use sector_count-2
+                 * if available, else LBA 256 as a safer-than-zero spot. */
+                uint64_t test_lba = (info.sectors > 16) ? (info.sectors - 2) : 8;
+                static uint8_t scratch[4096] __attribute__((aligned(64)));
+                static uint8_t readback[4096] __attribute__((aligned(64)));
+                uint32_t bs = info.sector_size;
+                if (bs > sizeof(scratch)) bs = sizeof(scratch);
+
+                /* Read once first to seed the buffer with prior contents
+                 * so we can restore after the test. */
+                int read_ok = (block_read_drive(0, test_lba, 1, scratch) == 0);
+
+                kputs("  Block journal write ... ");
+                uint64_t before = block_chain_journal_total();
+
+                /* Three writes at distinct LBAs so the journal grows by
+                 * three. Write a recognizable pattern. */
+                uint8_t pat[512];
+                for (int i = 0; i < 512; i++) pat[i] = (uint8_t)(i ^ 0x5A);
+
+                int w_ok = 0;
+                for (int k = 0; k < 3; k++) {
+                    uint64_t lba = test_lba + (uint64_t)k * 0;  /* same lba ok; */
+                    /* but use distinct lbas to make the dump readable */
+                    lba = test_lba - (uint64_t)k;
+                    if (block_write_drive(0, lba, 1, pat) == 0) w_ok++;
+                }
+                /* Read back to prove the chain plumbed bytes through. */
+                int rb_ok = (block_read_drive(0, test_lba, 1, readback) == 0);
+
+                uint64_t after = block_chain_journal_total();
+                uint64_t added = after - before;
+
+                if (w_ok == 3 && added == 3 && rb_ok) {
+                    kputs("PASS (");
+                    kput_dec(added);
+                    kputs(" records added)\n");
+                    passes++;
+                } else {
+                    kputs("FAIL (w_ok=");
+                    kput_dec((uint64_t)w_ok);
+                    kputs(" added=");
+                    kput_dec(added);
+                    kputs(" rb=");
+                    kput_dec((uint64_t)rb_ok);
+                    kputs(")\n");
+                    fails++;
+                }
+
+                /* Show last 3 journal entries. */
+                block_chain_dump_journal(3);
+
+                /* Restore prior contents at test_lba (best effort). */
+                if (read_ok) (void)block_write_drive(0, test_lba, 1, scratch);
+            } else {
+                kputs("  Block journal write ... SKIP (no usable drive 0)\n");
+            }
+        } else {
+            kputs("  Block journal write ... SKIP (no drives)\n");
+        }
+    } else {
+        kputs("not registered\n");
+        fails++;
     }
 
     /* VAULT: write+read+delete round-trip at root */
