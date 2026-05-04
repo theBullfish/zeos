@@ -4,13 +4,22 @@ Z+ language frontend — bootstrap compiler.
 
 ## Status
 
-**v2 lexer landed.** Token surface now covers v1 + Hex (`0x68`),
-HexColor (`#29ADFF`), Dimension (`1920x1080`), ByteSize (`200KB`),
-TimePast (`t-1`), DevNull (`/dev/null`), TemplateString (`"…{name}…"`),
-and Bang (`!`). 38 tests green; corpus-wide round-trip clean across all
-68 .zp files; only 3 files still produce Error tokens (chirp's `↑`,
-forge_ide's string escapes, goya_fleet's `─...>` long-form arrow — see
-TOKEN_TAXONOMY.md §13.1). Parser, AST, IR not started.
+**v2 lexer landed.** Token surface covers v1 + Hex (`0x68`), HexColor
+(`#29ADFF`), Dimension (`1920x1080`), ByteSize (`200KB`), TimePast
+(`t-1`), DevNull (`/dev/null`), TemplateString (`"…{name}…"`), and Bang
+(`!`). Corpus-wide round-trip clean across all 68 .zp files; only 3
+files still produce Error tokens (chirp's `↑`, forge_ide's string
+escapes, goya_fleet's `─...>` long-form arrow — see TOKEN_TAXONOMY.md
+§13.1).
+
+**AST type landed (no parser yet).** `src/ast.rs` defines the typed
+enum surface. The chord rule from `docs/SIGNAL_LOGIC.md` §1 is
+structural: a `|` merge is **one** `Merge` node carrying its policy
+(All / Any / Quorum / Fastest / Within / By), never a DAG of
+independent edges. Hand-built fixture for the top section of
+`programs/02_log_monitor.zp` lives in `tests/ast_log_monitor.rs` with
+a chord-rule canary test that fails first on any future lowering
+mistake. 47 tests green.
 
 ## Layout
 
@@ -20,13 +29,15 @@ tools/zplus/
 ├── README.md
 ├── TOKEN_TAXONOMY.md       # the lexer spec (empirical, from 68 .zp programs)
 ├── src/
-│   ├── lib.rs              # crate entry — re-exports lex API
+│   ├── lib.rs              # crate entry — re-exports lex + ast modules
 │   ├── lex.rs              # the lexer
+│   ├── ast.rs              # typed AST — chord rule documented at top
 │   └── bin/zplus_lex.rs    # CLI: dumps token stream for a file
 └── tests/
-    ├── log_monitor.rs      # green-light: programs/02_log_monitor.zp
-    ├── http_server.rs      # second fixture: programs/03_http_server.zp
-    └── corpus.rs           # corpus-wide smoke: round-trip + error-count allowlist
+    ├── log_monitor.rs      # green-light: programs/02_log_monitor.zp tokens
+    ├── http_server.rs      # second fixture: programs/03_http_server.zp tokens
+    ├── corpus.rs           # corpus-wide smoke: round-trip + error-count allowlist
+    └── ast_log_monitor.rs  # hand-built AST for 02_log_monitor.zp top section
 ```
 
 ## Build & test

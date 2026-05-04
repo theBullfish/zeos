@@ -1,8 +1,16 @@
 //! Z+ language frontend — bootstrap compiler.
 //!
-//! v1 lexer scope: enough to tokenize `programs/02_log_monitor.zp` cleanly.
-//! See `tools/zplus/TOKEN_TAXONOMY.md` for the full token surface.
+//! Lexer (v2): tokenizes 65/68 `.zp` programs with zero Error tokens; full
+//! corpus round-trips byte-for-byte. See `tools/zplus/TOKEN_TAXONOMY.md`.
+//!
+//! AST: typed enums in `ast` reflecting chord/fastest-N — `Merge` is one
+//! node carrying its policy, never a DAG of independent edges. Hand-built
+//! fixture for `programs/02_log_monitor.zp` lives in
+//! `tests/ast_log_monitor.rs`.
+//!
+//! Parser: not started.
 
+pub mod ast;
 pub mod lex;
 
 pub use lex::{lex, Lexer, Token, TokenKind};
