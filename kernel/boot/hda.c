@@ -67,27 +67,41 @@
 
 #define VERB_GET_PARAM             0xF00
 #define VERB_GET_CONFIG_DEFAULT    0xF1C
+#define VERB_GET_CONNECT_LIST      0xF02
+#define VERB_GET_CONV_STREAM_CHAN  0xF06
+#define VERB_GET_PIN_CTL           0xF07
 #define VERB_SET_POWER             0x705
 #define VERB_SET_PIN_CTL           0x707
 #define VERB_SET_CONV_FMT          0x200
 #define VERB_SET_CONV_STREAM_CHAN  0x706
 #define VERB_SET_AMP_GAIN          0x300
 #define VERB_SET_EAPD              0x70C
+#define VERB_SET_CONNECT_SEL       0x701
 
 #define PARAM_VENDOR_ID            0x00
 #define PARAM_NODE_COUNT           0x04
 #define PARAM_FUNC_GROUP_TYPE      0x05
 #define PARAM_WIDGET_CAP           0x09
 #define PARAM_PIN_CAP              0x0C
+#define PARAM_CONNLIST_LEN         0x0E
 
 #define WT_AUDIO_OUTPUT    0x0
+#define WT_AUDIO_INPUT     0x1
+#define WT_AUDIO_MIXER     0x2
+#define WT_AUDIO_SELECTOR  0x3
 #define WT_PIN_COMPLEX     0x4
+
+#define WCAP_CONN_LIST     (1u << 8)
+#define WCAP_OUT_AMP       (1u << 2)
+#define WCAP_IN_AMP        (1u << 1)
 
 #define PIN_CAP_OUTPUT      (1u << 4)
 #define PIN_CAP_HEADPHONE   (1u << 3)
 #define PIN_CAP_EAPD        (1u << 16)
 #define PIN_CTL_OUT_ENABLE  (1u << 6)
 #define PIN_CTL_HP_ENABLE   (1u << 7)
+
+#define MAX_PATH_NIDS      8
 
 static volatile uint8_t  *mmio = 0;
 static int                ready = 0;
@@ -111,6 +125,8 @@ static uint64_t           audio_buf_phys;
 static uint8_t            codec_addr = 0xFF;
 static uint16_t           dac_nid    = 0;
 static uint16_t           pin_nid    = 0;
+static uint16_t           path_nids[MAX_PATH_NIDS];   /* DAC..pin, inclusive */
+static uint8_t            path_len   = 0;
 
 static int                out_sd_idx = -1;
 static volatile uint8_t  *sd_regs = 0;
@@ -170,13 +186,22 @@ static void busy_pause(int loops)
 
 static uint32_t make_verb(uint8_t cad, uint16_t nid, uint16_t verb, uint16_t payload)
 {
+    /* HDA spec 7.3.1:
+     *   short form (4-bit verb id + 16-bit data) is used when the verb
+     *   number is in the range 0x000..0x3FF (top nibble 0..3).
+     *   long form  (12-bit verb id + 8-bit data) is used otherwise.
+     * The previous classifier matched (verb & 0xF00) == 0x700, which
+     * incorrectly treated 0x70x verbs (Set Power, Set Pin Ctl, Set
+     * Stream/Channel, Set EAPD) as short form, scrambling configuration.
+     */
     uint32_t v = ((uint32_t)cad & 0xF) << 28;
     v |= ((uint32_t)nid & 0xFF) << 20;
-    if ((verb & 0xF00) == 0x200 || (verb & 0xF00) == 0x300 ||
-        (verb & 0xF00) == 0x700) {
+    if (verb < 0x400) {
+        /* short form: top nibble of verb in [19:16], 16-bit data in [15:0] */
         v |= ((uint32_t)(verb & 0xF00)) << 8;
         v |= (payload & 0xFFFF);
     } else {
+        /* long form: 12-bit verb in [19:8], 8-bit data in [7:0] */
         v |= ((uint32_t)(verb & 0xFFF)) << 8;
         v |= (payload & 0xFF);
     }
@@ -270,6 +295,95 @@ static int hda_setup_corb_rirb(void)
     return 0;
 }
 
+/* ── Generic codec topology walk ───────────────────────────────────────
+ *
+ * Spec ref: HDA 1.0a sections 7.1.2 (widget topology) and 7.3 (verbs).
+ *
+ * Walk strategy (works for QEMU 1af4:0012 and standard Intel codecs):
+ *
+ *   1. Get sub-node count of root (NID 0). Each sub-node is a Function
+ *      Group; only AFG (type 0x01) carries audio widgets.
+ *   2. Power up the AFG (D0).
+ *   3. Enumerate every widget in the AFG; classify by WIDGET_CAP bits
+ *      [23:20]: 0=DAC, 1=ADC, 2=Mixer, 3=Selector, 4=Pin Complex.
+ *   4. For every Pin Complex with PIN_CAP_OUTPUT, walk backwards through
+ *      its CONNECTION_LIST (verb 0xF02), recursing through Mixers and
+ *      Selectors, until we land on a DAC widget. Cache the full path
+ *      (DAC..pin, inclusive) so the configuration step can unmute every
+ *      amp along the way.
+ *   5. Prefer pins whose CONFIG_DEFAULT default-device is line-out (0),
+ *      speaker (1), or headphone (2) for cosmetic purposes, but accept
+ *      any output-capable pin if that's the only option. QEMU's
+ *      hda-output exposes default-device = speaker, so this matches.
+ *
+ * Returns 0 on success with dac_nid/pin_nid/path_nids populated. */
+
+static int read_conn_entry(uint8_t cad, uint16_t nid, uint8_t idx,
+                           int long_form, uint16_t *out)
+{
+    /* CONNECTION_LIST verb 0xF02 returns up to 4 short entries (1 byte
+     * each) or 2 long entries (2 bytes each) per call, indexed by the
+     * starting offset in the data byte. */
+    uint8_t off = long_form ? (idx & ~1u) : (idx & ~3u);
+    uint32_t r = codec_cmd(cad, nid, VERB_GET_CONNECT_LIST, off);
+    if (r == 0xFFFFFFFFu) return -1;
+    if (long_form) {
+        uint8_t slot = idx - off;          /* 0 or 1 */
+        *out = (uint16_t)((r >> (slot * 16)) & 0x7FFF);
+    } else {
+        uint8_t slot = idx - off;          /* 0..3 */
+        *out = (uint16_t)((r >> (slot * 8)) & 0x7F);
+    }
+    return 0;
+}
+
+/* Recursive depth-first trace pin -> ... -> DAC. Path is built in
+ * reverse (pin first, DAC last) and reversed by the caller. */
+static int trace_to_dac(uint8_t cad, uint16_t nid,
+                        uint16_t *path, uint8_t *plen, uint8_t depth)
+{
+    if (depth >= MAX_PATH_NIDS) return -1;
+
+    uint32_t wcap = codec_cmd(cad, nid, VERB_GET_PARAM, PARAM_WIDGET_CAP);
+    uint8_t  wt   = (wcap >> 20) & 0xF;
+
+    if (wt == WT_AUDIO_OUTPUT) {
+        path[depth] = nid;
+        *plen = depth + 1;
+        return 0;
+    }
+
+    if (wt != WT_AUDIO_MIXER && wt != WT_AUDIO_SELECTOR &&
+        wt != WT_PIN_COMPLEX) {
+        /* Dead end: ADC/Power/Volume Knob/Beep Gen never reach a DAC. */
+        return -1;
+    }
+
+    if (!(wcap & WCAP_CONN_LIST)) return -1;
+
+    uint32_t cl_len = codec_cmd(cad, nid, VERB_GET_PARAM, PARAM_CONNLIST_LEN);
+    int long_form = (cl_len & (1u << 7)) ? 1 : 0;
+    uint8_t n = cl_len & 0x7F;
+    if (n == 0) return -1;
+
+    path[depth] = nid;
+
+    for (uint8_t i = 0; i < n; i++) {
+        uint16_t src = 0;
+        if (read_conn_entry(cad, nid, i, long_form, &src) < 0) continue;
+        if (src == 0 || src == nid) continue;
+        if (trace_to_dac(cad, src, path, plen, depth + 1) == 0) {
+            /* If this widget is a Selector, lock its connection-select
+             * to the index that reaches the DAC. (Mixer just sums.) */
+            if (wt == WT_AUDIO_SELECTOR) {
+                codec_cmd(cad, nid, VERB_SET_CONNECT_SEL, i);
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
 static int hda_walk_codec(uint8_t cad)
 {
     uint32_t r = codec_cmd(cad, 0, VERB_GET_PARAM, PARAM_NODE_COUNT);
@@ -279,51 +393,65 @@ static int hda_walk_codec(uint8_t cad)
 
     for (uint16_t fg = fg_start; fg < fg_start + fg_count; fg++) {
         uint32_t ftype = codec_cmd(cad, fg, VERB_GET_PARAM, PARAM_FUNC_GROUP_TYPE);
-        if ((ftype & 0xFF) != 0x01) continue;
+        if ((ftype & 0xFF) != 0x01) continue;          /* AFG only */
 
         codec_cmd(cad, fg, VERB_SET_POWER, 0x00);
+        timer_wait_ms(1);
 
         uint32_t nc = codec_cmd(cad, fg, VERB_GET_PARAM, PARAM_NODE_COUNT);
         uint16_t w_start = (nc >> 16) & 0xFF;
         uint16_t w_count = nc & 0xFF;
 
-        uint16_t found_dac = 0;
-        uint16_t found_pin = 0;
+        uint16_t best_pin = 0, fallback_pin = 0;
+        uint16_t best_path[MAX_PATH_NIDS];
+        uint8_t  best_plen = 0;
+        uint16_t fb_path[MAX_PATH_NIDS];
+        uint8_t  fb_plen = 0;
 
         for (uint16_t w = w_start; w < w_start + w_count; w++) {
             uint32_t wcap = codec_cmd(cad, w, VERB_GET_PARAM, PARAM_WIDGET_CAP);
             uint8_t  wt = (wcap >> 20) & 0xF;
+            if (wt != WT_PIN_COMPLEX) continue;
 
-            if (wt == WT_AUDIO_OUTPUT && !found_dac) {
-                found_dac = w;
-            } else if (wt == WT_PIN_COMPLEX) {
-                uint32_t pcap = codec_cmd(cad, w, VERB_GET_PARAM, PARAM_PIN_CAP);
-                if (!(pcap & PIN_CAP_OUTPUT)) continue;
-                uint32_t cfg = codec_cmd(cad, w, VERB_GET_CONFIG_DEFAULT, 0);
-                uint8_t dev = (cfg >> 20) & 0xF;
-                if (!found_pin && (dev == 0 || dev == 1 || dev == 2)) {
-                    found_pin = w;
-                }
+            uint32_t pcap = codec_cmd(cad, w, VERB_GET_PARAM, PARAM_PIN_CAP);
+            if (!(pcap & PIN_CAP_OUTPUT)) continue;
+
+            /* Power up the pin so it'll respond to subsequent verbs. */
+            codec_cmd(cad, w, VERB_SET_POWER, 0x00);
+
+            uint16_t local_path[MAX_PATH_NIDS];
+            uint8_t  local_plen = 0;
+            if (trace_to_dac(cad, w, local_path, &local_plen, 0) != 0)
+                continue;
+
+            uint32_t cfg = codec_cmd(cad, w, VERB_GET_CONFIG_DEFAULT, 0);
+            uint8_t dev = (cfg >> 20) & 0xF;
+            int preferred = (dev == 0 || dev == 1 || dev == 2);
+
+            if (preferred && !best_pin) {
+                best_pin = w;
+                best_plen = local_plen;
+                for (uint8_t i = 0; i < local_plen; i++) best_path[i] = local_path[i];
+            } else if (!fallback_pin) {
+                fallback_pin = w;
+                fb_plen = local_plen;
+                for (uint8_t i = 0; i < local_plen; i++) fb_path[i] = local_path[i];
             }
         }
 
-        if (found_dac && found_pin) {
-            dac_nid = found_dac;
-            pin_nid = found_pin;
-            return 0;
-        }
-        if (found_dac && !found_pin) {
-            for (uint16_t w = w_start; w < w_start + w_count; w++) {
-                uint32_t wcap = codec_cmd(cad, w, VERB_GET_PARAM, PARAM_WIDGET_CAP);
-                if (((wcap >> 20) & 0xF) != WT_PIN_COMPLEX) continue;
-                uint32_t pcap = codec_cmd(cad, w, VERB_GET_PARAM, PARAM_PIN_CAP);
-                if (pcap & PIN_CAP_OUTPUT) {
-                    dac_nid = found_dac;
-                    pin_nid = w;
-                    return 0;
-                }
-            }
-        }
+        uint16_t chosen = best_pin ? best_pin : fallback_pin;
+        if (!chosen) continue;
+
+        uint16_t *src = best_pin ? best_path : fb_path;
+        uint8_t   sln = best_pin ? best_plen  : fb_plen;
+
+        /* trace_to_dac stored path in reverse order (pin first, DAC last
+         * at index sln-1). Flip to DAC-first for clarity. */
+        path_len = sln;
+        for (uint8_t i = 0; i < sln; i++) path_nids[i] = src[sln - 1 - i];
+        dac_nid = path_nids[0];
+        pin_nid = path_nids[sln - 1];
+        return 0;
     }
     return -1;
 }
@@ -380,13 +508,37 @@ static int hda_setup_stream(void)
     codec_cmd(codec_addr, dac_nid, VERB_SET_CONV_STREAM_CHAN, (1 << 4) | 0);
     codec_cmd(codec_addr, dac_nid, VERB_SET_CONV_FMT, FMT_48K_16B_STEREO);
 
-    codec_cmd(codec_addr, dac_nid, VERB_SET_POWER, 0x00);
-    codec_cmd(codec_addr, pin_nid, VERB_SET_POWER, 0x00);
+    /* Power up every widget along the path. */
+    for (uint8_t i = 0; i < path_len; i++) {
+        codec_cmd(codec_addr, path_nids[i], VERB_SET_POWER, 0x00);
+    }
 
-    codec_cmd(codec_addr, dac_nid, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
-    codec_cmd(codec_addr, dac_nid, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
-    codec_cmd(codec_addr, pin_nid, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 13) | 0x7F);
-    codec_cmd(codec_addr, pin_nid, VERB_SET_AMP_GAIN, (1 << 15) | (1 << 12) | 0x7F);
+    /* Unmute output and input amps on every widget along the path that
+     * advertises them. Amp Gain/Mute payload bits:
+     *   15: set output amp     14: set input amp
+     *   13: set left            12: set right
+     *   11:8 input index (0 here -- mixer/selector idx 0 is fine for
+     *        the chain we already picked or set-connect-sel'd above)
+     *   7:   mute (0 = unmute)
+     *   6:0: gain (0x7F = max)
+     */
+    const uint16_t out_left  = (1u << 15) | (1u << 13) | 0x7F;
+    const uint16_t out_right = (1u << 15) | (1u << 12) | 0x7F;
+    const uint16_t in_left   = (1u << 14) | (1u << 13) | 0x7F;
+    const uint16_t in_right  = (1u << 14) | (1u << 12) | 0x7F;
+
+    for (uint8_t i = 0; i < path_len; i++) {
+        uint16_t nid = path_nids[i];
+        uint32_t wcap = codec_cmd(codec_addr, nid, VERB_GET_PARAM, PARAM_WIDGET_CAP);
+        if (wcap & WCAP_OUT_AMP) {
+            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, out_left);
+            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, out_right);
+        }
+        if (wcap & WCAP_IN_AMP) {
+            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, in_left);
+            codec_cmd(codec_addr, nid, VERB_SET_AMP_GAIN, in_right);
+        }
+    }
 
     uint32_t pcap = codec_cmd(codec_addr, pin_nid, VERB_GET_PARAM, PARAM_PIN_CAP);
     uint8_t pinctl = PIN_CTL_OUT_ENABLE;
@@ -457,11 +609,27 @@ int hda_init(void)
     }
     if (!found) { status_msg = "no usable output path"; return -1; }
 
-    kputs("hda: DAC nid=");
-    kput_dec(dac_nid);
-    kputs(" pin nid=");
-    kput_dec(pin_nid);
-    kputs("\n");
+    kputs("hda: codec ");
+    kput_dec(codec_addr);
+    kputs(" path:");
+    for (uint8_t i = 0; i < path_len; i++) {
+        uint16_t nid = path_nids[i];
+        uint32_t wcap = codec_cmd(codec_addr, nid, VERB_GET_PARAM, PARAM_WIDGET_CAP);
+        uint8_t  wt = (wcap >> 20) & 0xF;
+        const char *tag = "?";
+        switch (wt) {
+            case WT_AUDIO_OUTPUT:   tag = "DAC"; break;
+            case WT_AUDIO_MIXER:    tag = "MIX"; break;
+            case WT_AUDIO_SELECTOR: tag = "SEL"; break;
+            case WT_PIN_COMPLEX:    tag = "PIN"; break;
+        }
+        kputs(" ");
+        kputs(tag);
+        kputs(" NID ");
+        kput_dec(nid);
+        if (i + 1 < path_len) kputs(" ->");
+    }
+    kputs(" (output)\n");
 
     if (hda_setup_stream() < 0) return -1;
 

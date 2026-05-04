@@ -219,6 +219,7 @@ static void cmd_usb_serial(const char *args);
 static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
+static void cmd_wifi_scan(const char *args);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
@@ -432,6 +433,7 @@ static const struct shell_cmd commands[] = {
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
+    {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
     {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
@@ -2440,6 +2442,42 @@ vault_done:
         kputs(")\n");
         chain_dump(CHAIN_AUDIO);
         if (nc == 4) passes++; else fails++;
+
+        /* 100 ms 440 Hz tone -- proves the pipeline actually pushes
+         * samples to the DAC. With the QEMU 1af4:0012 codec the audio
+         * backend should render this through the host. */
+        if (hda_ready()) {
+            const int sr     = 48000;
+            const int frames = sr / 10;          /* 100 ms */
+            const int freq   = 440;
+            static int16_t tone_buf[4800 * 2];   /* 19 KB */
+            uint32_t step  = ((uint64_t)freq * 4096ULL * 65536ULL) / (uint32_t)sr;
+            uint32_t phase = 0;
+            int env_frames = sr / 200;            /* 5 ms ramp */
+            for (int i = 0; i < frames; i++) {
+                uint32_t p = (phase >> 16) & 4095;
+                int32_t s;
+                if (p < 1024)        s =  (int32_t)(p) * 24;
+                else if (p < 2048)   s =  (int32_t)(2047 - p) * 24;
+                else if (p < 3072)   s = -(int32_t)(p - 2048) * 24;
+                else                 s = -(int32_t)(4095 - p) * 24;
+                int amp = 256;
+                if (i < env_frames)               amp = (256 * i) / env_frames;
+                else if (i > frames - env_frames) amp = (256 * (frames - i)) / env_frames;
+                int32_t v = (s * amp) >> 8;
+                if (v > 32767)  v =  32767;
+                if (v < -32768) v = -32768;
+                tone_buf[i*2 + 0] = (int16_t)v;
+                tone_buf[i*2 + 1] = (int16_t)v;
+                phase += step;
+            }
+            int trc = hda_play_pcm(tone_buf, frames * 2, sr);
+            kputs("    tone 440 Hz / 100 ms .. ");
+            if (trc == 0) { kputs("PASS\n"); passes++; }
+            else          { kputs("FAIL (rc="); kput_dec((uint64_t)(int64_t)trc); kputs(")\n"); fails++; }
+        } else {
+            kputs("    tone 440 Hz / 100 ms .. SKIP (no controller)\n");
+        }
     } else {
         kputs("    chain not registered\n");
         fails++;
@@ -2968,6 +3006,13 @@ static void cmd_wifi(const char *args)
     }
 
     kputs("usage: wifi [status|scan|connect <ssid> [psk]]\n");
+}
+
+/* Standalone passive-scan command. Prints the AP list. */
+static void cmd_wifi_scan(const char *args)
+{
+    (void)args;
+    rtl8188eu_scan();
 }
 
 /* ── USB CDC ACM ──────────────────────────────────────────────── */
