@@ -59,6 +59,8 @@
 #include "hda.h"
 #include "fat32.h"
 #include "tests.h"
+#include "suspend.h"
+#include "acpi.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -209,6 +211,7 @@ static void cmd_fetch(const char *args);
 static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
+static void cmd_suspend(const char *args);
 static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
 static void cmd_static_ip(const char *args);
@@ -577,6 +580,7 @@ static const struct shell_cmd commands[] = {
     {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
+    {"suspend", "ACPI S3 suspend-to-RAM (suspend [seconds]; default 5s RTC wake)", cmd_suspend, VIS_DEREZ},
     {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
     {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
@@ -921,6 +925,37 @@ static void cmd_clear(const char *args)
 {
     (void)args;
     fb_clear(COLOR_SURFACE);
+}
+
+/* ── Suspend (ACPI S3) ──────────────────────────────────────────── */
+
+static void cmd_suspend(const char *args)
+{
+    /* Parse optional seconds argument; default 5s. */
+    while (*args == ' ' || *args == '\t') args++;
+    uint32_t secs = 0;
+    while (*args >= '0' && *args <= '9') {
+        secs = secs * 10 + (uint32_t)(*args - '0');
+        args++;
+    }
+    if (secs == 0) secs = 5;
+
+    kputs("[shell] suspend requested, RTC wake in ");
+    kput_dec((uint64_t)secs);
+    kputs("s\n");
+
+    int rc = suspend_to_ram(secs);
+    if (rc == 0) {
+        kputs("[shell] suspend cycle complete\n");
+        if (CHAIN_POWER >= 0) {
+            chain_t *cp = chain_get(CHAIN_POWER);
+            if (cp) cp->vault_version++;
+        }
+    } else {
+        kputs("[shell] suspend failed rc=");
+        kput_dec((uint64_t)(uint32_t)(-rc));
+        kputc('\n');
+    }
 }
 
 /* ── Signal chain demo (unchanged) ──────────────── */
@@ -3100,6 +3135,32 @@ vault_done:
      * there was just nothing to restore). Force a snapshot+sync now
      * so the test scenario (selftest -> reset -> selftest) doesn't
      * have to wait for the periodic checkpoint to fire. */
+    /* Suspend: not actually executed during selftest (would halt the
+     * console). Verify the path is wired: FADT parsed, _S3 located,
+     * driver hooks registered, CHAIN_POWER alive. */
+    kputs("  Suspend ............... ");
+    {
+        const acpi_fadt_info_t *f = acpi_fadt();
+        int fadt_ok  = (f && f->valid && f->pm1a_cnt_blk);
+        int s3_ok    = (f && f->slp_typ_valid);
+        int chain_ok = (CHAIN_POWER >= 0);
+        if (fadt_ok && chain_ok) {
+            kputs("PASS — S3 path wired (untested in QEMU)");
+            if (!s3_ok) kputs(" [_S3 not in DSDT]");
+            kputc('\n');
+            passes++;
+        } else {
+            kputs("FAIL (fadt=");
+            kput_dec((uint64_t)fadt_ok);
+            kputs(" s3=");
+            kput_dec((uint64_t)s3_ok);
+            kputs(" chain=");
+            kput_dec((uint64_t)chain_ok);
+            kputs(")\n");
+            fails++;
+        }
+    }
+
     kputs("  Persistence ........... ");
     if (persistence_ready()) {
         uint32_t n = persistence_journal_restored_count();

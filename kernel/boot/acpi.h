@@ -64,4 +64,38 @@ acpi_lapic_t *acpi_lapic_for(int cpu);
 acpi_ioapic_t *acpi_ioapic(int idx);
 const acpi_iso_t *acpi_iso_for(uint8_t legacy_irq);
 
+/* ── FADT / FACS / DSDT _S3 — needed for ACPI S3 suspend ─────────── */
+
+typedef struct {
+    int      valid;            /* 1 if FADT was parsed */
+    uint16_t pm1a_cnt_blk;     /* I/O port for PM1a control */
+    uint16_t pm1b_cnt_blk;     /* I/O port for PM1b control (0 if not present) */
+    uint16_t pm1a_evt_blk;     /* I/O port for PM1a event (status+enable) */
+    uint16_t pm1b_evt_blk;
+    uint8_t  pm1_evt_len;
+    uint8_t  pm1_cnt_len;
+    uint32_t facs_addr;        /* 32-bit FACS phys */
+    uint64_t x_facs_addr;      /* 64-bit FACS phys (preferred if non-zero) */
+    uint32_t dsdt_addr;        /* 32-bit DSDT phys */
+    uint64_t x_dsdt_addr;      /* 64-bit DSDT phys (preferred) */
+    uint8_t  smi_cmd_byte;     /* byte to write to SMI_CMD to enable ACPI mode */
+    uint16_t smi_cmd;          /* SMI command port */
+    uint8_t  acpi_enable;
+    uint8_t  acpi_disable;
+
+    /* _S3 package values (decoded from DSDT). slp_typa/b are the values
+     * to write into PM1a_CNT.SLP_TYP / PM1b_CNT.SLP_TYP (already shifted
+     * into bits 10-12 of PM1_CNT). slp_typ_valid=1 if _S3 was located. */
+    int      slp_typ_valid;
+    uint8_t  slp_typa;
+    uint8_t  slp_typb;
+} acpi_fadt_info_t;
+
+const acpi_fadt_info_t *acpi_fadt(void);
+
+/* Set the firmware ACPI wake vector. Writes `wake_paddr` (must be
+ * <1MB and 4-byte aligned for the 32-bit field; the 64-bit field
+ * carries the same value) into FACS. Returns 0 on success. */
+int acpi_set_wake_vector(uint32_t wake_paddr);
+
 #endif /* ZEOS_ACPI_H */

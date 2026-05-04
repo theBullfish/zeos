@@ -30,6 +30,7 @@
 #include "mouse.h"
 #include "serial.h"
 #include "hotplug.h"
+#include "suspend.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -51,6 +52,7 @@ int CHAIN_DISPLAY_GOP    = -1;
 int CHAIN_KEYBOARD       = -1;
 int CHAIN_MOUSE          = -1;
 int CHAIN_SERIAL_IN      = -1;
+int CHAIN_POWER          = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -581,6 +583,26 @@ int chain_registry_init(void)
         kputs("[chain_registry] hotplug pumps: ");
         kput_dec((uint64_t)hp);
         kputs("\n");
+    }
+
+    /* Power: ACPI S3 suspend/resume orchestrator. The chain itself is
+     * a state machine — its single node walks the pipeline:
+     *   power_event → quiesce_chains → save_devices → s3_enter →
+     *   s3_resume → restore_devices → unquiesce_chains
+     *
+     * The actual work is dispatched via suspend_to_ram() at command
+     * time; the chain exists so the suspend cycle is visible in the
+     * graph (panel, inspector, B3) and so future power policy can
+     * route into it. */
+    extern void suspend_register_default_drivers(void);
+    suspend_register_default_drivers();
+    CHAIN_POWER = chain_create("power", CHAIN_CPU, MASQ_INTERNAL);
+    if (CHAIN_POWER >= 0) {
+        /* Single passthrough node — the chain's purpose is provenance,
+         * not per-tick work. The suspend command pokes the cycle
+         * counter via vault_version so MasQ records each S3 entry. */
+        chain_t *cp = chain_get(CHAIN_POWER);
+        if (cp) cp->resolve_interval_ticks = 256;
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */
