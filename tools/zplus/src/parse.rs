@@ -70,53 +70,63 @@ impl<'src> Parser<'src> {
         Ok(Module { stmts, span: Span::new(start, self.src_len) })
     }
 
-    /// If `stmt` is a vertical-merge fragment (`x -> |` or `x -> | -> y`),
-    /// see if it pairs with already-pushed fragments OR upcoming fragments
-    /// to form one `Merge` node. Returns `Some(stmt)` to push, or `None`
-    /// if the stmt was absorbed into something already in `stmts`.
+    /// If `stmt` is a vertical-merge fragment, fold it into a running
+    /// `Merge` in `stmts`. Two fragment shapes:
+    ///   1. `INPUT -> |` / `INPUT -> | -> DOWNSTREAM`
+    ///        → `Connect(Flow(INPUT, Merge { inputs: [], ... }))`
+    ///   2. `| policy | -> DOWNSTREAM` (no input)
+    ///        → `Connect(Merge { inputs: [], policy, downstream })`
+    ///
+    /// Returns `Some(stmt)` if a brand-new statement should be pushed, or
+    /// `None` if the stmt was absorbed into an already-present Merge.
+    ///
+    /// Rule: any fragment immediately after a `Connect(Merge)` coalesces —
+    /// the policy / downstream / inputs of the new fragment are merged in.
+    /// Non-fragment statements (including blank-line-separated ones) end
+    /// the running merge group naturally because the next iteration will
+    /// see no `Connect(Merge)` to coalesce with.
     fn try_coalesce_vertical_merge(
         &mut self,
         stmt: Stmt<'src>,
         stmts: &mut Vec<Stmt<'src>>,
     ) -> Option<Stmt<'src>> {
-        // Detect: Connect(Flow(input, MergePlaceholder { downstream: Option<...> }))
-        // We model the parse output of `x -> |` as Connect(Flow(x, Merge{inputs:[], policy:All, downstream:None}))
-        // and `x -> | -> y` as Connect(Flow(x, Merge{inputs:[], policy:All, downstream:Some(y)}))
-        // The coalesce step folds the input into the Merge's `inputs` list.
-        let frag = match &stmt {
-            Stmt::Connect(Chain::Flow(_lhs, rhs, _)) => match rhs.as_ref() {
-                Chain::Merge(_) => true,
-                _ => false,
-            },
-            _ => false,
-        };
-        if !frag {
-            return Some(stmt);
-        }
-
-        // Extract the fragment's components.
-        let (input, mut merge) = match stmt {
-            Stmt::Connect(Chain::Flow(lhs, rhs, _)) => match *rhs {
-                Chain::Merge(m) => (*lhs, m),
-                _ => unreachable!(),
-            },
-            _ => unreachable!(),
+        let (maybe_input, frag_merge) = match stmt {
+            Stmt::Connect(Chain::Flow(lhs, rhs, _))
+                if matches!(rhs.as_ref(), Chain::Merge(_)) =>
+            {
+                let m = match *rhs {
+                    Chain::Merge(m) => m,
+                    _ => unreachable!(),
+                };
+                (Some(*lhs), m)
+            }
+            Stmt::Connect(Chain::Merge(m)) => (None, m),
+            other => return Some(other),
         };
 
-        // Look back: is the last pushed stmt also a merge fragment with no
-        // downstream yet committed AND no inputs collected yet?
+        // If the previous statement is a Connect(Merge), fold this fragment in.
         if let Some(Stmt::Connect(Chain::Merge(prev))) = stmts.last_mut() {
-            // Append this input.
-            prev.inputs.push(input);
-            // If the new fragment provides a downstream, commit it.
-            if merge.downstream.is_some() {
-                prev.downstream = merge.downstream;
+            if let Some(input) = maybe_input {
+                prev.inputs.push(input);
+            }
+            // Carry over any inputs the new fragment had collected.
+            prev.inputs.extend(frag_merge.inputs);
+            // Adopt non-default policy if the fragment specifies one.
+            if !matches!(frag_merge.policy, MergePolicy::All) {
+                prev.policy = frag_merge.policy;
+            }
+            // Adopt downstream if the fragment specifies one.
+            if frag_merge.downstream.is_some() {
+                prev.downstream = frag_merge.downstream;
             }
             return None;
         }
 
-        // Else: start a new Merge. Move the input into the merge's inputs.
-        merge.inputs.insert(0, input);
+        // No predecessor merge — start a new one.
+        let mut merge = frag_merge;
+        if let Some(input) = maybe_input {
+            merge.inputs.insert(0, input);
+        }
         Some(Stmt::Connect(Chain::Merge(merge)))
     }
 
@@ -271,13 +281,20 @@ impl<'src> Parser<'src> {
             }
             TokenKind::Pipe => {
                 // `|` standalone — start of a merge fragment with no inputs yet.
-                // The actual inputs come from previous Flow chains via the
-                // vertical-merge coalescing pass in parse_module.
+                // Forms accepted:
+                //   `|`                          — default policy All, no downstream
+                //   `| -> downstream`            — All policy, downstream chain
+                //   `| policy | -> downstream`   — explicit policy + downstream
+                //   `| policy |`                 — explicit policy, no downstream
                 self.advance();
+                let policy = self.try_parse_merge_policy()?;
+                if policy.is_some() {
+                    self.expect(TokenKind::Pipe)?;
+                }
                 let downstream = self.try_parse_merge_downstream()?;
                 Ok(Chain::Merge(Merge {
                     inputs: Vec::new(),
-                    policy: MergePolicy::All,
+                    policy: policy.unwrap_or(MergePolicy::All),
                     downstream: downstream.map(Box::new),
                     span: Span::new(cur.start, self.prev_end()),
                 }))
@@ -295,9 +312,82 @@ impl<'src> Parser<'src> {
         if self.peek_kind() == Some(TokenKind::Flow) {
             self.advance();
             self.skip_newlines();
-            Ok(Some(self.parse_chain_term()?))
+            // The downstream is itself a chain — it may chain further with
+            // `-> next -> next` etc.
+            Ok(Some(self.parse_chain()?))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Parses the policy specifier between `|` markers, if present.
+    /// Forms:
+    ///   - `all`, `any`
+    ///   - `N of M` — quorum
+    ///   - `fastest(N)`
+    ///   - `within(<chain>)` — temporal confluence
+    ///   - `merge(by: <path>)` — sort policy
+    fn try_parse_merge_policy(&mut self) -> Result<Option<MergePolicy<'src>>, ParseError> {
+        let start_pos = self.pos;
+        match self.peek_kind() {
+            Some(TokenKind::Ident) => {
+                let cur = self.cur();
+                match cur.text {
+                    "all" => { self.advance(); Ok(Some(MergePolicy::All)) }
+                    "any" => { self.advance(); Ok(Some(MergePolicy::Any)) }
+                    "fastest" => {
+                        self.advance();
+                        self.expect(TokenKind::LParen)?;
+                        let n_tok = self.expect(TokenKind::Int)?;
+                        let n: u32 = n_tok.text.parse().map_err(|_| ParseError {
+                            message: format!("invalid fastest count: {}", n_tok.text),
+                            span: Span::new(n_tok.start, n_tok.end),
+                        })?;
+                        self.expect(TokenKind::RParen)?;
+                        Ok(Some(MergePolicy::Fastest(n)))
+                    }
+                    "within" => {
+                        self.advance();
+                        self.expect(TokenKind::LParen)?;
+                        let inner = self.parse_chain()?;
+                        self.expect(TokenKind::RParen)?;
+                        Ok(Some(MergePolicy::Within(Box::new(inner))))
+                    }
+                    "merge" => {
+                        self.advance();
+                        self.expect(TokenKind::LParen)?;
+                        // expect `by: <path>`
+                        let by_tok = self.expect(TokenKind::Ident)?;
+                        if by_tok.text != "by" {
+                            return Err(ParseError {
+                                message: format!("expected 'by', got '{}'", by_tok.text),
+                                span: Span::new(by_tok.start, by_tok.end),
+                            });
+                        }
+                        self.expect(TokenKind::Colon)?;
+                        let path = self.parse_path()?;
+                        self.expect(TokenKind::RParen)?;
+                        Ok(Some(MergePolicy::By(path)))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            Some(TokenKind::Int) => {
+                // `N of M` quorum
+                let n_tok = self.advance();
+                if self.peek_kind() == Some(TokenKind::Ident) && self.cur().text == "of" {
+                    self.advance();
+                    let m_tok = self.expect(TokenKind::Int)?;
+                    let n: u32 = n_tok.text.parse().unwrap_or(0);
+                    let m: u32 = m_tok.text.parse().unwrap_or(0);
+                    Ok(Some(MergePolicy::Quorum { n, m }))
+                } else {
+                    // Not a policy — back up
+                    self.pos = start_pos;
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
         }
     }
 
@@ -325,9 +415,20 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_arg(&mut self) -> Result<Arg<'src>, ParseError> {
-        // Named arg lookahead: IDENT COLON (and not part of a wire decl —
-        // arg names don't have dotted paths in any corpus citation we've
-        // seen, so the simple check is enough).
+        // Unary comparison at start of arg: `gate(> 5x, knee: 2x)`.
+        if let Some(op) = self.peek_unary_cmp_op() {
+            let start = self.cur_pos();
+            self.advance();
+            let rhs = self.parse_arg_expr()?;
+            let span = Span::new(start, self.span_of(&rhs).end);
+            return Ok(Arg::Positional(Chain::UnaryCmp {
+                op,
+                rhs: Box::new(rhs),
+                span,
+            }));
+        }
+
+        // Named arg lookahead: IDENT COLON.
         if self.peek_kind() == Some(TokenKind::Ident)
             && self.kind_at(self.pos + 1) == Some(TokenKind::Colon)
         {
@@ -335,10 +436,11 @@ impl<'src> Parser<'src> {
             let tok = self.advance();
             let name = Ident { text: tok.text, span: Span::new(tok.start, tok.end) };
             self.expect(TokenKind::Colon)?;
-            let value = self.parse_chain()?;
+            // Unary cmp value: `sustained: > 5m`? Not seen in corpus, but
+            // handle anyway by routing through parse_arg_expr.
+            let value = self.parse_arg_expr()?;
             // Type-union value form: `level : error | warn | info | debug`
-            // — eat additional `| IDENT` segments and discard for now (the
-            // semantic layer can reconstruct from value if needed).
+            // — eat additional `| IDENT` segments and discard for now.
             while self.peek_kind() == Some(TokenKind::Pipe)
                 && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
             {
@@ -348,7 +450,57 @@ impl<'src> Parser<'src> {
             let end = self.prev_end();
             Ok(Arg::Named { name, value, span: Span::new(start, end) })
         } else {
-            Ok(Arg::Positional(self.parse_chain()?))
+            Ok(Arg::Positional(self.parse_arg_expr()?))
+        }
+    }
+
+    /// An expression usable as an arg value / arg subject. Differs from
+    /// `parse_chain` in that it accepts binary comparison / fuzzy-match
+    /// operators (`~`, `>`, `<`, `<=`, `>=`, `==`, `!=`) — these are NOT
+    /// chain operators, so the chain parser proper won't fold them.
+    fn parse_arg_expr(&mut self) -> Result<Chain<'src>, ParseError> {
+        let mut left = self.parse_chain()?;
+        // After a chain term, check for a single comparison/match operator.
+        // We handle the simple form `a OP b` only — no precedence chains
+        // like `a OP b OP c`. Corpus doesn't use those.
+        if let Some(op) = self.peek_bin_op() {
+            self.advance();
+            let right = self.parse_chain()?;
+            let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
+            left = Chain::BinExpr {
+                op,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    fn peek_bin_op(&self) -> Option<BinOp> {
+        match self.peek_kind()? {
+            TokenKind::Tilde => Some(BinOp::FuzzyMatch),
+            TokenKind::Lt => Some(BinOp::Lt),
+            TokenKind::Gt => Some(BinOp::Gt),
+            TokenKind::Le => Some(BinOp::Le),
+            TokenKind::Ge => Some(BinOp::Ge),
+            TokenKind::EqEq => Some(BinOp::Eq),
+            TokenKind::Ne => Some(BinOp::Ne),
+            _ => None,
+        }
+    }
+
+    /// Comparison ops valid as a unary (subject elided). FuzzyMatch is not
+    /// in the corpus as a unary form.
+    fn peek_unary_cmp_op(&self) -> Option<BinOp> {
+        match self.peek_kind()? {
+            TokenKind::Lt => Some(BinOp::Lt),
+            TokenKind::Gt => Some(BinOp::Gt),
+            TokenKind::Le => Some(BinOp::Le),
+            TokenKind::Ge => Some(BinOp::Ge),
+            TokenKind::EqEq => Some(BinOp::Eq),
+            TokenKind::Ne => Some(BinOp::Ne),
+            _ => None,
         }
     }
 
@@ -421,6 +573,7 @@ impl<'src> Parser<'src> {
             | Chain::Sever(_, _, s) => *s,
             Chain::Fork(_, s) => *s,
             Chain::Merge(m) => m.span,
+            Chain::BinExpr { span, .. } | Chain::UnaryCmp { span, .. } => *span,
         }
     }
 }
@@ -560,5 +713,99 @@ kern_log -> |
         let Stmt::Connect(Chain::Tap(_, _, _)) = &m.stmts[0] else {
             panic!("expected Tap, got {:?}", m.stmts[0]);
         };
+    }
+
+    /// Fuzzy match in arg: `gate(message ~ "out of memory")`.
+    /// Note Flow is left-associative: `a -> b -> c` is `Flow(Flow(a,b), c)`.
+    #[test]
+    fn fuzzy_match_arg() {
+        let m = module(r#"errors -> gate(message ~ "out of memory") -> oom_alert"#);
+        // Connect(Flow(Flow(errors, gate(...)), oom_alert))
+        let Stmt::Connect(Chain::Flow(left, _oom, _)) = &m.stmts[0] else { panic!() };
+        let Chain::Flow(_errors, gate_call, _) = left.as_ref() else { panic!() };
+        let Chain::Call(call) = gate_call.as_ref() else { panic!() };
+        assert_eq!(call.callee.joined(), "gate");
+        assert_eq!(call.args.len(), 1);
+        let Arg::Positional(Chain::BinExpr { op, .. }) = &call.args[0] else {
+            panic!("expected BinExpr arg, got {:?}", call.args[0]);
+        };
+        assert_eq!(*op, BinOp::FuzzyMatch);
+    }
+
+    /// Unary comparison shorthand: `gate(> 5x, knee: 2x)`.
+    #[test]
+    fn unary_comparison_arg() {
+        let m = module("delta(error_rate) -> gate(> 5x, knee: 2x) -> spike_alert");
+        // Connect(Flow(Flow(delta_call, gate_call), spike_alert))
+        let Stmt::Connect(Chain::Flow(left, _spike, _)) = &m.stmts[0] else { panic!() };
+        let Chain::Flow(_delta, gate_call, _) = left.as_ref() else { panic!() };
+        let Chain::Call(call) = gate_call.as_ref() else { panic!() };
+        assert_eq!(call.callee.joined(), "gate");
+        assert_eq!(call.args.len(), 2);
+        // First arg: UnaryCmp(Gt, Ratio(5))
+        let Arg::Positional(Chain::UnaryCmp { op, rhs, .. }) = &call.args[0] else {
+            panic!("expected UnaryCmp, got {:?}", call.args[0]);
+        };
+        assert_eq!(*op, BinOp::Gt);
+        let Chain::Atom(Atom::Literal(Literal::Ratio(v, _))) = rhs.as_ref() else { panic!() };
+        assert_eq!(*v, 5.0);
+        // Second arg: knee: 2x
+        let Arg::Named { name, value, .. } = &call.args[1] else { panic!() };
+        assert_eq!(name.text, "knee");
+        let Chain::Atom(Atom::Literal(Literal::Ratio(v, _))) = value else { panic!() };
+        assert_eq!(*v, 2.0);
+    }
+
+    /// Merge with `within(N)` policy. `programs/02_log_monitor.zp:50-54`.
+    #[test]
+    fn merge_with_within_policy() {
+        let src = "oom_alert -> |
+| within(30s) | -> crash_pattern -> alert(critical: \"service crash loop\")
+conn_alert -> |
+";
+        let m = module(src);
+        assert_eq!(m.stmts.len(), 1, "expected 1 coalesced stmt, got {}", m.stmts.len());
+        let Stmt::Connect(Chain::Merge(merge)) = &m.stmts[0] else { panic!() };
+        // Inputs: oom_alert, conn_alert (the policy line has no input).
+        let names: Vec<_> = merge.inputs.iter().map(|c| match c {
+            Chain::Atom(Atom::Path(p)) => p.joined(),
+            other => panic!("unexpected input: {:?}", other),
+        }).collect();
+        assert_eq!(names, vec!["oom_alert", "conn_alert"]);
+        // Policy: Within(Duration(30s))
+        let MergePolicy::Within(inner) = &merge.policy else {
+            panic!("expected Within policy, got {:?}", merge.policy);
+        };
+        let Chain::Atom(Atom::Literal(Literal::Duration { value, unit, .. })) = inner.as_ref() else {
+            panic!("within arg is not Duration: {:?}", inner);
+        };
+        assert_eq!(*value, 30.0);
+        assert_eq!(*unit, DurationUnit::S);
+        // Downstream: should chain through crash_pattern -> alert(...)
+        assert!(merge.downstream.is_some());
+    }
+
+    /// Quorum policy: `| 2 of 3 |`.
+    #[test]
+    fn merge_with_quorum_policy() {
+        let m = module("a -> | 2 of 3 | -> result");
+        let Stmt::Connect(Chain::Merge(merge)) = &m.stmts[0] else { panic!() };
+        assert_eq!(merge.policy, MergePolicy::Quorum { n: 2, m: 3 });
+    }
+
+    /// Fastest policy: `| fastest(2) |`.
+    #[test]
+    fn merge_with_fastest_policy() {
+        let m = module("a -> | fastest(2) | -> result");
+        let Stmt::Connect(Chain::Merge(merge)) = &m.stmts[0] else { panic!() };
+        assert_eq!(merge.policy, MergePolicy::Fastest(2));
+    }
+
+    /// Any policy: `| any |`.
+    #[test]
+    fn merge_with_any_policy() {
+        let m = module("a -> | any | -> result");
+        let Stmt::Connect(Chain::Merge(merge)) = &m.stmts[0] else { panic!() };
+        assert_eq!(merge.policy, MergePolicy::Any);
     }
 }

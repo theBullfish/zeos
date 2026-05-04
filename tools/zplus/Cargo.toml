@@ -13,4 +13,8 @@ path = "src/lib.rs"
 name = "zplus-lex"
 path = "src/bin/zplus_lex.rs"
 
+[[bin]]
+name = "zplus-parse"
+path = "src/bin/zplus_parse.rs"
+
 [dev-dependencies]

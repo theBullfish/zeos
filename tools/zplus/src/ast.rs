@@ -103,6 +103,35 @@ pub enum Chain<'src> {
     Fork(Vec<Chain<'src>>, Span),
     /// `|` merge — see chord rule at top of file.
     Merge(Merge<'src>),
+    /// `lhs OP rhs` — comparison or fuzzy match. Produces a predicate, not
+    /// a signal flow. `message ~ "..."`, `value > 5x`, `a == b`.
+    BinExpr {
+        op: BinOp,
+        lhs: Box<Chain<'src>>,
+        rhs: Box<Chain<'src>>,
+        span: Span,
+    },
+    /// `OP rhs` — comparison with an implicit subject. `gate(> 5x)` parses
+    /// as `gate(UnaryCmp { op: Gt, rhs: Ratio(5) })`. The subject is the
+    /// gate's input signal, supplied by the runtime.
+    UnaryCmp {
+        op: BinOp,
+        rhs: Box<Chain<'src>>,
+        span: Span,
+    },
+}
+
+/// Binary / unary comparison & match operators usable inside arg
+/// expressions. Distinct from chain operators (`->`, `~>`, `-x>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BinOp {
+    Lt,         // <
+    Gt,         // >
+    Le,         // <=
+    Ge,         // >=
+    Eq,         // ==
+    Ne,         // !=
+    FuzzyMatch, // ~ — `message ~ "out of memory"` (substring / pattern)
 }
 
 #[derive(Debug, Clone, PartialEq)]
