@@ -16,6 +16,7 @@
  */
 
 #include "shell.h"
+#include "settings_registry.h"
 #include "usb_msc.h"
 #include "usb_hub.h"
 #include "block.h"
@@ -63,6 +64,7 @@
 #include "suspend.h"
 #include "acpi.h"
 #include "battery.h"
+#include "power_buttons.h"
 #include "brightness.h"
 
 #define CMD_BUF_SIZE 256
@@ -224,6 +226,10 @@ static void cmd_brightness(const char *args);
 static void cmd_idle(const char *args);
 static void cmd_lock(const char *args);
 static void cmd_pin(const char *args);
+static void cmd_power_button(const char *args);
+static void cmd_lid_close(const char *args);
+static void cmd_lid_open(const char *args);
+static void cmd_power(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
 static void cmd_cp(const char *args);
@@ -547,6 +553,7 @@ static void cmd_rm(const char *args);
 static void cmd_truncate(const char *args);
 static void cmd_echo(const char *args);
 static void cmd_trash(const char *args);
+static void cmd_settings(const char *args);
 
 /* ── Command table ──────────────────────────────── */
 
@@ -638,6 +645,10 @@ static const struct shell_cmd commands[] = {
     {"idle",    "show/set idle timing (idle | idle dim|lock|blank <secs>)", cmd_idle,  VIS_ALWAYS},
     {"lock",    "lock the screen now",            cmd_lock,    VIS_ALWAYS},
     {"pin",     "set lock screen PIN (pin <new-pin>)", cmd_pin, VIS_ALWAYS},
+    {"power-button", "show/set power-button action (suspend|shutdown|lock|ask)", cmd_power_button, VIS_ALWAYS},
+    {"lid-close", "show/set lid-close action (suspend|lock|nothing)", cmd_lid_close, VIS_ALWAYS},
+    {"lid-open",  "show/set lid-open action (wake|nothing)", cmd_lid_open, VIS_ALWAYS},
+    {"power",     "combined power view (buttons, lid, battery)", cmd_power, VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
     /* FAT32 (USB / SD / ESP / NVMe) read+write */
@@ -649,6 +660,7 @@ static const struct shell_cmd commands[] = {
     {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
     {"truncate","truncate file to size (truncate <path> <size>)", cmd_truncate, VIS_DEREZ},
     {"echo",    "write text to FAT32 file (echo <text> > <path>)", cmd_echo, VIS_ALWAYS},
+    {"settings","unified settings (settings | settings <name> [value] | search/export/import)", cmd_settings, VIS_ALWAYS},
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -2837,6 +2849,163 @@ static void cmd_pin(const char *args)
     kputs("  PIN updated and persisted to /lock/pin\n");
 }
 
+/* ── Power button / lid actions ─────────────────────────────── */
+
+static const char *first_token(const char *s, int *outlen)
+{
+    while (*s == ' ' || *s == '\t') s++;
+    int n = 0;
+    while (s[n] && s[n] != ' ' && s[n] != '\t' && s[n] != '\n') n++;
+    *outlen = n;
+    return s;
+}
+
+static void cmd_power_button(const char *args)
+{
+    int n = 0;
+    const char *t = first_token(args, &n);
+    if (n == 0) {
+        kputs("  power-button = ");
+        kputs(power_action_label(power_button_action()));
+        kputs(" (events seen: ");
+        kput_dec((uint64_t)power_button_event_count());
+        kputs(")\n");
+        return;
+    }
+    char tok[16]; int i;
+    for (i = 0; i < n && i < 15; i++) tok[i] = t[i];
+    tok[i] = 0;
+    power_action_t a;
+    if (!power_action_parse(tok, &a)) {
+        kputs("  usage: power-button [suspend|shutdown|lock|ask]\n");
+        return;
+    }
+    if (power_button_set_action(a) < 0) {
+        kputs("  invalid action for power-button\n");
+        return;
+    }
+    kputs("  power-button = ");
+    kputs(power_action_label(a));
+    kputs(" (saved)\n");
+}
+
+static void cmd_lid_close(const char *args)
+{
+    int n = 0;
+    const char *t = first_token(args, &n);
+    if (n == 0) {
+        kputs("  lid-close = ");
+        kputs(power_action_label(lid_close_action()));
+        kputc('\n');
+        return;
+    }
+    char tok[16]; int i;
+    for (i = 0; i < n && i < 15; i++) tok[i] = t[i];
+    tok[i] = 0;
+    power_action_t a;
+    if (!power_action_parse(tok, &a)) {
+        kputs("  usage: lid-close [suspend|lock|nothing]\n");
+        return;
+    }
+    if (lid_close_set_action(a) < 0) {
+        kputs("  invalid action for lid-close (use suspend|lock|nothing)\n");
+        return;
+    }
+    kputs("  lid-close = ");
+    kputs(power_action_label(a));
+    kputs(" (saved)\n");
+}
+
+static void cmd_lid_open(const char *args)
+{
+    int n = 0;
+    const char *t = first_token(args, &n);
+    if (n == 0) {
+        kputs("  lid-open = ");
+        kputs(power_action_label(lid_open_action()));
+        kputc('\n');
+        return;
+    }
+    char tok[16]; int i;
+    for (i = 0; i < n && i < 15; i++) tok[i] = t[i];
+    tok[i] = 0;
+    power_action_t a;
+    if (!power_action_parse(tok, &a)) {
+        kputs("  usage: lid-open [wake|nothing]\n");
+        return;
+    }
+    if (lid_open_set_action(a) < 0) {
+        kputs("  invalid action for lid-open (use wake|nothing)\n");
+        return;
+    }
+    kputs("  lid-open = ");
+    kputs(power_action_label(a));
+    kputs(" (saved)\n");
+}
+
+static void cmd_power(const char *args)
+{
+    (void)args;
+    kputs("\n  Power\n  ─────\n");
+    kputs("  power-button     = ");
+    kputs(power_action_label(power_button_action()));
+    kputs(" (");
+    kputs(power_btn_present() ? "PNP0C0C" : "fixed (FADT)");
+    kputs(", events: ");
+    kput_dec((uint64_t)power_button_event_count());
+    kputs(")\n");
+
+    kputs("  sleep-button     = ");
+    kputs(sleep_btn_present() ? "PNP0C0E present" : "not detected");
+    kputc('\n');
+
+    kputs("  lid              = ");
+    if (!lid_present()) {
+        kputs("not detected\n");
+    } else {
+        int s = lid_current_state();
+        if (s == 1) kputs("open");
+        else if (s == 0) kputs("closed");
+        else kputs("present (state via AML method, unreadable without evaluator)");
+        kputs(" (events: ");
+        kput_dec((uint64_t)lid_event_count());
+        kputs(")\n");
+    }
+    kputs("  lid-close        = ");
+    kputs(power_action_label(lid_close_action()));
+    kputc('\n');
+    kputs("  lid-open         = ");
+    kputs(power_action_label(lid_open_action()));
+    kputc('\n');
+
+    /* Battery summary alongside, since `power` is the combined view. */
+    kputs("  AC               = ");
+    int ac = ac_online();
+    if (ac == 1)      kputs("online\n");
+    else if (ac == 0) kputs("offline (on battery)\n");
+    else              kputs("unknown\n");
+
+    int bn = battery_count();
+    if (bn == 0) {
+        kputs("  battery          = none\n");
+    } else {
+        for (int i = 0; i < bn; i++) {
+            kputs("  battery[");
+            kput_dec((uint64_t)i);
+            kputs("]       = ");
+            int pct = battery_percent(i);
+            if (pct >= 0) {
+                kput_dec((uint64_t)pct);
+                kputs("% ");
+                kputs(bat_state_label(battery_state(i)));
+            } else {
+                kputs("present (charge unknown)");
+            }
+            kputc('\n');
+        }
+    }
+}
+
 /* Selftest kernel_fn for the MDE chain probe. The body is what
  * actually runs on the CPU backend: read the .answer field, return
  * it. Real work, real return value. */
@@ -3621,6 +3790,29 @@ vault_done:
         }
     }
 
+    /* Power buttons (ACPI PNP0C0C / 0D / 0E + PM1 PWRBTN_STS poll). */
+    kputs("  Power buttons ......... ");
+    {
+        kputs("button=");
+        kputs(power_action_label(power_button_action()));
+        kputs(", lid-close=");
+        kputs(power_action_label(lid_close_action()));
+        kputs(", lid-open=");
+        kputs(power_action_label(lid_open_action()));
+        uint32_t pe = power_button_event_count();
+        uint32_t le = lid_event_count();
+        if (pe == 0 && le == 0) {
+            kputs(" (no events seen yet)\n");
+        } else {
+            kputs(" (events: btn=");
+            kput_dec((uint64_t)pe);
+            kputs(" lid=");
+            kput_dec((uint64_t)le);
+            kputs(")\n");
+        }
+        passes++;
+    }
+
     kputs("  Persistence ........... ");
     if (persistence_ready()) {
         uint32_t n = persistence_journal_restored_count();
@@ -3636,6 +3828,11 @@ vault_done:
         kputs("FAIL (not initialized)\n");
         fails++;
     }
+
+    /* Settings registry — count keys, count live (non-stub) */
+    settings_print_selftest_line();
+    if (settings_count() > 0) passes++;
+    else                      fails++;
 
     kputs("  ──────────────\n  ");
     kput_dec(passes); kputs(" passed, ");
@@ -4600,4 +4797,213 @@ static void cmd_echo(const char *args)
     if (wrote < 0) { kputs("  echo: write failed\n"); return; }
     kputs("  Wrote "); kput_dec((uint32_t)wrote); kputs(" bytes to ");
     kputs(path); kputs("\n");
+}
+
+/* ── settings: unified config surface ─────────────────────────── */
+
+static int settings_substr_match(const char *hay, const char *needle)
+{
+    if (!hay || !needle || !*needle) return 1;
+    for (int i = 0; hay[i]; i++) {
+        int j = 0;
+        while (hay[i + j] && needle[j] && hay[i + j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+/* Compare the dotted prefix (text up to the first '.') of two names. */
+static int settings_same_prefix(const char *a, const char *b)
+{
+    while (*a && *b && *a != '.' && *b != '.') {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return (*a == '.' || *a == '\0') && (*b == '.' || *b == '\0');
+}
+
+static void settings_print_one(const settings_entry_t *e)
+{
+    char val[SETTINGS_VALUE_MAX];
+    val[0] = '\0';
+    int rc = settings_get(e->name, val, sizeof(val));
+    kputs("    ");
+    kputs(e->name);
+    /* pad to ~28 cols */
+    int len = 0; for (const char *p = e->name; *p; p++) len++;
+    for (int j = len; j < 28; j++) kputc(' ');
+    kputs(" = ");
+    if (rc == 0) kputs(val);
+    else         kputs("(unavailable)");
+    kputs("   [");
+    kputs(settings_kind_label(e->kind));
+    if (e->flags & SETTINGS_FLAG_READONLY)  kputs(",ro");
+    if (e->flags & SETTINGS_FLAG_WRITEONLY) kputs(",wo");
+    if (e->flags & SETTINGS_FLAG_STUB)      kputs(",stub");
+    kputs("]\n");
+    if (e->kind == SK_ENUM && e->enum_labels) {
+        kputs("        choices: ");
+        kputs(e->enum_labels);
+        kputc('\n');
+    }
+}
+
+struct settings_walk_ctx {
+    const char *filter;   /* substring filter, NULL = all */
+    int         export_mode;
+    char        last_prefix[SETTINGS_NAME_MAX];
+};
+
+static int settings_walk_print(const settings_entry_t *e, void *u)
+{
+    struct settings_walk_ctx *ctx = (struct settings_walk_ctx *)u;
+    if (ctx->filter && !settings_substr_match(e->name, ctx->filter)) return 0;
+
+    if (ctx->export_mode) {
+        char val[SETTINGS_VALUE_MAX];
+        val[0] = '\0';
+        if (settings_get(e->name, val, sizeof(val)) != 0) return 0;
+        kputs(e->name);
+        kputc('=');
+        kputs(val);
+        kputc('\n');
+        return 0;
+    }
+
+    /* Group separator on prefix change */
+    if (!settings_same_prefix(ctx->last_prefix, e->name)) {
+        if (ctx->last_prefix[0]) kputc('\n');
+        /* extract prefix */
+        int i = 0;
+        while (e->name[i] && e->name[i] != '.' && i < SETTINGS_NAME_MAX - 1) {
+            ctx->last_prefix[i] = e->name[i];
+            i++;
+        }
+        ctx->last_prefix[i] = '\0';
+        kputs("  [");
+        kputs(ctx->last_prefix);
+        kputs("]\n");
+    }
+
+    settings_print_one(e);
+    return 0;
+}
+
+static void cmd_settings(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+
+    /* No args -> list everything grouped by prefix */
+    if (*args == '\0') {
+        struct settings_walk_ctx ctx = { 0, 0, { 0 } };
+        kputs("\n  Zeos Settings\n  ─────────────\n");
+        settings_enumerate(settings_walk_print, &ctx);
+        kputs("\n  ");
+        kput_dec((uint64_t)settings_count());
+        kputs(" total (");
+        kput_dec((uint64_t)settings_live_count());
+        kputs(" live, ");
+        kput_dec((uint64_t)(settings_count() - settings_live_count()));
+        kputs(" stub)\n");
+        kputs("  use: settings <name> [<value>]   |   settings search <substr>\n");
+        kputs("       settings export             |   settings import <key=value> ...\n\n");
+        return;
+    }
+
+    /* Parse first word */
+    char first[SETTINGS_NAME_MAX];
+    int fi = 0;
+    while (args[fi] && args[fi] != ' ' && args[fi] != '\t' && fi < SETTINGS_NAME_MAX - 1) {
+        first[fi] = args[fi];
+        fi++;
+    }
+    first[fi] = '\0';
+    const char *rest = args + fi;
+    while (*rest == ' ' || *rest == '\t') rest++;
+
+    /* `settings search <substr>` */
+    if (streq(first, "search")) {
+        if (!*rest) {
+            kputs("  usage: settings search <substr>\n");
+            return;
+        }
+        struct settings_walk_ctx ctx = { rest, 0, { 0 } };
+        kputs("\n  Matches for '"); kputs(rest); kputs("':\n");
+        settings_enumerate(settings_walk_print, &ctx);
+        kputs("\n");
+        return;
+    }
+
+    /* `settings export` */
+    if (streq(first, "export")) {
+        struct settings_walk_ctx ctx = { 0, 1, { 0 } };
+        settings_enumerate(settings_walk_print, &ctx);
+        return;
+    }
+
+    /* `settings import key=value key=value ...` */
+    if (streq(first, "import")) {
+        if (!*rest) {
+            kputs("  usage: settings import key=value [key=value ...]\n");
+            return;
+        }
+        const char *p = rest;
+        int ok = 0, fail = 0;
+        char keybuf[SETTINGS_NAME_MAX];
+        char valbuf[SETTINGS_VALUE_MAX];
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            int ki = 0;
+            while (*p && *p != '=' && *p != ' ' && *p != '\t' && ki < SETTINGS_NAME_MAX - 1) {
+                keybuf[ki++] = *p++;
+            }
+            keybuf[ki] = '\0';
+            if (*p != '=') { fail++; while (*p && *p != ' ') p++; continue; }
+            p++;
+            int vi = 0;
+            while (*p && *p != ' ' && *p != '\t' && vi < SETTINGS_VALUE_MAX - 1) {
+                valbuf[vi++] = *p++;
+            }
+            valbuf[vi] = '\0';
+            if (settings_set(keybuf, valbuf) == 0) ok++;
+            else                                  fail++;
+        }
+        kputs("  imported: "); kput_dec((uint64_t)ok);
+        kputs(" ok, "); kput_dec((uint64_t)fail); kputs(" failed\n");
+        return;
+    }
+
+    /* `settings <name>` or `settings <name> <value>` */
+    const settings_entry_t *e = settings_find(first);
+    if (!e) {
+        kputs("  unknown setting: "); kputs(first); kputs("\n");
+        kputs("  try `settings` to list, or `settings search "); kputs(first); kputs("`\n");
+        return;
+    }
+
+    if (!*rest) {
+        settings_print_one(e);
+        if (e->desc) {
+            kputs("        ");
+            kputs(e->desc);
+            kputc('\n');
+        }
+        return;
+    }
+
+    /* Set */
+    int rc = settings_set(first, rest);
+    if (rc == 0) {
+        kputs("  set "); kputs(first); kputs(" = ");
+        char val[SETTINGS_VALUE_MAX];
+        if (settings_get(first, val, sizeof(val)) == 0) kputs(val);
+        kputs("\n");
+    } else {
+        kputs("  failed to set "); kputs(first);
+        if (e->flags & SETTINGS_FLAG_READONLY) kputs(" (readonly)");
+        else if (e->flags & SETTINGS_FLAG_STUB) kputs(" (stub: source module not yet wired)");
+        else kputs(" (bad value or out of range)");
+        kputs("\n");
+    }
 }

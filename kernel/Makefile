@@ -96,6 +96,8 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/brightness.c \
            boot/idle.c \
            boot/lockscreen.c \
+           boot/power_buttons.c \
+           boot/settings_registry.c \
            boot/tests.c
 
 # mbedTLS library sources (3.6 LTS, vendored at lib/mbedtls/)

@@ -37,6 +37,7 @@
 #include "kprint.h"
 #include "idle.h"
 #include "lockscreen.h"
+#include "power_buttons.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -748,6 +749,13 @@ int chain_registry_init(void)
         chain_t *cb = chain_get(CHAIN_BATTERY);
         if (cb) cb->resolve_interval_ticks = 240;
     }
+
+    /* Power input (PNP0C0C / PNP0C0D / PNP0C0E). Polls PM1 PWRBTN_STS
+     * each ~10ms (8 ticks) and dispatches the configured action via
+     * suspend.c / lockscreen.c / notify.c. Init() loads VAULT-stored
+     * action prefs and scans DSDT/SSDTs for HID matches. */
+    power_buttons_init();
+    (void)power_buttons_chain_register(CHAIN_CPU);
 
     /* Trash garbage collector. Wired BEFORE auto-route so MDE can
      * discover the (trivial) typed pipeline.

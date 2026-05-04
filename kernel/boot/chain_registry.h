@@ -50,6 +50,7 @@ extern int CHAIN_MOUSE;
 extern int CHAIN_SERIAL_IN;
 extern int CHAIN_POWER;
 extern int CHAIN_BATTERY;
+/* CHAIN_POWER_INPUT is declared in power_buttons.h */
 extern int CHAIN_TRASH_GC;
 extern int CHAIN_IDLE;
 
