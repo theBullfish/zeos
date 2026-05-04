@@ -23,18 +23,13 @@ use std::path::{Path, PathBuf};
 
 use zplus::{lex, TokenKind};
 
-/// Files known to use lexical surface the v2 lexer doesn't yet handle.
-/// Keep this list sorted; entries should match exactly the count produced
-/// by the current lexer so unrelated regressions are caught immediately.
+/// Files known to use lexical surface the lexer doesn't yet handle.
+/// As of v3, every .zp file in the corpus tokenizes cleanly — this
+/// allowlist is empty. New entries belong here only when a file with
+/// previously-clean status starts producing Error tokens AND the cause
+/// is a deferred lexical decision rather than a regression.
 fn expected_errors() -> HashMap<&'static str, usize> {
-    HashMap::from([
-        // ↑ heat operator — `programs/chirp.zp:47` `post.heat↑`
-        ("chirp.zp", 1),
-        // String escapes `\"` in LSP-style snippet templates
-        ("derez/forge_ide.zp", 4),
-        // `─...>` decorative long-form arrow
-        ("goya_fleet.zp", 20),
-    ])
+    HashMap::new()
 }
 
 fn programs_dir() -> PathBuf {

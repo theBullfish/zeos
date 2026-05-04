@@ -74,6 +74,8 @@ pub enum TokenKind {
     Slash,
     Percent,
     Bang,        // ! (boolean NOT — `gate(!recording)`)
+    HeatUp,      // ↑ (U+2191) — postfix amplifier; `post.heat↑`
+    HeatDown,    // ↓ (U+2193) — symmetric pair, not yet seen in corpus
 
     // Sentinel: lexer could not recognize the input here.
     Error,
@@ -243,7 +245,40 @@ impl<'a> Lexer<'a> {
             return Some(self.tok(TokenKind::Bang, start));
         }
 
-        // String literal — no escape handling in v1 (corpus has no escapes).
+        // ─ (U+2500 = E2 94 80) followed by 0+ more ─ then `>` is a long-form
+        // Flow arrow. `intake ────────────> | ` in goya_fleet.zp:217.
+        // Only matches when terminated by `>`; bare ─ runs that don't end in
+        // `>` fall through to Error.
+        if b == 0xE2 && self.peek_at(1) == Some(0x94) && self.peek_at(2) == Some(0x80) {
+            let mut probe = self.pos + 3;
+            while self.bytes.get(probe) == Some(&0xE2)
+                && self.bytes.get(probe + 1) == Some(&0x94)
+                && self.bytes.get(probe + 2) == Some(&0x80)
+            {
+                probe += 3;
+            }
+            if self.bytes.get(probe) == Some(&b'>') {
+                self.pos = probe + 1;
+                return Some(self.tok(TokenKind::Flow, start));
+            }
+        }
+
+        // ↑ U+2191 = E2 86 91 ; ↓ U+2193 = E2 86 93
+        if b == 0xE2 && self.peek_at(1) == Some(0x86) {
+            match self.peek_at(2) {
+                Some(0x91) => {
+                    self.pos += 3;
+                    return Some(self.tok(TokenKind::HeatUp, start));
+                }
+                Some(0x93) => {
+                    self.pos += 3;
+                    return Some(self.tok(TokenKind::HeatDown, start));
+                }
+                _ => {}
+            }
+        }
+
+        // String literal. Supports the C-style escape set: \" \\ \n \t \r \0.
         // Detects interpolation holes `{...}` in the body and upgrades the
         // kind to TemplateString. Hole-span extraction is deferred to the
         // parser.
@@ -252,6 +287,15 @@ impl<'a> Lexer<'a> {
             let mut has_hole = false;
             while let Some(c) = self.peek() {
                 self.pos += 1;
+                if c == b'\\' {
+                    if matches!(
+                        self.peek(),
+                        Some(b'"' | b'\\' | b'n' | b't' | b'r' | b'0')
+                    ) {
+                        self.pos += 1;
+                    }
+                    continue;
+                }
                 if c == b'"' {
                     let kind = if has_hole { TokenKind::TemplateString } else { TokenKind::String };
                     return Some(self.tok(kind, start));
@@ -823,5 +867,80 @@ mod tests {
             vec![(TokenKind::Bang, "!"), (TokenKind::Ident, "recording")]);
         assert_eq!(non_trivia("a != b"),
             vec![(TokenKind::Ident, "a"), (TokenKind::Ne, "!="), (TokenKind::Ident, "b")]);
+    }
+
+    // ── v3 token kinds ────────────────────────────────────────────
+
+    /// `↑` is a single token, postfix amplifier. `programs/chirp.zp:47`.
+    #[test]
+    fn heat_up_after_path() {
+        assert_eq!(
+            non_trivia("post.heat↑"),
+            vec![
+                (TokenKind::Ident, "post"),
+                (TokenKind::Dot, "."),
+                (TokenKind::Ident, "heat"),
+                (TokenKind::HeatUp, "↑"),
+            ]
+        );
+    }
+
+    #[test]
+    fn heat_down() {
+        assert_eq!(non_trivia("x↓"),
+            vec![(TokenKind::Ident, "x"), (TokenKind::HeatDown, "↓")]);
+    }
+
+    /// String escapes: `\"`, `\\`, `\n`, `\t`, `\r`, `\0` are all consumed
+    /// as part of the string body.
+    #[test]
+    fn string_escapes() {
+        // `\"` doesn't terminate the string
+        assert_eq!(non_trivia(r#""a\"b""#),
+            vec![(TokenKind::String, r#""a\"b""#)]);
+        // `\n` consumed as escape, doesn't trigger the unterminated-string error
+        assert_eq!(non_trivia(r#""line\n""#),
+            vec![(TokenKind::String, r#""line\n""#)]);
+        // `\\` is a literal backslash escape
+        assert_eq!(non_trivia(r#""a\\b""#),
+            vec![(TokenKind::String, r#""a\\b""#)]);
+    }
+
+    /// Forge_ide.zp pattern: nested `\"` plus `{value}` interpolation hole.
+    /// Whole thing is one TemplateString.
+    #[test]
+    fn template_string_with_escape_and_hole() {
+        assert_eq!(
+            non_trivia(r#""print(\"${1:{value}}\")""#),
+            vec![(TokenKind::TemplateString, r#""print(\"${1:{value}}\")""#)]
+        );
+    }
+
+    /// Long-form Flow arrow: `─...>` is one Flow token.
+    /// `programs/goya_fleet.zp:217`.
+    #[test]
+    fn long_form_flow_arrow() {
+        let src = "intake ─────> sink";
+        assert_eq!(
+            non_trivia(src),
+            vec![
+                (TokenKind::Ident, "intake"),
+                (TokenKind::Flow, "─────>"),
+                (TokenKind::Ident, "sink"),
+            ]
+        );
+    }
+
+    #[test]
+    fn single_dash_then_gt_is_long_form_flow() {
+        assert_eq!(non_trivia("a ─> b"),
+            vec![(TokenKind::Ident, "a"), (TokenKind::Flow, "─>"), (TokenKind::Ident, "b")]);
+    }
+
+    /// Bare `─` not terminated by `>` falls through to Error.
+    #[test]
+    fn bare_dash_is_error() {
+        let toks = lex("─");
+        assert!(toks.iter().any(|t| t.kind == TokenKind::Error));
     }
 }
