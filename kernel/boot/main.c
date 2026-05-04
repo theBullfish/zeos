@@ -47,6 +47,7 @@
 #include "block.h"
 #include "fat32.h"
 #include "net_rtl8188eu.h"
+#include "lockscreen.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
@@ -729,6 +730,24 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern void settings_print_selftest_line(void);
         settings_register_all();
         settings_print_selftest_line();
+    }
+
+    /* Cold-boot login gate. After splash dismiss + chain registry +
+     * persistence replay, but before the scheduler starts. Shows the
+     * same PIN overlay used by idle-lock; on first ever boot
+     * (no /lock/pin) the gate runs an enrollment flow first. The
+     * setting /lock/cold-boot-required defaults to 1 (require PIN) and
+     * can be toggled with the `cold-boot-login` shell command or the
+     * lock.cold_boot_required setting. The shell pump never sees the
+     * bytes typed at the gate -- keyboard.c routes them straight to
+     * lockscreen_input() while the overlay is active. */
+    {
+        if (cold_boot_login_required()) {
+            kputs("[main] cold-boot login required\n");
+            lockscreen_run_cold_boot_gate();
+        } else {
+            kputs("[main] cold-boot login disabled\n");
+        }
     }
 
     /* Scheduler: chain resolution as the kernel main loop. Must

@@ -42,6 +42,7 @@
 #include "timer.h"
 #include "kprint.h"
 #include "io.h"
+#include "lockscreen.h"
 
 #define SCHED_LOG_RING 256
 
@@ -512,7 +513,17 @@ void scheduler_run(void)
          * The shell is just another consumer of input_event signals;
          * we drain the merged ring once per tick. */
         while (keyboard_try_getc(&c)) {
-            (void)shell_pump_char(c);
+            /* Defensive gate: keyboard.c already diverts ASCII to
+             * lockscreen_input() while the overlay is active, so kb_buf
+             * normally doesn't accumulate during a lock. But if input
+             * landed in kb_buf in the same tick the IDLE chain
+             * transitioned to LOCKED, route those leftover bytes to the
+             * lock screen instead of the shell. */
+            if (lockscreen_active()) {
+                lockscreen_input(c);
+            } else {
+                (void)shell_pump_char(c);
+            }
             dispatched++;
             if (dispatched >= 128) break;  /* fairness */
         }

@@ -39,8 +39,33 @@ int  lockscreen_pin_configured(void);
  * Persists to VAULT under /lock/pin. Returns 0 on success. */
 int  lockscreen_set_pin(const char *new_pin);
 
+/* Forget the stored PIN (deletes /lock/pin). Forces re-enrollment on
+ * next boot. Used by `pin reset`. */
+int  lockscreen_pin_clear(void);
+
 /* Counters for selftest / inspector. */
 uint32_t lockscreen_failed_attempts(void);
 uint32_t lockscreen_unlock_count(void);
+
+/* ── Cold-boot login ─────────────────────────────────────────────
+ *
+ * The same PIN overlay runs as a login gate at boot when
+ * /lock/cold-boot-required is set. If no PIN is configured yet, the
+ * gate runs an enrollment flow ("set a PIN" + confirm) and stores
+ * the result before allowing the shell to come up.
+ */
+
+/* Read /lock/cold-boot-required from VAULT. Default 1 (require PIN
+ * at boot) when the key is missing. */
+int  cold_boot_login_required(void);
+
+/* Persist /lock/cold-boot-required. enabled != 0 stores 1, else 0. */
+int  cold_boot_login_set(int enabled);
+
+/* Synchronous boot-time gate. Shows the lock overlay (or the
+ * enrollment flow on first ever boot), pumps input + composes
+ * frames, and only returns once the user has unlocked or completed
+ * enrollment. Safe to call before scheduler_run. */
+void lockscreen_run_cold_boot_gate(void);
 
 #endif /* ZEOS_LOCKSCREEN_H */

@@ -259,6 +259,15 @@ static int s_lock_pin(const char *v) {
     return lockscreen_set_pin(v);
 }
 
+/* lock.cold_boot_required */
+static int g_lock_cold(char *out, int n) {
+    return sr_itoa(cold_boot_login_required() ? 1 : 0, out, n) >= 0 ? 0 : -1;
+}
+static int s_lock_cold(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    return cold_boot_login_set(x ? 1 : 0);
+}
+
 /* trash.auto_empty_days — there is no live setter (CHAIN_TRASH_GC
  * uses a baked-in 30-day cutoff). Expose as readonly until a tunable
  * lands. */
@@ -357,6 +366,10 @@ static const settings_entry_t E_LOCK_PIN = {
     "lock.pin", SK_STRING, SETTINGS_FLAG_WRITEONLY, g_lock_pin, s_lock_pin, 0,
     "lock screen PIN (4-16 digits, write-only)"
 };
+static const settings_entry_t E_LOCK_COLD_BOOT = {
+    "lock.cold_boot_required", SK_BOOL, 0, g_lock_cold, s_lock_cold, 0,
+    "require PIN at cold boot (0/1)"
+};
 static const settings_entry_t E_TRASH_DAYS = {
     "trash.auto_empty_days", SK_INT_SECS,
     SETTINGS_FLAG_READONLY | SETTINGS_FLAG_STUB,
@@ -406,6 +419,7 @@ void settings_register_all(void)
     settings_register(&E_IDLE_LOCK);
     settings_register(&E_IDLE_BLANK);
     settings_register(&E_LOCK_PIN);
+    settings_register(&E_LOCK_COLD_BOOT);
     settings_register(&E_TRASH_DAYS);
     settings_register(&E_POWER_BTN);
     settings_register(&E_POWER_LID_CLOSE);

@@ -4,12 +4,14 @@
  * password / biometrics are future work.
  *
  * The PIN is stored in VAULT at /lock/pin (ASCII digits, NUL-padded).
- * On first boot a default PIN of "0000" is written so the lock command
- * has something to validate against. The default is logged loudly --
- * users are expected to `pin <new>` immediately.
+ * If /lock/pin is missing, the overlay enters enrollment mode
+ * ("Set a PIN" + confirm) instead of validation mode.
  *
  * Drawing uses font_draw(FONT_BOOT, ...) so the overlay works before
  * the TTF cache is populated and during the lock-from-cold path.
+ *
+ * Cold-boot login: same PIN overlay runs at boot if /lock/cold-boot-required
+ * is set. First-ever boot prompts for PIN enrollment.
  */
 
 #include "lockscreen.h"
@@ -20,21 +22,32 @@
 #include "timer.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "compositor.h"
+#include "keyboard.h"
+#include "serial.h"
 
 #include <stdint.h>
 
 #define LOCK_PIN_PATH        "/lock/pin"
+#define LOCK_COLD_BOOT_PATH  "/lock/cold-boot-required"
 #define LOCK_PIN_MIN_LEN     4
 #define LOCK_PIN_MAX_LEN     16
 #define LOCK_DEFAULT_PIN     "0000"
 
 #define LOCK_ENTRY_BUF       (LOCK_PIN_MAX_LEN + 1)
 
+/* Enrollment phases for first-boot ("Set a PIN") flow. */
+#define LOCK_ENROLL_OFF      0
+#define LOCK_ENROLL_PICK     1   /* prompt: "Set a PIN" */
+#define LOCK_ENROLL_CONFIRM  2   /* prompt: "Confirm PIN" */
+
 static char     g_stored_pin[LOCK_ENTRY_BUF];
 static char     g_entry[LOCK_ENTRY_BUF];
+static char     g_enroll_first[LOCK_ENTRY_BUF];
 static int      g_entry_len;
 static int      g_active;
 static int      g_flash_frames;          /* >0 = render red flash next draw */
+static int      g_enroll_phase;
 static uint32_t g_failed_attempts;
 static uint32_t g_unlock_count;
 
@@ -76,13 +89,14 @@ static void lockscreen_load_pin(void)
     uint8_t buf[LOCK_ENTRY_BUF];
     for (int i = 0; i < LOCK_ENTRY_BUF; i++) buf[i] = 0;
 
+    g_stored_pin[0] = '\0';
+
     int got = vault_read(LOCK_PIN_PATH, buf, sizeof(buf) - 1);
     if (got <= 0) {
-        /* First boot: seed with default. */
-        ls_strncpy(g_stored_pin, LOCK_DEFAULT_PIN, LOCK_ENTRY_BUF);
-        (void)vault_write(LOCK_PIN_PATH, g_stored_pin,
-                          (uint32_t)ls_strlen(g_stored_pin));
-        kputs("[lockscreen] WARNING: default PIN '0000' set. Run `pin <new>`.\n");
+        /* No PIN yet -- enrollment will run at the next cold-boot gate
+         * (or via `pin <new>` from the shell). */
+        kputs("[lockscreen] no PIN set; enrollment will run at next "
+              "cold-boot gate or via `pin <new>`.\n");
         return;
     }
 
@@ -94,10 +108,10 @@ static void lockscreen_load_pin(void)
     }
     g_stored_pin[n] = '\0';
     if (n < LOCK_PIN_MIN_LEN) {
-        /* Stored PIN is corrupt -- restore default. */
-        ls_strncpy(g_stored_pin, LOCK_DEFAULT_PIN, LOCK_ENTRY_BUF);
-        (void)vault_write(LOCK_PIN_PATH, g_stored_pin,
-                          (uint32_t)ls_strlen(g_stored_pin));
+        /* Stored PIN is corrupt -- forget it and require enrollment. */
+        kputs("[lockscreen] stored PIN corrupt; clearing.\n");
+        g_stored_pin[0] = '\0';
+        (void)vault_delete(LOCK_PIN_PATH);
     }
 }
 
@@ -105,6 +119,8 @@ void lockscreen_init(void)
 {
     g_entry_len = 0;
     g_entry[0] = '\0';
+    g_enroll_first[0] = '\0';
+    g_enroll_phase = LOCK_ENROLL_OFF;
     g_active = 0;
     g_flash_frames = 0;
     g_failed_attempts = 0;
@@ -133,6 +149,32 @@ int lockscreen_set_pin(const char *new_pin)
     return 0;
 }
 
+int lockscreen_pin_clear(void)
+{
+    g_stored_pin[0] = '\0';
+    /* vault_delete returns 0 on success or already-absent; either way
+     * the in-memory state is now empty. */
+    (void)vault_delete(LOCK_PIN_PATH);
+    kputs("[lockscreen] PIN cleared; enrollment required on next lock.\n");
+    return 0;
+}
+
+/* ── Cold-boot login config ───────────────────────────────────── */
+
+int cold_boot_login_required(void)
+{
+    uint32_t v = 1;  /* default = required */
+    int got = vault_load_config(LOCK_COLD_BOOT_PATH, &v, sizeof(v));
+    if (got != (int)sizeof(v)) return 1;
+    return v ? 1 : 0;
+}
+
+int cold_boot_login_set(int enabled)
+{
+    uint32_t v = enabled ? 1u : 0u;
+    return vault_save_config(LOCK_COLD_BOOT_PATH, &v, sizeof(v));
+}
+
 /* ── Modal state ──────────────────────────────────────────────── */
 
 void lockscreen_show(void)
@@ -141,6 +183,14 @@ void lockscreen_show(void)
     g_entry[0] = '\0';
     g_active = 1;
     g_flash_frames = 0;
+    /* If no PIN is configured, fall through to enrollment instead of
+     * trapping the user at a validation prompt that nothing satisfies. */
+    if (!lockscreen_pin_configured()) {
+        g_enroll_phase = LOCK_ENROLL_PICK;
+        g_enroll_first[0] = '\0';
+    } else {
+        g_enroll_phase = LOCK_ENROLL_OFF;
+    }
 }
 
 void lockscreen_repaint(void)
@@ -154,6 +204,72 @@ uint32_t lockscreen_failed_attempts(void) { return g_failed_attempts; }
 uint32_t lockscreen_unlock_count(void)    { return g_unlock_count; }
 
 /* ── Input ────────────────────────────────────────────────────── */
+
+/* ── Enrollment helpers ──────────────────────────────────────── */
+
+static void enroll_reset_to_pick(void)
+{
+    g_enroll_phase = LOCK_ENROLL_PICK;
+    g_enroll_first[0] = '\0';
+    g_entry_len = 0;
+    g_entry[0] = '\0';
+    g_flash_frames = 12;
+}
+
+static void enroll_handle_enter(void)
+{
+    /* Validate length, store/confirm, then either advance or commit. */
+    if (g_entry_len < LOCK_PIN_MIN_LEN || g_entry_len > LOCK_PIN_MAX_LEN) {
+        g_flash_frames = 12;
+        kputs("[lockscreen] enroll: PIN must be ");
+        kput_dec((uint64_t)LOCK_PIN_MIN_LEN);
+        kputs("..");
+        kput_dec((uint64_t)LOCK_PIN_MAX_LEN);
+        kputs(" digits\n");
+        g_entry_len = 0;
+        g_entry[0] = '\0';
+        return;
+    }
+
+    if (g_enroll_phase == LOCK_ENROLL_PICK) {
+        ls_strncpy(g_enroll_first, g_entry, LOCK_ENTRY_BUF);
+        g_entry_len = 0;
+        g_entry[0] = '\0';
+        g_enroll_phase = LOCK_ENROLL_CONFIRM;
+        return;
+    }
+
+    /* CONFIRM phase. */
+    if (!ls_streq(g_entry, g_enroll_first)) {
+        kputs("[lockscreen] enroll: confirm mismatch; restart\n");
+        enroll_reset_to_pick();
+        return;
+    }
+
+    if (lockscreen_set_pin(g_enroll_first) < 0) {
+        kputs("[lockscreen] enroll: set_pin failed; restart\n");
+        enroll_reset_to_pick();
+        return;
+    }
+
+    kputs("[lockscreen] PIN enrolled\n");
+    g_enroll_phase = LOCK_ENROLL_OFF;
+    g_unlock_count++;
+    g_active = 0;
+    g_entry_len = 0;
+    g_entry[0] = '\0';
+    g_enroll_first[0] = '\0';
+    g_flash_frames = 0;
+
+    extern int idle_chain_id(void);
+    int id = idle_chain_id();
+    if (id >= 0) {
+        chain_t *cc = chain_get(id);
+        if (cc) cc->vault_version++;
+    }
+    extern void idle_force_unlock(void);
+    idle_force_unlock();
+}
 
 void lockscreen_input(char c)
 {
@@ -169,6 +285,12 @@ void lockscreen_input(char c)
 
     if (c == '\n' || c == '\r') {
         if (g_entry_len == 0) return;
+
+        if (g_enroll_phase != LOCK_ENROLL_OFF) {
+            enroll_handle_enter();
+            return;
+        }
+
         if (ls_streq(g_entry, g_stored_pin)) {
             /* Unlock. */
             g_unlock_count++;
@@ -250,8 +372,10 @@ void lockscreen_draw(void)
     }
     fb_rect_outline(cx, cy, CARD_W, CARD_H, border, 2);
 
-    /* Title: "ZEOS  Locked". Boot font is 8x16 -- adequate for a modal. */
+    /* Title varies by mode: validation vs enrollment. */
     const char *title = "ZEOS  Locked";
+    if (g_enroll_phase == LOCK_ENROLL_PICK)    title = "ZEOS  Set a PIN";
+    else if (g_enroll_phase == LOCK_ENROLL_CONFIRM) title = "ZEOS  Confirm PIN";
     int title_w = ls_strlen(title) * 8;
     int tx = cx + (CARD_W - title_w) / 2;
     int ty = cy + 32;
@@ -283,11 +407,118 @@ void lockscreen_draw(void)
     font_draw(px, py, buf, FONT_BOOT, 16, 0xFFE2E8F0);
 
     /* Hint line. */
-    const char *hint = (g_failed_attempts > 0)
-        ? "Wrong PIN -- try again. Press Enter to validate."
-        : "Enter PIN. Press Enter to validate.";
+    const char *hint;
+    if (g_enroll_phase == LOCK_ENROLL_PICK) {
+        hint = "Choose a 4-16 digit PIN. Press Enter to continue.";
+    } else if (g_enroll_phase == LOCK_ENROLL_CONFIRM) {
+        hint = "Re-enter the same PIN to confirm. Press Enter.";
+    } else if (g_failed_attempts > 0) {
+        hint = "Wrong PIN -- try again. Press Enter to validate.";
+    } else {
+        hint = "Enter PIN. Press Enter to validate.";
+    }
     int hint_w = ls_strlen(hint) * 8;
     int hx = cx + (CARD_W - hint_w) / 2;
     int hy = cy + 144;
     font_draw(hx, hy, hint, FONT_BOOT, 16, 0xFF94A3B8);
+}
+
+/* ── Cold-boot login gate ─────────────────────────────────────── */
+
+/*
+ * Synchronous boot-time gate. Runs between chain_registry_init and
+ * scheduler_run. Shows the same overlay used by idle lock; the only
+ * differences from the idle path are:
+ *   1. The overlay is engaged unconditionally (not via the IDLE chain).
+ *   2. We hand-pump chain_registry_tick() + compositor_frame() until
+ *      the user has either validated their PIN or completed enrollment.
+ *
+ * Input flows the existing way: keyboard.c routes ASCII to
+ * lockscreen_input() while the overlay is active, so the shell pump
+ * never sees the bytes typed at the gate.
+ */
+void lockscreen_run_cold_boot_gate(void)
+{
+    lockscreen_show();
+
+    if (g_enroll_phase != LOCK_ENROLL_OFF) {
+        kputs("[lockscreen] cold-boot gate: PIN enrollment\n");
+    } else {
+        kputs("[lockscreen] cold-boot gate: PIN required\n");
+    }
+
+    compositor_dirty_all();
+
+    /* Pump until the overlay clears itself. The scheduler is not running
+     * yet -- mde_resolve_all gates many chains by scheduler_tick_count,
+     * which is still 0 -- so we drive input drains directly here:
+     *
+     *   1. keyboard_chain_drain() drains the PS/2 / USB-HID scancode
+     *      ring through process_scancode(), which routes ASCII to
+     *      lockscreen_input() while the overlay is active.
+     *   2. serial_rx_pop() drains COM1 RX through keyboard_inject_char(),
+     *      which has the same lockscreen-gating fast path.
+     *   3. keyboard_try_getc() drains any leftover ASCII that landed in
+     *      kb_buf before the lock screen claimed the modal -- belt and
+     *      suspenders.
+     *   4. compositor_frame() paints the overlay each loop iteration so
+     *      the user actually sees what they're typing into.
+     *   5. HLT until the next IRQ (PIT 1kHz or serial RX) to keep the
+     *      CPU idle while we wait. */
+    /* Paint the overlay once into the framebuffer. We deliberately do
+     * NOT use compositor_frame() here because the compositor pipeline
+     * relies on chains that the scheduler hasn't activated yet; in
+     * tests we observed the gate stalling on its second iteration when
+     * compositor_frame ran the full chain pass. The overlay is a simple
+     * centered card -- one paint plus per-input repaints is enough. */
+    extern void idle_post_overlay(void);
+
+    fb_clear(0xFF0F1115);
+    lockscreen_draw();
+
+    while (g_active) {
+        (void)keyboard_chain_drain();
+
+        /* serial_rx_pending() also tops up the RX ring from the UART
+         * FIFO so polling works on hosts where the COM1 IRQ never
+         * fires (notably some QEMU configurations). */
+        (void)serial_rx_pending();
+        uint8_t b;
+        int rx_any = 0;
+        while (serial_rx_pop(&b)) {
+            char c;
+            if      (b == 0x0D || b == 0x0A) c = '\n';
+            else if (b == 0x7F || b == 0x08) c = '\b';
+            else if (b < 0x20 || b > 0x7E)   continue;
+            else                              c = (char)b;
+            keyboard_inject_char(c);
+            rx_any = 1;
+        }
+
+        int kb_any = 0;
+        char c;
+        while (keyboard_try_getc(&c)) {
+            if (lockscreen_active()) {
+                lockscreen_input(c);
+                kb_any = 1;
+            } else {
+                break;
+            }
+        }
+
+        if (rx_any || kb_any) {
+            /* Repaint the masked entry on every keystroke. */
+            fb_clear(0xFF0F1115);
+            lockscreen_draw();
+        }
+
+        /* Cheap busy-poll. We don't depend on the IRQ wake here because
+         * some boot paths arrive at the gate with the next IRQ delayed
+         * (observed: HLT producing zero wakeups in QEMU stdio mode).
+         * The spin keeps CPU usage bounded without a hard sleep. */
+        for (volatile int i = 0; i < 100000; i++) { /* spin */ }
+    }
+
+    kputs("[lockscreen] cold-boot gate: cleared\n");
+    compositor_dirty_all();
 }

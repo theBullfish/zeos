@@ -226,6 +226,7 @@ static void cmd_brightness(const char *args);
 static void cmd_idle(const char *args);
 static void cmd_lock(const char *args);
 static void cmd_pin(const char *args);
+static void cmd_cold_boot_login(const char *args);
 static void cmd_power_button(const char *args);
 static void cmd_lid_close(const char *args);
 static void cmd_lid_open(const char *args);
@@ -644,7 +645,8 @@ static const struct shell_cmd commands[] = {
     {"brightness", "show or set display brightness (brightness [0-100|+N|-N])", cmd_brightness, VIS_ALWAYS},
     {"idle",    "show/set idle timing (idle | idle dim|lock|blank <secs>)", cmd_idle,  VIS_ALWAYS},
     {"lock",    "lock the screen now",            cmd_lock,    VIS_ALWAYS},
-    {"pin",     "set lock screen PIN (pin <new-pin>)", cmd_pin, VIS_ALWAYS},
+    {"pin",     "set lock screen PIN (pin <new-pin> | pin reset)", cmd_pin, VIS_ALWAYS},
+    {"cold-boot-login", "show/toggle cold-boot login (cold-boot-login [on|off])", cmd_cold_boot_login, VIS_ALWAYS},
     {"power-button", "show/set power-button action (suspend|shutdown|lock|ask)", cmd_power_button, VIS_ALWAYS},
     {"lid-close", "show/set lid-close action (suspend|lock|nothing)", cmd_lid_close, VIS_ALWAYS},
     {"lid-open",  "show/set lid-open action (wake|nothing)", cmd_lid_open, VIS_ALWAYS},
@@ -2830,6 +2832,7 @@ static void cmd_pin(const char *args)
     while (*args == ' ' || *args == '\t') args++;
     if (*args == '\0') {
         kputs("  usage: pin <new-pin>   (4..16 digits)\n");
+        kputs("         pin reset        (clear stored PIN)\n");
         return;
     }
     /* Bound the input -- copy into a small stack buffer so we can
@@ -2842,11 +2845,54 @@ static void cmd_pin(const char *args)
     }
     buf[n] = '\0';
 
+    /* `pin reset` -- forget the stored PIN. Forces re-enrollment on the
+     * next cold-boot gate or on the next idle-driven lock. */
+    if (n == 5 && buf[0]=='r' && buf[1]=='e' && buf[2]=='s'
+              && buf[3]=='e' && buf[4]=='t') {
+        lockscreen_pin_clear();
+        kputs("  PIN cleared. Enrollment will run on next cold-boot login.\n");
+        return;
+    }
+
     if (lockscreen_set_pin(buf) < 0) {
         kputs("  PIN must be 4..16 digits\n");
         return;
     }
     kputs("  PIN updated and persisted to /lock/pin\n");
+}
+
+static void cmd_cold_boot_login(const char *args)
+{
+    while (*args == ' ' || *args == '\t') args++;
+    if (*args == '\0') {
+        kputs("  cold-boot-login = ");
+        kputs(cold_boot_login_required() ? "on" : "off");
+        kputs(", PIN ");
+        kputs(lockscreen_pin_configured() ? "set" : "MISSING");
+        kputc('\n');
+        kputs("  usage: cold-boot-login on|off\n");
+        return;
+    }
+
+    if (args[0]=='o' && args[1]=='n' &&
+        (args[2]=='\0' || args[2]==' ' || args[2]=='\t')) {
+        if (cold_boot_login_set(1) < 0) {
+            kputs("  failed to persist /lock/cold-boot-required\n");
+            return;
+        }
+        kputs("  cold-boot-login = on (saved)\n");
+        return;
+    }
+    if (args[0]=='o' && args[1]=='f' && args[2]=='f' &&
+        (args[3]=='\0' || args[3]==' ' || args[3]=='\t')) {
+        if (cold_boot_login_set(0) < 0) {
+            kputs("  failed to persist /lock/cold-boot-required\n");
+            return;
+        }
+        kputs("  cold-boot-login = off (saved)\n");
+        return;
+    }
+    kputs("  usage: cold-boot-login on|off\n");
 }
 
 /* ── Power button / lid actions ─────────────────────────────── */
@@ -3790,6 +3836,22 @@ vault_done:
         }
     }
 
+    /* Cold-boot login -- the boot gate runs even before any idle time
+     * has accrued. Three reportable states:
+     *   required + PIN set    -> "required (PIN set)"
+     *   required + no PIN     -> "not required (no PIN)" (enrollment
+     *                            will run on next boot)
+     *   not required          -> "not required" */
+    kputs("  Cold-boot login ....... ");
+    {
+        int req = cold_boot_login_required();
+        int pin = lockscreen_pin_configured();
+        if (req && pin)        kputs("required (PIN set)\n");
+        else if (req && !pin)  kputs("not required (no PIN)\n");
+        else                   kputs("not required\n");
+        passes++;
+    }
+
     /* Power buttons (ACPI PNP0C0C / 0D / 0E + PM1 PWRBTN_STS poll). */
     kputs("  Power buttons ......... ");
     {
@@ -3835,19 +3897,31 @@ vault_done:
      * report. */
     {
         extern uint32_t undo_total_records(void);
+        extern uint32_t undo_total_undos(void);
+        extern uint32_t undo_total_redos(void);
         extern uint32_t context_menu_total_opens(void);
         extern uint32_t hover_total_zones(void);
-        extern int      dirty_count(void);
+        extern uint32_t hover_total_enters(void);
+        extern uint32_t quick_look_total_opens(void);
+        extern uint32_t list_state_total_renders(void);
         kputs("  UI primitives ......... ");
-        kputs("undo:");
+        kputs("undo/redo, context menus, hover, dirty, quick-look, list states — wired (rec=");
         kput_dec((uint64_t)undo_total_records());
-        kputs(" hover:");
-        kput_dec((uint64_t)hover_total_zones());
-        kputs(" ctx:");
+        kputs(" undo=");
+        kput_dec((uint64_t)undo_total_undos());
+        kputs(" redo=");
+        kput_dec((uint64_t)undo_total_redos());
+        kputs(" ctx=");
         kput_dec((uint64_t)context_menu_total_opens());
-        kputs(" dirty:");
-        kput_dec((uint64_t)dirty_count());
-        kputs(" — apps wired\n");
+        kputs(" hov=");
+        kput_dec((uint64_t)hover_total_zones());
+        kputs("/");
+        kput_dec((uint64_t)hover_total_enters());
+        kputs(" ql=");
+        kput_dec((uint64_t)quick_look_total_opens());
+        kputs(" ls=");
+        kput_dec((uint64_t)list_state_total_renders());
+        kputs(")\n");
         passes++;
     }
 
