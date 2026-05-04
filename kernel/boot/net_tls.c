@@ -11,13 +11,20 @@
  *
  * Build: mbedTLS source goes in kernel/lib/mbedtls/
  *        Configure via kernel/lib/mbedtls/mbedtls_config.h
+ *
+ * Dual-stack TLS: each slot's transport is v4 or v6, dispatched via
+ * the slot's family flag in the BIO callbacks. Happy Eyeballs picks
+ * the first to connect.
  */
 
 #include "net_tls.h"
 #include "net_tcp.h"
+#include "net_tcp6.h"
+#include "net_ipv6.h"
 #include "net_dns.h"
 #include "net_http.h"
 #include "kprint.h"
+#include "timer.h"
 #include "cfa_handle.h"
 #include "chain.h"
 #include "chain_registry.h"
@@ -43,10 +50,36 @@ extern long  zeos_time(long *timer);
 
 /* ── TLS connection structure ── */
 
+/* Address-family marker for the slot's transport. */
+#define TLS_FAM_NONE  0
+#define TLS_FAM_V4    4
+#define TLS_FAM_V6    6
+
+/*
+ * tls_transport_t — address-family-agnostic transport pointer.
+ *
+ * v4: the legacy TCP API still operates on `struct tcp_conn` (slot 0
+ *     of the v4 pool); we keep the struct embedded in the slot below
+ *     and the `v4` arm of the union is unused. Family flag is the
+ *     only thing the BIO callbacks read.
+ *
+ * v6: tcp_handle6_t (alias for tcp_handle_t) into the v6 slot pool
+ *     declared in net_tcp6.h. The BIO callbacks dispatch on the
+ *     family flag and call tcp_send_v6 / tcp_recv_v6_nb.
+ */
+typedef struct {
+    int family;                 /* TLS_FAM_V4 or TLS_FAM_V6 */
+    union {
+        tcp_handle_t  v4;       /* unused today; legacy struct path */
+        tcp_handle6_t v6;
+    } h;
+} tls_transport_t;
+
 struct tls_conn {
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config  conf;
-    struct tcp_conn     tcp;
+    struct tcp_conn     tcp;     /* v4 path: legacy struct */
+    tls_transport_t     xport;   /* family + v6 handle (or v4 marker) */
     int tcp_connected;
     char hostname[256];
     uint16_t port;
@@ -108,29 +141,47 @@ static mbedtls_ssl_context *tls_ssl(struct tls_conn *conn)
  * translate Zeos return semantics into mbedtls's expected sentinel
  * values so the handshake state machine can differentiate "no data
  * yet, retry" from "peer closed" from "fatal error".
+ *
+ * The BIO ctx is the owning struct tls_conn so the callbacks can read
+ * the slot's family flag and dispatch to v4 or v6 transport. v4 still
+ * uses the legacy tcp_conn struct API (single-active, slot 0); v6 uses
+ * the handle-based API into the v6 pool.
  */
 static int zeos_tls_send(void *ctx, const unsigned char *buf, size_t len)
 {
-    struct tcp_conn *tcp = (struct tcp_conn *)ctx;
-    /* Cap to uint16_t; mbedtls will call again for the rest. */
+    struct tls_conn *conn = (struct tls_conn *)ctx;
     uint16_t chunk = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
-    int n = tcp_send(tcp, buf, chunk);
-    if (n > 0)              return n;
-    if (tcp->remote_closed) return MBEDTLS_ERR_NET_CONN_RESET;
-    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_WRITE;
+    if (conn->xport.family == TLS_FAM_V6) {
+        int n = tcp_send_v6(conn->xport.h.v6, buf, chunk);
+        if (n > 0) return n;
+        if (tcp_v6_remote_closed(conn->xport.h.v6))
+            return MBEDTLS_ERR_NET_CONN_RESET;
+        return MBEDTLS_ERR_NET_SEND_FAILED;
+    }
+    int n = tcp_send(&conn->tcp, buf, chunk);
+    if (n > 0)                     return n;
+    if (conn->tcp.remote_closed)   return MBEDTLS_ERR_NET_CONN_RESET;
+    if (n == 0)                    return MBEDTLS_ERR_SSL_WANT_WRITE;
     return MBEDTLS_ERR_NET_SEND_FAILED;
 }
 
 static int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len)
 {
-    struct tcp_conn *tcp = (struct tcp_conn *)ctx;
+    struct tls_conn *conn = (struct tls_conn *)ctx;
     uint16_t chunk = len > 0xFFFF ? 0xFFFF : (uint16_t)len;
+    if (conn->xport.family == TLS_FAM_V6) {
+        int n = tcp_recv_v6_nb(conn->xport.h.v6, buf, chunk);
+        if (n > 0) return n;
+        if (tcp_v6_remote_closed(conn->xport.h.v6)) return 0;  /* clean EOF */
+        if (n == 0) return MBEDTLS_ERR_SSL_WANT_READ;
+        return MBEDTLS_ERR_NET_RECV_FAILED;
+    }
     /* Non-blocking: single net_poll pass, return whatever's available.
      * mbedtls's WANT_READ retry loop drives the wait — no 5-sec inline poll. */
-    int n = tcp_recv_nb(tcp, buf, chunk);
-    if (n > 0)              return n;
-    if (tcp->remote_closed) return 0;  /* clean EOF */
-    if (n == 0)             return MBEDTLS_ERR_SSL_WANT_READ;  /* no data yet, retry */
+    int n = tcp_recv_nb(&conn->tcp, buf, chunk);
+    if (n > 0)                    return n;
+    if (conn->tcp.remote_closed)  return 0;  /* clean EOF */
+    if (n == 0)                   return MBEDTLS_ERR_SSL_WANT_READ;
     return MBEDTLS_ERR_NET_RECV_FAILED;
 }
 
@@ -275,6 +326,171 @@ int tls_init(void)
     return 0;
 }
 
+/*
+ * Shared handshake: assumes g_tls.xport is set up with an established
+ * TCP transport (v4 or v6) and g_tls.hostname/port copied. Runs SSL
+ * setup, SNI, handshake, and cert verify. Tears down the TCP transport
+ * and returns NULL on any failure.
+ */
+static tls_conn_t *tls_finish_handshake(void)
+{
+    /* Set up SSL context. The slot's CFA handle was wrapped at
+     * tls_init time; we just initialize the underlying struct here.
+     * Every subsequent access goes through cfa_resolve via tls_ssl(). */
+    mbedtls_ssl_init(&g_tls.ssl);
+
+    mbedtls_ssl_context *ssl = tls_ssl(&g_tls);
+    mbedtls_ssl_config  *conf = tls_conf();
+    if (!ssl || !conf) {
+        kputs("TLS: cfa_resolve denied during connect\n");
+        mbedtls_ssl_free(&g_tls.ssl);
+        if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+        else                                  tcp_close(&g_tls.tcp);
+        g_tls.xport.family = TLS_FAM_NONE;
+        return NULL;
+    }
+
+    int ret = mbedtls_ssl_setup(ssl, conf);
+    if (ret != 0) {
+        kputs("TLS: ssl_setup failed\n");
+        mbedtls_ssl_free(ssl);
+        if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+        else                                  tcp_close(&g_tls.tcp);
+        g_tls.xport.family = TLS_FAM_NONE;
+        return NULL;
+    }
+
+    ret = mbedtls_ssl_set_hostname(ssl, g_tls.hostname);
+    if (ret != 0) {
+        kputs("TLS: set_hostname failed\n");
+        mbedtls_ssl_free(ssl);
+        if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+        else                                  tcp_close(&g_tls.tcp);
+        g_tls.xport.family = TLS_FAM_NONE;
+        return NULL;
+    }
+
+    /* BIO ctx = struct tls_conn so callbacks can dispatch on family. */
+    mbedtls_ssl_set_bio(ssl, &g_tls, zeos_tls_send, zeos_tls_recv, NULL);
+
+    while ((ret = mbedtls_ssl_handshake(ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+            ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            kputs("TLS: handshake failed (");
+            kput_dec(-ret);
+            kputs(")");
+            if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+                uint32_t f = mbedtls_ssl_get_verify_result(ssl);
+                kputs(" verify_flags=0x");
+                kput_hex(f);
+            }
+            kputs("\n");
+            mbedtls_ssl_free(ssl);
+            if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+            else                                  tcp_close(&g_tls.tcp);
+            g_tls.xport.family = TLS_FAM_NONE;
+            return NULL;
+        }
+    }
+
+    uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
+    if (flags != 0) {
+        kputs("TLS: certificate verification failed (0x");
+        kput_hex(flags);
+        kputs(")\n");
+        mbedtls_ssl_close_notify(ssl);
+        mbedtls_ssl_free(ssl);
+        if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+        else                                  tcp_close(&g_tls.tcp);
+        g_tls.xport.family = TLS_FAM_NONE;
+        return NULL;
+    }
+
+    kputs("TLS: connected, ");
+    kputs(mbedtls_ssl_get_version(ssl));
+    kputs(g_tls.xport.family == TLS_FAM_V6 ? " (v6)\n" : " (v4)\n");
+
+    g_tls.active = 1;
+    return &g_tls;
+}
+
+static int tls_copy_hostname(const char *hostname, uint16_t port)
+{
+    size_t hlen = 0;
+    while (hostname[hlen] && hlen < 512) hlen++;
+    if (hlen == 0 || hlen >= 256) {
+        kputs("TLS: hostname length out of range\n");
+        return -1;
+    }
+    int i;
+    for (i = 0; hostname[i] && i < 255; i++)
+        g_tls.hostname[i] = hostname[i];
+    g_tls.hostname[i] = 0;
+    g_tls.port = port;
+    return 0;
+}
+
+tls_conn_t *tls_open(const char *hostname, struct ipv4_addr ip, uint16_t port)
+{
+    if (g_tls.active) {
+        kputs("TLS: refused — connection already active\n");
+        return NULL;
+    }
+    if (tls_copy_hostname(hostname, port) < 0) return NULL;
+
+    if (tcp_connect(&g_tls.tcp, ip, port) < 0) {
+        kputs("TLS: TCP connect failed\n");
+        return NULL;
+    }
+    g_tls.tcp_connected = 1;
+    g_tls.xport.family = TLS_FAM_V4;
+    g_tls.xport.h.v4 = 0;
+    return tls_finish_handshake();
+}
+
+tls_conn_t *tls_open_v6(const char *hostname, struct ipv6_addr ip,
+                        uint16_t port)
+{
+    if (g_tls.active) {
+        kputs("TLS: refused — connection already active\n");
+        return NULL;
+    }
+    if (tls_copy_hostname(hostname, port) < 0) return NULL;
+
+    tcp_handle_t v6h = tcp_open_v6(ip, port);
+    if (v6h == TCP_INVALID_HANDLE) {
+        kputs("TLS: TCP6 connect failed\n");
+        return NULL;
+    }
+    g_tls.tcp_connected = 1;
+    g_tls.xport.family = TLS_FAM_V6;
+    g_tls.xport.h.v6 = v6h;
+    return tls_finish_handshake();
+}
+
+/*
+ * tls_open_v6_timed — internal: same as tls_open_v6 but with a TCP
+ * connect budget (Happy Eyeballs). Returns NULL if v6 doesn't establish
+ * within budget_ms; the caller is then free to try v4.
+ */
+static tls_conn_t *tls_open_v6_timed(const char *hostname, struct ipv6_addr ip,
+                                      uint16_t port, uint32_t budget_ms)
+{
+    if (g_tls.active) {
+        kputs("TLS: refused — connection already active\n");
+        return NULL;
+    }
+    if (tls_copy_hostname(hostname, port) < 0) return NULL;
+
+    tcp_handle_t v6h = tcp_open_v6_timed(ip, port, budget_ms);
+    if (v6h == TCP_INVALID_HANDLE) return NULL;
+
+    g_tls.tcp_connected = 1;
+    g_tls.xport.family = TLS_FAM_V6;
+    g_tls.xport.h.v6 = v6h;
+    return tls_finish_handshake();
+}
+
 tls_conn_t *tls_connect(const char *hostname, uint16_t port)
 {
     /* Single-connection model: refuse a second connect while one is live
@@ -334,92 +550,19 @@ tls_conn_t *tls_connect(const char *hostname, uint16_t port)
     }
 have_ip:;
 
-    /* TCP connect */
+    /* Hostname for SNI */
+    if (tls_copy_hostname(hostname, port) < 0) return NULL;
+
+    /* TCP connect (v4 path) */
     if (tcp_connect(&g_tls.tcp, server_ip, port) < 0) {
         kputs("TLS: TCP connect failed\n");
         return NULL;
     }
     g_tls.tcp_connected = 1;
+    g_tls.xport.family = TLS_FAM_V4;
+    g_tls.xport.h.v4 = 0;  /* slot 0 — legacy single-active */
 
-    /* Copy hostname for SNI */
-    int i;
-    for (i = 0; hostname[i] && i < 255; i++)
-        g_tls.hostname[i] = hostname[i];
-    g_tls.hostname[i] = 0;
-    g_tls.port = port;
-
-    /* Set up SSL context. The slot's CFA handle was wrapped at
-     * tls_init time; we just initialize the underlying struct here.
-     * Every subsequent access goes through cfa_resolve via tls_ssl(). */
-    mbedtls_ssl_init(&g_tls.ssl);
-
-    mbedtls_ssl_context *ssl = tls_ssl(&g_tls);
-    mbedtls_ssl_config  *conf = tls_conf();
-    if (!ssl || !conf) {
-        kputs("TLS: cfa_resolve denied during connect\n");
-        mbedtls_ssl_free(&g_tls.ssl);
-        tcp_close(&g_tls.tcp);
-        return NULL;
-    }
-
-    int ret = mbedtls_ssl_setup(ssl, conf);
-    if (ret != 0) {
-        kputs("TLS: ssl_setup failed\n");
-        mbedtls_ssl_free(ssl);
-        tcp_close(&g_tls.tcp);
-        return NULL;
-    }
-
-    /* SNI — server name indication */
-    ret = mbedtls_ssl_set_hostname(ssl, g_tls.hostname);
-    if (ret != 0) {
-        kputs("TLS: set_hostname failed\n");
-        mbedtls_ssl_free(ssl);
-        tcp_close(&g_tls.tcp);
-        return NULL;
-    }
-
-    /* Set I/O callbacks — ctx is the tcp_conn */
-    mbedtls_ssl_set_bio(ssl, &g_tls.tcp,
-                         zeos_tls_send, zeos_tls_recv, NULL);
-
-    /* TLS handshake */
-    while ((ret = mbedtls_ssl_handshake(ssl)) != 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-            ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-            kputs("TLS: handshake failed (");
-            kput_dec(-ret);
-            kputs(")");
-            if (ret == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-                uint32_t f = mbedtls_ssl_get_verify_result(ssl);
-                kputs(" verify_flags=0x");
-                kput_hex(f);
-            }
-            kputs("\n");
-            mbedtls_ssl_free(ssl);
-            tcp_close(&g_tls.tcp);
-            return NULL;
-        }
-    }
-
-    /* Verify certificate */
-    uint32_t flags = mbedtls_ssl_get_verify_result(ssl);
-    if (flags != 0) {
-        kputs("TLS: certificate verification failed (0x");
-        kput_hex(flags);
-        kputs(")\n");
-        mbedtls_ssl_close_notify(ssl);
-        mbedtls_ssl_free(ssl);
-        tcp_close(&g_tls.tcp);
-        return NULL;
-    }
-
-    kputs("TLS: connected, ");
-    kputs(mbedtls_ssl_get_version(ssl));
-    kputs("\n");
-
-    g_tls.active = 1;
-    return &g_tls;
+    return tls_finish_handshake();
 }
 
 int tls_send(tls_conn_t *conn, const void *data, int len)
@@ -457,7 +600,12 @@ void tls_close(tls_conn_t *conn)
         mbedtls_ssl_close_notify(ssl);
         mbedtls_ssl_free(ssl);
     }
-    tcp_close(&conn->tcp);
+    if (conn->xport.family == TLS_FAM_V6) {
+        tcp_close_v6(conn->xport.h.v6);
+    } else {
+        tcp_close(&conn->tcp);
+    }
+    conn->xport.family = TLS_FAM_NONE;
 
     /* The slot's h_ssl is permanent for the slot lifetime. We don't
      * release it here -- the next tls_connect on this slot will
@@ -578,6 +726,61 @@ static void tls_split_url(const char *url, int *use_tls,
  * On a 3xx response, redir_loc receives the raw Location value
  * (NUL-terminated, may be relative). Returns status or -1.
  */
+/*
+ * Happy Eyeballs for HTTPS: resolve A + AAAA, try v6 first with a
+ * 200 ms TCP-connect budget, fall back to v4 if v6 doesn't establish.
+ * Returns a live tls_conn_t or NULL.
+ *
+ * Note: this is a single-threaded simplification of RFC 8305. Real
+ * Happy Eyeballs runs both connects in parallel; we run them serially
+ * with a tight v6 budget. In practice on a v6-reachable network the
+ * SYN-ACK comes back well under 200 ms; on v6-only-unreachable
+ * networks we burn the budget once and then succeed on v4.
+ */
+static tls_conn_t *tls_happy_eyeballs(const char *hostname, uint16_t port)
+{
+    /* If hostname is already an IPv4 dotted-quad, just hand it to
+     * tls_connect — no AAAA can apply. */
+    {
+        const char *p = hostname;
+        int dots = 0;
+        while (*p) { if (*p == '.') dots++; p++; }
+        /* A literal IPv4 has exactly 3 dots and only digits/dots. We
+         * keep this loose; tls_connect re-validates. */
+        if (dots == 3) {
+            int only_digits = 1;
+            for (const char *q = hostname; *q; q++) {
+                if (!((*q >= '0' && *q <= '9') || *q == '.')) {
+                    only_digits = 0; break;
+                }
+            }
+            if (only_digits) return tls_connect(hostname, port);
+        }
+    }
+
+    struct ipv6_addr ip6;
+    int have_v6 = (dns_resolve_aaaa(hostname, &ip6) == 0) ? 1 : 0;
+
+    if (have_v6) {
+        char ipbuf[48];
+        ipv6_format(ip6, ipbuf);
+        kputs("HTTPS: trying v6 [");
+        kputs(ipbuf);
+        kputs("] (200ms budget)\n");
+        tls_conn_t *c = tls_open_v6_timed(hostname, ip6, port, 200);
+        if (c) return c;
+        kputs("HTTPS: v6 missed budget — falling back to v4\n");
+    }
+
+    /* v4 path */
+    struct ipv4_addr ip4;
+    if (dns_resolve(hostname, &ip4) < 0) {
+        kputs("HTTPS: v4 DNS failed\n");
+        return NULL;
+    }
+    return tls_open(hostname, ip4, port);
+}
+
 int https_get_once(const char *hostname, const char *path,
                    char *resp_buf, int resp_max, int *body_len,
                    char *redir_loc, int redir_max)
@@ -585,7 +788,7 @@ int https_get_once(const char *hostname, const char *path,
     if (redir_max > 0) redir_loc[0] = 0;
     if (body_len) *body_len = 0;
 
-    tls_conn_t *conn = tls_connect(hostname, 443);
+    tls_conn_t *conn = tls_happy_eyeballs(hostname, 443);
     if (!conn) return -1;
 
     /* Build HTTP/1.1 request */

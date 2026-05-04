@@ -23,6 +23,7 @@
 #define ZEOS_NET_TLS_H
 
 #include "net.h"
+#include "net_ipv6.h"
 #include <stdint.h>
 
 /* TLS connection state */
@@ -37,6 +38,21 @@ typedef struct tls_conn tls_conn_t;
  * hostname is used for SNI (Server Name Indication).
  */
 tls_conn_t *tls_connect(const char *hostname, uint16_t port);
+
+/*
+ * tls_open(hostname, ipv4, port) — peer to tls_connect but takes a
+ * pre-resolved IPv4 address (skips DNS). Used by Happy Eyeballs after
+ * the resolver has handed us both an A and AAAA record.
+ */
+tls_conn_t *tls_open(const char *hostname, struct ipv4_addr ip, uint16_t port);
+
+/*
+ * tls_open_v6(hostname, ipv6, port) — IPv6 peer to tls_open. Same
+ * handshake / cert validation, but on a tcp6 transport. SNI uses
+ * `hostname` (string), not the address literal.
+ */
+tls_conn_t *tls_open_v6(const char *hostname, struct ipv6_addr ip,
+                        uint16_t port);
 
 /*
  * Send data over TLS. Returns bytes sent or -1 on error.

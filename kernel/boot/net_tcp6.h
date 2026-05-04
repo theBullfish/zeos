@@ -12,8 +12,27 @@
 #include "net_ipv6.h"
 #include "net_tcp.h"   /* for tcp_handle_t / tcp_state / TCP_INVALID_HANDLE */
 
+/* v6 handles share the int-handle representation but live in a
+ * separate slot pool. Aliased for callers that want family clarity
+ * (e.g. tls_transport_t's v6 arm). */
+typedef tcp_handle_t tcp_handle6_t;
+
 /* Open a TCP/IPv6 connection. Returns handle or TCP_INVALID_HANDLE. */
 tcp_handle_t tcp_open_v6(struct ipv6_addr dst, uint16_t port);
+
+/* Open with a budget (milliseconds). Returns TCP_INVALID_HANDLE if the
+ * SYN-ACK doesn't arrive before the budget expires. Used by Happy
+ * Eyeballs to bound how long we wait on v6 before falling back to v4. */
+tcp_handle_t tcp_open_v6_timed(struct ipv6_addr dst, uint16_t port,
+                                uint32_t budget_ms);
+
+/* Non-blocking receive on a v6 handle. Single net_poll, returns whatever's
+ * already in the rx buffer. 0 = no data yet (caller should retry).
+ * < 0 = error or remote closed (peer dropped us). */
+int  tcp_recv_v6_nb(tcp_handle_t h, void *buf, uint16_t max_len);
+
+/* Probe remote_closed flag on a v6 handle. */
+int  tcp_v6_remote_closed(tcp_handle_t h);
 
 /* Send data on a v6 handle. Blocking stop-and-wait with retransmission. */
 int  tcp_send_v6(tcp_handle_t h, const void *data, uint16_t len);

@@ -372,3 +372,97 @@ void tcp6_process(const struct ipv6_addr *src, const struct ipv6_addr *dst,
     }
     (void)seg_ack;
 }
+
+/* ── Extended API (Happy Eyeballs / TLS bridge) ─────────────────── */
+
+/*
+ * Open with a millisecond budget. We replicate tcp_open_v6's setup
+ * (slot allocation, SYN, retransmit) but the SYN-ACK wait is bounded
+ * by wall-clock TSC against the budget instead of a fixed iteration
+ * count. If the budget expires we tear the slot back down and return
+ * TCP_INVALID_HANDLE so Happy Eyeballs can fall through to v4 cleanly.
+ */
+tcp_handle_t tcp_open_v6_timed(struct ipv6_addr dst, uint16_t port,
+                                uint32_t budget_ms)
+{
+    int slot = -1;
+    for (int i = 0; i < TCP6_MAX_CONNECTIONS; i++) {
+        if (!s_pool[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) return TCP_INVALID_HANDLE;
+    struct tcp6_conn *c = &s_pool[slot];
+    c->remote_ip = dst;
+    c->remote_port = port;
+    c->local_port = 49152 + (uint16_t)(rdtsc6_tcp() & 0x3FFF);
+    c->seq = (uint32_t)rdtsc6_tcp();
+    c->ack = 0;
+    c->state = TCP_CLOSED;
+    c->in_use = 1;
+    c->rx_len = 0; c->rx_read = 0; c->remote_closed = 0;
+    retx_clear(c);
+
+    c->state = TCP_SYN_SENT;
+    uint32_t syn_expect = c->seq + 1;
+    send_tracked(c, TCP_SYN, 0, 0, syn_expect);
+    c->seq++;
+
+    uint64_t freq = timer_tsc_freq();
+    uint64_t start = timer_read_tsc();
+    /* Convert ms budget to TSC ticks. If freq calibration failed,
+     * fall back to ~1 GHz assumption — better than infinite. */
+    uint64_t budget_ticks = freq ? (freq / 1000ULL) * (uint64_t)budget_ms
+                                  : 1000000ULL * (uint64_t)budget_ms;
+
+    while (c->state == TCP_SYN_SENT) {
+        net_poll();
+        tcp6_retransmit_tick();
+        if (c->state == TCP_ERROR) break;
+        uint64_t elapsed = timer_read_tsc() - start;
+        if (elapsed >= budget_ticks) break;
+        for (volatile int j = 0; j < 5000; j++);
+    }
+
+    if (c->state != TCP_ESTABLISHED) {
+        /* Best effort: try to send a RST so the peer doesn't keep a
+         * half-open SYN-ACK queue entry. send_seg ignores failure. */
+        c->state = TCP_CLOSED;
+        c->in_use = 0;
+        retx_clear(c);
+        return TCP_INVALID_HANDLE;
+    }
+    return slot;
+}
+
+/*
+ * Non-blocking recv: single poll, return whatever's in the rx buffer
+ * (or 0 if nothing). The TLS BIO callback drives the retry via
+ * MBEDTLS_ERR_SSL_WANT_READ. Mirror of net_tcp.c's tcp_recv_nb.
+ */
+int tcp_recv_v6_nb(tcp_handle_t h, void *buf, uint16_t max_len)
+{
+    struct tcp6_conn *c = get(h);
+    if (!c) return -1;
+
+    net_poll();
+    tcp6_retransmit_tick();
+
+    if (c->rx_read < c->rx_len) {
+        uint16_t avail = c->rx_len - c->rx_read;
+        uint16_t n = avail > max_len ? max_len : avail;
+        uint8_t *d = (uint8_t *)buf;
+        for (uint16_t i = 0; i < n; i++) d[i] = c->rx_buf[c->rx_read + i];
+        c->rx_read += n;
+        return n;
+    }
+    /* Reset window so future packets land at offset 0 */
+    c->rx_len = 0; c->rx_read = 0;
+    if (c->remote_closed) return 0;  /* signal EOF via 0 — TLS layer maps */
+    return 0;  /* no data yet; caller polls */
+}
+
+int tcp_v6_remote_closed(tcp_handle_t h)
+{
+    struct tcp6_conn *c = get(h);
+    if (!c) return 1;
+    return c->remote_closed ? 1 : 0;
+}

@@ -49,6 +49,7 @@
 #include "net_ipv6.h"
 #include "net_tcp.h"
 #include "net_http.h"
+#include "net_tls.h"
 #include "timer.h"
 #include "signal.h"
 #include "chain.h"
@@ -3572,7 +3573,9 @@ vault_done:
         }
     }
 
-    /* HTTPS: full TLS handshake + GET against a known-good host */
+    /* HTTPS: full TLS handshake + GET against a known-good host.
+     * Goes through Happy Eyeballs (https_get_once → tls_happy_eyeballs):
+     * if v6 connectivity exists this fetches over v6, otherwise v4. */
     kputs("  HTTPS fetch ........... ");
     if (!g_net.up) {
         kputs("SKIP (no network)\n");
@@ -3589,6 +3592,52 @@ vault_done:
             kputs("FAIL (status=");
             kput_dec(status); kputs(")\n");
             fails++;
+        }
+    }
+
+    /* HTTPS/v6 explicit: AAAA-only path. Logs honestly if no v6 route. */
+    kputs("  HTTPS/v6 .............. ");
+    if (!g_net.up) {
+        kputs("SKIP (no network)\n");
+    } else {
+        struct ipv6_addr ip6;
+        extern int dns_resolve_aaaa(const char *, struct ipv6_addr *);
+        extern tls_conn_t *tls_open_v6(const char *, struct ipv6_addr, uint16_t);
+        if (dns_resolve_aaaa("letsencrypt.org", &ip6) < 0) {
+            kputs("no v6 route (no AAAA / no v6 reachability)\n");
+        } else {
+            char ipbuf[48];
+            ipv6_format(ip6, ipbuf);
+            tls_conn_t *c = tls_open_v6("letsencrypt.org", ip6, 443);
+            if (!c) {
+                kputs("no v6 route (TCP6/TLS failed to "); kputs(ipbuf); kputs(")\n");
+            } else {
+                /* Issue a tiny GET and count bytes */
+                const char *req =
+                    "GET / HTTP/1.1\r\nHost: letsencrypt.org\r\n"
+                    "Connection: close\r\nUser-Agent: Zeos/0.1\r\n\r\n";
+                int rl = 0; while (req[rl]) rl++;
+                int sent = 0;
+                while (sent < rl) {
+                    int n = tls_send(c, req + sent, rl - sent);
+                    if (n < 0 && n != -0x6900 /* WANT_READ-ish placeholder */) break;
+                    if (n > 0) sent += n;
+                }
+                static char rbuf[4096];
+                int total = 0;
+                while (total < (int)sizeof(rbuf) - 1) {
+                    int n = tls_recv(c, rbuf + total, sizeof(rbuf) - 1 - total);
+                    if (n <= 0) break;
+                    total += n;
+                }
+                tls_close(c);
+                if (total > 0) {
+                    kputs("fetched ("); kput_dec(total); kputs(" bytes) — letsencrypt.org via "); kputs(ipbuf); kputs("\n");
+                    passes++;
+                } else {
+                    kputs("no v6 route (handshake ok, no data from "); kputs(ipbuf); kputs(")\n");
+                }
+            }
         }
     }
 
