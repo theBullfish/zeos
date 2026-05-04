@@ -25,6 +25,10 @@
  * Idle: HLT until next interrupt. Wake: any IRQ-driven chain
  * (kbd, mouse, NIC RX, NVMe completion, GPU vsync) bumps a pending
  * counter that the next tick consumes.
+ *
+ * Serial input (UART) flows through CHAIN_SERIAL_IN; PS/2 through
+ * CHAIN_KEYBOARD. Both produce input_event which MDE routes to
+ * the shell pump.
  */
 
 #include "scheduler.h"
@@ -37,6 +41,7 @@
 #include "serial.h"
 #include "timer.h"
 #include "kprint.h"
+#include "io.h"
 
 #define SCHED_LOG_RING 256
 
@@ -502,19 +507,14 @@ void scheduler_run(void)
          * consumer of input_event signals. */
         char c;
         int dispatched = 0;
+        /* Both PS/2 (CHAIN_KEYBOARD) and UART (CHAIN_SERIAL_IN) feed
+         * kb_buf with ASCII characters during chain_registry_tick().
+         * The shell is just another consumer of input_event signals;
+         * we drain the merged ring once per tick. */
         while (keyboard_try_getc(&c)) {
             (void)shell_pump_char(c);
             dispatched++;
-            if (dispatched >= 64) break;  /* fairness */
-        }
-        /* Serial RX: anyone driving us via the UART (debug console,
-         * QEMU -serial stdio) feeds the same shell pump. CR/LF are
-         * normalized so terminals work without raw mode. */
-        while (serial_try_getc(&c)) {
-            if (c == '\r') c = '\n';
-            (void)shell_pump_char(c);
-            dispatched++;
-            if (dispatched >= 128) break;
+            if (dispatched >= 128) break;  /* fairness */
         }
 
         /* 7. If nothing happened this tick, idle until an IRQ wakes us. */

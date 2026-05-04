@@ -72,14 +72,15 @@ void serial_init(void)
     s_rx_tail = 0;
     s_rx_dropped = 0;
 
-    /* TEMP DIAG: skip baud reprogramming to leave UEFI's settings alone */
-    outb(COM1 + 1, 0x00);  /* Disable interrupts during config */
-    /* FCR: enable FIFO, clear RX+TX, trigger=1 byte. 1-byte trigger
-     * minimizes latency for line-mode terminals (single-keystroke). */
-    outb(COM1 + 2, 0x07);
-    outb(COM1 + 4, 0x0F);  /* DTR/RTS asserted, OUT1+OUT2 enabled.
-                            * OUT2=1 routes the UART IRQ to the PIC;
-                            * required for IRQ4 to fire at all on PCs. */
+    outb(COM1 + 1, 0x00);  /* IER: no IRQs during config */
+    outb(COM1 + 3, 0x80);  /* LCR: DLAB=1 */
+    outb(COM1 + 0, 0x01);  /* DLL: divisor lo = 1 (115200) */
+    outb(COM1 + 1, 0x00);  /* DLM: divisor hi = 0 */
+    outb(COM1 + 3, 0x03);  /* LCR: 8N1, DLAB=0 */
+    outb(COM1 + 2, 0x01);  /* FCR: enable FIFO only (no clear yet) */
+    outb(COM1 + 2, 0x07);  /* FCR: enable FIFO + clear RX/TX, 1B trig */
+    outb(COM1 + 4, 0x0F);  /* MCR: DTR|RTS|OUT1|OUT2.
+                              OUT2 routes UART IRQ to the PIC. */
 
     /* Drain anything left in the RX FIFO from the loopback test or
      * from firmware-side console handoff. Some QEMU configurations
@@ -163,24 +164,10 @@ int serial_try_getc(char *out)
 
 int serial_rx_pending(void)
 {
-    static uint32_t diag_last_isr = 0;
-    static uint32_t diag_count = 0;
-    if (diag_count < 5 || s_isr_count != diag_last_isr) {
-        diag_count++;
-        diag_last_isr = s_isr_count;
-        extern void kputs(const char *);
-        extern void kput_hex(uint64_t);
-        extern void kput_dec(uint64_t);
-        kputs("[ser_diag isr=");
-        kput_dec((uint64_t)s_isr_count);
-        kputs(" lsr=");
-        kput_hex((uint64_t)inb(COM1+5));
-        kputs(" head=");
-        kput_dec((uint64_t)s_rx_head);
-        kputs(" tail=");
-        kput_dec((uint64_t)s_rx_tail);
-        kputs("]\n");
-    }
+    /* Top up the ring from the FIFO before reporting. This makes the
+     * polling fallback work on systems where IRQ4 never fires (some
+     * QEMU stdio configurations, certain UEFI handoffs, etc.). The
+     * ISR drains the same FIFO when an interrupt does fire. */
     serial_rx_drain_fifo();
     return (int)((s_rx_head - s_rx_tail) & (SERIAL_RX_RING - 1u));
 }
