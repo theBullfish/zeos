@@ -27,6 +27,7 @@
 #include "mde_chain.h"
 #include "gpu_compute.h"
 #include "gpu_virtio.h"
+#include "gpu_goya.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "serial.h"
@@ -1001,6 +1002,21 @@ int chain_registry_init(void)
             int gop_id = -1;
             (void)gpu_virtio_gop_fallback(&gop_id);
             CHAIN_DISPLAY_GOP = gop_id;
+        }
+    }
+
+    /* Habana Goya HL-1000 compute accelerator(s). Compute-only — no
+     * display sub-chains (per docs/GPU_HOLES.md A3 / D3). Each detected
+     * card registers a CHAIN_GOYA_<n> under CHAIN_CPU and (when the
+     * preboot FIT blob is embedded + handshake clears) a
+     * gpu_compute_backend named "goya-N" so MDE.device_select can
+     * route prefer_gpu work onto it. */
+    {
+        int goyas = gpu_goya_init(CHAIN_CPU);
+        if (goyas > 0) {
+            kputs("[chain_registry] goya cards: ");
+            kput_dec((uint64_t)goyas);
+            kputc('\n');
         }
     }
 

@@ -93,6 +93,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/updater.c \
            boot/gpu_virtio.c \
            boot/gpu_compute.c \
+           boot/gpu_goya.c \
            boot/scheduler.c \
            boot/smp.c \
            boot/persistence.c \
@@ -124,8 +125,12 @@ FONT_JBMONO = ../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
 FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
 
 # ── Embedded firmware blobs (binary -> ELF via objcopy) ──
-FW_RTL8188EU = lib/firmware/rtl8188eufw.bin
-FW_OBJS      = lib/firmware/rtl8188eufw.o
+FW_RTL8188EU       = lib/firmware/rtl8188eufw.bin
+FW_GOYA_BOOT_FIT   = lib/firmware/habanalabs/goya/goya-boot-fit.itb
+FW_GOYA_LINUX_FIT  = lib/firmware/habanalabs/goya/goya-fit.itb
+FW_OBJS      = lib/firmware/rtl8188eufw.o \
+               lib/firmware/habanalabs/goya/goya-boot-fit.o \
+               lib/firmware/habanalabs/goya/goya-fit.o
 
 # AP bring-up trampoline (assembled flat binary embedded as ELF object).
 SMP_OBJS    = boot/smp_trampoline.o
@@ -151,6 +156,55 @@ lib/firmware/rtl8188eufw.o: $(FW_RTL8188EU)
 		--output-target=elf64-x86-64 \
 		--binary-architecture=i386:x86-64 \
 		rtl8188eufw.bin rtl8188eufw.o
+
+# Embed Habana Goya FIT firmware blobs (preboot + Linux). cd into the
+# firmware directory so objcopy emits clean symbol names of the form
+# _binary_goya_boot_fit_itb_{start,end,size} and
+# _binary_goya_fit_itb_{start,end,size}.
+# If the blob source file is missing, build an empty .o so the
+# weak-linked symbols collapse to start==end and gpu_goya.c reports
+# "no firmware" honestly.
+lib/firmware/habanalabs/goya/goya-boot-fit.o: $(FW_GOYA_BOOT_FIT)
+	@mkdir -p lib/firmware/habanalabs/goya
+	@if [ -f $(FW_GOYA_BOOT_FIT) ]; then \
+		cd lib/firmware/habanalabs/goya && $(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			goya-boot-fit.itb goya-boot-fit.o ; \
+	else \
+		echo "[fw] $(FW_GOYA_BOOT_FIT) absent -- emitting empty stub"; \
+		printf '' > lib/firmware/habanalabs/goya/_empty.bin ; \
+		cd lib/firmware/habanalabs/goya && $(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			--redefine-sym _binary__empty_bin_start=_binary_goya_boot_fit_itb_start \
+			--redefine-sym _binary__empty_bin_end=_binary_goya_boot_fit_itb_end \
+			--redefine-sym _binary__empty_bin_size=_binary_goya_boot_fit_itb_size \
+			_empty.bin goya-boot-fit.o ; \
+	fi
+
+lib/firmware/habanalabs/goya/goya-fit.o: $(FW_GOYA_LINUX_FIT)
+	@mkdir -p lib/firmware/habanalabs/goya
+	@if [ -f $(FW_GOYA_LINUX_FIT) ]; then \
+		cd lib/firmware/habanalabs/goya && $(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			goya-fit.itb goya-fit.o ; \
+	else \
+		echo "[fw] $(FW_GOYA_LINUX_FIT) absent -- emitting empty stub"; \
+		printf '' > lib/firmware/habanalabs/goya/_empty2.bin ; \
+		cd lib/firmware/habanalabs/goya && $(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			--redefine-sym _binary__empty2_bin_start=_binary_goya_fit_itb_start \
+			--redefine-sym _binary__empty2_bin_end=_binary_goya_fit_itb_end \
+			--redefine-sym _binary__empty2_bin_size=_binary_goya_fit_itb_size \
+			_empty2.bin goya-fit.o ; \
+	fi
 
 # AP bring-up trampoline. NASM assembles the 16->32->64 trampoline
 # to a flat 4 KiB binary; objcopy embeds it as an ELF section so the

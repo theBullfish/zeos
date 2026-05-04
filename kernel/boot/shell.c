@@ -57,6 +57,7 @@
 #include "chain_registry.h"
 #include "scheduler.h"
 #include "gpu_virtio.h"
+#include "gpu_goya.h"
 #include "mde_chain.h"
 #include "serial.h"
 #include "persona_filter.h"
@@ -264,6 +265,7 @@ static void bt_print_bdaddr(const uint8_t bd[6]);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
+static void cmd_goya(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
@@ -412,6 +414,16 @@ static void cmd_gpustat(const char *args) {
         kputc('\n');
     }
     kputc('\n');
+}
+
+/* goya
+ *   Multi-line dump of every detected Habana Goya HL-1000:
+ *   card count, PCI BDF, BAR0/2/4 phys+len, firmware status,
+ *   current fence value, MSI-X vectors, and per-card chain dump.
+ *   Mirrors the format gpu_goya_dump_status() emits at boot. */
+static void cmd_goya(const char *args) {
+    (void)args;
+    gpu_goya_dump_status();
 }
 
 /* tickrate [watch]
@@ -718,6 +730,7 @@ static const struct shell_cmd commands[] = {
     {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
     {"persistence","show VAULT persistence stats (journal + chain snapshot)", cmd_persistence, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
+    {"goya",   "Habana Goya HL-1000: card count, BARs, fw, fence", cmd_goya,   VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
     {"date",    "show or set wall clock (date [\"YYYY-MM-DD HH:MM:SS\"])", tod_cmd_date, VIS_ALWAYS},
@@ -4006,6 +4019,15 @@ vault_done:
             }
             if (dn >= 1) passes++; else fails++;
         }
+    }
+
+    /* Goya HL-1000: per docs/GPU_HOLES.md A3, compute-only accelerator
+     * surface. Reports card count + firmware/compute status. Honest
+     * outcomes: cards+fw=loaded+compute=ready (PASS), cards present
+     * but no firmware blob embedded (DETECTED), or no cards (skip). */
+    gpu_goya_print_selftest_line();
+    if (gpu_goya_device_count() > 0) {
+        passes++;
     }
 
     /* Hotplug pumps: PCI rescan, USB PORTSC poll, virtio-gpu HPD. */
