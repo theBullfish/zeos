@@ -4262,9 +4262,7 @@ vault_done:
         extern uint32_t quick_look_total_opens(void);
         extern uint32_t list_state_total_renders(void);
         kputs("  UI primitives ......... ");
-        extern uint32_t quick_look_total_decodes_ok(void);
-        extern uint32_t quick_look_total_decodes_fail(void);
-        kputs("undo/redo, context menus, hover, dirty, quick_look=full PNG decode, list states — wired (rec=");
+        kputs("undo/redo, context menus, hover, dirty, quick-look, list states — wired (rec=");
         kput_dec((uint64_t)undo_total_records());
         kputs(" undo=");
         kput_dec((uint64_t)undo_total_undos());
@@ -4278,10 +4276,6 @@ vault_done:
         kput_dec((uint64_t)hover_total_enters());
         kputs(" ql=");
         kput_dec((uint64_t)quick_look_total_opens());
-        kputs("/dec=");
-        kput_dec((uint64_t)quick_look_total_decodes_ok());
-        kputs(",");
-        kput_dec((uint64_t)quick_look_total_decodes_fail());
         kputs(" ls=");
         kput_dec((uint64_t)list_state_total_renders());
         kputs(")\n");
