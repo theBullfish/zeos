@@ -211,7 +211,40 @@ static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 static void cmd_lsdrives(const char *args);
-static const char *drive_kind_label(int k);
+
+static const char *drive_kind_label(int k) {
+    switch (k) {
+        case BLOCK_KIND_NVME:    return "nvme";
+        case BLOCK_KIND_AHCI:    return "ahci";
+        case BLOCK_KIND_USB_MSC: return "usb-msc";
+        default:                 return "?";
+    }
+}
+
+static void cmd_lsdrives(const char *args) {
+    (void)args;
+    int n = block_drive_count();
+    if (n == 0) { kputs("  No storage drives.\n"); return; }
+    kputs("\n  idx  kind     sectors        size       model\n");
+    kputs(  "  ---  -------  -------------  ---------  -----\n");
+    for (int i = 0; i < n; i++) {
+        block_drive_info_t info;
+        if (block_drive_info(i, &info) != 0) continue;
+        uint64_t bytes = info.sectors * (uint64_t)info.sector_size;
+        kputs("  ");
+        kput_dec(i); kputs("    ");
+        kputs(drive_kind_label(info.kind));
+        kputs("\t");
+        kput_dec(info.sectors);
+        kputs("\t");
+        if (bytes >= (1ull << 30))      { kput_dec(bytes >> 30); kputs(" GB"); }
+        else if (bytes >= (1ull << 20)) { kput_dec(bytes >> 20); kputs(" MB"); }
+        else                             { kput_dec(bytes >> 10); kputs(" KB"); }
+        if (info.model[0]) { kputs("  "); kputs(info.model); }
+        kputs("\n");
+    }
+    kputs("\n");
+}
 
 /* FAT32 read-only */
 static void cmd_fat_mount(const char *args);
