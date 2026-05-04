@@ -33,6 +33,18 @@ session. Three sections, that's it.
 
 - PR #2 (draft) opened on theBullfish/zeos against `main`.
 
+- AST type landed (commit `b630c5d`). `tools/zplus/src/ast.rs` defines
+  the typed enum surface for Z+. The chord rule from
+  `docs/SIGNAL_LOGIC.md` §1 is **structural**: a `|` merge is one
+  `Merge` node carrying its policy (All / Any / Quorum{n,m} /
+  Fastest(N) / Within / By), never a DAG of independent edges. Comments
+  at the top of `ast.rs` name the linear-default tells we explicitly
+  designed to NOT support. Hand-built AST for the top section of
+  `programs/02_log_monitor.zp` lives in `tests/ast_log_monitor.rs`
+  with the chord-rule canary `merge_is_one_node_not_three_flow_edges`
+  that fails first on any future parser lowering mistake. 47 tests
+  green.
+
 - v2 lexer landed (commit `0c4f710`). Adds 8 token kinds — Hex,
   HexColor, Dimension, ByteSize, TimePast, DevNull, TemplateString,
   Bang — plus a boundary rule that prevents number suffixes from
@@ -64,46 +76,40 @@ session. Three sections, that's it.
 
 ## Next up
 
-**v3 lexer cleanup, then start the parser.** Three corpus discoveries
-need a spec decision before the lexer can claim full coverage. Each is
-small in code size but each really wants a Brad-level call before
-implementation:
+**Parser, smallest first cut.** AST is in. Lexer covers 65/68 files.
+The bridge from token stream → AST is the next thing.
 
-1. **`↑` heat-up postfix operator** (`programs/chirp.zp:47` —
-   `post.heat↑`). Is there also a `↓`? Are these unary expressions or
-   sugar for `+= 1` / `-= 1`? Once decided: ~1 hour to add `HeatUp` /
-   `HeatDown` tokens with tests.
+Suggested smallest shippable increment:
 
-2. **String escapes** (`programs/derez/forge_ide.zp:261` — LSP snippet
-   templates contain `\"`). Decide the supported set:
-   - Minimal: just `\"` and `\\` (matches what the corpus actually
-     uses — forge_ide is the only file with escapes).
-   - C-style: `\"`, `\\`, `\n`, `\t`, `\r`, `\0`.
-   - Once decided: re-architect the string lex loop to recognize
-     escapes, then write tests.
+1. **Parse a single wire-declaration line** — `name : <chain>` where
+   `<chain>` is the simplest form: `Call` followed by zero or more
+   `Flow` to atom paths. Target: parse line 8 of
+   `programs/02_log_monitor.zp` (`syslog : fs("/var/log/syslog") -> lines`)
+   into the same `WireDecl` shape that `tests/ast_log_monitor.rs`
+   hand-built. Round-trip via `assert_eq!(parsed, hand_built)`.
+2. **Then merge resolution** — handle the vertical `-> |` /
+   `-> | -> name` block as one `Merge` node with `MergePolicy::All`.
+   This is where the chord rule first hits parser code; the canary
+   test in `ast_log_monitor.rs` will catch lowering mistakes.
+3. **Then the rest of `02_log_monitor.zp`** — gate(...), parse(...),
+   delta(...), rate(per: ...), within(...), on_silence(...),
+   vault.store(ttl: ...). Each adds Call shape variants but no new
+   chain-level operators.
 
-3. **`─...>` long-form Flow arrow** (`programs/goya_fleet.zp:217` —
-   `intake ────────────────────> |`, 20 occurrences in this one file).
-   Is this real Z+ syntax (a visual emphasis variant of `->`) or
-   one-author decoration that should be reformatted? If real: lexer
-   matches `(─)+>` as Flow. If decoration: leave goya_fleet on the
-   error allowlist and ask the author to reformat.
+Defer until after `02_log_monitor.zp` parses end-to-end:
 
-After v3 lexer cleanup, **start the parser.** First parse target stays
-`programs/02_log_monitor.zp`. Goal: produce an AST that represents the
-chain graph (named wires, gate calls, taps, vault sinks). Check
-`docs/CHAIN_CONTRACT.md` and `docs/SIGNAL_LOGIC.md` before designing
-the AST shape — it must reflect chord / fastest-N semantics, not a
-linear DAG. (Brad's brief warns explicitly against linear-default tells
-like "first X then Y then Z" and `asyncio.gather` over per-round task
-lists.)
+- The three v3 lexer questions (↑ heat operator, `\"` string escapes,
+  `─...>` long-form arrow). They block 3 of 68 files; the 65 clean
+  files are enough to drive parser design.
+- `<-` actuator binding (used in 11/16/22 — different programs).
+- `<->` bidirectional (proposed only).
+- IR / lowering / codegen.
 
-Stretch ideas, only if v3 lands fast:
-- Turn `zplus-lex` CLI into `zplus check <files...>` with summary
-  output (errors by file).
-- Add token-kind histogram to the corpus smoke test so we can see
-  which token kinds dominate the corpus (helps prioritize parser
-  rules).
+Open architectural question for the parser: should it produce a
+`Result<Module, Vec<ParseError>>` with error recovery (continue past
+syntax errors) or a `Result<Module, ParseError>` (fail fast)? The
+brief implies fast feedback matters; recommend fail-fast for v1 and
+add recovery only when the corpus surfaces the need.
 
 ---
 
