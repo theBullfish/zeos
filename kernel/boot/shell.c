@@ -20,6 +20,7 @@
 #include "usb_hub.h"
 #include "block.h"
 #include "block_chain.h"
+#include "persistence.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -56,6 +57,7 @@
 #include "usb_cdc.h"
 #include "hda.h"
 #include "fat32.h"
+#include "tests.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -206,6 +208,7 @@ static void cmd_fetch(const char *args);
 static void cmd_https(const char *args);
 static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
+static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
 static void cmd_static_ip(const char *args);
 static void cmd_xxd(const char *args);
@@ -227,6 +230,7 @@ static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_chain_backoff(const char *args);
+static void cmd_persistence(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -259,6 +263,14 @@ static void cmd_lsdrives(const char *args) {
         if (info.model[0]) { kputs("  "); kputs(info.model); }
         kputs("\n");
     }
+    kputs("\n");
+}
+
+static void cmd_persistence(const char *args)
+{
+    (void)args;
+    kputs("\n");
+    persistence_dump();
     kputs("\n");
 }
 
@@ -449,6 +461,12 @@ static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
 static void cmd_fat_cat(const char *args);
 
+/* FAT32 write-side commands */
+static void cmd_touch(const char *args);
+static void cmd_rm(const char *args);
+static void cmd_truncate(const char *args);
+static void cmd_echo(const char *args);
+
 /* ── Command table ──────────────────────────────── */
 
 static const struct shell_cmd commands[] = {
@@ -492,6 +510,7 @@ static const struct shell_cmd commands[] = {
     {"fetch",   "fetch a URL (HTTP GET)",          cmd_fetch,   VIS_DEREZ},
     {"https",   "fetch a URL over TLS (HTTPS GET)", cmd_https,   VIS_DEREZ},
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
+    {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
     {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
     {"cp",      "copy a file (cp src dst)",       cmd_cp,      VIS_ALWAYS},
@@ -508,6 +527,7 @@ static const struct shell_cmd commands[] = {
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
     {"lsdrives","list storage drives (NVMe / AHCI / USB MSC)", cmd_lsdrives, VIS_ALWAYS},
     {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
+    {"persistence","show VAULT persistence stats (journal + chain snapshot)", cmd_persistence, VIS_DEREZ},
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
@@ -526,10 +546,14 @@ static const struct shell_cmd commands[] = {
     {"beep",    "play a 440 Hz tone via HDA audio", cmd_beep,   VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
 
-    /* FAT32 (USB / SD / ESP) read-only */
+    /* FAT32 (USB / SD / ESP / NVMe) read+write */
     {"fat-mount","mount FAT32 (fat-mount [<drive> <part-lba>])", cmd_fat_mount, VIS_ALWAYS},
     {"fat-ls",  "list FAT32 directory (fat-ls <path>)", cmd_fat_ls, VIS_ALWAYS},
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
+    {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
+    {"rm",      "delete file or empty directory (FAT32)", cmd_rm,    VIS_ALWAYS},
+    {"truncate","truncate file to size (truncate <path> <size>)", cmd_truncate, VIS_DEREZ},
+    {"echo",    "write text to FAT32 file (echo <text> > <path>)", cmd_echo, VIS_ALWAYS},
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -2811,9 +2835,54 @@ vault_done:
         passes++;
     }
 
+    /* Persistence: report how much of the masq_journal + chain
+     * registry came back from VAULT on this boot. First boot reports
+     * N=0/M=0 -- that is also a PASS (the layer initialized cleanly,
+     * there was just nothing to restore). Force a snapshot+sync now
+     * so the test scenario (selftest -> reset -> selftest) doesn't
+     * have to wait for the periodic checkpoint to fire. */
+    kputs("  Persistence ........... ");
+    if (persistence_ready()) {
+        uint32_t n = persistence_journal_restored_count();
+        uint32_t m = persistence_chains_restored_count();
+        kputs("journal: ");
+        kput_dec((uint64_t)n);
+        kputs(" entries restored, chain snapshot: ");
+        kput_dec((uint64_t)m);
+        kputs(" chains restored\n");
+        (void)persistence_save_snapshot_now();
+        passes++;
+    } else {
+        kputs("FAIL (not initialized)\n");
+        fails++;
+    }
+
     kputs("  ──────────────\n  ");
     kput_dec(passes); kputs(" passed, ");
-    kput_dec(fails); kputs(" failed\n\n");
+    kput_dec(fails); kputs(" failed\n");
+    kputs("  tests: run via `tests` command for full coverage\n\n");
+}
+
+/* ── Test framework command ─────────────────────────── */
+static void cmd_tests(const char *args)
+{
+    /* Skip leading whitespace */
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == '\0') {
+        (void)test_run_all();
+        return;
+    }
+
+    /* JSON mode for CI: tests --json */
+    if (args[0] == '-' && args[1] == '-' &&
+        args[2] == 'j' && args[3] == 's' && args[4] == 'o' && args[5] == 'n') {
+        (void)test_run_all_json();
+        return;
+    }
+
+    /* Substring filter */
+    (void)test_run_named(args);
 }
 
 /* ── VAULT filesystem commands ──────────────────── */
@@ -2822,35 +2891,80 @@ vault_done:
 #define VAULT_RAM_SIZE (2 * 1024 * 1024)
 static uint8_t vault_ram[VAULT_RAM_SIZE] __attribute__((aligned(4096)));
 
-static void vault_init_ramdisk(void)
+/* Stamp builtin Z+ programs into /programs. Called only when we
+ * format a fresh region; resume-from-disk reuses what's already
+ * persisted so we don't churn temporal versions every boot. */
+static void vault_seed_builtins(void)
 {
+    for (int i = 0; i < (int)NUM_BUILTINS; i++) {
+        char path[64];
+        int pi = 0;
+        const char *prefix = "/programs/";
+        while (*prefix) path[pi++] = *prefix++;
+        const char *n = builtins[i].name;
+        while (*n) path[pi++] = *n++;
+        path[pi++] = '.'; path[pi++] = 'z'; path[pi++] = 'p';
+        path[pi] = '\0';
+
+        int len = 0;
+        const char *s = builtins[i].source;
+        while (s[len]) len++;
+        vault_write(path, builtins[i].source, (uint32_t)len);
+    }
+}
+
+void shell_vault_init(void)
+{
+    if (vault_ready) return;  /* idempotent */
+
+    /* Try to attach a persistent backing drive. block_init() ran in
+     * main.c before this call, so block_drive_count() is accurate.
+     * The QEMU run target adds a dedicated 8 MB NVMe disk specifically
+     * for this. On real hardware, drive 0 is whatever NVMe/AHCI/USB
+     * disk is present -- the persistent VAULT rides along on the
+     * first 2 MB of it. */
+    int rc = -1;
+    if (block_drive_count() > 0) {
+        rc = vault_persist_attach(vault_ram, VAULT_RAM_SIZE, 0);
+    }
+
+    if (rc == 1) {
+        /* A previously-formatted image was loaded into vault_ram from
+         * disk. Mount without re-formatting -- this is the path that
+         * makes journal + snapshot files survive a reboot. */
+        if (vault_mount(vault_ram, VAULT_RAM_SIZE) == 0) {
+            vault_ready = 1;
+            kputs("[vault] resumed from persistent backing\n");
+            return;
+        }
+        /* Mount of the loaded image failed -- fall through to format.
+         * Don't trust whatever was on disk. */
+    }
+
+    /* No usable image (no drive bound, drive empty, or mount failed
+     * after a successful read). Format a fresh region and seed it
+     * with the default directory layout + builtin programs. */
     if (vault_format(vault_ram, VAULT_RAM_SIZE, "zeos") == 0 &&
         vault_mount(vault_ram, VAULT_RAM_SIZE) == 0) {
         vault_ready = 1;
 
-        /* Create default directories */
         vault_create("/programs", VAULT_TIER_REFERENCE);
         vault_create("/home", VAULT_TIER_SOVEREIGN);
         vault_create("/tmp", VAULT_TIER_INTERNAL);
+        vault_seed_builtins();
 
-        /* Store built-in Z+ programs in VAULT */
-        for (int i = 0; i < (int)NUM_BUILTINS; i++) {
-            char path[64];
-            /* Build path: /programs/name.zp */
-            int pi = 0;
-            const char *prefix = "/programs/";
-            while (*prefix) path[pi++] = *prefix++;
-            const char *n = builtins[i].name;
-            while (*n) path[pi++] = *n++;
-            path[pi++] = '.'; path[pi++] = 'z'; path[pi++] = 'p';
-            path[pi] = '\0';
-
-            int len = 0;
-            const char *s = builtins[i].source;
-            while (s[len]) len++;
-            vault_write(path, builtins[i].source, (uint32_t)len);
-        }
+        /* Push the freshly-formatted, freshly-seeded image to disk so
+         * the very next vault_sync() is cheap and the next boot has
+         * something valid to resume. */
+        (void)vault_persist_flush();
+        kputs("[vault] formatted fresh region (no prior image)\n");
     }
+}
+
+/* Backwards-compat wrapper -- shell_init still calls this name. */
+static void vault_init_ramdisk(void)
+{
+    shell_vault_init();
 }
 
 static void cmd_ls(const char *args)
@@ -2980,11 +3094,27 @@ static void cmd_write_file(const char *args)
 
 static void cmd_mkdir(const char *args)
 {
-    if (!vault_ready || !*args) {
+    if (!*args) {
         kputs("  Usage: mkdir <path>\n");
         return;
     }
 
+    /* Prefer FAT32 if a volume is mounted: that's the user-visible
+     * filesystem for sticks / SDs / NVMe images. Fall back to VAULT
+     * otherwise. */
+    if (fat32_mounted()) {
+        if (fat32_mkdir(args) == 0) {
+            kputs("  Created directory: "); kputs(args); kputs("\n");
+        } else {
+            kputs("  Failed to create: "); kputs(args); kputs("\n");
+        }
+        return;
+    }
+
+    if (!vault_ready) {
+        kputs("  No filesystem mounted.\n");
+        return;
+    }
     int ino = vault_mkdir(args, VAULT_TIER_INTERNAL);
     if (ino >= 0) {
         kputs("  Created directory: ");
