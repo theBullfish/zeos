@@ -90,6 +90,23 @@ typedef struct chain {
 
     /* VAULT */
     int             vault_version;  /* Temporal state version */
+
+    /* Scheduler watchdog -- post-hoc hang detection.
+     * watchdog_deadline_tsc: armed before chain_resolve(); 0 = inactive.
+     * watchdog_timeout_us:   per-chain timeout, default 100000 (100ms).
+     * Once LAPIC timer is wired this becomes preemptive; until then the
+     * scheduler scans deadlines at the start of the NEXT tick and marks
+     * any chain whose deadline expired as CHAIN_ERROR. */
+    uint64_t        watchdog_deadline_tsc;
+    uint32_t        watchdog_timeout_us;
+
+    /* Scheduler B3 backoff -- tunable per chain.
+     * backoff_skip_threshold: failure ratio (b3_beta / (alpha+beta)) at
+     *                         which to start skipping. Default 0.5.
+     * backoff_skip_every:     skip period when ratio is at the threshold
+     *                         floor. Default 4. Higher ratios scale up. */
+    float           backoff_skip_threshold;
+    uint32_t        backoff_skip_every;
 } chain_t;
 
 /* ── API ─────────────────────────────────────────────────────────── */

@@ -91,6 +91,10 @@ void chain_init(void)
         registry[i].last_resolve_ms = 0.0f;
         registry[i].parent_id = -1;
         registry[i].vault_version = 0;
+        registry[i].watchdog_deadline_tsc = 0;
+        registry[i].watchdog_timeout_us   = 100000;  /* 100ms default */
+        registry[i].backoff_skip_threshold = 0.5f;
+        registry[i].backoff_skip_every     = 4;
         registry[i].addr.depth = 0;
         registry[i].addr.birth_tsc = 0;
         for (j = 0; j < 8; j++)
@@ -148,6 +152,10 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     registry[slot].last_resolve_ms = 0.0f;
     registry[slot].parent_id = parent_id;
     registry[slot].vault_version = 1;
+    registry[slot].watchdog_deadline_tsc = 0;
+    registry[slot].watchdog_timeout_us   = 100000;  /* 100ms default */
+    registry[slot].backoff_skip_threshold = 0.5f;
+    registry[slot].backoff_skip_every     = 4;
 
     registry_used[slot] = 1;
     chain_total++;

@@ -37,6 +37,25 @@ uint32_t scheduler_errors_last(void);
 uint32_t scheduler_slow_resolves_total(void);
 uint32_t scheduler_quantum_us_get(void);
 
+/* Aggregate slow-tick counter: total wall-time per tick exceeded the
+ * configured quantum. Distinct from per-chain slow_resolves_total. */
+uint32_t scheduler_aggregate_slow_total(void);
+
+/* Watchdog kills: chains marked CHAIN_ERROR by the post-hoc watchdog
+ * because their watchdog_deadline_tsc expired between resolves. */
+uint32_t scheduler_watchdog_kills(void);
+
+/* Top slow chain across the lifetime of this run.
+ *   *id_out  = chain id with the largest cumulative resolve time
+ *              (-1 if no slow events yet)
+ *   *avg_ms  = average per-resolve time for that chain
+ * Returns 1 if a top chain is known, 0 otherwise. */
+int scheduler_top_slow_chain(int *id_out, float *avg_ms_out);
+
+/* Tune B3 backoff per chain at runtime. threshold in (0,1], every >= 1.
+ * Returns 0 on success, -1 on bad args. */
+int scheduler_set_backoff(int chain_id, float threshold, uint32_t every);
+
 /* Sample window: returns ticks-per-second observed over a rolling
  * 100ms-or-similar window. Used by the selftest. */
 uint32_t scheduler_tps(void);
