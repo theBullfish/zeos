@@ -39,5 +39,9 @@ extern int CHAIN_NET_TX;
 extern int CHAIN_NET_RX;
 extern int CHAIN_BLOCK;
 extern int CHAIN_MDE;
+extern int CHAIN_GPU_0;
+extern int CHAIN_GPU_0_RENDER;
+extern int CHAIN_GPU_0_DISPLAY;
+extern int CHAIN_DISPLAY_GOP;
 
 #endif /* ZEOS_CHAIN_REGISTRY_H */

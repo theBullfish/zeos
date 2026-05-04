@@ -45,6 +45,7 @@
 #include "chain.h"
 #include "cfa_handle.h"
 #include "chain_registry.h"
+#include "gpu_virtio.h"
 #include "mde_chain.h"
 #include "serial.h"
 #include "persona_filter.h"
@@ -219,6 +220,7 @@ static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
+static void cmd_gpustat(const char *args);
 
 static const char *drive_kind_label(int k) {
     switch (k) {
@@ -265,6 +267,79 @@ static void cmd_masq_journal(const char *args) {
     kputs("\n");
     block_chain_dump_journal(n);
     kputs("\n");
+}
+
+static void cmd_gpustat(const char *args) {
+    (void)args;
+    int gn = gpu_virtio_device_count();
+    if (gn == 0) {
+        int gop = -1;
+        if (gpu_virtio_gop_fallback(&gop) && gop >= 0) {
+            kputs("\n  No virtio-gpu detected -- GOP fallback active.\n");
+            kputs("  display.gop  ");
+            kput_dec((uint64_t)fb_width());
+            kputs("x");
+            kput_dec((uint64_t)fb_height());
+            kputs("  (UEFI GOP, no EDID-via-virtio)\n\n");
+        } else {
+            kputs("\n  No GPU chains registered.\n\n");
+        }
+        return;
+    }
+
+    kputs("\n  GPUs: ");
+    kput_dec((uint64_t)gn);
+    kputs("    Displays: ");
+    kput_dec((uint64_t)gpu_virtio_display_count());
+    kputs("\n");
+
+    for (int gi = 0; gi < gn; gi++) {
+        const gpu_virtio_device_t *d = gpu_virtio_device(gi);
+        if (!d) continue;
+        kputs("  gpu");
+        kput_dec((uint64_t)gi);
+        kputs("  pci=");
+        kput_hex((uint64_t)d->pci_vendor);
+        kputs(":");
+        kput_hex((uint64_t)d->pci_device);
+        kputs(" @ ");
+        kput_dec((uint64_t)d->pci_bus); kputs(":");
+        kput_dec((uint64_t)d->pci_dev); kputs(".");
+        kput_dec((uint64_t)d->pci_func);
+        kputs("  scanouts=");
+        kput_dec((uint64_t)d->num_scanouts);
+        kputs("  ready=");
+        kput_dec((uint64_t)d->ready);
+        kputc('\n');
+    }
+
+    int total = gpu_virtio_display_count();
+    for (int i = 0; i < total; i++) {
+        gpu_virtio_display_t info;
+        if (gpu_virtio_display_info(i, &info) != 0) continue;
+        kputs("    display.gpu");
+        kput_dec((uint64_t)info.gpu_index);
+        kputs(".scanout");
+        kput_dec((uint64_t)info.scanout_index);
+        kputs("  ");
+        kput_dec((uint64_t)info.width);
+        kputs("x");
+        kput_dec((uint64_t)info.height);
+        if (info.refresh_hz) {
+            kputs(" @");
+            kput_dec((uint64_t)info.refresh_hz);
+            kputs("Hz");
+        }
+        kputs("  edid=");
+        kputs(info.edid_valid ? "yes" : "no");
+        if (info.edid_valid && info.monitor_name[0]) {
+            kputs("  monitor=\"");
+            kputs(info.monitor_name);
+            kputs("\"");
+        }
+        kputc('\n');
+    }
+    kputc('\n');
 }
 
 /* FAT32 read-only */
@@ -331,6 +406,7 @@ static const struct shell_cmd commands[] = {
     {"netinfo", "show network configuration",      cmd_netinfo, VIS_ALWAYS},
     {"lsdrives","list storage drives (NVMe / AHCI / USB MSC)", cmd_lsdrives, VIS_ALWAYS},
     {"masq-journal","show last N block-write journal records (masq-journal [N])", cmd_masq_journal, VIS_DEREZ},
+    {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
@@ -2465,6 +2541,40 @@ vault_done:
             kputs("tier ");
             kput_dec(td);
             kputs("\n");
+        }
+    }
+
+    /* GPU: virtio-gpu chains (CHAIN_GPU_n + CHAIN_DISPLAY_<n>) or
+     * GOP fallback. Per docs/GPU_HOLES.md L1 -- this is the first
+     * real GPU paradigm slot. Verifies at least one display chain
+     * is active. */
+    kputs("  GPU ................... ");
+    {
+        int gn = gpu_virtio_device_count();
+        int dn = gpu_virtio_display_count();
+        if (gn == 0) {
+            int gop = -1;
+            if (gpu_virtio_gop_fallback(&gop) && gop >= 0) {
+                kputs("no virtio-gpu detected (GOP fallback)\n");
+                chain_dump(gop);
+                passes++;
+            } else {
+                kputs("FAIL (no GPU chains)\n");
+                fails++;
+            }
+        } else {
+            kputs("PASS (");
+            kput_dec((uint64_t)gn);
+            kputs(" device(s), ");
+            kput_dec((uint64_t)dn);
+            kputs(" display(s))\n");
+            if (CHAIN_GPU_0 >= 0) chain_dump(CHAIN_GPU_0);
+            for (int i = 0; i < dn; i++) {
+                gpu_virtio_display_t info;
+                if (gpu_virtio_display_info(i, &info) == 0 && info.chain_id >= 0)
+                    chain_dump(info.chain_id);
+            }
+            if (dn >= 1) passes++; else fails++;
         }
     }
 

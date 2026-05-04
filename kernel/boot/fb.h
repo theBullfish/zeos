@@ -32,6 +32,11 @@ void fb_put_dec(uint64_t val);
 uint32_t fb_width(void);
 uint32_t fb_height(void);
 
+/* Physical base address of the framebuffer (identity-mapped on UEFI). */
+uint64_t fb_phys_base(void);
+/* Pitch in pixels (>= width). */
+uint32_t fb_pitch_pixels(void);
+
 /* Set a single pixel (bounds-checked) */
 void fb_pixel(int x, int y, uint32_t color);
 

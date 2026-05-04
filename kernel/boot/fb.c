@@ -181,6 +181,17 @@ uint32_t fb_height(void)
     return g_fb ? g_fb->height : 0;
 }
 
+uint64_t fb_phys_base(void)
+{
+    /* Identity-mapped: virtual == physical for the FB on UEFI boot. */
+    return g_fb ? (uint64_t)(uintptr_t)g_fb->base : 0;
+}
+
+uint32_t fb_pitch_pixels(void)
+{
+    return g_fb ? g_fb->pitch : 0;
+}
+
 void fb_pixel(int x, int y, uint32_t color)
 {
     if (!g_fb || !g_fb->base)

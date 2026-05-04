@@ -24,6 +24,7 @@
 #include "net_chain.h"
 #include "block_chain.h"
 #include "mde_chain.h"
+#include "gpu_virtio.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -38,6 +39,10 @@ int CHAIN_BROWSER    = -1;
 int CHAIN_INSPECTOR  = -1;
 int CHAIN_PALETTE    = -1;
 int CHAIN_AUDIO      = -1;
+int CHAIN_GPU_0          = -1;
+int CHAIN_GPU_0_RENDER   = -1;
+int CHAIN_GPU_0_DISPLAY  = -1;
+int CHAIN_DISPLAY_GOP    = -1;
 
 /* ── Node resolve functions ────────────────────────────────────── */
 /*
@@ -266,6 +271,28 @@ int chain_registry_init(void)
      * present in device_select for future drivers. */
     if (mde_chain_register(CHAIN_CPU) != 0) {
         kputs("[chain_registry] WARN: mde chain registration failed\n");
+    }
+
+    /* GPU: virtio-gpu first (per docs/GPU_HOLES.md L1). Registers
+     * CHAIN_GPU_<n> + render/display sub-chains + per-scanout display
+     * chains. Falls back to CHAIN_DISPLAY_GOP if no virtio-gpu is
+     * present so headless / non-virtio QEMU still surfaces a display
+     * chain. Real Intel/AMD/NVIDIA drivers will plug into this same
+     * shape later (per CHAIN_CONTRACT addendum). */
+    {
+        int gpus = gpu_virtio_init(CHAIN_CPU);
+        if (gpus > 0) {
+            const gpu_virtio_device_t *d0 = gpu_virtio_device(0);
+            if (d0) {
+                CHAIN_GPU_0         = d0->chain_id;
+                CHAIN_GPU_0_RENDER  = d0->chain_render_id;
+                CHAIN_GPU_0_DISPLAY = d0->chain_display_id;
+            }
+        } else {
+            int gop_id = -1;
+            (void)gpu_virtio_gop_fallback(&gop_id);
+            CHAIN_DISPLAY_GOP = gop_id;
+        }
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */
