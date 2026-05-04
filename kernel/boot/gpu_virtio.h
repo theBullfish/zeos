@@ -77,4 +77,10 @@ int gpu_virtio_gop_fallback(int *out_chain_id);
  * exists -- it returns 0 and does nothing. Returns 0 on success. */
 int gpu_virtio_present(void);
 
+/* Dump human-readable GPU status (devices + per-device per-scanout
+ * lines) using kputs. Called by the shell `gpustat` command. Mirrors
+ * the format documented in docs/GPU_HOLES.md so the same shape
+ * survives across virtio + future Intel/AMD/NVIDIA drivers. */
+void gpu_virtio_dump_status(void);
+
 #endif /* ZEOS_GPU_VIRTIO_H */

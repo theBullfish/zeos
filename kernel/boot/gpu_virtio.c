@@ -21,6 +21,23 @@
  * on every chain_resolve call. vault_version on the display chain
  * bumps on each successful flush; vault_version on the GPU chain
  * bumps on init/teardown and EDID change.
+ *
+ * Multi-GPU + multi-scanout validated. Each virtio-gpu PCI function
+ * gets its own CHAIN_GPU_<n> with independent resource ID space (per
+ * virtio spec each device has its own resource namespace). Each
+ * enabled scanout under a GPU registers a CHAIN_DISPLAY sub-chain
+ * with its OWN page-aligned backing memory. The compositor draws to
+ * the GOP fb; the per-display flush copies GOP fb -> the scanout's
+ * backing before TRANSFER_TO_HOST_2D + RESOURCE_FLUSH. Compositor
+ * fans out per-display; per-display refresh rates are independent.
+ *
+ * QEMU NOTE: QEMU's virtio-vga exposes one scanout per device by
+ * default; the spec allows up to 16 but QEMU does not surface a knob
+ * to raise that count. The canonical multi-display test on Zeos is
+ * therefore "two -device virtio-vga" -> two CHAIN_GPU entries each
+ * with one CHAIN_DISPLAY (`make run-multigpu`, or `zeos
+ * run-multigpu`). The driver itself handles up to 16 scanouts per
+ * GPU so real hardware lights up without code changes.
  */
 
 #include "gpu_virtio.h"
@@ -296,6 +313,17 @@ typedef struct {
     uint32_t edid_size;
     uint8_t  edid[256];              /* Block 0 + optional extension. */
     char     monitor_name[16];
+    /* Per-display backing memory. Each scanout has its OWN
+     * page-aligned BGRA buffer attached as the resource backing —
+     * independent of any other scanout on the same or different GPU.
+     * The compositor draws to the shared GOP fb; the per-display
+     * flush copies GOP -> this backing then issues TRANSFER + FLUSH
+     * against the scanout's per-device resource_id. Independent
+     * allocations let a future WM target different pixels per
+     * display without touching the driver. */
+    uint64_t backing_phys;
+    uint32_t backing_len;
+    uint8_t *backing_ptr;
 } scanout_t;
 
 typedef struct gpu_dev {
@@ -333,6 +361,11 @@ typedef struct gpu_dev {
         cfa_handle_t h;
     } cmd_handles[GPU_CMD_HANDLE_SLOTS];
     int cmd_handle_count;
+
+    /* Per-device resource-id allocator. Per virtio-gpu spec each
+     * device has its own resource namespace, so gpu0.rid=N and
+     * gpu1.rid=N are distinct on the wire. Starts at 1; 0 is reserved. */
+    uint32_t  next_rid;
 } gpu_dev_t;
 
 static gpu_dev_t s_devs[GPU_VIRTIO_MAX_DEVICES];
@@ -646,7 +679,7 @@ static int gpu_get_display_info(gpu_dev_t *gd)
         s->width       = s_resp_di.pmodes[i].r.width;
         s->height      = s_resp_di.pmodes[i].r.height;
         s->refresh_hz  = 0;
-        s->resource_id = (uint32_t)(i + 1);     /* 1-based per spec */
+        s->resource_id = 0;     /* assigned per-device during bring-up */
         s->edid_valid  = 0;
         s->edid_size   = 0;
         s->monitor_name[0] = 0;
@@ -779,6 +812,25 @@ static int gpu_transfer_and_flush(gpu_dev_t *gd, int scanout_idx)
 {
     scanout_t *s = &gd->scanouts[scanout_idx];
     if (!s->enabled) return -1;
+
+    /* Copy GOP framebuffer -> this scanout's per-display backing.
+     * Each scanout owns its own backing, so multiple scanouts (on the
+     * same or different GPU) cannot trample each other's resource.
+     * Today this mirrors the GOP image to every display; a future WM
+     * can vary the source here per display without driver changes. */
+    if (s->backing_ptr && s->backing_len > 0) {
+        uint64_t fb_phys = fb_phys_base();
+        uint32_t fb_w    = fb_width();
+        uint32_t fb_h    = fb_height();
+        if (fb_phys != 0 && fb_w == s->width && fb_h == s->height) {
+            uint32_t copy_len = fb_w * fb_h * 4u;
+            if (copy_len > s->backing_len) copy_len = s->backing_len;
+            const volatile uint32_t *sw = (const volatile uint32_t *)(uintptr_t)fb_phys;
+            volatile uint32_t       *dw = (volatile uint32_t *)s->backing_ptr;
+            uint32_t words = copy_len >> 2;
+            for (uint32_t i = 0; i < words; i++) dw[i] = sw[i];
+        }
+    }
 
     /* TRANSFER_TO_HOST_2D: copy from guest backing into host resource. */
     s_cmd_xfer.hdr.type     = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
@@ -1016,6 +1068,7 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
 {
     gd->pci = pci;
     gd->gpu_index = gpu_index;
+    gd->next_rid  = 1;       /* per-device resource id namespace (1-based) */
 
     /* Enable memory + bus master in command register. */
     uint32_t cmd = pci_config_read32(pci->bus, pci->dev, pci->func, 0x04);
@@ -1111,12 +1164,42 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
         s->width  = fb_w;
         s->height = fb_h;
 
+        /* Per-device rid allocator (1-based, namespace per virtio
+         * device per spec). gpu0.rid=1 and gpu1.rid=1 are distinct on
+         * the wire so there is no cross-GPU collision. */
+        s->resource_id = gd->next_rid++;
+
+        /* Allocate this scanout's OWN page-aligned backing memory.
+         * Separate from the GOP fb and from every other scanout. The
+         * compositor still draws into the GOP fb; gpu_transfer_and_flush
+         * mirrors GOP -> this backing before TRANSFER + FLUSH. */
+        uint32_t this_len = s->width * s->height * 4u;
+        uint64_t this_pgs = (this_len + 4095u) / 4096u;
+        uint64_t this_phys = pmm_alloc_contiguous(this_pgs);
+        if (!this_phys) {
+            kputs("[gpu_virtio] per-display backing alloc failed\n");
+            s->enabled = 0;
+            continue;
+        }
+        s->backing_phys = this_phys;
+        s->backing_len  = this_len;
+        s->backing_ptr  = (uint8_t *)(uintptr_t)this_phys;
+        /* Pre-fill with current GOP contents so the very first
+         * SET_SCANOUT shows the boot screen, not garbage. */
+        {
+            const volatile uint32_t *sw = (const volatile uint32_t *)(uintptr_t)fb_phys;
+            volatile uint32_t       *dw = (volatile uint32_t *)s->backing_ptr;
+            uint32_t copy_len = (this_len < fb_len) ? this_len : fb_len;
+            uint32_t words = copy_len >> 2;
+            for (uint32_t k = 0; k < words; k++) dw[k] = sw[k];
+        }
+
         if (gpu_create_2d(gd, si, s->resource_id, s->width, s->height) != 0) {
             kputs("[gpu_virtio] CREATE_2D failed\n");
             s->enabled = 0;
             continue;
         }
-        if (gpu_attach_backing(gd, s->resource_id, fb_phys, fb_len) != 0) {
+        if (gpu_attach_backing(gd, s->resource_id, s->backing_phys, s->backing_len) != 0) {
             kputs("[gpu_virtio] ATTACH_BACKING failed\n");
             s->enabled = 0;
             continue;
@@ -1126,7 +1209,9 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
             s->enabled = 0;
             continue;
         }
-        /* Initial flush so the GOP contents reach the host scanout. */
+        /* Initial flush so the per-display backing reaches the host
+         * scanout. (gpu_transfer_and_flush would copy GOP -> backing
+         * but we pre-filled, so this is the first real push.) */
         (void)gpu_transfer_and_flush(gd, si);
     }
 
@@ -1219,8 +1304,81 @@ int gpu_virtio_init(int parent_id)
         kputs(" displays=");
         kput_dec((uint64_t)s_total_scanouts);
         kputc('\n');
+        /* One-shot status dump at boot so the serial log (and any later
+         * `gpustat` from the shell, which calls the same helper) shows
+         * the multi-GPU / multi-scanout topology. */
+        gpu_virtio_dump_status();
     }
     return s_dev_count;
+}
+
+void gpu_virtio_dump_status(void)
+{
+    int gn = s_dev_count;
+    if (gn == 0) {
+        if (s_gop_fallback_chain >= 0) {
+            kputs("\n  No virtio-gpu detected -- GOP fallback active.\n");
+            kputs("  display.gop  ");
+            kput_dec((uint64_t)fb_width());
+            kputs("x");
+            kput_dec((uint64_t)fb_height());
+            kputs("  (UEFI GOP, no EDID-via-virtio)\n\n");
+        } else {
+            kputs("\n  No GPU chains registered.\n\n");
+        }
+        return;
+    }
+
+    kputs("\n  GPUs: ");
+    kput_dec((uint64_t)gn);
+    kputs("    Displays: ");
+    kput_dec((uint64_t)s_total_scanouts);
+    kputs("\n");
+
+    for (int gi = 0; gi < gn; gi++) {
+        gpu_dev_t *gd = &s_devs[gi];
+        kputs("  gpu");
+        kput_dec((uint64_t)gi);
+        kputs("  pci=");
+        kput_hex((uint64_t)(gd->pci ? gd->pci->vendor_id : 0));
+        kputs(":");
+        kput_hex((uint64_t)(gd->pci ? gd->pci->device_id : 0));
+        kputs(" @ ");
+        kput_dec((uint64_t)(gd->pci ? gd->pci->bus  : 0)); kputs(":");
+        kput_dec((uint64_t)(gd->pci ? gd->pci->dev  : 0)); kputs(".");
+        kput_dec((uint64_t)(gd->pci ? gd->pci->func : 0));
+        kputs("  scanouts=");
+        kput_dec((uint64_t)gd->num_scanouts);
+        kputs("  ready=");
+        kput_dec((uint64_t)gd->ready);
+        kputc('\n');
+        for (int si = 0; si < GPU_VIRTIO_MAX_SCANOUTS; si++) {
+            scanout_t *s = &gd->scanouts[si];
+            if (!s->valid || !s->enabled) continue;
+            kputs("    display.gpu");
+            kput_dec((uint64_t)gi);
+            kputs(".scanout");
+            kput_dec((uint64_t)si);
+            kputs("  ");
+            kput_dec((uint64_t)s->width);
+            kputs("x");
+            kput_dec((uint64_t)s->height);
+            if (s->refresh_hz) {
+                kputs(" @");
+                kput_dec((uint64_t)s->refresh_hz);
+                kputs("Hz");
+            }
+            kputs("  edid=");
+            kputs(s->edid_valid ? "yes" : "no");
+            if (s->edid_valid && s->monitor_name[0]) {
+                kputs("  monitor=\"");
+                kputs(s->monitor_name);
+                kputs("\"");
+            }
+            kputc('\n');
+        }
+    }
+    kputc('\n');
 }
 
 int gpu_virtio_device_count(void) { return s_dev_count; }

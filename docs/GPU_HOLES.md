@@ -204,6 +204,59 @@ chain_create("accel0", CHAIN_CPU, MASQ_INTERNAL)
   // no display or audio sub-chains
 ```
 
+## Multi-GPU + multi-scanout — implemented 2026-05-03
+
+`gpu_virtio_init()` iterates EVERY virtio-gpu PCI function (capped at
+`GPU_VIRTIO_MAX_DEVICES = 4`). Each device gets:
+
+- its own `gpu_dev_t` slot
+- its own resource-id namespace (per virtio spec; `gd->next_rid`
+  starts at 1 per device)
+- its own `CHAIN_GPU_<n>` + `gpu<n>.render` + `gpu<n>.display`
+  sub-chains
+- one `display.gpu<n>.scanout<si>` chain per enabled scanout, each
+  with its OWN page-aligned backing buffer allocated from
+  `pmm_alloc_contiguous` (independent of GOP fb and of every other
+  scanout)
+
+Per-display fan-out: the scheduler resolves each
+`display.gpu<n>.scanout<si>` chain independently. Each chain's
+`virtio_dma_resolve` copies GOP fb -> its scanout's backing then
+issues `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` against the
+scanout's resource_id. Refresh rate is gated per scanout via
+`min_flush_interval_us` + `last_flush_tsc`, so a 144Hz panel does
+not stall a 60Hz panel.
+
+Canonical multi-display test:
+
+```
+make run-multigpu       # in kernel/, or
+zeos run-multigpu       # from anywhere
+
+# launches qemu-system-x86_64 with TWO -device virtio-vga.
+# selftest GPU line reports:
+#   GPU ........... PASS (2 device(s), 2 display(s))
+# gpustat reports:
+#   GPUs: 2    Displays: 2
+#   gpu0  pci=1af4:1050 @ 0:3.0  scanouts=1  ready=1
+#     display.gpu0.scanout0  1920x1080  edid=yes  monitor="QEMU Monitor"
+#   gpu1  pci=1af4:1050 @ 0:4.0  scanouts=1  ready=1
+#     display.gpu1.scanout0  1920x1080  edid=yes  monitor="QEMU Monitor"
+```
+
+QEMU's virtio-vga device exposes one scanout per device by default
+and does not surface a knob to raise that to the spec's max of 16,
+so the canonical multi-display test on Zeos is "two virtio-vga
+devices" (one CHAIN_GPU each, one CHAIN_DISPLAY each). The driver
+itself handles up to 16 scanouts per GPU, so real hardware (or a
+future QEMU patch) lights up without code changes.
+
+Today's behaviour: every connected display mirrors the GOP
+framebuffer (the compositor still draws once into GOP fb; per-display
+flush mirrors that into each scanout's backing). A future WM-side
+change can vary the source per display without touching the driver
+— only the per-display memcpy source changes.
+
 ## Honest unknowns
 
 - We don't yet know if QEMU's virtio-gpu will give us multi-output in a

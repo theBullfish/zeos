@@ -213,6 +213,32 @@ run: $(BUILDDIR)/$(TARGET) $(VAULT_IMG)
 		-display gtk \
 		2>&1
 
+# Two-GPU virtio-vga test boot. Validates the multi-GPU /
+# multi-scanout path in gpu_virtio.c — each `-device virtio-vga`
+# enumerates as its own CHAIN_GPU_<n> with its own resource-id
+# namespace and its own per-display backing memory. selftest's
+# GPU line should report:
+#     GPU ........... PASS (2 device(s), 2 display(s))
+# (QEMU's virtio-vga exposes one scanout per device; see
+# docs/GPU_HOLES.md and the top of kernel/boot/gpu_virtio.c.)
+run-multigpu: $(BUILDDIR)/$(TARGET) $(VAULT_IMG) $(BUILDDIR)/OVMF_VARS.fd
+	@mkdir -p $(ESP)/EFI/BOOT
+	cp $(BUILDDIR)/$(TARGET) $(ESP)/EFI/BOOT/BOOTX64.EFI
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=$(BUILDDIR)/OVMF_VARS.fd \
+		-drive format=raw,file=fat:rw:$(ESP) \
+		-drive if=none,id=zeosvault,file=$(VAULT_IMG),format=raw \
+		-device nvme,drive=zeosvault,serial=ZEOSVAULT \
+		-m 512M \
+		-device virtio-vga \
+		-device virtio-vga \
+		-device virtio-net-pci,netdev=n0 \
+		-netdev user,id=n0 \
+		-serial stdio \
+		-display gtk \
+		2>&1
+
 # Copy OVMF vars (writable copy needed per QEMU instance)
 $(BUILDDIR)/OVMF_VARS.fd:
 	@mkdir -p $(BUILDDIR)

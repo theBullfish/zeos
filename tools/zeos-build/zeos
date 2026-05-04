@@ -49,6 +49,13 @@ cmd_build() {
     fi
 }
 
+cmd_run_multigpu() {
+    msg "Building Zeos kernel..."
+    make -C "$KERNEL_DIR" all
+    msg "Launching QEMU with TWO virtio-vga devices (multi-GPU test)..."
+    make -C "$KERNEL_DIR" run-multigpu
+}
+
 cmd_run() {
     msg "Building and launching Zeos in QEMU..."
     echo ""
@@ -227,6 +234,7 @@ cmd_help() {
 case "${1:-help}" in
     build)    cmd_build ;;
     run)      cmd_run ;;
+    run-multigpu) cmd_run_multigpu ;;
     clean)    cmd_clean ;;
     usb)      cmd_usb ;;
     flash)    cmd_flash "${2:-}" ;;
