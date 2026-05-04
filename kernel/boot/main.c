@@ -601,6 +601,18 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         /* USB Mass Storage class driver (BBB / SCSI). Brings up the
          * first thumb drive found and prints sector count. */
         usb_msc_init();
+
+        /* USB Bluetooth HCI controller. Detects E0/01/01 class triple,
+         * sets up EP1 IN (events) + EP2 IN/OUT (ACL data), then runs
+         * Reset / Read Local Version / Read BD_ADDR. Foundation for
+         * BT keyboards / mice / audio (OS_LITTLE_THINGS #16). */
+        {
+            extern int bt_usb_init(void);
+            extern int bt_hci_init(void);
+            if (bt_usb_init() == 0) {
+                (void)bt_hci_init();
+            }
+        }
     } else {
         kputs("USB xHCI: not available\n");
     }
@@ -718,6 +730,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         extern int persistence_apply_snapshot(void);
         persistence_apply_snapshot();
+    }
+
+    /* Release APs from their pre-partition spin. From here APs walk
+     * the chain registry and resolve chains where (id % cpu_count)
+     * matches their cpu index. The BSP's scheduler_run will skip the
+     * AP-owned chains automatically. */
+    {
+        extern void smp_partition_activate(void);
+        smp_partition_activate();
     }
 
     /* Restore master audio volume + mute from VAULT (/audio/volume).

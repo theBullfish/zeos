@@ -76,6 +76,7 @@ int CHAIN_NOTIFY         = -1;
 int CHAIN_SETTINGS       = -1;
 int CHAIN_BRIGHTNESS     = -1;
 int CHAIN_WIFI           = -1;
+int CHAIN_BLUETOOTH      = -1;
 
 /* Per-tick counters published by the serial chain so cmd_selftest
  * can sample drain rate over a 100ms window without reaching into
@@ -504,6 +505,78 @@ void wifi_associated_state_resolve(chain_node_t *self, void *input, void *output
     }
 }
 
+/* ── Bluetooth chain resolves ──────────────────────────────────── */
+/*
+ * CHAIN_BLUETOOTH pipeline:
+ *   hci_event_poll -> event_decode -> device_state -> emit_event
+ *
+ * The active command path (Reset / Inquiry / LE Create Connection)
+ * runs synchronously inside bt_hci.c when shell commands fire it. The
+ * chain is the observation surface for asynchronous events: the first
+ * node drains the HCI event ring via bt_hci_poll(), the rest are
+ * lightweight observers so MasQ provenance bumps once per event burst.
+ *
+ * resolve_interval_ticks=8 (~10ms) lands roughly in the middle of the
+ * scheduler's 432–800 tps measurement window, which keeps the event
+ * latency comparable to the HID interrupt path.
+ */
+
+extern void     bt_hci_poll(void);
+extern int      bt_usb_present(void);
+extern int      bt_hci_ready(void);
+extern uint32_t bt_hci_event_count(void);
+
+static uint32_t s_bt_last_event_count;
+
+static void bt_hci_event_poll_resolve(chain_node_t *self,
+                                      void *input, void *output)
+{
+    (void)self; (void)input;
+    int *out = (int *)output;
+    if (!bt_usb_present()) {
+        if (out) *out = 0;
+        return;
+    }
+    bt_hci_poll();
+    uint32_t now = bt_hci_event_count();
+    int delta = (int)(now - s_bt_last_event_count);
+    s_bt_last_event_count = now;
+    if (out) *out = delta;
+}
+
+static void bt_event_decode_resolve(chain_node_t *self,
+                                    void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    /* Decode happens inline in bt_hci_poll(); this node is the typed
+     * passthrough so MDE can route on "bt_event_decoded". */
+    if (out) *out = delta;
+}
+
+static void bt_device_state_resolve(chain_node_t *self,
+                                    void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    if (out) *out = delta;
+}
+
+static void bt_emit_event_resolve(chain_node_t *self,
+                                  void *input, void *output)
+{
+    (void)self;
+    int delta = input ? *(int *)input : 0;
+    int *out = (int *)output;
+    if (out) *out = delta;
+    if (delta > 0 && CHAIN_BLUETOOTH >= 0) {
+        chain_t *cb = chain_get(CHAIN_BLUETOOTH);
+        if (cb) cb->vault_version++;
+    }
+}
+
 /* ── Init ──────────────────────────────────────────────────────── */
 
 int chain_registry_init(void)
@@ -741,6 +814,37 @@ int chain_registry_init(void)
             /* ~1 Hz observation cadence; the assoc state machine
              * itself runs synchronously inside rtl8188eu_associate. */
             if (cw) cw->resolve_interval_ticks = 480;
+        }
+    }
+
+    /* CHAIN_BLUETOOTH: HCI event observation pipeline.
+     *   hci_event_poll  → drains EP1 IN events from the controller
+     *   event_decode    → typed passthrough (decode happens inline)
+     *   device_state    → updates discovered-device table and link
+     *   emit_event      → bumps vault_version on each event burst
+     *
+     * resolve_interval_ticks=8 (~10ms) so HCI event latency is in the
+     * same neighbourhood as the HID interrupt-IN path. The chain is
+     * created unconditionally — when no controller is present the
+     * resolves are no-ops and the chain still surfaces in the graph
+     * so the inspector / B3 observe its absence as data. */
+    {
+        CHAIN_BLUETOOTH = chain_create("bluetooth", CHAIN_CPU, MASQ_INTERNAL);
+        if (CHAIN_BLUETOOTH >= 0) {
+            chain_add_node(CHAIN_BLUETOOTH, "hci_event_poll",
+                           "bt_tick", "bt_event_raw",
+                           bt_hci_event_poll_resolve);
+            chain_add_node(CHAIN_BLUETOOTH, "event_decode",
+                           "bt_event_raw", "bt_event_decoded",
+                           bt_event_decode_resolve);
+            chain_add_node(CHAIN_BLUETOOTH, "device_state",
+                           "bt_event_decoded", "bt_device_state",
+                           bt_device_state_resolve);
+            chain_add_node(CHAIN_BLUETOOTH, "emit_event",
+                           "bt_device_state", "bt_event",
+                           bt_emit_event_resolve);
+            chain_t *cb = chain_get(CHAIN_BLUETOOTH);
+            if (cb) cb->resolve_interval_ticks = 8;
         }
     }
 

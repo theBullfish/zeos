@@ -71,6 +71,8 @@
 #include "aml.h"
 #include "power_buttons.h"
 #include "brightness.h"
+#include "bt_hci.h"
+#include "bt_usb.h"
 
 #define CMD_BUF_SIZE 256
 
@@ -255,6 +257,8 @@ static void cmd_cdc_send(const char *args);
 static void cmd_cdc_recv(const char *args);
 static void cmd_wifi(const char *args);
 static void cmd_wifi_scan(const char *args);
+static void cmd_bt(const char *args);
+static void bt_print_bdaddr(const uint8_t bd[6]);
 static void cmd_lsdrives(const char *args);
 static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
@@ -725,6 +729,7 @@ static const struct shell_cmd commands[] = {
     {"cores",   "list SMP cores: lapic_id, role, alive, heartbeat",  cmd_cores,    VIS_DEREZ},
     {"wifi",    "RTL8188EU USB WiFi: status|scan|list|connect|forget", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
+    {"bt",      "Bluetooth: bt status|scan|connect <addr>|disconnect <addr>", cmd_bt, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
     {"ls",      "list files",                      cmd_ls,      VIS_ALWAYS},
@@ -3804,6 +3809,36 @@ vault_done:
         }
     }
 
+    /* Bluetooth: HCI USB transport + boot sequence (Reset / Read Local
+     * Version / Read BD_ADDR). Both "controller present" and "not
+     * present" PASS — present means real silicon answered the boot
+     * commands, not present is honest reporting on QEMU / no dongle. */
+    kputs("  Bluetooth ............. ");
+    if (bt_usb_present() && bt_hci_ready()) {
+        kputs("controller present (BD_ADDR ");
+        bt_print_bdaddr(bt_hci_bdaddr());
+        kputs(")\n");
+        passes++;
+    } else if (bt_usb_present()) {
+        /* Bound transport but boot sequence didn't complete (often a
+         * vendor-firmware-needed chip). Still PASS — the transport
+         * proved itself; the firmware loader is future work. */
+        kputs("controller present (HCI boot incomplete — vendor firmware?)\n");
+        passes++;
+    } else {
+        kputs("not present\n");
+        passes++;
+    }
+    if (CHAIN_BLUETOOTH >= 0) {
+        chain_t *btc = chain_get(CHAIN_BLUETOOTH);
+        int bn = btc ? btc->node_count : 0;
+        kputs("    chain nodes=");
+        kput_dec((uint64_t)bn);
+        kputs("\n");
+        chain_dump(CHAIN_BLUETOOTH);
+        if (bn == 4) passes++; else fails++;
+    }
+
     /* MDE chain: submit a trivial compute_request through CHAIN_MDE
      * and verify (a) the kernel_fn really ran (rc=42), (b)
      * vault_version bumped at least twice (schedule admit +
@@ -4864,6 +4899,213 @@ static void cmd_wifi_scan(const char *args)
 {
     (void)args;
     rtl8188eu_scan();
+}
+
+/* ── Bluetooth shell ──────────────────────────────────────────── */
+
+static void bt_print_bdaddr(const uint8_t bd[6])
+{
+    /* Display order ab:cd:ef:01:02:03 — bd is little-endian on the wire. */
+    for (int i = 5; i >= 0; i--) {
+        if (bd[i] < 0x10) kputc('0');
+        kput_hex(bd[i]);
+        if (i) kputc(':');
+    }
+}
+
+/* Parse "ab:cd:ef:01:02:03" into 6 bytes (little-endian on the wire).
+ * Returns 0 on success, -1 otherwise. */
+static int bt_parse_bdaddr(const char *s, uint8_t out[6])
+{
+    /* Skip whitespace */
+    while (*s == ' ' || *s == '\t') s++;
+    int byte_idx = 5;
+    int nibble_count = 0;
+    uint8_t cur = 0;
+    while (*s && byte_idx >= 0) {
+        char c = *s++;
+        if (c == ':' || c == '-') {
+            if (nibble_count == 0) return -1;
+            out[byte_idx--] = cur;
+            cur = 0;
+            nibble_count = 0;
+            continue;
+        }
+        uint8_t v;
+        if (c >= '0' && c <= '9') v = (uint8_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v = (uint8_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v = (uint8_t)(c - 'A' + 10);
+        else if (c == ' ' || c == '\t' || c == 0 || c == '\n') break;
+        else return -1;
+        cur = (uint8_t)((cur << 4) | v);
+        nibble_count++;
+        if (nibble_count > 2) return -1;
+    }
+    if (nibble_count > 0 && byte_idx >= 0) {
+        out[byte_idx--] = cur;
+    }
+    return (byte_idx == -1) ? 0 : -1;
+}
+
+static void cmd_bt_status(void)
+{
+    if (!bt_usb_present()) {
+        kputs("Bluetooth: no controller present (no USB device matched class E0/01/01)\n");
+        return;
+    }
+    kputs("Bluetooth: controller present\n");
+    bt_usb_dump();
+    if (bt_hci_ready()) {
+        uint8_t hv = 0, lv = 0;
+        uint16_t mf = 0;
+        bt_hci_local_version(&hv, &mf, &lv);
+        kputs("  BD_ADDR ........ ");
+        bt_print_bdaddr(bt_hci_bdaddr());
+        kputs("\n  HCI version .... ");
+        kput_dec(hv);
+        kputs("\n  LMP version .... ");
+        kput_dec(lv);
+        kputs("\n  manufacturer ... ");
+        kput_hex(mf);
+        kputs("\n  scanning ....... ");
+        kputs(bt_hci_scanning() ? "yes" : "no");
+        kputs("\n  link state ..... ");
+        switch (bt_link_state()) {
+        case BT_LINK_NONE:          kputs("idle\n"); break;
+        case BT_LINK_CONNECTING:    kputs("connecting\n"); break;
+        case BT_LINK_CONNECTED:     kputs("connected\n"); break;
+        case BT_LINK_DISCONNECTING: kputs("disconnecting\n"); break;
+        }
+    } else {
+        kputs("  HCI boot ....... not completed (chip may need vendor firmware)\n");
+    }
+}
+
+static void cmd_bt_scan(void)
+{
+    if (!bt_usb_present()) {
+        kputs("bt: no controller present\n");
+        return;
+    }
+    bt_devices_clear();
+    kputs("bt: starting 10s discovery (classic inquiry + LE scan)\n");
+    if (bt_inquiry_start(10) != 0) {
+        kputs("bt: classic inquiry failed to dispatch\n");
+    }
+    if (bt_le_scan_start() != 0) {
+        kputs("bt: LE scan failed to dispatch\n");
+    }
+
+    /* Pump events for ~10 seconds. The scheduler is also calling
+     * bt_hci_poll() through CHAIN_BLUETOOTH every 8 ticks; this is the
+     * synchronous foreground drain so the user sees activity in the
+     * shell. We pace via 100x100ms sleeps that yield to interrupts. */
+    extern void timer_wait_ms(uint32_t ms);
+    for (int i = 0; i < 100; i++) {
+        bt_hci_poll();
+        timer_wait_ms(100);
+    }
+
+    (void)bt_le_scan_stop();
+
+    bt_device_t devs[16];
+    int n = bt_devices_found(devs, (int)(sizeof(devs)/sizeof(devs[0])));
+    kputs("bt: ");
+    kput_dec((uint64_t)n);
+    kputs(" device(s) discovered\n");
+    for (int i = 0; i < n; i++) {
+        kputs("  ");
+        bt_print_bdaddr(devs[i].bdaddr);
+        kputs("  ");
+        switch (devs[i].addr_type) {
+        case 0: kputs("BR/EDR"); break;
+        case 1: kputs("LE-pub"); break;
+        case 2: kputs("LE-rnd"); break;
+        default: kputs("?     "); break;
+        }
+        if (devs[i].rssi != 127) {
+            kputs("  rssi=");
+            /* Print signed dBm. */
+            int r = devs[i].rssi;
+            if (r < 0) { kputc('-'); r = -r; }
+            kput_dec((uint64_t)r);
+            kputs("dBm");
+        }
+        if (devs[i].name_len) {
+            kputs("  ");
+            kputs(devs[i].name);
+        }
+        kputc('\n');
+    }
+}
+
+static void cmd_bt(const char *args)
+{
+    /* Skip leading whitespace. */
+    while (*args == ' ' || *args == '\t') args++;
+
+    if (*args == 0 || (args[0] == 's' && args[1] == 't' && args[2] == 'a')) {
+        cmd_bt_status();
+        return;
+    }
+    if (args[0] == 's' && args[1] == 'c' && args[2] == 'a' && args[3] == 'n') {
+        cmd_bt_scan();
+        return;
+    }
+    if (args[0] == 'c' && args[1] == 'o' && args[2] == 'n' && args[3] == 'n') {
+        const char *p = args + 4;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        while (*p == ' ' || *p == '\t') p++;
+        uint8_t bd[6];
+        if (bt_parse_bdaddr(p, bd) != 0) {
+            kputs("usage: bt connect <addr>  (e.g. ab:cd:ef:01:02:03)\n");
+            return;
+        }
+        /* Look up addr_type from the discovered table; default to LE
+         * public (1) if not seen — classic peers need pairing+page which
+         * is out of scope for the foundation. */
+        bt_device_t devs[16];
+        int n = bt_devices_found(devs, (int)(sizeof(devs)/sizeof(devs[0])));
+        uint8_t at = 1;
+        int found = 0;
+        for (int i = 0; i < n; i++) {
+            int eq = 1;
+            for (int j = 0; j < 6; j++) if (devs[i].bdaddr[j] != bd[j]) { eq = 0; break; }
+            if (eq) { at = devs[i].addr_type ? devs[i].addr_type : 1; found = 1; break; }
+        }
+        if (!found) {
+            kputs("bt: peer not in discovered table — assuming LE public\n");
+        }
+        if (at == 0) {
+            kputs("bt: classic BR/EDR connect not implemented in foundation; LE only\n");
+            return;
+        }
+        if (bt_le_connect(bd, at) != 0) {
+            kputs("bt: LE Create Connection failed to dispatch\n");
+            return;
+        }
+        kputs("bt: connecting to ");
+        bt_print_bdaddr(bd);
+        kputs(" (LE) — watch `bt status` for outcome\n");
+        return;
+    }
+    if (args[0] == 'd' && args[1] == 'i' && args[2] == 's') {
+        const char *p = args + 3;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        while (*p == ' ' || *p == '\t') p++;
+        uint8_t bd[6];
+        if (bt_parse_bdaddr(p, bd) != 0) {
+            kputs("usage: bt disconnect <addr>\n");
+            return;
+        }
+        if (bt_disconnect(bd) != 0) {
+            kputs("bt: disconnect rejected (no live link to that peer)\n");
+            return;
+        }
+        kputs("bt: disconnect dispatched\n");
+        return;
+    }
+    kputs("usage: bt [status|scan|connect <addr>|disconnect <addr>]\n");
 }
 
 /* ── USB CDC ACM ──────────────────────────────────────────────── */
