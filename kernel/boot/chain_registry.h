@@ -35,5 +35,7 @@ extern int CHAIN_BROWSER;
 extern int CHAIN_INSPECTOR;
 extern int CHAIN_PALETTE;
 extern int CHAIN_AUDIO;
+extern int CHAIN_NET_TX;
+extern int CHAIN_NET_RX;
 
 #endif /* ZEOS_CHAIN_REGISTRY_H */

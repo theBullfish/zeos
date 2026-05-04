@@ -21,6 +21,7 @@
 #include "inspector.h"
 #include "palette.h"
 #include "hda.h"
+#include "net_chain.h"
 #include "kprint.h"
 
 /* ── System chain IDs ──────────────────────────────────────────── */
@@ -237,6 +238,14 @@ int chain_registry_init(void)
             if (n2 >= 0) c->nodes[n2].state = hda_pin_state();
             if (n3 >= 0) c->nodes[n3].state = hda_dma_state();
         }
+    }
+
+    /* Networking: chain-native NIC pipeline. The active driver
+     * (virtio / e1000 / rtl8169 / rtl8139 / usb_eth) registered itself
+     * as the hardware_dma backend during net_init(). The chain layer
+     * is generic; the driver never appears in this file. */
+    if (net_chain_register(CHAIN_CPU) != 0) {
+        kputs("[chain_registry] WARN: net chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

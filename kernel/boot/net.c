@@ -16,6 +16,7 @@
 #include "net_ip.h"
 #include "net_tcp.h"
 #include "net_dhcp.h"
+#include "net_chain.h"
 #include "kprint.h"
 
 /* Global network config */
@@ -40,36 +41,47 @@ int net_init(void)
 
     /* Driver probe order: virtio-net (QEMU/cloud), e1000/e1000e (Intel
      * laptops/desktops 2005+), rtl8139 (cheap consumer 2002-2010).
-     * First success wins. */
+     * First success wins. The chosen driver is registered as the
+     * hardware_dma backend for the net_tx / net_rx chains; the legacy
+     * net_drv_send / net_drv_recv pointers are then redirected through
+     * the chain so every TX and every RX flows through the typed
+     * pipeline. */
+    struct net_hw_ops hw = {0, 0, 0};
     if (virtio_net_init() == 0) {
-        net_drv_send    = virtio_net_send;
-        net_drv_recv    = virtio_net_recv;
+        hw.tx = virtio_net_send; hw.rx_poll = virtio_net_recv; hw.name = "virtio-net";
         net_drv_get_mac = virtio_net_get_mac;
         kputs("NET: using virtio-net driver\n");
     } else if (e1000_init() == 0) {
-        net_drv_send    = e1000_send;
-        net_drv_recv    = e1000_recv;
+        hw.tx = e1000_send; hw.rx_poll = e1000_recv; hw.name = "e1000";
         net_drv_get_mac = e1000_get_mac;
         kputs("NET: using e1000 driver\n");
     } else if (rtl8169_init() == 0) {
-        net_drv_send    = rtl8169_send;
-        net_drv_recv    = rtl8169_recv;
+        hw.tx = rtl8169_send; hw.rx_poll = rtl8169_recv; hw.name = "rtl8169";
         net_drv_get_mac = rtl8169_get_mac;
         kputs("NET: using rtl8169 driver\n");
     } else if (rtl8139_init() == 0) {
-        net_drv_send    = rtl8139_send;
-        net_drv_recv    = rtl8139_recv;
+        hw.tx = rtl8139_send; hw.rx_poll = rtl8139_recv; hw.name = "rtl8139";
         net_drv_get_mac = rtl8139_get_mac;
         kputs("NET: using rtl8139 driver\n");
     } else if (usb_eth_init() == 0) {
-        net_drv_send    = usb_eth_send;
-        net_drv_recv    = usb_eth_recv;
+        hw.tx = usb_eth_send; hw.rx_poll = usb_eth_recv; hw.name = "usb-eth";
         net_drv_get_mac = usb_eth_get_mac;
         kputs("NET: using usb_eth driver\n");
     } else {
         kputs("NET: no network device found\n");
         return -1;
     }
+
+    /* Wire the hw backend into the chain layer, then point the legacy
+     * dispatch pointers at the chain shims so existing callers (ARP,
+     * IP, DHCP, TCP, TLS, DNS) traverse the chain without any code
+     * changes. The chains themselves get *registered* later by
+     * chain_registry_init(); during the brief window before that the
+     * shim falls back to direct hw calls (DHCP discover happens in
+     * that window). */
+    net_chain_set_hw(&hw);
+    net_drv_send = net_chain_send;
+    net_drv_recv = net_chain_recv;
 
     /* Get our MAC */
     net_drv_get_mac(&g_net.mac);

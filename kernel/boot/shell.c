@@ -2206,6 +2206,28 @@ vault_done:
         fails++;
     }
 
+    /* Network chains: dump both TX and RX so the chain-native NIC
+     * conversion is observable. Each chain must show 4 nodes
+     * matching the contract pipeline. */
+    kputs("  Network chains ........ ");
+    if (CHAIN_NET_TX >= 0 && CHAIN_NET_RX >= 0) {
+        chain_t *tx = chain_get(CHAIN_NET_TX);
+        chain_t *rx = chain_get(CHAIN_NET_RX);
+        int tn = tx ? tx->node_count : 0;
+        int rn = rx ? rx->node_count : 0;
+        kputs("tx_nodes=");
+        kput_dec((uint64_t)tn);
+        kputs(", rx_nodes=");
+        kput_dec((uint64_t)rn);
+        kputc('\n');
+        chain_dump(CHAIN_NET_TX);
+        chain_dump(CHAIN_NET_RX);
+        if (tn == 4 && rn == 4) passes++; else fails++;
+    } else {
+        kputs("not registered\n");
+        fails++;
+    }
+
     /* USB MSC: report presence + size in MB. */
     kputs("  USB MSC ............... ");
     if (usb_msc_ready()) {
