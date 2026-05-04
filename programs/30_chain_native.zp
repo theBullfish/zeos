@@ -1,0 +1,20 @@
+// 30_chain_native.zp
+// Z+ binds directly to the live kernel chain graph.
+// pulse fires every tick; sustained holds for 5 consecutive ticks
+// before allowing audio.play to ring through CHAIN_AUDIO. tap.log
+// observes the pulse on every tick.
+//
+// audio.play   -> chain_resolve(CHAIN_AUDIO)   (pcm_request staged in hda)
+// tap.log      -> kprint side-channel
+//
+// vault_version on CHAIN_AUDIO bumps when the play fires (MasQ rule).
+
+pulse : emit(1)
+beat  : input -> sustained(> 0, for = 5)
+ring  : input -> audio.play
+log   : input -> tap.log
+
+pulse -> beat -> ring
+pulse ~> log
+
+chain heartbeat { pulse beat ring log }

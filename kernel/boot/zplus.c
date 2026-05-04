@@ -1,22 +1,39 @@
 /*
- * Zeos — Z+ Interpreter (Minimal)
+ * Zeos — Z+ Interpreter
  *
  * Parses Tier 3 Z+ syntax and maps it to the signal chain engine.
  *
- * This is deliberately simple. It handles the constructs needed
- * to run hello_chain.zp and signal_playground.zp. As the language
- * spec solidifies, this grows.
+ * Z+ now binds directly to the live kernel chain graph.
+ * audio.* -> CHAIN_AUDIO, net.* -> CHAIN_NET_TX/RX, fs.* -> CHAIN_BLOCK,
+ * vault.* -> vault_save_config / vault_load_config. Programs are
+ * first-class chain consumers — Z+ is the surface that talks to the
+ * actual registered chain graph, not a generic DSL.
  *
  * The interpreter works in three phases:
  *   1. PARSE  — tokenize source, extract node decls and edges
  *   2. COMPILE — create signal chain nodes and wire them
- *   3. EXECUTE — inject data into sources and resolve
+ *   3. EXECUTE — inject data into sources and resolve (multi-tick when
+ *                a sustained() node is present so its consecutive-tick
+ *                condition can fire)
  */
 
 #include "zplus.h"
 #include "signal.h"
 #include "chain.h"
+#include "chain_registry.h"
+#include "hda.h"
+#include "net_chain.h"
+#include "block_chain.h"
+#include "vault.h"
 #include "kprint.h"
+
+/* The audio chain consumes a staged pcm_request from hda.c. It's declared
+ * static there; we use the module-level shim hda_play_pcm() to stage and
+ * resolve, which is the canonical compat-shim pattern from the chain
+ * contract. zp_proc_audio_play() does the same work without the imperative
+ * wrapper — it stages a tiny PCM blip (square wave) and calls
+ * chain_resolve(CHAIN_AUDIO) directly. The chain's vault_version bumps
+ * automatically on stream start (per the MasQ provenance rule). */
 
 /* ── String utilities ─────────────────────────── */
 
@@ -47,6 +64,9 @@ static void zp_strcpy(char *dst, const char *src, int max)
 static int zp_isdigit(char c) { return c >= '0' && c <= '9'; }
 static int zp_isalpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
 static int zp_isalnum(char c) { return zp_isalpha(c) || zp_isdigit(c); }
+/* Identifier extension: allow '.' so verbs like audio.play / net.send /
+ * vault.get / tap.log lex as a single TOK_IDENT. */
+static int zp_isident(char c) { return zp_isalnum(c) || c == '.'; }
 
 /* ── Tokenizer ────────────────────────────────── */
 
@@ -228,10 +248,10 @@ static int lexer_token(struct zp_lexer *lex, struct zp_token *tok)
         return 0;
     }
 
-    /* Identifier */
+    /* Identifier (may contain '.') */
     if (zp_isalpha(c)) {
         int i = 0;
-        while (lex->pos < lex->len && zp_isalnum(lexer_peek(lex))) {
+        while (lex->pos < lex->len && zp_isident(lexer_peek(lex))) {
             char d = lexer_next(lex);
             if (i < ZP_MAX_NAME - 1)
                 tok->text[i++] = d;
@@ -283,7 +303,10 @@ static int add_node(struct zp_program *prog, const char *name, enum zp_node_type
     zp_strcpy(prog->nodes[idx].name, name, ZP_MAX_NAME);
     prog->nodes[idx].type = type;
     prog->nodes[idx].int_val = val;
+    prog->nodes[idx].int_val2 = 0;
+    prog->nodes[idx].int_val3 = 0;
     prog->nodes[idx].sig_idx = -1;
+    prog->nodes[idx].chain_bind_id = -1;
     if (fmt)
         zp_strcpy(prog->nodes[idx].fmt, fmt, ZP_MAX_STRING);
     else
@@ -301,6 +324,80 @@ static int add_edge(struct zp_program *prog, const char *src, const char *dst)
     zp_strcpy(prog->edges[idx].src, src, ZP_MAX_NAME);
     zp_strcpy(prog->edges[idx].dst, dst, ZP_MAX_NAME);
     return idx;
+}
+
+/* Map a TOK_IDENT verb name (after lexing with '.' allowed) to a node type.
+ * Returns 1 on hit, 0 if unknown. */
+static int verb_to_type(const char *t, enum zp_node_type *out)
+{
+    if (zp_streq(t, "audio.play"))  { *out = ZP_AUDIO_PLAY; return 1; }
+    if (zp_streq(t, "net.send"))    { *out = ZP_NET_SEND;   return 1; }
+    if (zp_streq(t, "net.recv"))    { *out = ZP_NET_RECV;   return 1; }
+    if (zp_streq(t, "fs.read"))     { *out = ZP_FS_READ;    return 1; }
+    if (zp_streq(t, "fs.write"))    { *out = ZP_FS_WRITE;   return 1; }
+    if (zp_streq(t, "vault.put"))   { *out = ZP_VAULT_PUT;  return 1; }
+    if (zp_streq(t, "vault.get"))   { *out = ZP_VAULT_GET;  return 1; }
+    if (zp_streq(t, "tap.log"))     { *out = ZP_TAP_LOG;    return 1; }
+    return 0;
+}
+
+/* Parse `(low = N, high = M)` for knee. */
+static void parse_knee_args(struct zp_lexer *lex, int32_t *out_low, int32_t *out_high)
+{
+    struct zp_token t;
+    *out_low = 0; *out_high = 100;
+    lexer_token(lex, &t); /* ( */
+    if (t.type != TOK_LPAREN) return;
+    while (1) {
+        lexer_token(lex, &t);
+        if (t.type == TOK_RPAREN || t.type == TOK_EOF || t.type == TOK_NEWLINE) break;
+        if (t.type == TOK_IDENT) {
+            char key[ZP_MAX_NAME];
+            zp_strcpy(key, t.text, ZP_MAX_NAME);
+            lexer_token(lex, &t); /* '=' would be EQ but we lex == only; '=' is unknown */
+            /* Our lexer doesn't tokenize bare '='; it skipped. Just read a number. */
+            if (t.type != TOK_NUMBER) lexer_token(lex, &t);
+            if (t.type == TOK_NUMBER) {
+                if (zp_streq(key, "low"))       *out_low  = t.num_val;
+                else if (zp_streq(key, "high")) *out_high = t.num_val;
+            }
+        }
+        lexer_token(lex, &t); /* , or ) */
+        if (t.type == TOK_RPAREN) break;
+    }
+}
+
+/* Parse `(> N, for = M)` for sustained. Returns gate-style comparator type
+ * via *out_gtype, threshold in *out_thresh, count in *out_count. */
+static void parse_sustained_args(struct zp_lexer *lex,
+                                 enum zp_node_type *out_gtype,
+                                 int32_t *out_thresh,
+                                 int32_t *out_count)
+{
+    struct zp_token t;
+    *out_gtype = ZP_GATE_GT;
+    *out_thresh = 0;
+    *out_count = 1;
+    lexer_token(lex, &t); /* ( */
+    if (t.type != TOK_LPAREN) return;
+    lexer_token(lex, &t); /* comparator */
+    if      (t.type == TOK_GT)  *out_gtype = ZP_GATE_GT;
+    else if (t.type == TOK_LT)  *out_gtype = ZP_GATE_LT;
+    else if (t.type == TOK_EQ)  *out_gtype = ZP_GATE_EQ;
+    else if (t.type == TOK_GTE) *out_gtype = ZP_GATE_GTE;
+    else if (t.type == TOK_LTE) *out_gtype = ZP_GATE_LTE;
+    lexer_token(lex, &t); /* threshold number */
+    if (t.type == TOK_NUMBER) *out_thresh = t.num_val;
+    lexer_token(lex, &t); /* , */
+    /* expect for = N */
+    while (t.type != TOK_RPAREN && t.type != TOK_EOF && t.type != TOK_NEWLINE) {
+        if (t.type == TOK_IDENT && zp_streq(t.text, "for")) {
+            lexer_token(lex, &t); /* maybe number or skipped '=' */
+            if (t.type != TOK_NUMBER) lexer_token(lex, &t);
+            if (t.type == TOK_NUMBER) *out_count = t.num_val;
+        }
+        lexer_token(lex, &t);
+    }
 }
 
 /*
@@ -473,6 +570,65 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                 add_node(prog, first_name, ZP_DELTA, 0, 0);
                 lexer_token(lex, &t);  /* -> */
                 lexer_token(lex, &t);  /* output */
+
+            } else if (t.type == TOK_IDENT && zp_streq(t.text, "knee")) {
+                /* knee(low = N, high = M) [-> output]   (output skipped by skip_line) */
+                int32_t lo, hi;
+                parse_knee_args(lex, &lo, &hi);
+                add_node(prog, first_name, ZP_KNEE, lo, 0);
+                prog->nodes[prog->node_count - 1].int_val2 = hi;
+
+            } else if (t.type == TOK_IDENT && zp_streq(t.text, "sustained")) {
+                /* sustained(> N, for = K) [-> output] */
+                enum zp_node_type gt;
+                int32_t thresh, count;
+                parse_sustained_args(lex, &gt, &thresh, &count);
+                add_node(prog, first_name, ZP_SUSTAINED, thresh, 0);
+                prog->nodes[prog->node_count - 1].int_val2 = count;
+                prog->nodes[prog->node_count - 1].int_val3 = (int32_t)gt;
+
+            } else if (t.type == TOK_IDENT) {
+                /* Verb dispatch: audio.play / net.* / fs.* / vault.* / tap.log */
+                enum zp_node_type vt;
+                if (verb_to_type(t.text, &vt)) {
+                    add_node(prog, first_name, vt, 0, 0);
+                    /* fs.read/write and vault.put/get accept args.
+                     * Probe by char in source — we don't pre-consume the
+                     * next token because skip_line will eat to newline. */
+                    if (lexer_peek(lex) == '(') {
+                        struct zp_token p;
+                        lexer_token(lex, &p); /* ( */
+                        if (vt == ZP_VAULT_PUT || vt == ZP_VAULT_GET) {
+                            lexer_token(lex, &p); /* key string */
+                            if (p.type == TOK_STRING)
+                                zp_strcpy(prog->nodes[prog->node_count - 1].fmt,
+                                          p.text, ZP_MAX_STRING);
+                            while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
+                                   && p.type != TOK_EOF)
+                                lexer_token(lex, &p);
+                        } else if (vt == ZP_FS_READ || vt == ZP_FS_WRITE) {
+                            int32_t a = 0, b = 0, c = 0;
+                            lexer_token(lex, &p);
+                            if (p.type == TOK_NUMBER) a = p.num_val;
+                            lexer_token(lex, &p); /* , */
+                            lexer_token(lex, &p);
+                            if (p.type == TOK_NUMBER) b = p.num_val;
+                            lexer_token(lex, &p); /* , */
+                            lexer_token(lex, &p);
+                            if (p.type == TOK_NUMBER) c = p.num_val;
+                            prog->nodes[prog->node_count - 1].int_val  = a;
+                            prog->nodes[prog->node_count - 1].int_val2 = b;
+                            prog->nodes[prog->node_count - 1].int_val3 = c;
+                            while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
+                                   && p.type != TOK_EOF)
+                                lexer_token(lex, &p);
+                        } else {
+                            while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
+                                   && p.type != TOK_EOF)
+                                lexer_token(lex, &p);
+                        }
+                    }
+                }
             }
 
         } else if (t.type == TOK_NUMBER) {
@@ -751,6 +907,203 @@ static int zp_proc_passthrough(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
+/* Knee: smooth ramp. Below low -> 0. Above high -> 100. Linear in between.
+ * low/high stored in user_data low24:high8? Use globals indexed by node id. */
+static int32_t knee_low[ZP_MAX_NODES];
+static int32_t knee_high[ZP_MAX_NODES];
+
+static int zp_proc_knee(struct sig_node *node, struct sig_data *in,
+                         struct sig_data *out)
+{
+    int32_t v = sig_data_read_i32(in);
+    int idx = node->id;
+    int32_t lo = (idx < ZP_MAX_NODES) ? knee_low[idx]  : 0;
+    int32_t hi = (idx < ZP_MAX_NODES) ? knee_high[idx] : 100;
+    int32_t r;
+    if (v <= lo)        r = 0;
+    else if (v >= hi)   r = 100;
+    else if (hi == lo)  r = 100;
+    else                r = ((v - lo) * 100) / (hi - lo);
+    sig_data_write_i32(out, r);
+    return 0;
+}
+
+/* Sustained: fires only after input has held the comparator condition for
+ * N consecutive ticks. Internal counter. When threshold reached, output
+ * passes the input value through; otherwise output 0 (no fire). */
+static int32_t sustained_thresh[ZP_MAX_NODES];
+static int32_t sustained_target[ZP_MAX_NODES];
+static int32_t sustained_count[ZP_MAX_NODES];
+static int32_t sustained_gate[ZP_MAX_NODES];   /* gate type */
+
+static int sustained_cmp(int32_t v, int32_t t, int32_t gt)
+{
+    switch ((enum zp_node_type)gt) {
+    case ZP_GATE_GT:  return v >  t;
+    case ZP_GATE_LT:  return v <  t;
+    case ZP_GATE_EQ:  return v == t;
+    case ZP_GATE_GTE: return v >= t;
+    case ZP_GATE_LTE: return v <= t;
+    default:          return v >  t;
+    }
+}
+
+static int zp_proc_sustained(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    int32_t v = sig_data_read_i32(in);
+    int idx = node->id;
+    if (idx >= ZP_MAX_NODES) { out->size = 0; return 1; }
+    int32_t t = sustained_thresh[idx];
+    int32_t target = sustained_target[idx];
+    int32_t gt = sustained_gate[idx];
+
+    if (sustained_cmp(v, t, gt))
+        sustained_count[idx]++;
+    else
+        sustained_count[idx] = 0;
+
+    if (sustained_count[idx] >= target) {
+        sig_data_write_i32(out, v);
+        return 0;
+    }
+    /* Not yet sustained — block downstream */
+    out->size = 0;
+    return 1;
+}
+
+/* audio.play — bridge to CHAIN_AUDIO. Generates a short square-wave blip
+ * (200 samples @ 8 kHz, 440 Hz) and stages it through the canonical
+ * pcm_request path. The compat shim hda_play_pcm() does exactly this:
+ * stage the request, call chain_resolve(CHAIN_AUDIO). The chain's
+ * vault_version bumps inside the pcm_source / hardware_dma resolves per
+ * the MasQ provenance rule. */
+static int zp_proc_audio_play(struct sig_node *node, struct sig_data *in,
+                               struct sig_data *out)
+{
+    (void)node; (void)in;
+    static int16_t blip[400];
+    static int initialized = 0;
+    if (!initialized) {
+        for (int i = 0; i < 400; i++)
+            blip[i] = (i & 0x10) ? 12000 : -12000;  /* coarse 440-ish square */
+        initialized = 1;
+    }
+    int rc = hda_play_pcm(blip, 400, 8000);
+    sig_data_write_i32(out, rc == 0 ? 1 : 0);
+    return 0;
+}
+
+/* net.send — bridge to CHAIN_NET_TX. Sends a tiny placeholder ethernet
+ * frame (broadcast, EtherType 0x88B5 reserved-experimental). Returns 1 if
+ * the chain accepted the frame, 0 otherwise. */
+static int zp_proc_net_send(struct sig_node *node, struct sig_data *in,
+                             struct sig_data *out)
+{
+    (void)node; (void)in;
+    uint8_t frame[64];
+    for (int i = 0; i < 6; i++) frame[i] = 0xff;        /* dst broadcast */
+    for (int i = 6; i < 12; i++) frame[i] = 0x00;        /* src placeholder */
+    frame[12] = 0x88; frame[13] = 0xB5;                  /* experimental */
+    for (int i = 14; i < 64; i++) frame[i] = (uint8_t)i;
+    int rc = net_chain_send(frame, sizeof(frame));
+    sig_data_write_i32(out, rc == 0 ? 1 : 0);
+    return 0;
+}
+
+/* net.recv — bridge to CHAIN_NET_RX. Pulls one frame if present, emits
+ * its byte length. Zero if queue empty (chain still resolves). */
+static int zp_proc_net_recv(struct sig_node *node, struct sig_data *in,
+                             struct sig_data *out)
+{
+    (void)node; (void)in;
+    uint8_t buf[1600];
+    int len = net_chain_recv(buf, sizeof(buf));
+    sig_data_write_i32(out, len > 0 ? len : 0);
+    return 0;
+}
+
+/* fs.read(drive, lba, count) — bridge to CHAIN_BLOCK with op=READ. Reads
+ * into a small static scratch buffer (up to one block). Output = bytes
+ * actually moved (count*512 on success, 0 on failure). */
+static uint8_t zp_fs_scratch[4096];
+static int32_t zp_fs_drive[ZP_MAX_NODES];
+static int32_t zp_fs_lba[ZP_MAX_NODES];
+static int32_t zp_fs_count[ZP_MAX_NODES];
+
+static int zp_proc_fs_read(struct sig_node *node, struct sig_data *in,
+                            struct sig_data *out)
+{
+    (void)in;
+    int idx = node->id;
+    int32_t drive = (idx < ZP_MAX_NODES) ? zp_fs_drive[idx] : 0;
+    int32_t lba   = (idx < ZP_MAX_NODES) ? zp_fs_lba[idx]   : 0;
+    int32_t count = (idx < ZP_MAX_NODES) ? zp_fs_count[idx] : 1;
+    if (count > 8) count = 8;
+    if (count <= 0) count = 1;
+    int rc = block_chain_submit(drive, (uint64_t)lba, (uint32_t)count,
+                                BLOCK_OP_READ, zp_fs_scratch);
+    sig_data_write_i32(out, rc == 0 ? count * 512 : 0);
+    return 0;
+}
+
+static int zp_proc_fs_write(struct sig_node *node, struct sig_data *in,
+                             struct sig_data *out)
+{
+    (void)in;
+    int idx = node->id;
+    int32_t drive = (idx < ZP_MAX_NODES) ? zp_fs_drive[idx] : 0;
+    int32_t lba   = (idx < ZP_MAX_NODES) ? zp_fs_lba[idx]   : 0;
+    int32_t count = (idx < ZP_MAX_NODES) ? zp_fs_count[idx] : 1;
+    if (count > 8) count = 8;
+    if (count <= 0) count = 1;
+    /* Source buffer = scratch (whatever a previous fs.read left). */
+    int rc = block_chain_submit(drive, (uint64_t)lba, (uint32_t)count,
+                                BLOCK_OP_WRITE, zp_fs_scratch);
+    sig_data_write_i32(out, rc == 0 ? count * 512 : 0);
+    return 0;
+}
+
+/* vault.put / vault.get — vault config key/value store bridge. Key is in
+ * node->user_data as a const char* (the parsed string literal). Value for
+ * put is the input int32. */
+static int zp_proc_vault_put(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    int32_t v = sig_data_read_i32(in);
+    const char *key = (const char *)node->user_data;
+    if (!key || !*key) { sig_data_write_i32(out, 0); return 0; }
+    int rc = vault_save_config(key, &v, sizeof(v));
+    sig_data_write_i32(out, rc > 0 ? v : 0);
+    return 0;
+}
+
+static int zp_proc_vault_get(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    (void)in;
+    const char *key = (const char *)node->user_data;
+    int32_t v = 0;
+    if (key && *key) vault_load_config(key, &v, sizeof(v));
+    sig_data_write_i32(out, v);
+    return 0;
+}
+
+/* tap.log — pure observer. Logs the value to kprint and passes it through
+ * unchanged so the chain can keep flowing. */
+static int zp_proc_tap_log(struct sig_node *node, struct sig_data *in,
+                            struct sig_data *out)
+{
+    int32_t v = sig_data_read_i32(in);
+    kputs("    [tap.log ");
+    kputs(node->name);
+    kputs("] ");
+    kput_dec((uint64_t)(uint32_t)v);
+    kputs("\n");
+    sig_data_write_i32(out, v);
+    return 0;
+}
+
 /* Print: display the value with format string */
 static int zp_proc_print(struct sig_node *node, struct sig_data *in,
                           struct sig_data *out)
@@ -930,6 +1283,51 @@ int zp_compile(struct zp_program *prog)
             proc = zp_proc_passthrough;
             user_data = 0;
             break;
+        case ZP_KNEE:
+            proc = zp_proc_knee;
+            user_data = 0;
+            break;
+        case ZP_SUSTAINED:
+            proc = zp_proc_sustained;
+            user_data = 0;
+            break;
+        case ZP_AUDIO_PLAY:
+            proc = zp_proc_audio_play;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_AUDIO;
+            break;
+        case ZP_NET_SEND:
+            proc = zp_proc_net_send;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_NET_TX;
+            break;
+        case ZP_NET_RECV:
+            proc = zp_proc_net_recv;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_NET_RX;
+            break;
+        case ZP_FS_READ:
+            proc = zp_proc_fs_read;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_BLOCK;
+            break;
+        case ZP_FS_WRITE:
+            proc = zp_proc_fs_write;
+            user_data = 0;
+            decl->chain_bind_id = CHAIN_BLOCK;
+            break;
+        case ZP_VAULT_PUT:
+            proc = zp_proc_vault_put;
+            user_data = (void *)decl->fmt;
+            break;
+        case ZP_VAULT_GET:
+            proc = zp_proc_vault_get;
+            user_data = (void *)decl->fmt;
+            break;
+        case ZP_TAP_LOG:
+            proc = zp_proc_tap_log;
+            user_data = 0;
+            break;
         }
 
         int idx = sig_node_add(chain, decl->name, proc, user_data);
@@ -940,6 +1338,28 @@ int zp_compile(struct zp_program *prog)
             return -1;
         }
         decl->sig_idx = idx;
+
+        /* Seed per-node state arrays for nodes that need extra params. */
+        if (idx < ZP_MAX_NODES) {
+            if (decl->type == ZP_KNEE) {
+                knee_low[idx]  = decl->int_val;
+                knee_high[idx] = decl->int_val2;
+            } else if (decl->type == ZP_SUSTAINED) {
+                sustained_thresh[idx] = decl->int_val;
+                sustained_target[idx] = decl->int_val2;
+                sustained_gate[idx]   = decl->int_val3;
+                sustained_count[idx]  = 0;
+            } else if (decl->type == ZP_FS_READ || decl->type == ZP_FS_WRITE) {
+                zp_fs_drive[idx] = decl->int_val;
+                zp_fs_lba[idx]   = decl->int_val2;
+                zp_fs_count[idx] = decl->int_val3;
+            }
+            /* Reset delta history for this node so re-runs start clean. */
+            if (decl->type == ZP_DELTA) {
+                delta_history[idx] = 0;
+                delta_has_prev[idx] = 0;
+            }
+        }
     }
 
     /* Create edges */
@@ -986,17 +1406,38 @@ int zp_execute(struct zp_program *prog)
     if (prog->chain_id < 0)
         return -1;
 
-    /* Inject data into all source (emit) nodes */
+    /* If the program has a sustained node with target N, the chain has to
+     * tick at least N+1 times before the sustain fires. Walk the program
+     * to compute the longest target and run that many ticks. Default 1. */
+    int max_ticks = 1;
     for (int i = 0; i < prog->node_count; i++) {
-        if (prog->nodes[i].type == ZP_EMIT) {
-            struct sig_data trigger = {.size = 0, .type = 0};
-            sig_inject(prog->chain_id, prog->nodes[i].sig_idx, &trigger);
+        if (prog->nodes[i].type == ZP_SUSTAINED) {
+            int t = prog->nodes[i].int_val2 + 1;
+            if (t > max_ticks) max_ticks = t;
         }
     }
+    if (max_ticks > 16) max_ticks = 16; /* safety cap */
 
-    /* Resolve */
-    int fired = sig_resolve(prog->chain_id);
-    return fired;
+    int total_fired = 0;
+    for (int tick = 0; tick < max_ticks; tick++) {
+        /* Inject data into all source (emit) nodes each tick */
+        for (int i = 0; i < prog->node_count; i++) {
+            if (prog->nodes[i].type == ZP_EMIT) {
+                struct sig_data trigger = {.size = 0, .type = 0};
+                sig_inject(prog->chain_id, prog->nodes[i].sig_idx, &trigger);
+            }
+        }
+        int fired = sig_resolve(prog->chain_id);
+        if (fired > 0) total_fired += fired;
+        if (max_ticks > 1) {
+            kputs("    tick ");
+            kput_dec((uint64_t)tick);
+            kputs(": ");
+            kput_dec((uint64_t)fired);
+            kputs(" fired\n");
+        }
+    }
+    return total_fired;
 }
 
 int zp_run(const char *source)

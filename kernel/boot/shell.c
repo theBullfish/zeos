@@ -1232,6 +1232,19 @@ static const char zp_pipeline[] =
     "start -> boost -> check -> result\n"
     "start -> blocked -> nope\n";
 
+/* chain_native — Z+ binds directly to the live kernel chain graph.
+ * pulse fires every tick; sustained holds 5 consecutive ticks; then
+ * audio.play rings through CHAIN_AUDIO and bumps its vault_version. */
+static const char zp_chain_native[] =
+    "// Z+ binds to the live kernel chain graph.\n"
+    "pulse : emit(1)\n"
+    "beat  : input -> sustained(> 0, for = 5)\n"
+    "ring  : input -> audio.play\n"
+    "log   : input -> tap.log\n"
+    "pulse -> beat -> ring\n"
+    "pulse ~> log\n"
+    "chain heartbeat { pulse beat ring log }\n";
+
 struct zp_builtin {
     const char *name;
     const char *desc;
@@ -1245,6 +1258,7 @@ static const struct zp_builtin builtins[] = {
     {"gate",     "gate demo — 100 passes, 5 blocks (threshold 50)", zp_gate},
     {"fork",     "fork demo — one source, three paths",             zp_fork},
     {"pipeline", "gate + math combined — transform then filter",    zp_pipeline},
+    {"chain_native", "Z+ -> live kernel chains (audio + tap.log)",  zp_chain_native},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
