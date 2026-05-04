@@ -125,30 +125,60 @@ static void device_select_resolve(chain_node_t *self, void *input, void *output)
 
     /* Ask the gpu_compute registry for a backend. Today the registry
      * always has at least the CPU backend; GPU backends register from
-     * gpu_virtio_init / future Intel/AMD/NVIDIA drivers.
+     * gpu_virtio_init / per-card gpu_goya_init (one slot per card).
      *
-     * Selection policy:
-     *   prefer_gpu=1 -> use whatever gpu_compute_pick returns (GPU first,
-     *                   CPU fallback when no GPU backend can_dispatch).
-     *   prefer_gpu=0 -> force CPU backend at index 0 for safety/determinism.
+     * Selection:
+     *   1. Affinity pin (req->affinity_backend_idx >= 0): use that slot
+     *      iff it can_dispatch and isn't in cooldown. Else fall through.
+     *   2. prefer_gpu=1: pick via the request's policy_override (or the
+     *      global policy), which can be FIRST / ROUND_ROBIN / LEAST_LOADED
+     *      / SHAPE_AWARE. Real load balancing across the Goya fleet.
+     *   3. prefer_gpu=0: force the CPU backend (index 0) for safety /
+     *      determinism — same legacy behavior.
      *
      * The registry never returns NULL when init has run, so the
      * legacy MDE_BACKEND_CPU branch in execute_resolve only fires if
      * the registry was somehow empty (defense-in-depth). */
     gpu_compute_backend_t *picked = NULL;
-    if (s_slot.req->prefer_gpu) {
-        picked = gpu_compute_pick(s_slot.req->args);
-    } else if (gpu_compute_count() > 0) {
-        picked = gpu_compute_get(0);  /* CPU is always at index 0 */
+    int picked_idx = -1;
+
+    if (s_slot.req->affinity_backend_idx >= 0) {
+        gpu_compute_backend_t *pin =
+            gpu_compute_get(s_slot.req->affinity_backend_idx);
+        if (pin && pin->can_dispatch && pin->can_dispatch(s_slot.req->args)) {
+            /* Honor pin even if in cooldown? No — cooldown is a strong
+             * signal. If pinned slot is cooling, fall back to free-pick. */
+            picked = pin;
+            picked_idx = s_slot.req->affinity_backend_idx;
+        }
+    }
+
+    if (!picked) {
+        if (s_slot.req->prefer_gpu) {
+            int policy = s_slot.req->policy_override;
+            if (policy < 0) policy = gpu_compute_get_policy();
+            picked = gpu_compute_pick_with(policy, s_slot.req->args);
+        } else if (gpu_compute_count() > 0) {
+            picked = gpu_compute_get(0);  /* CPU always at index 0 */
+        }
+    }
+
+    /* Resolve picked back to its registry index (for backend_idx_used). */
+    if (picked && picked_idx < 0) {
+        for (int i = 0; i < gpu_compute_count(); i++) {
+            if (gpu_compute_get(i) == picked) { picked_idx = i; break; }
+        }
     }
 
     if (picked) {
-        s_slot.tok.backend    = picked;
-        s_slot.tok.backend_id = (picked->device_id < 0)
-                                ? MDE_BACKEND_CPU : MDE_BACKEND_GPU;
+        s_slot.tok.backend        = picked;
+        s_slot.tok.backend_id     = (picked->device_id < 0)
+                                    ? MDE_BACKEND_CPU : MDE_BACKEND_GPU;
+        s_slot.req->backend_idx_used = picked_idx;
     } else {
-        s_slot.tok.backend    = NULL;
-        s_slot.tok.backend_id = MDE_BACKEND_CPU;
+        s_slot.tok.backend        = NULL;
+        s_slot.tok.backend_id     = MDE_BACKEND_CPU;
+        s_slot.req->backend_idx_used = -1;
     }
 }
 
@@ -199,12 +229,13 @@ static void execute_resolve(chain_node_t *self, void *input, void *output)
     uint64_t elapsed = 0;
 
     if (s_slot.tok.backend && s_slot.tok.backend->dispatch) {
-        /* Registry-backed dispatch. The CPU backend really runs the
-         * kernel_fn. The virtio-virgl backend currently logs and falls
-         * back to CPU execution -- honest about not having a shader
-         * compiler yet. Real Intel/AMD/NVIDIA backends will execute on
-         * device when they register. */
-        rc = s_slot.tok.backend->dispatch(s_slot.tok.req->kernel_fn,
+        /* Registry-backed dispatch via the tracked wrapper so that
+         * inflight_count, EWMA latency, consecutive_errors, and
+         * cooldown all stay accurate without every backend duplicating
+         * the bookkeeping. The CPU backend really runs the kernel_fn;
+         * Goya/virtio backends fall back per their own scope notes. */
+        rc = gpu_compute_dispatch_tracked(s_slot.tok.backend,
+                                          s_slot.tok.req->kernel_fn,
                                           s_slot.tok.req->args,
                                           &elapsed);
     } else if (s_slot.tok.backend_id == MDE_BACKEND_CPU) {
@@ -294,6 +325,9 @@ int mde_chain_submit(mde_compute_request_t *req)
     req->rc           = -1;
     req->elapsed_tsc  = 0;
     req->backend_used = MDE_BACKEND_NONE;
+    req->backend_idx_used = -1;
+    /* policy_override < 0 means "use global"; affinity_backend_idx < 0
+     * means "free pick". All in-tree callers initialize both to -1. */
 
     int rc = chain_resolve(CHAIN_MDE);
 

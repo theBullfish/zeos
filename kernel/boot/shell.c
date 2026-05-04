@@ -59,6 +59,7 @@
 #include "gpu_virtio.h"
 #include "gpu_nvidia.h"
 #include "gpu_goya.h"
+#include "gpu_compute.h"
 #include "mde_chain.h"
 #include "serial.h"
 #include "persona_filter.h"
@@ -268,6 +269,7 @@ static void cmd_masq_journal(const char *args);
 static void cmd_gpustat(const char *args);
 static void cmd_goya(const char *args);
 static void cmd_nvidia(const char *args);
+static void cmd_gpu_load(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
@@ -436,6 +438,17 @@ static void cmd_goya(const char *args) {
 static void cmd_nvidia(const char *args) {
     (void)args;
     gpu_nvidia_dump_status();
+}
+
+/* gpu-load
+ *   Per-backend load table for the gpu_compute registry. Shows the
+ *   active selection policy, every backend's inflight count, lifetime
+ *   dispatch total, EWMA dispatch latency in microseconds, and any
+ *   active error cooldown. Driven by stats updated in
+ *   gpu_compute_dispatch_tracked() on every CHAIN_MDE.execute. */
+static void cmd_gpu_load(const char *args) {
+    (void)args;
+    gpu_compute_dump_load();
 }
 
 /* tickrate [watch]
@@ -744,6 +757,7 @@ static const struct shell_cmd commands[] = {
     {"gpustat","list GPUs and displays (mode + EDID monitor)", cmd_gpustat, VIS_DEREZ},
     {"goya",   "Habana Goya HL-1000: card count, BARs, fw, fence", cmd_goya,   VIS_DEREZ},
     {"nvidia", "NVIDIA GPUs: chip family, outputs, mode, GSP state", cmd_nvidia, VIS_DEREZ},
+    {"gpu-load","per-backend MDE compute load (policy, inflight, EWMA us, cooldown)", cmd_gpu_load, VIS_DEREZ},
     {"scheduler-log","dump last N scheduler tick records (default 16)", cmd_scheduler_log, VIS_DEREZ},
     {"hotplug","dump recent hotplug events (PCI/USB/display)", cmd_hotplug, VIS_DEREZ},
     {"date",    "show or set wall clock (date [\"YYYY-MM-DD HH:MM:SS\"])", tod_cmd_date, VIS_ALWAYS},
@@ -3910,6 +3924,8 @@ vault_done:
             .args        = &thunk,
             .rc          = 0,
             .elapsed_tsc = 0,
+            .policy_override = -1,
+            .affinity_backend_idx = -1,
         };
         int srv = mde_chain_submit(&req);
         int vv_after = mc ? mc->vault_version : 0;
@@ -3943,6 +3959,12 @@ vault_done:
         kputs("not registered\n");
         fails++;
     }
+
+    /* MDE selector: report the active policy, the number of registered
+     * compute backends, and how many are currently in error cooldown.
+     * Always passes -- this is observability, not validation. */
+    gpu_compute_print_selftest_line();
+    passes++;
 
     /* CFA handles: TLS state + VAULT blob + lockscreen PIN buffers
      * must each be wrapped after tls_init(), vault_mount(), and

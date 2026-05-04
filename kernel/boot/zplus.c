@@ -1428,6 +1428,8 @@ static int zp_proc_compute_run(struct sig_node *node, struct sig_data *in,
         .prefer_gpu   = (idx >= 0 && idx < ZP_MAX_NODES)
                             ? zp_compute_prefer_gpu[idx] : 0,
         .backend_used = 0,
+        .policy_override = -1,
+        .affinity_backend_idx = -1,
     };
     int submit_rc = mde_chain_submit(&req);
     zp_compute_output_val[idx] = args.output_val;

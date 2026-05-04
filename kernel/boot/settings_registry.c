@@ -17,6 +17,8 @@
 #include "timeofday.h"
 #include "access.h"
 #include "power_buttons.h"
+#include "gpu_compute.h"
+#include "mde_chain.h"
 
 #include <stdint.h>
 
@@ -561,6 +563,44 @@ static int s_theme_dark(const char *v) {
     return 0;
 }
 
+/* mde.select_policy — picks how CHAIN_MDE.device_select balances work
+ * across registered backends. Default LEAST_LOADED. Each change bumps
+ * CHAIN_MDE.vault_version with old/new (MasQ provenance). */
+static int g_mde_policy(char *out, int n) {
+    const char *lab = gpu_compute_policy_label(gpu_compute_get_policy());
+    sr_strcpy(out, n, lab ? lab : "?");
+    /* Lowercase for setting display consistency. */
+    for (int i = 0; out[i]; i++) {
+        if (out[i] >= 'A' && out[i] <= 'Z') out[i] = (char)(out[i] - 'A' + 'a');
+    }
+    return 0;
+}
+static int s_mde_policy(const char *v) {
+    if (!v) return -1;
+    int newp = -1;
+    if (sr_streq(v, "first"))             newp = MDE_SELECT_FIRST;
+    else if (sr_streq(v, "round_robin"))  newp = MDE_SELECT_ROUND_ROBIN;
+    else if (sr_streq(v, "least_loaded")) newp = MDE_SELECT_LEAST_LOADED;
+    else if (sr_streq(v, "shape_aware"))  newp = MDE_SELECT_SHAPE_AWARE;
+    if (newp < 0) return -1;
+    int oldp = gpu_compute_get_policy();
+    if (gpu_compute_set_policy(newp) != 0) return -1;
+    if (oldp != newp && CHAIN_MDE >= 0) {
+        chain_t *c = chain_get(CHAIN_MDE);
+        if (c) {
+            c->vault_version++;
+            kputs("[mde] select_policy ");
+            kputs(gpu_compute_policy_label(oldp));
+            kputs(" -> ");
+            kputs(gpu_compute_policy_label(newp));
+            kputs(" (vault_version=");
+            kput_dec((uint64_t)c->vault_version);
+            kputs(")\n");
+        }
+    }
+    return 0;
+}
+
 /* ── Static entry table. Pointers handed to settings_register. ── */
 
 static const settings_entry_t E_AUDIO_VOLUME = {
@@ -630,6 +670,12 @@ static const settings_entry_t E_THEME_DARK = {
     "theme.dark_mode", SK_BOOL, 0, g_theme_dark, s_theme_dark, 0,
     "dark mode (0=light, 1=dark/auto)"
 };
+static const settings_entry_t E_MDE_SELECT_POLICY = {
+    "mde.select_policy", SK_ENUM, 0,
+    g_mde_policy, s_mde_policy,
+    "first|round_robin|least_loaded|shape_aware",
+    "CHAIN_MDE backend selection policy"
+};
 
 void settings_register_all(void)
 {
@@ -652,6 +698,7 @@ void settings_register_all(void)
     settings_register(&E_TIME_TZ);
     settings_register(&E_NET_DHCP);
     settings_register(&E_THEME_DARK);
+    settings_register(&E_MDE_SELECT_POLICY);
 
 }
 

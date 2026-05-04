@@ -35,6 +35,20 @@ typedef struct {
     uint64_t   elapsed_tsc;             /* filled on completion */
     int        prefer_gpu;              /* opt-in: try GPU backend first */
     int        backend_used;            /* filled on completion: MDE_BACKEND_* */
+
+    /* -1 means use the global policy; else MDE_SELECT_* from gpu_compute.h. */
+    int        policy_override;
+    /* Per-request hints for SHAPE_AWARE selection (matrix dims, conv params).
+     * Today consulted by the stub policy, kept for the typed-workloads path
+     * (GPU_HOLES.md D3). All zeros = "no hints". */
+    uint32_t   shape_hints[4];
+    /* -1 means free-pick; else pin to gpu_compute_get(idx). The selector
+     * still verifies can_dispatch + cooldown. */
+    int        affinity_backend_idx;
+    /* Filled on completion: index into gpu_compute registry of the backend
+     * that actually ran the request. -1 if the legacy direct CPU path
+     * fired (registry empty). */
+    int        backend_idx_used;
 } mde_compute_request_t;
 
 /* Register CHAIN_MDE under parent_id (CHAIN_CPU). Returns 0 on success. */

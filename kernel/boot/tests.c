@@ -258,7 +258,7 @@ static int test_chain_mde(char *reason, uint32_t rsize)
     int infl0 = mde_chain_inflight();
 
     struct mde_test_args a = { .answer = 42 };
-    mde_compute_request_t req = { .kernel_fn = mde_test_kfn, .args = &a, .rc = 0, .elapsed_tsc = 0 };
+    mde_compute_request_t req = { .kernel_fn = mde_test_kfn, .args = &a, .rc = 0, .elapsed_tsc = 0, .policy_override = -1, .affinity_backend_idx = -1 };
     int srv = mde_chain_submit(&req);
     int vv1 = c->vault_version;
     int infl1 = mde_chain_inflight();
@@ -588,6 +588,8 @@ static int test_gpu_compute(char *reason, uint32_t rsize)
         .elapsed_tsc = 0,
         .prefer_gpu  = 1,
         .backend_used = 0,
+        .policy_override = -1,
+        .affinity_backend_idx = -1,
     };
     int srv = mde_chain_submit(&req);
     if (srv != 7 || req.rc != 7 || req.elapsed_tsc == 0) {
