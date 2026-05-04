@@ -20,14 +20,69 @@
 #include "kprint.h"
 #include "ui_context_menu.h"
 #include "quick_look.h"
+#include "image_viewer.h"
 
 /* ── UI primitive wiring ── */
 static void rc_new_folder(void *ctx) { (void)ctx; kputs("DESK: new folder\n"); }
 static void rc_settings(void *ctx)   { (void)ctx; kputs("DESK: settings\n"); }
 static void rc_wallpaper(void *ctx)  { (void)ctx; kputs("DESK: wallpaper\n"); }
 
+/* "Open in Image Viewer" path target. Set when a right-click lands on an
+ * icon whose name has a .png suffix — the menu item only renders in that
+ * case, so leaking stale state across clicks is harmless. */
+static char s_rc_image_path[256];
+
+static int desktop_name_is_png(const char *name) {
+    int n = 0; while (name[n]) n++;
+    if (n < 4) return 0;
+    const char *e = name + n - 4;
+    char a = e[0], b = e[1], c = e[2], d = e[3];
+    if (a >= 'A' && a <= 'Z') a += 32;
+    if (b >= 'A' && b <= 'Z') b += 32;
+    if (c >= 'A' && c <= 'Z') c += 32;
+    if (d >= 'A' && d <= 'Z') d += 32;
+    return a == '.' && b == 'p' && c == 'n' && d == 'g';
+}
+
+static void rc_open_in_image_viewer(void *ctx) {
+    (void)ctx;
+    if (s_rc_image_path[0]) image_viewer_open(s_rc_image_path);
+}
+
 int desktop_right_click(int x, int y) {
     (void)x; (void)y;
+    /* Look for a selected icon whose name ends in .png — if found, the
+     * menu adds "Open in Image Viewer" as the first item. */
+    extern desktop_state_t *desktop_get_state(void);
+    desktop_state_t *st = desktop_get_state();
+    const char *png_name = 0;
+    for (int i = 0; i < st->icon_count; i++) {
+        if (st->icons[i].selected && desktop_name_is_png(st->icons[i].name)) {
+            png_name = st->icons[i].name;
+            break;
+        }
+    }
+
+    if (png_name) {
+        /* Resolve to /<name>; the desktop's icon names map to root-level
+         * FAT32 files in the current bring-up. */
+        int o = 0;
+        s_rc_image_path[o++] = '/';
+        for (int i = 0; png_name[i] && o < 255; i++)
+            s_rc_image_path[o++] = png_name[i];
+        s_rc_image_path[o] = '\0';
+
+        static const ctx_menu_item_t items[5] = {
+            { "Open in Image Viewer", rc_open_in_image_viewer, 0, 1 },
+            { "-",          0,             0, 1 },
+            { "New folder", rc_new_folder, 0, 1 },
+            { "Settings",   rc_settings,   0, 1 },
+            { "Wallpaper",  rc_wallpaper,  0, 1 },
+        };
+        context_menu_open(x, y, items, 5);
+        return 1;
+    }
+
     static const ctx_menu_item_t items[3] = {
         { "New folder", rc_new_folder, 0, 1 },
         { "Settings",   rc_settings,   0, 1 },
@@ -54,6 +109,19 @@ void desktop_quick_look_selected(void) {
     desktop_state_t *st = desktop_get_state();
     for (int i = 0; i < st->icon_count; i++) {
         if (st->icons[i].selected) {
+            /* PNG → open in the full image viewer; everything else falls
+             * through to Quick Look (which only does a metadata card for
+             * non-text/non-PNG anyway). */
+            if (desktop_name_is_png(st->icons[i].name)) {
+                char path[260];
+                int o = 0;
+                path[o++] = '/';
+                for (int j = 0; st->icons[i].name[j] && o < 259; j++)
+                    path[o++] = st->icons[i].name[j];
+                path[o] = '\0';
+                image_viewer_open(path);
+                return;
+            }
             quick_look_open(st->icons[i].name, 0, 0,
                             desktop_quicklook_read, 0);
             return;

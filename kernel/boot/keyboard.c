@@ -194,6 +194,8 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int context_menu_active(void);
         extern int context_menu_key(int);
         extern int undo_handle_key(int, int);
+        extern int image_viewer_active(void);
+        extern int image_viewer_key(int);
 
         uint8_t mods_now = keybinds_get_modifiers();
         int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
@@ -201,6 +203,7 @@ static void process_scancode(uint8_t scancode, int extended)
         /* Esc (scancode 0x01) closes overlays before anything else. */
         if (scancode == 0x01) {
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
+            if (image_viewer_active()) { image_viewer_key(27); return; }
             if (quick_look_active())   { quick_look_key(27);   return; }
             if (context_menu_active()) { context_menu_key(27); return; }
         }
@@ -228,15 +231,29 @@ static void process_scancode(uint8_t scancode, int extended)
 
         /* Generic key dispatch into modal / quick look / context menu
          * for printable characters (Enter / S / D shortcuts). */
-        if (dirty_modal_active() || quick_look_active() ||
-            context_menu_active()) {
+        if (dirty_modal_active() || image_viewer_active() ||
+            quick_look_active() || context_menu_active()) {
             char ch = sh ? scancode_to_ascii_shift[scancode]
                          : scancode_to_ascii[scancode];
             if (ch) {
                 if (dirty_modal_active())  { dirty_modal_key(ch);  return; }
+                if (image_viewer_active()) { image_viewer_key(ch); return; }
                 if (quick_look_active())   { quick_look_key(ch);   return; }
                 if (context_menu_active()) { context_menu_key(ch); return; }
             }
+        }
+    }
+
+    /* Extended arrow keys → image viewer pan. We re-check here because
+     * the block above is gated on !extended. */
+    if (extended && !(scancode & 0x80)) {
+        extern int image_viewer_active(void);
+        extern int image_viewer_key_arrow(int dir);
+        if (image_viewer_active()) {
+            if (scancode == 0x4B) { image_viewer_key_arrow(0); return; } /* left */
+            if (scancode == 0x4D) { image_viewer_key_arrow(1); return; } /* right */
+            if (scancode == 0x48) { image_viewer_key_arrow(2); return; } /* up */
+            if (scancode == 0x50) { image_viewer_key_arrow(3); return; } /* down */
         }
     }
 

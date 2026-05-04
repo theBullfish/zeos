@@ -109,6 +109,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/ui_hover.c \
            boot/ui_dirty.c \
            boot/quick_look.c \
+           boot/image_viewer.c \
            boot/ui_states.c \
            boot/tests.c
 

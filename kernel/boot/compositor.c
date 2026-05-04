@@ -31,6 +31,7 @@
 #include "ui_context_menu.h"
 #include "ui_dirty.h"
 #include "quick_look.h"
+#include "image_viewer.h"
 #include "dock.h"
 #include "panel.h"
 #include "persona.h"
@@ -212,6 +213,7 @@ void compositor_frame(void) {
          * Drawn after notifications so a modal sits above a stale toast. */
         context_menu_draw();
         quick_look_draw();
+        image_viewer_draw();
         dirty_modal_draw();
     }
 

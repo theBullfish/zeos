@@ -640,6 +640,7 @@ static void cmd_cores(const char *args)
 static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
 static void cmd_fat_cat(const char *args);
+static void cmd_view(const char *args);
 
 /* FAT32 write-side commands */
 static void cmd_touch(const char *args);
@@ -761,6 +762,7 @@ static const struct shell_cmd commands[] = {
     {"fat-mount","mount FAT32 (fat-mount [<drive> <part-lba>])", cmd_fat_mount, VIS_ALWAYS},
     {"fat-ls",  "list FAT32 directory (fat-ls <path>)", cmd_fat_ls, VIS_ALWAYS},
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
+    {"view",    "open image viewer (view <path>; PNG only for now)", cmd_view, VIS_ALWAYS},
     {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
     {"rm",      "delete (moves to /.zeos-trash; rm -f to bypass)", cmd_rm,    VIS_ALWAYS},
     {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
@@ -4346,6 +4348,21 @@ vault_done:
         passes++;
     }
 
+    /* Image viewer — selftest reports readiness + lifetime counters. */
+    {
+        extern uint32_t image_viewer_total_opens(void);
+        extern uint32_t image_viewer_total_decodes_ok(void);
+        extern uint32_t image_viewer_total_decodes_fail(void);
+        kputs("  Image viewer .......... ready (lodepng-backed, PNG only) (opens=");
+        kput_dec((uint64_t)image_viewer_total_opens());
+        kputs(" ok=");
+        kput_dec((uint64_t)image_viewer_total_decodes_ok());
+        kputs(" fail=");
+        kput_dec((uint64_t)image_viewer_total_decodes_fail());
+        kputs(")\n");
+        passes++;
+    }
+
     /* Settings registry — count keys, count live (non-stub) */
     settings_print_selftest_line();
     if (settings_count() > 0) passes++;
@@ -5429,6 +5446,26 @@ static void cmd_fat_cat(const char *args)
         kputs("  ... (");
         kput_dec(f.size - (uint32_t)got);
         kputs(" more bytes)\n");
+    }
+}
+
+/* Open the standalone image viewer on a FAT32 path. */
+static void cmd_view(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) {
+        kputs("  Usage: view <path>\n");
+        return;
+    }
+    if (!fat32_mounted()) {
+        kputs("  fat32: not mounted (run 'fat-mount' first)\n");
+        return;
+    }
+    extern int image_viewer_open(const char *path);
+    if (image_viewer_open(args)) {
+        kputs("  view: opened "); kputs(args); kputs("\n");
+    } else {
+        kputs("  view: opened with error (see overlay for details)\n");
     }
 }
 

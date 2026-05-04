@@ -28,6 +28,7 @@
 #include "ui_context_menu.h"
 #include "ui_dirty.h"
 #include "quick_look.h"
+#include "image_viewer.h"
 
 /* ── Forward: dispatch button events to UI overlays.
  * Returns 1 if the event was consumed by an overlay (caller should
@@ -43,6 +44,7 @@ extern int  desktop_right_click(int x, int y);
 
 static int mouse_ui_dispatch_down(int x, int y, int button) {
     if (dirty_modal_active() && dirty_modal_mouse_down(x, y, button)) return 1;
+    if (image_viewer_active() && image_viewer_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
     if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
     if (button == 2) {
@@ -68,6 +70,7 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
 
 static void mouse_ui_dispatch_move(int x, int y) {
     if (dirty_modal_active())  { dirty_modal_mouse_move(x, y); return; }
+    if (image_viewer_active()) { image_viewer_mouse_move(x, y); return; }
     if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }
     hover_dispatch(x, y);
 }
@@ -432,6 +435,8 @@ static void process_packet(void)
             mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 1);
             cursor_press();
         } else {
+            if (image_viewer_active())
+                image_viewer_mouse_up(g_mouse.x, g_mouse.y, 1);
             cursor_release();
         }
     }
@@ -524,6 +529,8 @@ void mouse_inject(int dx, int dy, uint8_t buttons)
             mouse_ui_dispatch_down(g_mouse.x, g_mouse.y, 1);
             cursor_press();
         } else {
+            if (image_viewer_active())
+                image_viewer_mouse_up(g_mouse.x, g_mouse.y, 1);
             cursor_release();
         }
     }
