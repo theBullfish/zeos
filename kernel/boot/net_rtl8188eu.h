@@ -51,6 +51,9 @@
 #define RTL8188EU_PID_FFEF       0xFFEF   /* some no-name dongles */
 #define RTL8188EU_PID_0179       0x0179   /* engineering / older revs */
 
+/* Forward decl — full def in usb_xhci.h. */
+struct xhci_device;
+
 /* Driver state, populated by rtl8188eu_probe. */
 struct rtl8188eu_state {
     int      present;          /* 1 if a matching dongle was found */
@@ -58,8 +61,12 @@ struct rtl8188eu_state {
     uint16_t product_id;
     int      chip_alive;       /* 1 if the chip ACK'd a register read */
     uint32_t reg_sys_func_en;  /* raw value of register 0x0002..0x0003 */
+    int      fw_loaded;        /* 1 if firmware reached FWDL_RDY */
 
-    /* MAC bytes. All zero if unknown (firmware-gated read). */
+    /* xHCI device handle for control + bulk transfers. */
+    struct xhci_device *dev;
+
+    /* MAC bytes. All zero if unknown. */
     uint8_t  mac[6];
     int      mac_known;
 };

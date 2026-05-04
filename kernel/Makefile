@@ -48,6 +48,7 @@ LIBS     = -lefi -lgnuefi
 SRCS     = lib/lodepng/lodepng.c \
            boot/main.c boot/fb.c boot/serial.c boot/kprint.c \
            boot/panic.c boot/gdt.c boot/idt.c \
+           boot/acpi.c boot/lapic.c boot/ioapic.c \
            boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c \
            boot/timer.c boot/signal.c boot/zplus.c boot/sigviz.c boot/vault.c \
            boot/net.c boot/net_chain.c boot/net_virtio.c boot/net_e1000.c boot/net_rtl8169.c boot/net_rtl8139.c boot/net_arp.c boot/net_ip.c \
@@ -98,6 +99,10 @@ FONT_INTER  = ../assets/fonts/inter/Inter-Regular.ttf
 FONT_JBMONO = ../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
 FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
 
+# ── Embedded firmware blobs (binary -> ELF via objcopy) ──
+FW_RTL8188EU = lib/firmware/rtl8188eufw.bin
+FW_OBJS      = lib/firmware/rtl8188eufw.o
+
 boot/font_inter.o: $(FONT_INTER)
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
 		--redefine-sym _binary____assets_fonts_inter_Inter_Regular_ttf_start=_binary_inter_regular_ttf_start \
@@ -111,6 +116,14 @@ boot/font_jbmono.o: $(FONT_JBMONO)
 		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_end=_binary_jbmono_regular_ttf_end \
 		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_size=_binary_jbmono_regular_ttf_size \
 		$< $@
+
+# Embed RTL8188EU firmware blob. cd into the firmware dir so objcopy
+# emits clean symbol names (_binary_rtl8188eufw_bin_{start,end,size}).
+lib/firmware/rtl8188eufw.o: $(FW_RTL8188EU)
+	cd lib/firmware && $(OBJCOPY) --input-target=binary \
+		--output-target=elf64-x86-64 \
+		--binary-architecture=i386:x86-64 \
+		rtl8188eufw.bin rtl8188eufw.o
 
 # Output
 TARGET   = BOOTZ.EFI
@@ -155,10 +168,10 @@ lib/lodepng/lodepng.o: lib/lodepng/lodepng.c
 # Auto-generated header dependencies (-MMD -MP in CFLAGS)
 -include $(OBJS:.o=.d)
 
-# Link to shared object (includes embedded font data)
-$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS)
+# Link to shared object (includes embedded font and firmware blobs)
+$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) -o $@ $(LIBS)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so
@@ -227,4 +240,4 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo ""
 
 clean:
-	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(BUILDDIR)
+	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(FW_OBJS) $(BUILDDIR)

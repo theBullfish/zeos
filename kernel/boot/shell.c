@@ -29,6 +29,8 @@
 #include "keyboard.h"
 #include "pci.h"
 #include "msix.h"
+#include "lapic.h"
+#include "ioapic.h"
 #include "pmm.h"
 #include "heap.h"
 #include "zplus.h"
@@ -2421,6 +2423,25 @@ vault_done:
     kput_dec(msix_free_count());
     kputs(" vectors free)\n");
     passes++;
+
+    /* LAPIC: id, calibrated bus frequency, IOAPIC count from ACPI. */
+    kputs("  LAPIC ............. ");
+    if (lapic_ready()) {
+        uint32_t tpu = lapic_ticks_per_us();
+        uint32_t mhz = tpu;  /* ticks/µs == MHz at the configured divider */
+        kputs("id=");
+        kput_dec(lapic_id());
+        kputs(", freq=");
+        kput_dec(mhz);
+        kputs(" MHz, IOAPIC count=");
+        kput_dec((uint64_t)ioapic_count());
+        kputs("\n");
+        if (mhz >= 100) passes++;
+        else            fails++;
+    } else {
+        kputs("not ready\n");
+        fails++;
+    }
 
     /* HDA audio -- exercises the chain-native pipeline:
      * pcm_source -> volume_filter -> hda_pin -> hardware_dma.
