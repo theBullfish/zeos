@@ -14,6 +14,7 @@
 #include "pmm.h"
 #include "heap.h"
 #include "kprint.h"
+#include "vmm.h"
 
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *s, int c, unsigned long n);
@@ -179,12 +180,16 @@ static int bring_up(nvme_dev_t *d, struct pci_device *pdev)
     enable_bus_master(pdev->bus, pdev->dev, pdev->func);
     uint64_t bar0 = read_bar64(pdev->bus, pdev->dev, pdev->func, 0);
     if (!bar0) { kputs("[nvme] BAR0 zero\n"); return -1; }
-    if (bar0 >= 0x100000000ULL) {
-        kputs("[nvme] BAR0 above 4GB (outside identity map), skipping\n");
-        return -1;
-    }
     d->bar0_phys = bar0;
     d->regs = (volatile uint32_t *)(uintptr_t)bar0;
+
+    /* When the firmware places BAR0 above 4GB, our default identity
+     * map (low 4GB) doesn't cover it. Map 16KB of MMIO on demand. */
+    if (bar0 >= 0x100000000ULL) {
+        kputs("[nvme] BAR0 above 4GB, mapping MMIO\n");
+        uint64_t base = bar0 & ~0xFFFULL;
+        vmm_map_range(base, base, 4, PTE_WRITABLE | PTE_NOCACHE);
+    }
     uint64_t cap = nvme_read64(d, NVME_REG_CAP);
     uint16_t mqes = NVME_CAP_MQES(cap);
     uint8_t  dstrd = NVME_CAP_DSTRD(cap);
