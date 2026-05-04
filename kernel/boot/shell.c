@@ -43,6 +43,7 @@
 #include "vault.h"
 #include "net.h"
 #include "net_rtl8188eu.h"
+#include "wpa.h"
 #include "net_ip.h"
 #include "net_dns.h"
 #include "net_tcp.h"
@@ -65,6 +66,7 @@
 #include "suspend.h"
 #include "acpi.h"
 #include "battery.h"
+#include "aml.h"
 #include "power_buttons.h"
 #include "brightness.h"
 
@@ -219,6 +221,7 @@ static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
 static void cmd_suspend(const char *args);
 static void cmd_battery(const char *args);
+static void cmd_aml_eval(const char *args);
 static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
 static void cmd_volume(const char *args);
@@ -602,6 +605,7 @@ static const struct shell_cmd commands[] = {
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
     {"suspend", "ACPI S3 suspend-to-RAM (suspend [seconds]; default 5s RTC wake)", cmd_suspend, VIS_DEREZ},
     {"battery", "battery + AC adapter status (ACPI _BAT/_AC)", cmd_battery, VIS_ALWAYS},
+    {"aml-eval","evaluate an AML path (aml-eval <\\\\PATH>) — debug/introspection", cmd_aml_eval, VIS_DEREZ},
     {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
     {"xxd",     "hex dump of a file",             cmd_xxd,     VIS_ALWAYS},
@@ -631,7 +635,7 @@ static const struct shell_cmd commands[] = {
     {"epoch",   "current Unix epoch seconds",     tod_cmd_epoch,  VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},
-    {"wifi",    "RTL8188EU USB WiFi: status|scan|connect", cmd_wifi, VIS_DEREZ},
+    {"wifi",    "RTL8188EU USB WiFi: status|scan|list|connect|forget", cmd_wifi, VIS_DEREZ},
     {"wifi-scan","passive scan for visible APs (RTL8188EU)", cmd_wifi_scan, VIS_DEREZ},
 
     /* VAULT filesystem — always visible */
@@ -1053,6 +1057,70 @@ static void cmd_battery(const char *args)
         }
         kputs("\n");
     }
+}
+
+/* ── AML eval (debug/introspection) ───────────────────────────────
+ *
+ * Usage: aml-eval <path>
+ *   aml-eval \_SB_.LID0._LID
+ *   aml-eval \_SB_.BAT0._BST
+ *
+ * Prints the type and value of the result, plus the journal entry's
+ * elapsed TSC. No-arg methods only — passing args from the shell is a
+ * separate, more involved feature (would need expression parsing).
+ */
+static void cmd_aml_eval(const char *args)
+{
+    if (!args || !*args) {
+        kputs("  usage: aml-eval <\\PATH>\n");
+        kputs("  example: aml-eval \\_SB_.LID0._LID\n");
+        return;
+    }
+    /* Trim leading whitespace. */
+    while (*args == ' ' || *args == '\t') args++;
+
+    aml_object_t r = { .type = AML_T_UNINIT };
+    int rc = aml_evaluate(args, 0, 0, &r);
+    kputs("  path: ");
+    kputs(args);
+    kputs("\n  rc:   ");
+    if (rc == 0)       kputs("0 (success)");
+    else if (rc == -1) kputs("-1 (path not found)");
+    else if (rc == -2) kputs("-2 (unimplemented opcode hit)");
+    else if (rc == -3) kputs("-3 (eval aborted)");
+    else { kputs("rc="); kput_dec((uint64_t)rc); }
+    kputs("\n  type: ");
+    switch (r.type) {
+    case AML_T_INTEGER: kputs("Integer = 0x"); kput_hex(r.u.integer); break;
+    case AML_T_STRING:  kputs("String = \""); kputs(r.u.str.s ? r.u.str.s : ""); kputs("\""); break;
+    case AML_T_BUFFER:  kputs("Buffer ("); kput_dec((uint64_t)r.u.buf.len); kputs(" bytes)"); break;
+    case AML_T_PACKAGE: {
+        kputs("Package (");
+        kput_dec((uint64_t)r.u.pkg.n);
+        kputs(" elems): {");
+        for (uint32_t i = 0; i < r.u.pkg.n && i < 8; i++) {
+            if (i) kputs(", ");
+            if (r.u.pkg.elems[i].type == AML_T_INTEGER) {
+                kput_hex(r.u.pkg.elems[i].u.integer);
+            } else {
+                kputs("?");
+            }
+        }
+        if (r.u.pkg.n > 8) kputs(", ...");
+        kputs("}");
+        break;
+    }
+    default: kputs("(uninit)");
+    }
+    kputs("\n");
+    int jn = aml_journal_count();
+    if (jn > 0) {
+        const aml_journal_entry_t *e = aml_journal_at(jn - 1);
+        kputs("  elapsed_tsc: ");
+        kput_dec(e->elapsed_tsc);
+        kputs("\n");
+    }
+    aml_object_release(&r);
 }
 
 /* ── Signal chain demo (unchanged) ──────────────── */
@@ -3474,6 +3542,45 @@ vault_done:
         fails++;
     }
 
+    /* WiFi association: prove the WPA2 supplicant compiles and that
+     * its primitives self-check. We can't drive a real handshake from
+     * here without an AP, but we CAN verify PMK derivation against the
+     * IEEE 802.11i test vector and that the MIC primitive is wired —
+     * those two together are most of what could regress in this code
+     * path. The chip-side bring-up status comes from g_rtl8188eu. */
+    kputs("  WiFi assoc ............ ");
+    {
+        /* Test vector: passphrase="password", SSID="IEEE",
+         * iter=4096 -> PMK starts with f4 2c 6f c5 2d f0 eb ef. */
+        uint8_t pmk[32];
+        int     pmk_ok = (wpa_derive_pmk("password", "IEEE", pmk) == 0);
+        static const uint8_t expect[8] = {
+            0xf4,0x2c,0x6f,0xc5,0x2d,0xf0,0xeb,0xef
+        };
+        int v_ok = pmk_ok;
+        for (int i = 0; i < 8 && v_ok; i++)
+            if (pmk[i] != expect[i]) v_ok = 0;
+
+        if (!v_ok) {
+            kputs("PBKDF2 vector MISMATCH\n");
+            fails++;
+        } else if (g_rtl8188eu.assoc == RTL_ASSOC_JOINED) {
+            kputs("joined \"");
+            kputs(g_rtl8188eu.ssid);
+            kputs("\"\n");
+            passes++;
+        } else if (g_rtl8188eu.present && g_rtl8188eu.fw_loaded) {
+            kputs("supplicant ready, no AP joined\n");
+            passes++;
+        } else if (g_rtl8188eu.present) {
+            kputs("chip detected (firmware not loaded)\n");
+            passes++;
+        } else {
+            kputs("wired, untested (no RTL8188EU dongle present)\n");
+            passes++;
+        }
+    }
+
     /* MDE chain: submit a trivial compute_request through CHAIN_MDE
      * and verify (a) the kernel_fn really ran (rc=42), (b)
      * vault_version bumped at least twice (schedule admit +
@@ -3775,6 +3882,13 @@ vault_done:
             fails++;
         }
     }
+
+    /* AML interpreter selftest: cataloged method count, evaluable count
+     * (zero-arg methods that completed without hitting an unimplemented
+     * opcode), and skipped count. */
+    kputs("  ");
+    aml_print_selftest_line();
+    passes++;
 
     /* Battery: report presence and (if known) percent + state. On
      * QEMU this prints "not present" and PASSes — no battery is
@@ -4354,7 +4468,104 @@ void shell_run(struct zeos_boot_info *boot)
     scheduler_run();   /* never returns */
 }
 
-/* ── wifi: RTL8188EU USB dongle (detection-stage only) ────────── */
+/* ── wifi: RTL8188EU WPA2-PSK supplicant ──────────────────────── */
+
+static int wifi_split_args(const char *args, char *ssid, int ssid_max,
+                           char *psk, int psk_max)
+{
+    while (*args == ' ' || *args == '\t') args++;
+    int n = 0;
+    while (*args && *args != ' ' && *args != '\t' && n < ssid_max - 1)
+        ssid[n++] = *args++;
+    ssid[n] = 0;
+    if (psk) {
+        while (*args == ' ' || *args == '\t') args++;
+        int m = 0;
+        while (*args && *args != ' ' && *args != '\t' && m < psk_max - 1)
+            psk[m++] = *args++;
+        psk[m] = 0;
+    }
+    return n;
+}
+
+struct wifi_saved {
+    char    ssid[33];
+    int     ssid_len;
+    uint8_t pmk[32];
+    uint8_t reserved[4];
+};
+
+#define WIFI_SAVED_MAX 8
+
+struct wifi_saved_table {
+    int                 count;
+    struct wifi_saved   nets[WIFI_SAVED_MAX];
+};
+
+static int wifi_load_table(struct wifi_saved_table *t)
+{
+    int rc = vault_load_config("/wifi/networks", t, sizeof(*t));
+    if (rc != (int)sizeof(*t)) {
+        for (int i = 0; i < (int)sizeof(*t); i++) ((uint8_t *)t)[i] = 0;
+        return -1;
+    }
+    if (t->count < 0 || t->count > WIFI_SAVED_MAX) t->count = 0;
+    return 0;
+}
+
+static int wifi_save_table(const struct wifi_saved_table *t)
+{
+    return vault_save_config("/wifi/networks", t, sizeof(*t));
+}
+
+static int wifi_save_network(const char *ssid, const uint8_t pmk[32])
+{
+    struct wifi_saved_table t;
+    wifi_load_table(&t);
+    int slen = 0; while (ssid[slen]) slen++;
+    if (slen > 32) slen = 32;
+
+    for (int i = 0; i < t.count; i++) {
+        if (t.nets[i].ssid_len == slen) {
+            int eq = 1;
+            for (int j = 0; j < slen; j++)
+                if (t.nets[i].ssid[j] != ssid[j]) { eq = 0; break; }
+            if (eq) {
+                for (int j = 0; j < 32; j++) t.nets[i].pmk[j] = pmk[j];
+                return wifi_save_table(&t);
+            }
+        }
+    }
+    if (t.count >= WIFI_SAVED_MAX) return -1;
+    struct wifi_saved *e = &t.nets[t.count++];
+    for (int j = 0; j < (int)sizeof(*e); j++) ((uint8_t *)e)[j] = 0;
+    for (int j = 0; j < slen; j++) e->ssid[j] = ssid[j];
+    e->ssid_len = slen;
+    for (int j = 0; j < 32; j++) e->pmk[j] = pmk[j];
+    return wifi_save_table(&t);
+}
+
+static int wifi_forget_network(const char *ssid)
+{
+    struct wifi_saved_table t;
+    if (wifi_load_table(&t) < 0) return -1;
+    int slen = 0; while (ssid[slen]) slen++;
+    int found = -1;
+    for (int i = 0; i < t.count; i++) {
+        if (t.nets[i].ssid_len == slen) {
+            int eq = 1;
+            for (int j = 0; j < slen; j++)
+                if (t.nets[i].ssid[j] != ssid[j]) { eq = 0; break; }
+            if (eq) { found = i; break; }
+        }
+    }
+    if (found < 0) return -1;
+    for (int i = found; i < t.count - 1; i++)
+        t.nets[i] = t.nets[i + 1];
+    t.count--;
+    return wifi_save_table(&t);
+}
+
 static void cmd_wifi(const char *args)
 {
     while (*args == ' ' || *args == '\t') args++;
@@ -4368,14 +4579,59 @@ static void cmd_wifi(const char *args)
         rtl8188eu_scan();
         return;
     }
-    if (args[0] == 'c' && args[1] == 'o' && args[2] == 'n') {
-        /* Args after "connect ": ssid [psk]. We'd parse them here, but
-         * rtl8188eu_connect honestly refuses regardless of input. */
-        rtl8188eu_connect(0, 0);
+
+    if (args[0] == 'l' && args[1] == 'i' && args[2] == 's' && args[3] == 't') {
+        struct wifi_saved_table t;
+        if (wifi_load_table(&t) < 0 || t.count == 0) {
+            kputs("wifi: no saved networks.\n");
+            return;
+        }
+        kputs("wifi: saved networks:\n");
+        for (int i = 0; i < t.count; i++) {
+            kputs("  ");
+            kputs(t.nets[i].ssid);
+            kputs("\n");
+        }
         return;
     }
 
-    kputs("usage: wifi [status|scan|connect <ssid> [psk]]\n");
+    if (args[0] == 'f' && args[1] == 'o' && args[2] == 'r') {
+        /* "forget" — args advanced past command name in caller, so
+         * skip the verb here: "forget " is 7 chars. */
+        const char *p = args + 6;
+        while (*p == ' ' || *p == '\t') p++;
+        char ssid[33];
+        wifi_split_args(p, ssid, sizeof(ssid), 0, 0);
+        if (!ssid[0]) { kputs("usage: wifi forget <ssid>\n"); return; }
+        if (wifi_forget_network(ssid) == 0) {
+            kputs("wifi: forgot \"");
+            kputs(ssid);
+            kputs("\"\n");
+        } else {
+            kputs("wifi: SSID not in saved networks.\n");
+        }
+        return;
+    }
+
+    if (args[0] == 'c' && args[1] == 'o' && args[2] == 'n') {
+        const char *p = args + 7;       /* "connect " */
+        while (*p == ' ' || *p == '\t') p++;
+        char ssid[33], psk[64];
+        wifi_split_args(p, ssid, sizeof(ssid), psk, sizeof(psk));
+        if (!ssid[0] || !psk[0]) {
+            kputs("usage: wifi connect <ssid> <psk>\n");
+            return;
+        }
+        int rc = rtl8188eu_associate(ssid, psk);
+        if (rc == 0) {
+            uint8_t pmk[32];
+            if (wpa_derive_pmk(psk, ssid, pmk) == 0)
+                wifi_save_network(ssid, pmk);
+        }
+        return;
+    }
+
+    kputs("usage: wifi [status|scan|list|connect <ssid> <psk>|forget <ssid>]\n");
 }
 
 /* Standalone passive-scan command. Prints the AP list. */

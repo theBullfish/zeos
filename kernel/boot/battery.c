@@ -34,6 +34,7 @@
 
 #include "battery.h"
 #include "acpi.h"
+#include "aml.h"
 #include "kprint.h"
 
 /* ── Module state ──────────────────────────────────────────────── */
@@ -282,6 +283,86 @@ static int decode_psr_static(const uint8_t *aml, uint32_t len, int *out)
     return -1;
 }
 
+/* ── AML evaluator fallback ────────────────────────────────────── *
+ *
+ * When pattern-scan can't pull static _BST/_BIF (because the firmware
+ * implemented them as Methods), try invoking them through aml.c. We
+ * try the conventional paths laptops use (\_SB_.PCI0.LPCB.EC0.BAT0,
+ * \_SB_.PCI0.LPC0.EC.BAT0, \_SB_.BAT0, ...).
+ */
+static const char *kBatPaths[] = {
+    "\\_SB_.PCI0.LPCB.EC0.BAT0._BST",
+    "\\_SB_.PCI0.LPC0.EC.BAT0._BST",
+    "\\_SB_.PCI0.LPC.EC0.BAT0._BST",
+    "\\_SB_.BAT0._BST",
+    "\\_SB_.BAT1._BST",
+    0
+};
+static const char *kBifPaths[] = {
+    "\\_SB_.PCI0.LPCB.EC0.BAT0._BIF",
+    "\\_SB_.PCI0.LPC0.EC.BAT0._BIF",
+    "\\_SB_.PCI0.LPC.EC0.BAT0._BIF",
+    "\\_SB_.BAT0._BIF",
+    "\\_SB_.BAT1._BIF",
+    0
+};
+
+static int try_aml_bst(battery_info_t *b)
+{
+    aml_object_t r = { .type = AML_T_UNINIT };
+    int rc = -1;
+    for (int i = 0; kBatPaths[i]; i++) {
+        rc = aml_evaluate(kBatPaths[i], 0, 0, &r);
+        if (rc == 0 && r.type == AML_T_PACKAGE) break;
+        aml_object_release(&r);
+        r.type = AML_T_UNINIT;
+    }
+    if (rc != 0 || r.type != AML_T_PACKAGE) {
+        aml_object_release(&r);
+        return -1;
+    }
+    if (r.u.pkg.n >= 1) {
+        uint32_t s = (uint32_t)(r.u.pkg.elems[0].type == AML_T_INTEGER ?
+                                r.u.pkg.elems[0].u.integer : 0);
+        if (s & 0x4) b->state = BAT_CRITICAL;
+        else if (s & 0x2) b->state = BAT_CHARGING;
+        else if (s & 0x1) b->state = BAT_DISCHARGING;
+        else              b->state = BAT_FULL;
+    }
+    if (r.u.pkg.n >= 2 && r.u.pkg.elems[1].type == AML_T_INTEGER)
+        b->rate = (uint32_t)r.u.pkg.elems[1].u.integer;
+    if (r.u.pkg.n >= 3 && r.u.pkg.elems[2].type == AML_T_INTEGER)
+        b->remaining = (uint32_t)r.u.pkg.elems[2].u.integer;
+    if (b->remaining || b->rate) b->values_known = 1;
+    aml_object_release(&r);
+    return 0;
+}
+
+static int try_aml_bif(battery_info_t *b)
+{
+    aml_object_t r = { .type = AML_T_UNINIT };
+    int rc = -1;
+    for (int i = 0; kBifPaths[i]; i++) {
+        rc = aml_evaluate(kBifPaths[i], 0, 0, &r);
+        if (rc == 0 && r.type == AML_T_PACKAGE) break;
+        aml_object_release(&r);
+        r.type = AML_T_UNINIT;
+    }
+    if (rc != 0 || r.type != AML_T_PACKAGE) {
+        aml_object_release(&r);
+        return -1;
+    }
+    if (r.u.pkg.n >= 1 && r.u.pkg.elems[0].type == AML_T_INTEGER)
+        b->power_unit = (r.u.pkg.elems[0].u.integer == 1) ? 1 : 0;
+    if (r.u.pkg.n >= 2 && r.u.pkg.elems[1].type == AML_T_INTEGER)
+        b->design_capacity = (uint32_t)r.u.pkg.elems[1].u.integer;
+    if (r.u.pkg.n >= 3 && r.u.pkg.elems[2].type == AML_T_INTEGER)
+        b->last_full = (uint32_t)r.u.pkg.elems[2].u.integer;
+    if (b->design_capacity || b->last_full) b->values_known = 1;
+    aml_object_release(&r);
+    return 0;
+}
+
 /* ── Public API ────────────────────────────────────────────────── */
 
 void battery_init(void)
@@ -323,6 +404,12 @@ void battery_init(void)
             b->present = 1;
             decode_bif(tab->aml, tab->len, b);
             decode_bst(tab->aml, tab->len, b);
+            /* Method-form fallback via AML interpreter. Only fills in
+             * fields that pattern-scan didn't already populate. */
+            if (!b->values_known) {
+                (void)try_aml_bif(b);
+                (void)try_aml_bst(b);
+            }
         }
         if (hid_present(tab->aml, tab->len, HID_AC)) {
             g_ac_present_known = 1;
@@ -427,6 +514,10 @@ int battery_refresh(void)
         if (hid_present(tab->aml, tab->len, HID_BATTERY)) {
             decode_bif(tab->aml, tab->len, &g_bats[b_idx]);
             decode_bst(tab->aml, tab->len, &g_bats[b_idx]);
+            if (!g_bats[b_idx].values_known) {
+                (void)try_aml_bif(&g_bats[b_idx]);
+                (void)try_aml_bst(&g_bats[b_idx]);
+            }
             b_idx++;
         }
         if (hid_present(tab->aml, tab->len, HID_AC)) {

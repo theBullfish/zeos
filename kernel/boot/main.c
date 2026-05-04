@@ -538,6 +538,19 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     } else {
         kputs("not found (defaults).\n");
     }
+
+    /* AML interpreter — catalog every Name/Method across DSDT+SSDTs.
+     * Must run before battery/brightness/power-buttons init so those
+     * modules can call aml_evaluate() for Method-form _BST/_BCM/_LID.
+     * Honest scope: ~50 of ~200 opcodes; methods that hit unimplemented
+     * opcodes report "skipped" in the AML selftest line. */
+    {
+        extern int aml_init(void);
+        int n = aml_init();
+        kputs("AML catalog... ");
+        kput_dec((uint64_t)n);
+        kputs(" symbols.\n");
+    }
     kputs("LAPIC init... ");
     lapic_init();
     lapic_timer_calibrate();

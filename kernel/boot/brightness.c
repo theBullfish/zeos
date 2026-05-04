@@ -30,6 +30,7 @@
 
 #include "brightness.h"
 #include "acpi.h"
+#include "aml.h"
 #include "vault.h"
 #include "kprint.h"
 #include "chain.h"
@@ -370,8 +371,20 @@ static int brightness_commit_pct(int pct)
         return 1;
     }
 
-    /* TODO: when an AML interpreter lands, evaluate _BCM(g_levels[idx]).
-     * For now we record the desired raw level and report best-effort. */
+    /* Drive _BCM via the AML interpreter. We try the conventional paths
+     * laptops use; if none resolve, that's logged in the AML journal
+     * and we fall through to "persisted only" semantics. */
+    static const char *kBcmPaths[] = {
+        "\\_SB_.PCI0.GFX0.LCD0._BCM",
+        "\\_SB_.PCI0.GFX0.DD1F._BCM",
+        "\\_SB_.PCI0.GFX0.DD02._BCM",
+        "\\_SB_.PCI0.VGA.LCD._BCM",
+        0
+    };
+    aml_object_t arg = { .type = AML_T_INTEGER, .u.integer = (uint64_t)g_levels[idx] };
+    for (int i = 0; kBcmPaths[i]; i++) {
+        if (aml_evaluate(kBcmPaths[i], &arg, 1, 0) == 0) break;
+    }
     return 1;
 }
 

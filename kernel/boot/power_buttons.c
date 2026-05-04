@@ -26,6 +26,7 @@
 
 #include "power_buttons.h"
 #include "acpi.h"
+#include "aml.h"
 #include "io.h"
 #include "kprint.h"
 #include "vault.h"
@@ -272,9 +273,27 @@ int power_button_pressed(void)
 
 int lid_current_state(void)
 {
-    /* Without an AML evaluator we can only use the static literal we
-     * decoded at init. Most laptops have _LID as a Method, in which
-     * case s_lid_static stays -1 and we report unknown. */
+    /* Try the AML interpreter first (Method-form _LID, which is what
+     * modern laptops use). If that fails or aborts on an unimplemented
+     * opcode, fall back to the static literal we decoded at init. */
+    static const char *kLidPaths[] = {
+        "\\_SB_.LID0._LID",
+        "\\_SB_.LID._LID",
+        "\\_SB_.PCI0.LPCB.EC0.LID._LID",
+        "\\_SB_.PCI0.LPC0.EC.LID._LID",
+        0
+    };
+    aml_object_t r = { .type = AML_T_UNINIT };
+    for (int i = 0; kLidPaths[i]; i++) {
+        if (aml_evaluate(kLidPaths[i], 0, 0, &r) == 0 &&
+            r.type == AML_T_INTEGER) {
+            int v = r.u.integer ? 1 : 0;
+            aml_object_release(&r);
+            return v;
+        }
+        aml_object_release(&r);
+        r.type = AML_T_UNINIT;
+    }
     return s_lid_static;
 }
 
