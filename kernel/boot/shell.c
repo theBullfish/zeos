@@ -2890,6 +2890,7 @@ static void cmd_chat(const char *args)
         kputs("    chat stats\n");
         kputs("    chat bench [N]\n");
         kputs("    chat voice\n");
+        kputs("    chat e2ee on <room> | chat e2ee off <room>\n");
         return;
     }
 
@@ -2980,6 +2981,39 @@ static void cmd_chat(const char *args)
     }
     if (sub[0] == 'v' && sub[1] == 'o') {                        /* voice */
         chat_zeos_voice_stub();
+        return;
+    }
+    if (sub[0] == 'e' && sub[1] == '2') {                        /* e2ee */
+        /* chat e2ee on <room> | chat e2ee off <room> | chat e2ee <room> */
+        char what[8]; int wi = 0;
+        while (*rest && *rest != ' ' && wi < 7) what[wi++] = *rest++;
+        what[wi] = 0;
+        while (*rest == ' ') rest++;
+        char id[64]; int ii = 0;
+        while (*rest && *rest != ' ' && ii < 63) id[ii++] = *rest++;
+        id[ii] = 0;
+        int on = -1;
+        if (what[0] == 'o' && what[1] == 'n')  on = 1;
+        else if (what[0] == 'o' && what[1] == 'f') on = 0;
+        else if (id[0] == 0) {
+            /* "chat e2ee <room>" with no on/off means on. */
+            int n = 0;
+            for (int k = 0; what[k]; k++) id[n++] = what[k]; id[n] = 0;
+            on = 1;
+        }
+        if (!id[0]) {
+            kputs("  Usage: chat e2ee on <room> | chat e2ee off <room>\n");
+            return;
+        }
+        extern int  chat_polish_set_e2ee(const char *, int);
+        if (on) {
+            int rc = chat_polish_set_e2ee(id, 1);
+            if (rc == 0) { kputs("  E2EE enabled on "); kputs(id); kputs("\n"); }
+            else         { kputs("  E2EE enable failed (no such room or RNG fault)\n"); }
+        } else {
+            (void)chat_polish_set_e2ee(id, 0);
+            kputs("  E2EE disabled on "); kputs(id); kputs("\n");
+        }
         return;
     }
     kputs("  chat: unknown subcommand '"); kputs(sub); kputs("'\n");

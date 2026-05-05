@@ -6,6 +6,7 @@
 
 #include "chat_polish.h"
 #include "chat_zeos.h"
+#include "chat_e2ee.h"
 #include "fb.h"
 #include "font.h"
 #include "theme.h"
@@ -90,16 +91,21 @@ void chat_polish_init(void) {
 
 int chat_polish_set_e2ee(const char *room_id, int on) {
     chat_polish_init();
-    /* track membership in C.e2ee[] */
     int idx = -1;
     for (int i = 0; i < C.e2ee_count; i++)
         if (s_eq(C.e2ee[i], room_id)) { idx = i; break; }
     if (on) {
+        /* Real key derivation lives in chat_e2ee. If it fails (vault
+         * busy, room missing, RDRAND failure) we report that up and
+         * leave the polish-layer flag clear so the lock icon doesn't
+         * lie. */
+        if (chat_e2ee_enable(room_id) != 0) return -1;
         if (idx >= 0) return 0;
         if (C.e2ee_count >= CP_E2EE_MAX) return -1;
         s_cpy(C.e2ee[C.e2ee_count++], room_id, sizeof(C.e2ee[0]));
         return 0;
     } else {
+        chat_e2ee_disable(room_id);
         if (idx < 0) return 0;
         for (int j = idx; j < C.e2ee_count - 1; j++)
             s_cpy(C.e2ee[j], C.e2ee[j+1], sizeof(C.e2ee[0]));
@@ -108,9 +114,9 @@ int chat_polish_set_e2ee(const char *room_id, int on) {
     }
 }
 int chat_polish_is_e2ee(const char *room_id) {
-    for (int i = 0; i < C.e2ee_count; i++)
-        if (s_eq(C.e2ee[i], room_id)) return 1;
-    return 0;
+    /* Authoritative check is the e2ee module — the polish list is just
+     * a UI mirror. */
+    return chat_e2ee_is_active(room_id);
 }
 
 int chat_polish_set_active_room(const char *room_id) {
@@ -366,7 +372,9 @@ void chat_polish_print_selftest_line(void) {
     chat_zeos_walk_rooms(chat_zeos_current_ctx(), cp_count_cb, 0);
     kputs("chat-zeos polish ..... 3-pane UI ready, ");
     kput_dec((uint64_t)g_visible_count);
-    kputs(" rooms visible to active ctx\n");
+    kputs(" rooms visible to active ctx, E2EE rooms: ");
+    kput_dec((uint64_t)chat_e2ee_active_count());
+    kputs("\n");
 }
 
 void chat_polish_cmd(const char *args) {

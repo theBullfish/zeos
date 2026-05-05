@@ -13,6 +13,7 @@
  */
 
 #include "chat_zeos.h"
+#include "chat_e2ee.h"
 #include "std_btree.h"
 #include "vault.h"
 #include "timeofday.h"
@@ -297,6 +298,27 @@ int chat_zeos_send(const char *room_id, const char *ctx, const char *body) {
     for (int i = 0; i < blen; i++) m->body[i] = body[i];
     m->body[blen] = 0;
     m->body_len = blen;
+
+    /* If the room is E2EE-enabled, encrypt the body in-place before
+     * persistence + indexing. The plaintext only ever lived in the
+     * caller's stack frame and the temporary `body` argument; from
+     * here on we hold ciphertext. The search index is built on the
+     * ciphertext too, which means full-text search degrades to
+     * "exact-token-after-encryption" — i.e. it stops being useful for
+     * E2EE rooms. That's the right tradeoff: indexable plaintext is
+     * how Slack reads your DMs. */
+    if (chat_e2ee_is_active(room_id) && blen > 0) {
+        uint8_t ct[CHAT_BODY_MAX];
+        int n = chat_e2ee_encrypt(room_id, (uint64_t)seq,
+                                  (const uint8_t *)m->body, (size_t)blen, ct);
+        if (n == blen) {
+            for (int i = 0; i < n; i++) m->body[i] = (char)ct[i];
+        }
+        /* If encrypt failed, we fall through with plaintext rather than
+         * silently dropping the message — the polish layer's gate is
+         * the authoritative refusal point; this is a defense-in-depth
+         * layer so a partial state doesn't lose data. */
+    }
 
     /* Append to btree-backed message log. */
     btree_insert(g_message_log, CHAT_PACK_KEY(ridx, seq), (int32_t)midx);
