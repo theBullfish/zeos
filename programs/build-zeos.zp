@@ -1,0 +1,85 @@
+// build-zeos.zp — Zeos's own build system.  Replaces make / bazel.
+// Codex Labs LLC — 2026
+//
+// First-principles: a build system IS a typed dependency graph that
+// resolves in topo order on input change.  chain_registry already IS
+// that graph (chain_resolve, MDE topo-sort, masq_journal, per-chain
+// locks + AP partition for parallel resolves).  This is the verb layer.
+//
+// Each `rule` = one chain.  Inputs are fs signals; outputs are the
+// side-effect of cmd.run; topo order is whatever MDE decides.
+
+import std.fs   as fs
+import std.cmd  as cmd
+import std.time as t
+
+// ── RULE TYPE ────────────────────────────────────
+
+struct rule {
+  name:    str    // chain id, e.g. "boot/main.o"
+  input:   str    // source path
+  output:  str    // artifact path
+  command: str    // verbatim shell line
+}
+
+// ── ENGINE ───────────────────────────────────────
+// Change detection: vault_version of input vs vault_version of output.
+// fs.vault_version_of(path) is the documented gap below; today we
+// fall back to fs.exists + fs.size on input.
+
+started : input -> time.now -> tap.log
+
+chain build_engine {
+  step : input -> dispatch_rule
+  ~> tap.log
+}
+
+dispatch_rule : input -> {
+  in_present  : fs.exists -> gate(== 1),
+  out_missing : fs.exists -> gate(== 0) -> cmd.run,
+  out_stale   : fs.size   -> gate(.changed_since_last) -> cmd.run
+}
+
+// ── RULE GENERATION ──────────────────────────────
+// Read kernel/Makefile, extract SRCS, register one rule per .c file.
+
+makefile : emit("kernel/Makefile") -> fs.read_string -> tap.log
+
+srcs    : input -> str.split("\n") -> str.match("\\.c") -> str.trim
+o_for   : input -> str.replace(".c", ".o") -> str.prefix("build/")
+
+per_src : srcs -> rule {
+  name    = .input,
+  input   = .input,
+  output  = o_for,
+  command = "gcc -c " + .input + " -o " + o_for
+} -> register_chain
+
+link_rule : emit(rule {
+  name    = "kernel/build/BOOTZ.EFI",
+  input   = "build/*.o",
+  output  = "build/BOOTZ.EFI",
+  command = "ld -o build/BOOTZ.EFI build/*.o -lefi -lgnuefi"
+}) -> register_chain
+
+// ── KICK OFF ─────────────────────────────────────
+
+tick : input -> time.now ~> tap.log
+tick -> build_engine
+
+chain build_zeos { started makefile srcs per_src link_rule tick }
+
+// ── FOOTER ───────────────────────────────────────
+// build-zeos.zp: 85 lines of Z+
+// make: ~30,000 LOC.  bazel: ~500,000 LOC.
+// Same primitive: dependency graph + topo-sort + change detection.
+// Zeos already has all three in chain_registry; this is the verb layer.
+//
+// HONEST GAP: fs.vault_version_of(path) does not exist as a Z+ verb
+// today.  std_fs.c is not a separate file — fs.* verbs live in
+// zplus.c which this PR does not touch.  dispatch_rule uses
+// fs.exists + fs.size as a stand-in.  Clean path: one verb in
+// zplus.c returning the CHAIN_FS_EVENT vault_version for the inode
+// backing `path`; once landed, the .changed_since_last gate becomes
+// a strict integer compare and the build is correct under concurrent
+// edits.

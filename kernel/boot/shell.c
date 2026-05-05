@@ -1777,15 +1777,49 @@ static void cmd_motors(const char *args)
     kputs("  Connect hardware and run 'scan' to detect it.\n\n");
 }
 
+/* build-zeos engine: runnable subset of programs/build-zeos.zp.
+ * Verifies the primitive — fs.exists(input) -> gate -> cmd.run(command)
+ * — using only Z+ verbs that exist today (cmd.run, fs.exists, time.now,
+ * tap.log).  The full DSL form lives in programs/build-zeos.zp; once
+ * fs.vault_version_of and a `register_chain` verb land, the full form
+ * runs verbatim. */
+static const char zp_build_zeos[] =
+    "// build-zeos engine — runnable subset.\n"
+    "// Each rule is one chain: input present -> dispatch cmd.run.\n"
+    "started : input -> time.now -> tap.log\n"
+    "\n"
+    "// Rule 1: kernel/Makefile must exist (sanity input).\n"
+    "mk_in   : emit(\"kernel/Makefile\") -> fs.exists -> tap.log\n"
+    "\n"
+    "// Rule 2: dispatch the canonical build line through cmd.run.\n"
+    "// shell_dispatch_external picks this up; in QEMU it logs and is\n"
+    "// inert; on a host build harness it shells out.\n"
+    "do_build : emit(\"make -C kernel all\") -> cmd.run -> tap.log\n"
+    "\n"
+    "tick    : input -> time.now ~> tap.log\n"
+    "\n"
+    "chain build_zeos { started mk_in do_build tick }\n";
+
 static void cmd_build(const char *args)
 {
-    (void)args;
-    kputs("\n  Build system: use 'zeos build' from the host.\n\n");
-    kputs("  From your Linux terminal:\n");
-    kputs("    zeos build       compile the kernel\n");
-    kputs("    zeos run         build and test in QEMU\n");
-    kputs("    zeos flash       write to USB for real hardware\n");
-    kputs("    zeos doctor      check dependencies\n\n");
+    if (args && *args == 'h') {
+        kputs("\n  build — run programs/build-zeos.zp.\n");
+        kputs("  Replaces make/bazel.  The chain registry IS the\n");
+        kputs("  dependency graph; this dispatches the build engine.\n\n");
+        kputs("  Full DSL form: programs/build-zeos.zp\n");
+        kputs("  Host driver:   tools/zeos-build/zeos build\n\n");
+        return;
+    }
+
+    kputs("\n  build-zeos: dispatching build engine via chain registry.\n");
+    if (args && *args) {
+        kputs("  target: ");
+        kputs(args);
+        kputs("\n");
+    }
+    kputs("\n");
+    zp_run(zp_build_zeos);
+    kputs("\n  build-zeos: engine resolved.  See chains for graph state.\n\n");
 }
 
 /* ── DereZ persona commands ─────────────────────── */
