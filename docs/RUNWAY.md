@@ -35,6 +35,35 @@ lands; don't add. End is the end.
 14. · USB UVC webcams — iso transfers in xHCI + CHAIN_VIDEO_IN.
 15. · Print chain (formerly "print spooler") — CHAIN_PRINT pipeline `print_request → format → tx_to_printer → completion`. IPP for wire.
 
+## Zeos-back checkpoints
+
+Every 3 runway items, before launching the next: stop and audit.
+
+For each recent landing:
+- Is it shaped like a chain over typed signals, or like an imperative module?
+- Does it use CFA / MasQ / chains / Z+ / B3 / MDE primitives, or Linux primitives wearing Zeos labels?
+- Are state changes flowing through chain_resolve so vault_version / masq_journal / B3 capture them?
+- Is sensitive state CFA-wrapped at the right tier?
+
+For each upcoming item in the runway:
+- Re-read the brief I'd give an agent.
+- Spot Linux-shape language ("daemon", "spooler", "process", "users with UIDs").
+- Reshape the brief BEFORE launching, not after the agent ships drift.
+
+Track checkpoints inline: `## Zeos-back N (after items X-Y)` — record what was caught + corrected.
+
+## Zeos-back checkpoints — log
+
+### Zeos-back 1 (after items 1, 1b, 2, 3, 4, 5, 6)
+Caught and corrected before further launches:
+- #7 Text editor → chain-over-`text_edit` signals; subscriber chains for spell/autocomplete/autosave/version
+- #8 File manager → chain-over-`fs_event` signals; masq_journal is already the source of truth
+- #10 Activity Monitor → chain subscribing to all chains via MDE wildcard
+- #13 Multi-user → CFA identity contexts (re-named, re-shaped)
+- #15 Spooler → CHAIN_PRINT
+
+(#12 disk encryption was a separate catch — CFA-native, not LUKS — landed at b332860.)
+
 ## End state
 
 When this list closes, Zeos is:
