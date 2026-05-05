@@ -31,7 +31,9 @@ CFLAGS   = -ffreestanding \
            -Ilib/mbedtls/include \
            -MMD -MP \
            -DGNU_EFI_USE_MS_ABI \
-           -DHAVE_USE_MS_ABI
+           -DHAVE_USE_MS_ABI \
+           -DZEOS_VERSION='"alpha-0.2"' \
+           -DZEOS_COMMIT='"$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)"'
 
 # Linker flags
 LDFLAGS  = -nostdlib \
@@ -121,6 +123,10 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/ui_dirty.c \
            boot/quick_look.c \
            boot/image_viewer.c \
+           boot/jpeg.c \
+           boot/md_render.c \
+           boot/chat_e2ee.c \
+           boot/build_runner.c \
            boot/calculator.c \
            boot/editor.c \
            boot/ui_states.c \
@@ -135,6 +141,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/chat_polish.c \
            boot/wm_persist.c \
            boot/activity.c \
+           boot/welcome.c \
            boot/tests.c
 
 # mbedTLS library sources (3.6 LTS, vendored at lib/mbedtls/)

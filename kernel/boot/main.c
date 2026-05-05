@@ -907,6 +907,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         identity_print_selftest_line();
     }
 
+    /* First-boot welcome flow. Per identity context. After identity_init
+     * so we know which ctx to scope the markers to; before scheduler_run
+     * so the user sees the welcome before the shell prompt. Idempotent:
+     * skips on subsequent boots of the same ctx. */
+    {
+        extern void welcome_run_if_first_boot(void);
+        extern void welcome_print_selftest_line(void);
+        welcome_run_if_first_boot();
+        welcome_print_selftest_line();
+    }
+
     /* Scheduler: chain resolution as the kernel main loop. Must
      * follow chain_registry_init + mde_auto_route (done inside) so
      * the topo order is ready before the first tick. */
