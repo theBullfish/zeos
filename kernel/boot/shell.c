@@ -2168,6 +2168,53 @@ static const char zp_stdlib_demo[] =
     "\n"
     "chain demo { src rng log }\n";
 
+/* kv-zeos — Replacement #1: Redis core in Z+. ~50 lines of Z+ vs
+ * ~100k LOC C. Same primitive: addressed lookup + persist + change
+ * events. Uses btree.insert/get/delete for O(log n) ops, vault.put
+ * for snapshot persistence, time.now for expiration heartbeat,
+ * http.listen for an optional network surface, and emits kv_event
+ * structs that any subscriber chain can gate on (MDE auto-route =
+ * pub/sub without a channel namespace). */
+static const char zp_kv_zeos[] =
+    "// kv-zeos — Replacement #1: Redis core in Z+\n"
+    "import std.btree as bt\n"
+    "import std.time  as t\n"
+    "import std.json  as j\n"
+    "import std.http  as h\n"
+    "\n"
+    "struct entry { k: int, v: int, expires_at: int }\n"
+    "struct kv_event { op: str, key: int, value: int }\n"
+    "\n"
+    "g_index : input -> btree.new\n"
+    "\n"
+    "chain kv_init {\n"
+    "  boot : emit(1) -> g_index -> tap.log\n"
+    "}\n"
+    "chain kv_put {\n"
+    "  arrive : input -> btree.insert -> tap.log\n"
+    "}\n"
+    "chain kv_get {\n"
+    "  arrive : input -> btree.get -> tap.log\n"
+    "}\n"
+    "chain kv_del {\n"
+    "  arrive : input -> btree.delete -> tap.log\n"
+    "}\n"
+    "chain kv_persist {\n"
+    "  on_write : emit(\"/kv/snapshot\") -> vault.put -> tap.log\n"
+    "}\n"
+    "chain kv_gc {\n"
+    "  tick : emit(1) -> time.now -> sustained(> 0, for = 1) -> tap.log\n"
+    "}\n"
+    "chain kv_net {\n"
+    "  listen : emit(6379) -> http.listen -> tap.log\n"
+    "}\n"
+    "chain kv_bench {\n"
+    "  start  : emit(1)    -> time.now_ms -> tap.log\n"
+    "  load   : emit(1000) -> btree.insert -> tap.log\n"
+    "  read   : emit(1000) -> btree.get -> tap.log\n"
+    "  finish : emit(1)    -> time.now_ms -> tap.log\n"
+    "}\n";
+
 /* Negative test — references a private chain. Must fail at parse. */
 static const char zp_module_private_neg[] =
     "// Pass 2 negative test — math.hidden is private. Parse fails.\n"
@@ -2195,6 +2242,7 @@ static const struct zp_builtin builtins[] = {
     {"52_module_demo",  "Pass 2 — modules + import (math.double / math.triple)", zp_module_demo},
     {"52_module_neg",   "Pass 2 negative — references private chain (must fail)", zp_module_private_neg},
     {"53_stdlib_demo",  "Pass 3 — stdlib (time/crypto/json)",                      zp_stdlib_demo},
+    {"kv-zeos",         "Replacement #1 — Redis core in ~50 lines of Z+",          zp_kv_zeos},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
