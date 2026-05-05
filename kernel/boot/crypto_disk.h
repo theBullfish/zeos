@@ -68,6 +68,17 @@ int  crypto_disk_transform(int region_id, int mode, uint64_t lba,
                            uint32_t block_count, uint32_t sector_size,
                            const void *src, void *dst);
 
+/* Identity-context support. Switch the VAULT path the next salt
+ * load reads from. Stable string only (literal or context-owned). */
+void crypto_disk_set_salt_path(const char *path);
+
+/* Identity-context support. Re-derive the master key from `pin` +
+ * the salt at `salt_path` (created if missing). Used by
+ * identity_context_switch so each context has its own AES-XTS key
+ * even when sharing the same disk regions. Returns 0 on success. */
+int  crypto_disk_reinit_with_salt(const char *pin, int pin_len,
+                                  const char *salt_path);
+
 /* Re-derive master key from a new PIN and re-encrypt every region in
  * place (read+decrypt-with-old-key, encrypt-with-new-key, write).
  * Long operation; intended to run with the lockscreen modal up.

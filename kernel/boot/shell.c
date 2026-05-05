@@ -28,6 +28,7 @@
 #include "notify.h"
 #include "firewall.h"
 #include "crypto_disk.h"
+#include "identity.h"
 #include "calendar.h"
 #include "nvme.h"
 #include "ahci.h"
@@ -833,6 +834,11 @@ static const struct shell_cmd commands[] = {
     {"settings","unified settings (settings | settings <name> [value] | search/export/import)", cmd_settings, VIS_ALWAYS},
     {"firewall","stateful packet firewall (firewall | add | del | flush | log | enable | disable)", firewall_cmd, VIS_DEREZ},
     {"crypto",  "CFA-native disk encryption (crypto status | encrypt-region <name> <start> <count> | rekey)", crypto_cmd, VIS_DEREZ},
+    {"whoami",  "show active identity context",   cmd_whoami,  VIS_ALWAYS},
+    {"contexts","list identity contexts",         cmd_contexts, VIS_ALWAYS},
+    {"switch-context", "switch active context (switch-context <name> <pin>)", cmd_switch_context, VIS_ALWAYS},
+    {"new-context", "create a new identity context (new-context <name> <pin>)", cmd_new_context, VIS_ALWAYS},
+    {"delete-context", "delete an identity context (delete-context <name>)", cmd_delete_context, VIS_ALWAYS},
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))

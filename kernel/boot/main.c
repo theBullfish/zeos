@@ -865,6 +865,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         crypto_disk_print_selftest_line();
     }
 
+    /* CFA identity contexts. Loads contexts from VAULT or migrates the
+     * legacy single-PIN boot into context 1 "owner". After this point
+     * every newly created chain is tagged with the active context and
+     * cross-context perception of INTERNAL/SOVEREIGN is denied. */
+    {
+        extern void identity_init(void);
+        extern void identity_print_selftest_line(void);
+        identity_init();
+        identity_print_selftest_line();
+    }
+
     /* Scheduler: chain resolution as the kernel main loop. Must
      * follow chain_registry_init + mde_auto_route (done inside) so
      * the topo order is ready before the first tick. */

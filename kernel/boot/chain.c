@@ -6,6 +6,7 @@
 
 #include "chain.h"
 #include "cfa_handle.h"
+#include "identity.h"
 #include "kprint.h"
 #include "timer.h"
 #include "persistence.h"
@@ -192,6 +193,12 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     chain_total++;
 
     spin_unlock(&g_chain_registry_rw_lock);
+
+    /* Tag the new chain with the active identity context (if any).
+     * No-op pre-identity_init -- system chains created during early
+     * boot keep their non-context CFA roots and are universally
+     * perceivable regardless of which user logs in. */
+    identity_register_chain(slot);
 
     kputs("[chain] created \"");
     kputs(registry[slot].name);
@@ -432,21 +439,39 @@ int chain_can_perceive(int observer_id, int target_id)
         return 0;
 
     /*
-     * Perception rules:
+     * Perception rules (tier):
      *   Sovereign  -> Sovereign + Internal + Reference
      *   Internal   -> Internal + Reference
      *   Reference  -> Reference only
+     *
+     * Identity context scope (extension): if observer and target live
+     * under different context CFA roots, only REFERENCE-tier targets
+     * are visible. INTERNAL and SOVEREIGN are scoped to their own
+     * context. System chains (CFA root segment[0] outside the identity
+     * range) are treated as cross-context-visible to keep boot-time
+     * hardware chains usable from any context.
      */
+    int tier_ok = 0;
     switch (observer->tier) {
     case MASQ_SOVEREIGN:
-        return 1;  /* Sovereign sees everything */
+        tier_ok = 1;
+        break;
     case MASQ_INTERNAL:
-        return (target->tier == MASQ_INTERNAL || target->tier == MASQ_REFERENCE);
+        tier_ok = (target->tier == MASQ_INTERNAL || target->tier == MASQ_REFERENCE);
+        break;
     case MASQ_REFERENCE:
-        return (target->tier == MASQ_REFERENCE);
+        tier_ok = (target->tier == MASQ_REFERENCE);
+        break;
     }
+    if (!tier_ok) return 0;
 
-    return 0;
+    /* Cross-context check: REFERENCE tier is always visible across
+     * contexts. Other tiers require the same context root. */
+    if (target->tier == MASQ_REFERENCE) return 1;
+    if (!identity_roots_same_context(&observer->addr, &target->addr)) {
+        return 0;
+    }
+    return 1;
 }
 
 /* ── Count ───────────────────────────────────────────────────────── */

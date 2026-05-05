@@ -108,6 +108,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/brightness.c \
            boot/idle.c \
            boot/lockscreen.c \
+           boot/identity.c \
            boot/power_buttons.c \
            boot/settings_registry.c \
            boot/ui_undo.c \

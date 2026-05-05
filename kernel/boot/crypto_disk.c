@@ -96,6 +96,12 @@ static const char *cd_skip_ws(const char *s) {
 #define CRYPTO_PBKDF2_ITERS      120000
 #define CRYPTO_VAULT_SALT_PATH   "/crypto/salt"
 #define CRYPTO_VAULT_REGIONS_PATH "/crypto/regions"
+#define CRYPTO_SALT_PATH_MAX     64
+
+/* Active salt path. Defaults to CRYPTO_VAULT_SALT_PATH; identity.c
+ * overrides this when switching contexts so each context derives its
+ * own master key from its own salt. */
+static char g_salt_path[CRYPTO_SALT_PATH_MAX] = CRYPTO_VAULT_SALT_PATH;
 
 /* MasQ-tier PIN buffer for the duration of init. Wiped immediately
  * after key derivation. We never persist the PIN bytes anywhere. */
@@ -137,7 +143,7 @@ static int derive_master_key(const char *pin, int pin_len,
 
 static int load_or_create_salt(void)
 {
-    int got = vault_load_config(CRYPTO_VAULT_SALT_PATH, g_salt, sizeof(g_salt));
+    int got = vault_load_config(g_salt_path, g_salt, sizeof(g_salt));
     if (got == (int)sizeof(g_salt)) return 0;
 
     /* Generate fresh salt via mbedtls_hardware_poll (RDRAND + TSC jitter). */
@@ -152,7 +158,7 @@ static int load_or_create_salt(void)
             if ((i & 7) == 7) t = timer_read_tsc() ^ (t << 13) ^ (t >> 7);
         }
     }
-    int wrote = vault_save_config(CRYPTO_VAULT_SALT_PATH,
+    int wrote = vault_save_config(g_salt_path,
                                   g_salt, sizeof(g_salt));
     if (wrote < 0) {
         kputs("[crypto] WARN: salt persist failed; key non-stable across reboots\n");
@@ -452,6 +458,95 @@ void crypto_disk_init(const char *pin, int pin_len)
     kputs("[crypto] armed (AES-XTS-256, ");
     kput_dec((uint64_t)crypto_disk_region_count());
     kputs(" regions, key=SOVEREIGN-wrapped)\n");
+}
+
+/* Identity-context support: switch the salt path so a subsequent
+ * init/reinit derives keys from a different per-context VAULT salt.
+ * Caller passes a stable string (string literal or context-owned). */
+void crypto_disk_set_salt_path(const char *path)
+{
+    if (!path || !*path) return;
+    int i = 0;
+    while (path[i] && i < (int)sizeof(g_salt_path) - 1) {
+        g_salt_path[i] = path[i];
+        i++;
+    }
+    g_salt_path[i] = '\0';
+}
+
+/* Re-derive the master key from `pin` + the current salt-path's salt.
+ * Wipes the previous key first. Returns 0 on success.
+ *
+ * Called by identity_context_switch. The CFA handle for the master
+ * key is reused; only the underlying key bytes change. Any in-flight
+ * region access either completed under the old key (decrypted, returned
+ * to caller) or hasn't started; the spinlock around g_total_accesses
+ * isn't a synchronisation primitive for the key bytes themselves --
+ * during a context switch the system is single-threaded at the gate. */
+int crypto_disk_reinit_with_salt(const char *pin, int pin_len,
+                                 const char *salt_path)
+{
+    if (!pin || pin_len <= 0) return -1;
+    crypto_disk_set_salt_path(salt_path ? salt_path : CRYPTO_VAULT_SALT_PATH);
+
+    /* Make sure PSA + platform shims are alive; they may have been set
+     * up already by an earlier crypto_disk_init() call. */
+    static int s_platform_set;
+    if (!s_platform_set) {
+        mbedtls_platform_set_calloc_free(zeos_calloc, zeos_free);
+        s_platform_set = 1;
+    }
+    psa_status_t pst = psa_crypto_init();
+    if (pst != PSA_SUCCESS && pst != PSA_ERROR_ALREADY_EXISTS) return -1;
+
+    if (load_or_create_salt() < 0) {
+        kputs("[crypto] WARN: reinit with non-persisted salt\n");
+    }
+
+    uint8_t newkey[CRYPTO_KEY_LEN];
+    cd_memzero(newkey, sizeof(newkey));
+    if (derive_master_key(pin, pin_len, g_salt, sizeof(g_salt), newkey) != 0) {
+        cd_memzero(newkey, sizeof(newkey));
+        return -1;
+    }
+
+    /* Swap key bytes in place under the spinlock so a concurrent
+     * crypto_disk_transform on another core can't race a half-written
+     * key. The CFA handle keeps pointing at g_master_key. */
+    spin_lock(&g_lock);
+    cd_memzero(g_master_key, sizeof(g_master_key));
+    cd_memcpy(g_master_key, newkey, sizeof(newkey));
+    spin_unlock(&g_lock);
+    cd_memzero(newkey, sizeof(newkey));
+
+    /* If we hadn't been armed before (first context login), wrap the
+     * key in a SOVEREIGN handle and load regions now. Subsequent
+     * switches keep the same handle. */
+    if (!g_armed) {
+        cfa_addr_t base;
+        chain_t *blk = (CHAIN_BLOCK >= 0) ? chain_get(CHAIN_BLOCK) : 0;
+        if (blk) {
+            base = cfa_derive(&blk->addr, 0xC4D);
+        } else {
+            for (int i = 0; i < 8; i++) base.segments[i] = 0;
+            base.segments[0] = 0xC4D;
+            base.depth = 1;
+            base.birth_tsc = timer_read_tsc();
+        }
+        cfa_addr_t key_addr = cfa_derive(&base, 1);
+        g_master_key_h = cfa_wrap(g_master_key, sizeof(g_master_key),
+                                  key_addr, MASQ_SOVEREIGN);
+        if (g_master_key_h == 0) {
+            cd_memzero(g_master_key, sizeof(g_master_key));
+            return -1;
+        }
+        (void)regions_load();
+        g_armed = 1;
+    }
+
+    chain_t *c = (CHAIN_BLOCK >= 0) ? chain_get(CHAIN_BLOCK) : 0;
+    if (c) c->vault_version++;
+    return 0;
 }
 
 /* ── Rekey ───────────────────────────────────────────────────────── */
