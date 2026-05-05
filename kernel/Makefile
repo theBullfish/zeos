@@ -91,6 +91,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/notify.c \
            boot/firewall.c \
            boot/crypto_disk.c \
+           boot/print.c \
            boot/calendar.c \
            boot/theme_runtime.c \
            boot/icon_render.c \

@@ -46,6 +46,7 @@
 #include "calendar.h"
 #include "editor.h"
 #include "firewall.h"
+#include "print.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -1237,6 +1238,25 @@ int chain_registry_init(void)
         if (activity_chain_register(CHAIN_CPU) < 0) {
             kputs("[chain_registry] WARN: activity chain registration failed\n");
         }
+    }
+
+    /* CHAIN_PRINT + CHAIN_PRINT_QUEUE: Zeos-shaped print pipeline.
+     *   CHAIN_PRINT: print_request -> format -> tx_to_printer -> emit_completion
+     *   CHAIN_PRINT_QUEUE (subscriber, input=print_completion):
+     *     track_completion -> persist + masq journal
+     * MDE auto-routes the queue subscriber by type matching on
+     * print_completion. Transports: USB (class 0x07), IPP-over-TCP
+     * (port 631 HTTP POST application/ipp), FILE_PDF (fat32 write).
+     * mDNS auto-discovers _ipp._tcp.local printers when the NIC is up. */
+    {
+        print_init();
+        if (print_chain_register(CHAIN_CPU) < 0) {
+            kputs("[chain_registry] WARN: print chain registration failed\n");
+        }
+        /* Best-effort USB scan now (xHCI was already enumerated) and
+         * mDNS discover when net is alive. mDNS sleeps ~1.5s so we run
+         * it lazily via the shell, not at boot. */
+        (void)print_usb_scan();
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

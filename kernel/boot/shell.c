@@ -28,6 +28,7 @@
 #include "notify.h"
 #include "firewall.h"
 #include "crypto_disk.h"
+#include "print.h"
 #include "identity.h"
 #include "calendar.h"
 #include "nvme.h"
@@ -840,6 +841,11 @@ static const struct shell_cmd commands[] = {
     {"settings","unified settings (settings | settings <name> [value] | search/export/import)", cmd_settings, VIS_ALWAYS},
     {"firewall","stateful packet firewall (firewall | add | del | flush | log | enable | disable)", firewall_cmd, VIS_DEREZ},
     {"crypto",  "CFA-native disk encryption (crypto status | encrypt-region <name> <start> <count> | rekey)", crypto_cmd, VIS_DEREZ},
+    {"print",   "submit a file to a printer (print <path> [--printer N] | print --to-pdf <path>)", print_cmd, VIS_ALWAYS},
+    {"printers","list registered printers", printers_cmd, VIS_ALWAYS},
+    {"printer", "manage printers (printer add usb|ipp <url>|file <path> | printer remove <id> | printer discover)", printer_cmd, VIS_DEREZ},
+    {"print-queue","show print queue", print_queue_cmd, VIS_ALWAYS},
+    {"print-cancel","cancel a queued/active print job (print-cancel <job_id>)", print_cancel_cmd, VIS_ALWAYS},
     {"whoami",  "show active identity context",   cmd_whoami,  VIS_ALWAYS},
     {"contexts","list identity contexts",         cmd_contexts, VIS_ALWAYS},
     {"switch-context", "switch active context (switch-context <name> <pin>)", cmd_switch_context, VIS_ALWAYS},
@@ -4614,6 +4620,10 @@ vault_done:
 
     /* Firewall: state, rule count, conntrack, drops/min. */
     firewall_print_selftest_line();
+    passes++;
+
+    /* Print: chain registered, printer count, queue depth, active jobs. */
+    print_print_selftest_line();
     passes++;
 
     /* UI primitives — undo/redo, context menus, hover, dirty,
