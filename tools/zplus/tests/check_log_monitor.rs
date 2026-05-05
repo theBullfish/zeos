@@ -45,18 +45,17 @@ fn flow_connectivity_clean_on_log_monitor() {
     );
 }
 
-/// Corpus-wide ratchet for Flow connectivity. Currently 2 — both in
+/// Corpus-wide ratchet for Flow connectivity. Started at 2 — both in
 /// `quill.zp` lines 326-327 where `opacity(0 -> 1, ...)` and
-/// `scale(0.8 -> 1, ...)` overload `->` for value-range semantics
-/// rather than signal flow. The type checker correctly identifies the
-/// type mismatch (Tagged<Float, percent> vs Int; Float vs Int); the
-/// fix is at the language-syntax layer (use `..` for ranges instead
-/// of `->`), not here. Until that's settled, ratchet at 2.
+/// `scale(0.8 -> 1, ...)` overloaded `->` for value-range semantics
+/// rather than signal flow. Resolved by rewriting those uses to `..`
+/// (the corpus's standard range form). Now zero. Any new mismatch
+/// fails fast.
 #[test]
 fn flow_connectivity_corpus_ratchet() {
     use std::path::{Path, PathBuf};
 
-    const MAX_FLOW_MISMATCHES: usize = 2;
+    const MAX_FLOW_MISMATCHES: usize = 0;
 
     fn programs_dir() -> PathBuf {
         for c in ["../../programs", "programs"] {

@@ -322,9 +322,9 @@ present : app("Quill Present") {
 
     slide_transition : {
         none:      instant,
-        fade:      opacity(0 -> 1, duration: 300ms),
-        slide_left: translate_x(100% -> 0, duration: 300ms),
-        zoom:      scale(0.8 -> 1, duration: 300ms) + opacity(0 -> 1, duration: 200ms)
+        fade:      opacity(0..1, duration: 300ms),
+        slide_left: translate_x(100%..0, duration: 300ms),
+        zoom:      scale(0.8..1, duration: 300ms) + opacity(0..1, duration: 200ms)
     }
 
     // ── Presenter Mode ───────────────────────
