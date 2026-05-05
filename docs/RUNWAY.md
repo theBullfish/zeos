@@ -64,6 +64,11 @@ Caught and corrected before further launches:
 
 (#12 disk encryption was a separate catch — CFA-native, not LUKS — landed at b332860.)
 
+### Zeos-back 2 (after items 6 calc, 9 calendar/clock)
+- #6 Calculator: single-window isolated tool, no signal consumers. Imperative state honest. No drift.
+- #9 Calendar/clock: CHAIN_CLOCK pipeline correct, alarm fires through notify (chain → chain), VAULT persisted. No drift.
+- Next batch (#7 #8 #10) already reshaped pre-launch in Zeos-back 1. Briefs OK.
+
 ## End state
 
 When this list closes, Zeos is:
