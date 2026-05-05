@@ -62,7 +62,7 @@ Each test produces a structured result: pass / fail / degraded (continued under 
 
 ## What goes in a report
 
-Each report is a self-contained signal-graph snapshot (`.sgs` per `docs/FOUNDATIONAL_PROGRAMS.md`) with:
+The full measurement set is in `specs/MEASUREMENT_TARGETS.md` — 10 categories from language drift to thermal envelope. Each report is a self-contained signal-graph snapshot (`.sgs` per `docs/FOUNDATIONAL_PROGRAMS.md`) with:
 
 - Test ID (which suite, which version)
 - Pass/fail/degraded results per layer

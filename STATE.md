@@ -88,13 +88,21 @@ session. Three sections, that's it.
   RHS. The full corpus now passes the chord-rule arity check with
   zero exceptions. Ratchet locked at 0.
 
-- New feature spec: `specs/OPT_IN_TEST_REPORTING.md` (no commit yet
-  — captured 2026-05-05 from a Brad directive). Zeos ships with a
-  deep self-test suite that runs across every TRISAVERSE_STACK layer
-  and, with explicit user opt-in, sends anonymized reports back to
-  Codex Labs. P0 per `docs/FOUNDATIONAL_PROGRAMS.md` §11 — MDE's
-  heterogeneous-hardware learning depends on real-world reports.
-  No code yet; spec is the foundation.
+- New feature spec: `specs/OPT_IN_TEST_REPORTING.md` (commit
+  `7d8c95b`). Zeos ships with a deep self-test suite that runs across
+  every TRISAVERSE_STACK layer and, with explicit user opt-in, sends
+  anonymized reports back to Codex Labs. P0 per
+  `docs/FOUNDATIONAL_PROGRAMS.md` §11 — MDE's heterogeneous-hardware
+  learning depends on real-world reports.
+
+- Companion measurement-targets spec: `specs/MEASUREMENT_TARGETS.md`
+  enumerates 10 categories of what to measure for future iterations
+  (language drift, hardware MasQ, runtime chord rule, memory
+  pressure, MDE routing, compat overhead, network, DX, security
+  invariants, power/thermal). Mapped to the OPT_IN_TEST_REPORTING.md
+  report structure. Sequenced easiest-and-highest-leverage first —
+  language drift and chord-rule runtime are the first two to
+  instrument.
 
   **96 tests green**.
 
