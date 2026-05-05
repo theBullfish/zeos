@@ -139,9 +139,14 @@ session. Three sections, that's it.
   3 sinks per tick. `delta` tracks previous value across ticks via
   `call_state` keyed by span (per-call-site isolation). Bare-path
   builtins (`data -> delta -> sink`) dispatch through the same
-  `dispatch_builtin` as full-call forms. New demos:
-  `programs/demos/fanout.zp` (3-way fork), `programs/demos/ramp.zp`
-  (delta computing differences).
+  `dispatch_builtin` as full-call forms.
+
+- **Runtime v2.1: real gate predicates (commit `4e226a5`).**
+  `gate(> N)` actually filters now. Predicates evaluate with
+  upstream as the implicit subject (UnaryCmp / BinExpr). Multiple
+  positionals AND'd. eval_binop generalized via value_as_f64 to
+  handle Tick / Duration / Int / Float consistently. New demo
+  `programs/demos/threshold.zp`.
 
 - **Runtime v1.5: two independent time knobs (commit `4a41139`).**
   `RuntimeConfig::ticks_per_real_second` (wall-clock pacing) and
@@ -155,7 +160,7 @@ session. Three sections, that's it.
   simulation. CLI: `zplus-run ... --ms-per-tick 60000`.
 
   All three corpus ratchets (merge arity, Flow connectivity,
-  named-arg types) stay at zero. **149 tests green** (119 unit +
+  named-arg types) stay at zero. **153 tests green** (123 unit +
   30 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
