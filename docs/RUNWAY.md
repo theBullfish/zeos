@@ -25,15 +25,15 @@ lands; don't add. End is the end.
 4. · Window snap — half/quadrant snapping at the WM layer
 5. · Virtual desktops — workspace separation via existing chain hierarchy
 6. · Calculator app — programmer + scientific modes, standalone
-7. · Text editor app — uses ui_undo/dirty/list_states
-8. · File manager app — fat32 + trash + drag/drop + multi-pane
-9. · Calendar/clock app — uses tod, alarm, world clocks
-10. · Activity Monitor — chain/CPU/memory/network/per-process visibility
-11. · Firewall — CHAIN_FIREWALL gating CHAIN_NET_TX/RX with rule table
-12. · Disk encryption — CFA-native (not LUKS-shaped). Keys are CFA SOVEREIGN handles, blocks are CFA-addressed, MasQ records every encrypted-region access. The Linux shape (LUKS) is the wrong primitive — we already have the right one.
-13. · Multi-user accounts — CFA-tier per-user, login flow extends lockscreen
-14. · USB UVC webcams — iso transfers in xHCI + new chain
-15. · Print spooler — IPP + SMB to network printer
+7. · Text editor — Zeos-shaped: a typed-text chain emitting `text_edit` signals. Spellcheck, autocomplete, autosave, version history are all subscriber chains. UI is a renderer over the chain. Not "an editor app."
+8. · File manager — Zeos-shaped: a chain over `fs_event` signals that masq_journal already records. Trash-GC, search index, sync, undo all subscribe. UI is a stream renderer. Not "an app with menus."
+9. · Calendar/clock app — uses tod, alarm, world clocks. CHAIN_CLOCK at ~1Hz.
+10. · Activity Monitor — Zeos-shaped: a chain that subscribes to all chains via MDE wildcard route. Free integration with notifications + B3 anomaly detection.
+11. · Firewall — CHAIN_FIREWALL gating CHAIN_NET_TX/RX with rule table.
+12. · Disk encryption — CFA-native: keys are CFA SOVEREIGN handles, blocks are CFA-addressed, MasQ records every encrypted-region access. LUKS is the wrong primitive.
+13. · CFA identity contexts (formerly "multi-user accounts") — each context is a CFA root with its own MasQ tier + chain visibility set. Login transitions the active root. Same end-user feel, Zeos primitive.
+14. · USB UVC webcams — iso transfers in xHCI + CHAIN_VIDEO_IN.
+15. · Print chain (formerly "print spooler") — CHAIN_PRINT pipeline `print_request → format → tx_to_printer → completion`. IPP for wire.
 
 ## End state
 
