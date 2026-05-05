@@ -458,3 +458,18 @@ void notes_zeos_print_stats(void) {
 uint32_t notes_zeos_total_docs(void)      { return (uint32_t)g_doc_count; }
 uint32_t notes_zeos_total_tokens(void)    { return g_total_tokens; }
 uint32_t notes_zeos_total_backlinks(void) { return g_total_backlinks; }
+
+int notes_zeos_walk(void (*cb)(const char *path,
+                                uint32_t token_count,
+                                uint32_t link_count,
+                                void *user),
+                    void *user) {
+    if (!cb) return 0;
+    int n = 0;
+    for (int i = 0; i < NOTES_MAX_DOCS; i++) {
+        if (!g_docs[i].used) continue;
+        cb(g_docs[i].path, g_docs[i].token_count, g_docs[i].link_count, user);
+        n++;
+    }
+    return n;
+}

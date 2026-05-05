@@ -42,4 +42,12 @@ uint32_t notes_zeos_total_docs(void);
 uint32_t notes_zeos_total_tokens(void);
 uint32_t notes_zeos_total_backlinks(void);
 
+/* Walk every indexed doc. Callback receives the path + per-doc counts.
+ * Returns the number of docs visited. (Used by notes_polish's graph.) */
+int notes_zeos_walk(void (*cb)(const char *path,
+                                uint32_t token_count,
+                                uint32_t link_count,
+                                void *user),
+                    void *user);
+
 #endif /* ZEOS_NOTES_ZEOS_H */
