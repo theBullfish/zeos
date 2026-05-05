@@ -29,20 +29,17 @@ fn checker_finds_no_errors_on_log_monitor() {
     );
 }
 
-/// Corpus-wide ratchet for checker violations. Currently 17 — all
-/// `merge has no inputs` cases caused by a known parser limitation:
-/// fork-body merge fragments (e.g. `13_payment_processor.zp:42-44`,
-/// `11_home_automation.zp` × 6) aren't coalesced because the
-/// vertical-merge coalescer in `parse_module` only runs at the top
-/// level. Fixing the parser will drop this count to zero. Until then,
-/// the test asserts the count doesn't INCREASE — so a real new
-/// chord-rule violation (e.g. a `Quorum 2 of 3` with one input) fires
-/// immediately.
+/// Corpus-wide ratchet for checker violations. Started at 17 (parser
+/// limitation: fork-body merge fragments + top-level type-union shorthand
+/// produced empty merges). Driven to 0 by extending merge coalescing into
+/// fork bodies, into Bind-wrapped statements, and adding type-union eat
+/// on `->` Flow RHS for `IDENT | IDENT` shorthand. The corpus now has
+/// zero chord-rule violations. New regressions fail fast.
 #[test]
 fn checker_corpus_violations_are_capped() {
     use std::path::{Path, PathBuf};
 
-    const MAX_VIOLATIONS: usize = 17;
+    const MAX_VIOLATIONS: usize = 0;
 
     fn programs_dir() -> PathBuf {
         for c in ["../../programs", "programs"] {
@@ -87,12 +84,4 @@ fn checker_corpus_violations_are_capped() {
         MAX_VIOLATIONS,
         violations.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
     );
-    // Also assert all current violations are the known-issue kind.
-    for v in &violations {
-        assert!(
-            v.contains("merge has no inputs"),
-            "unexpected violation kind: {}",
-            v
-        );
-    }
 }

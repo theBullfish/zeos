@@ -90,6 +90,20 @@ impl<'src> Parser<'src> {
         stmt: Stmt<'src>,
         stmts: &mut Vec<Stmt<'src>>,
     ) -> Option<Stmt<'src>> {
+        // Unwrap an outer `Bind(...)` wrapper if present: a merge with
+        // a stmt-level shape annotation (`| -> spread : best_ask - best_bid`)
+        // parses as `Connect(Bind(Merge{...}, shape))`. We coalesce the
+        // inner Merge as a fragment and re-wrap with the Bind on the way
+        // back out so the shape annotation is preserved.
+        let (bind_outer_shape, bind_outer_span, stmt) = match stmt {
+            Stmt::Connect(Chain::Bind(inner, shape, span)) => match *inner {
+                Chain::Merge(_) | Chain::Flow(_, _, _) => {
+                    (Some(*shape), Some(span), Stmt::Connect(*inner))
+                }
+                other => return Some(Stmt::Connect(Chain::Bind(Box::new(other), shape, span))),
+            },
+            other => (None, None, other),
+        };
         let (maybe_input, frag_merge) = match stmt {
             Stmt::Connect(Chain::Flow(lhs, rhs, _))
                 if matches!(rhs.as_ref(), Chain::Merge(_)) =>
@@ -101,33 +115,59 @@ impl<'src> Parser<'src> {
                 (Some(*lhs), m)
             }
             Stmt::Connect(Chain::Merge(m)) => (None, m),
-            other => return Some(other),
+            other => {
+                // Re-wrap if we had an outer Bind.
+                let result = match (bind_outer_shape, bind_outer_span) {
+                    (Some(shape), Some(span)) => match other {
+                        Stmt::Connect(c) => Stmt::Connect(Chain::Bind(
+                            Box::new(c),
+                            Box::new(shape),
+                            span,
+                        )),
+                        s => s,
+                    },
+                    _ => other,
+                };
+                return Some(result);
+            }
         };
 
-        // If the previous statement is a Connect(Merge), fold this fragment in.
-        if let Some(Stmt::Connect(Chain::Merge(prev))) = stmts.last_mut() {
+        // If the previous statement is a Connect(Merge) — bare or wrapped
+        // in `Connect(Bind(Merge, _))` — fold this fragment in.
+        let prev_merge: Option<&mut Merge<'src>> = match stmts.last_mut() {
+            Some(Stmt::Connect(Chain::Merge(m))) => Some(m),
+            Some(Stmt::Connect(Chain::Bind(inner, _, _))) => match inner.as_mut() {
+                Chain::Merge(m) => Some(m),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(prev) = prev_merge {
             if let Some(input) = maybe_input {
                 prev.inputs.push(input);
             }
-            // Carry over any inputs the new fragment had collected.
             prev.inputs.extend(frag_merge.inputs);
-            // Adopt non-default policy if the fragment specifies one.
             if !matches!(frag_merge.policy, MergePolicy::All) {
                 prev.policy = frag_merge.policy;
             }
-            // Adopt downstream if the fragment specifies one.
             if frag_merge.downstream.is_some() {
                 prev.downstream = frag_merge.downstream;
             }
             return None;
         }
 
-        // No predecessor merge — start a new one.
+        // No predecessor merge — start a new one. Re-apply outer Bind
+        // wrapper if the stmt had a shape annotation.
         let mut merge = frag_merge;
         if let Some(input) = maybe_input {
             merge.inputs.insert(0, input);
         }
-        Some(Stmt::Connect(Chain::Merge(merge)))
+        let merged = Chain::Merge(merge);
+        let chain = match (bind_outer_shape, bind_outer_span) {
+            (Some(shape), Some(span)) => Chain::Bind(Box::new(merged), Box::new(shape), span),
+            _ => merged,
+        };
+        Some(Stmt::Connect(chain))
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt<'src>, ParseError> {
@@ -333,10 +373,11 @@ impl<'src> Parser<'src> {
             // Allow newline after a chain operator for multi-line chains.
             self.skip_newlines();
             let right = self.parse_chain_term()?;
-            // For `<-` only, the RHS is an actuator type/option-set spec.
-            // Allowed continuations: `| IDENT` (e.g. `<- on | off`) or
-            // `, IDENT` (e.g. `<- brightness, color_temp`). Both forms eat
-            // alternates and wrap them under a synthetic `__union__` call.
+            // For `<-` (and now `->` after a final IDENT atom: type-union
+            // shorthand like `-> open | closed`, `-> dry | wet`), eat
+            // trailing `| IDENT` and `, IDENT` segments. Without this,
+            // `door_front : house.sensor(...) -> open | closed` would
+            // produce a Flow followed by a stray Merge.
             let right = if matches!(op_kind, TokenKind::BindLeft) {
                 let mut r = right;
                 loop {
@@ -355,8 +396,27 @@ impl<'src> Parser<'src> {
                         span: Span::new(start, new_end),
                     });
                 }
-                // Also allow postfix `@ unit` on the RHS — `<- target_temp @ F`.
                 self.maybe_unit_annotate(r)?
+            } else if matches!(op_kind, TokenKind::Flow)
+                && matches!(right, Chain::Atom(Atom::Path(_)))
+                && self.peek_kind() == Some(TokenKind::Pipe)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+            {
+                let mut r = right;
+                while self.peek_kind() == Some(TokenKind::Pipe)
+                    && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                {
+                    self.advance();
+                    let extra = self.advance();
+                    let new_end = extra.end;
+                    let start = self.span_of(&r).start;
+                    r = Chain::Call(Call {
+                        callee: Path::one("__union__", Span::new(start, new_end)),
+                        args: vec![Arg::Positional(r)],
+                        span: Span::new(start, new_end),
+                    });
+                }
+                r
             } else {
                 right
             };
@@ -930,7 +990,14 @@ impl<'src> Parser<'src> {
             if self.peek_kind() == Some(TokenKind::RBrace) {
                 break;
             }
-            branches.push(self.parse_fork_branch()?);
+            let branch = self.parse_fork_branch()?;
+            // Coalesce vertical-merge fragments inside fork bodies (chord
+            // rule, mirroring `try_coalesce_vertical_merge` at stmt level).
+            // A `INPUT -> |` or `| policy | -> DOWNSTREAM` branch folds
+            // into the previous branch if that one is an unlabeled Merge.
+            if let Some(out) = Self::try_coalesce_fork_merge(branch, &mut branches) {
+                branches.push(out);
+            }
             self.skip_newlines();
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.advance();
@@ -950,6 +1017,58 @@ impl<'src> Parser<'src> {
         self.skip_newlines();
         self.expect(TokenKind::RBrace)?;
         Ok(Chain::Fork(branches, Span::new(start, self.prev_end())))
+    }
+
+    /// Coalesce a fork branch that is a vertical-merge fragment into the
+    /// previous branch's `Merge` body. Returns `Some(branch)` to push, or
+    /// `None` if absorbed.
+    fn try_coalesce_fork_merge(
+        branch: ForkBranch<'src>,
+        branches: &mut Vec<ForkBranch<'src>>,
+    ) -> Option<ForkBranch<'src>> {
+        if branch.label.is_some() {
+            return Some(branch);
+        }
+        let span = branch.span;
+        let (maybe_input, frag_merge) = match branch.body {
+            Chain::Flow(lhs, rhs, _) if matches!(rhs.as_ref(), Chain::Merge(_)) => {
+                let m = match *rhs {
+                    Chain::Merge(m) => m,
+                    _ => unreachable!(),
+                };
+                (Some(*lhs), m)
+            }
+            Chain::Merge(m) => (None, m),
+            other => {
+                return Some(ForkBranch { label: None, body: other, span });
+            }
+        };
+        if let Some(prev) = branches.last_mut() {
+            if prev.label.is_none() {
+                if let Chain::Merge(prev_merge) = &mut prev.body {
+                    if let Some(input) = maybe_input {
+                        prev_merge.inputs.push(input);
+                    }
+                    prev_merge.inputs.extend(frag_merge.inputs);
+                    if !matches!(frag_merge.policy, MergePolicy::All) {
+                        prev_merge.policy = frag_merge.policy;
+                    }
+                    if frag_merge.downstream.is_some() {
+                        prev_merge.downstream = frag_merge.downstream;
+                    }
+                    return None;
+                }
+            }
+        }
+        let mut merge = frag_merge;
+        if let Some(input) = maybe_input {
+            merge.inputs.insert(0, input);
+        }
+        Some(ForkBranch {
+            label: None,
+            body: Chain::Merge(merge),
+            span,
+        })
     }
 
     fn parse_fork_branch(&mut self) -> Result<ForkBranch<'src>, ParseError> {
