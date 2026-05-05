@@ -11,9 +11,11 @@
 //! Parser: not started.
 
 pub mod ast;
+pub mod check;
 pub mod lex;
 pub mod parse;
 pub mod ty;
 
+pub use check::{check_module, type_of_literal, TypeError};
 pub use lex::{lex, Lexer, Token, TokenKind};
 pub use parse::{parse, ParseError};
