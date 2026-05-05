@@ -115,6 +115,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/quick_look.c \
            boot/image_viewer.c \
            boot/calculator.c \
+           boot/editor.c \
            boot/ui_states.c \
            boot/tests.c
 

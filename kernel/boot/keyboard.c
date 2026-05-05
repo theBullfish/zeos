@@ -198,6 +198,8 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int image_viewer_key(int);
         extern int calculator_active(void);
         extern int calculator_key(int);
+        extern int editor_active(void);
+        extern int editor_key(int);
 
         uint8_t mods_now = keybinds_get_modifiers();
         int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
@@ -206,6 +208,7 @@ static void process_scancode(uint8_t scancode, int extended)
         if (scancode == 0x01) {
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
             if (calculator_active())   { calculator_key(27);   return; }
+            if (editor_active())       { editor_key(27);       return; }
             if (image_viewer_active()) { image_viewer_key(27); return; }
             if (quick_look_active())   { quick_look_key(27);   return; }
             if (context_menu_active()) { context_menu_key(27); return; }
@@ -241,9 +244,22 @@ static void process_scancode(uint8_t scancode, int extended)
             }
         }
 
+        /* Editor: Ctrl+S/A/F/C/V/X — translate scancode to control byte
+         * before falling into the generic dispatch (which only handles
+         * printable + Enter + Backspace). */
+        if (editor_active() && (mods_now & MOD_CTRL)) {
+            if (scancode == 0x1F) { editor_key(0x13); return; } /* Ctrl-S */
+            if (scancode == 0x1E) { editor_key(0x01); return; } /* Ctrl-A */
+            if (scancode == 0x21) { editor_key(0x06); return; } /* Ctrl-F */
+            if (scancode == 0x2E) { editor_key(0x03); return; } /* Ctrl-C */
+            if (scancode == 0x2F) { editor_key(0x16); return; } /* Ctrl-V */
+            if (scancode == 0x2D) { editor_key(0x18); return; } /* Ctrl-X */
+        }
+
         /* Generic key dispatch into modal / quick look / context menu
          * for printable characters (Enter / S / D shortcuts). */
         if (dirty_modal_active() || calculator_active() ||
+            editor_active() ||
             image_viewer_active() ||
             quick_look_active() || context_menu_active()) {
             char ch = sh ? scancode_to_ascii_shift[scancode]
@@ -257,6 +273,7 @@ static void process_scancode(uint8_t scancode, int extended)
             if (ch) {
                 if (dirty_modal_active())  { dirty_modal_key(ch);  return; }
                 if (calculator_active())   { calculator_key(ch);   return; }
+                if (editor_active())       { editor_key(ch);       return; }
                 if (image_viewer_active()) { image_viewer_key(ch); return; }
                 if (quick_look_active())   { quick_look_key(ch);   return; }
                 if (context_menu_active()) { context_menu_key(ch); return; }
@@ -271,11 +288,19 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int image_viewer_key_arrow(int dir);
         extern int calculator_active(void);
         extern int calculator_key_arrow(int dir);
+        extern int editor_active(void);
+        extern int editor_key_arrow(int dir);
         if (calculator_active()) {
             if (scancode == 0x4B) { calculator_key_arrow(0); return; }
             if (scancode == 0x4D) { calculator_key_arrow(1); return; }
             if (scancode == 0x48) { calculator_key_arrow(2); return; }
             if (scancode == 0x50) { calculator_key_arrow(3); return; }
+        }
+        if (editor_active()) {
+            if (scancode == 0x4B) { editor_key_arrow(0); return; }
+            if (scancode == 0x4D) { editor_key_arrow(1); return; }
+            if (scancode == 0x48) { editor_key_arrow(2); return; }
+            if (scancode == 0x50) { editor_key_arrow(3); return; }
         }
         if (image_viewer_active()) {
             if (scancode == 0x4B) { image_viewer_key_arrow(0); return; } /* left */

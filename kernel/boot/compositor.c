@@ -229,6 +229,13 @@ void compositor_frame(void) {
             extern void calculator_draw(void);
             if (calculator_active()) calculator_draw();
         }
+        {
+            extern int  editor_active(void);
+            extern void editor_draw(void);
+            extern void editor_tick(void);
+            editor_tick();
+            if (editor_active()) editor_draw();
+        }
         dirty_modal_draw();
     }
 

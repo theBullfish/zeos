@@ -25,7 +25,7 @@ lands; don't add. End is the end.
 4. · Window snap — half/quadrant snapping at the WM layer
 5. · Virtual desktops — workspace separation via existing chain hierarchy
 6. · Calculator app — programmer + scientific modes, standalone
-7. · Text editor — Zeos-shaped: a typed-text chain emitting `text_edit` signals. Spellcheck, autocomplete, autosave, version history are all subscriber chains. UI is a renderer over the chain. Not "an editor app."
+7. ✓ Text editor — Zeos-shaped: typed-text chain emitting `text_edit` signals. Spellcheck, autocomplete, autosave, version history are all subscriber chains. UI is a renderer over the chain.
 8. · File manager — Zeos-shaped: a chain over `fs_event` signals that masq_journal already records. Trash-GC, search index, sync, undo all subscribe. UI is a stream renderer. Not "an app with menus."
 9. · Calendar/clock app — uses tod, alarm, world clocks. CHAIN_CLOCK at ~1Hz.
 10. · Activity Monitor — Zeos-shaped: a chain that subscribes to all chains via MDE wildcard route. Free integration with notifications + B3 anomaly detection.

@@ -776,6 +776,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         zp_runtime_init();
     }
 
+    /* Editor session restore: re-open files that were open at last
+     * shutdown and restore cursor positions. Reads /editor/open_files
+     * from VAULT. No-op if VAULT entry doesn't exist (first boot or
+     * editor was never used). */
+    {
+        extern void editor_persist_restore(void);
+        editor_persist_restore();
+    }
+
     /* Unified settings registry — every config knob in the system
      * exposes a getter/setter pair through this surface so the shell
      * `settings` command can list and toggle everything. Persistence

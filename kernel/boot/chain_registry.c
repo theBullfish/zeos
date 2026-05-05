@@ -44,6 +44,7 @@
 #include "brightness.h"
 #include "power_buttons.h"
 #include "calendar.h"
+#include "editor.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -1171,6 +1172,19 @@ int chain_registry_init(void)
     cal_init();
     if (cal_chain_register(CHAIN_CPU) < 0) {
         kputs("[chain_registry] WARN: clock chain registration failed\n");
+    }
+
+    /* CHAIN_TEXT_EDIT + subscriber chains for the text editor.
+     *   Emitter:  text_change_request -> debounce -> emit_text_edit
+     *   Subscribers (input_type=text_edit):
+     *     CHAIN_TEXT_AUTOSAVE     -> debounce_2s -> fat32_write_resolve
+     *     CHAIN_TEXT_HISTORY      -> snapshot_threshold -> vault_write
+     *     CHAIN_TEXT_SPELL        -> tokenize -> check (stub)
+     *     CHAIN_TEXT_AUTOCOMPLETE -> suggest (stub)
+     * MDE auto-routes the fan-out by output_type=text_edit matching
+     * input_type=text_edit on every subscriber's first node. */
+    if (editor_chain_register(CHAIN_CPU) < 0) {
+        kputs("[chain_registry] WARN: editor chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

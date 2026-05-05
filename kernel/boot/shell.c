@@ -682,6 +682,7 @@ static void cmd_fat_ls(const char *args);
 static void cmd_fat_cat(const char *args);
 static void cmd_view(const char *args);
 static void cmd_calc(const char *args);
+static void cmd_edit(const char *args);
 
 /* FAT32 write-side commands */
 static void cmd_touch(const char *args);
@@ -815,6 +816,7 @@ static const struct shell_cmd commands[] = {
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
     {"view",    "open image viewer (view <path>; PNG only for now)", cmd_view, VIS_ALWAYS},
     {"calc",    "calculator (calc | calc <expr>); modes: standard/scientific/programmer", cmd_calc, VIS_ALWAYS},
+    {"edit",    "open text editor (edit | edit <path>); chain over text_edit signals", cmd_edit, VIS_ALWAYS},
     {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
     {"rm",      "delete (moves to /.zeos-trash; rm -f to bypass)", cmd_rm,    VIS_ALWAYS},
     {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
@@ -4564,6 +4566,25 @@ vault_done:
         passes++;
     }
 
+    /* Editor — chain over text_edit + autosave + history subscribers. */
+    {
+        extern uint32_t editor_total_opens(void);
+        extern uint32_t editor_total_emits(void);
+        extern uint32_t editor_total_autosaves(void);
+        extern uint32_t editor_total_snapshots(void);
+        kputs("  Editor ................ ready (text_edit chain + autosave + history subscribers)");
+        kputs(" (opens=");
+        kput_dec((uint64_t)editor_total_opens());
+        kputs(" emits=");
+        kput_dec((uint64_t)editor_total_emits());
+        kputs(" autosaves=");
+        kput_dec((uint64_t)editor_total_autosaves());
+        kputs(" snapshots=");
+        kput_dec((uint64_t)editor_total_snapshots());
+        kputs(")\n");
+        passes++;
+    }
+
     /* Window snap — half / quadrant snapping via Super+arrow + drag-to-edge.
      * Always passes once wm has initialized; reports the active tunables. */
     kputs("  Window snap ........... half/quadrant + Super+arrow + drag-to-edge");
@@ -5735,6 +5756,25 @@ static void cmd_calc(const char *args)
 }
 
 /* ── FAT32 write-side shell commands ─────────────────────────── */
+
+/* Editor — open the chain-shaped text editor on a path (or empty buffer). */
+static void cmd_edit(const char *args)
+{
+    while (*args == ' ') args++;
+    extern int editor_open(const char *path);
+    if (!*args) {
+        if (editor_open(0) == 0)
+            kputs("  edit: opened empty buffer (Esc to close, Ctrl-S save, Ctrl-F find)\n");
+        else
+            kputs("  edit: failed to open\n");
+        return;
+    }
+    if (editor_open(args) == 0) {
+        kputs("  edit: opened "); kputs(args); kputs("\n");
+    } else {
+        kputs("  edit: failed to open "); kputs(args); kputs("\n");
+    }
+}
 
 static int strlen_simple(const char *s) { int n = 0; while (s[n]) n++; return n; }
 

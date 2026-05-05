@@ -49,6 +49,43 @@ static void rc_open_in_image_viewer(void *ctx) {
     if (s_rc_image_path[0]) image_viewer_open(s_rc_image_path);
 }
 
+/* "Open in Editor" path target. Set when a right-click lands on an
+ * icon whose name looks like a text file. Same staleness rule as
+ * s_rc_image_path. */
+static char s_rc_text_path[256];
+
+/* True if `name` ends in one of the recognized text-file suffixes
+ * (.txt .md .c .h .zp .json .conf .log). Case-insensitive. */
+static int desktop_name_is_text(const char *name) {
+    int n = 0; while (name[n]) n++;
+    if (n < 2) return 0;
+    /* Find last '.' */
+    int dot = -1;
+    for (int i = n-1; i >= 0; i--) { if (name[i] == '.') { dot = i; break; } }
+    if (dot < 0) return 0;
+    char ext[8]; int e = 0;
+    for (int i = dot; i < n && e < 7; i++) {
+        char c = name[i];
+        if (c >= 'A' && c <= 'Z') c += 32;
+        ext[e++] = c;
+    }
+    ext[e] = 0;
+    const char *exts[] = { ".txt", ".md", ".c", ".h", ".zp",
+                           ".json", ".conf", ".log", 0 };
+    for (int i = 0; exts[i]; i++) {
+        const char *x = exts[i];
+        int k = 0; while (x[k] && ext[k] == x[k]) k++;
+        if (x[k] == 0 && ext[k] == 0) return 1;
+    }
+    return 0;
+}
+
+static void rc_open_in_editor(void *ctx) {
+    (void)ctx;
+    extern int editor_open(const char *path);
+    if (s_rc_text_path[0]) editor_open(s_rc_text_path);
+}
+
 int desktop_right_click(int x, int y) {
     (void)x; (void)y;
     /* Look for a selected icon whose name ends in .png — if found, the
@@ -56,11 +93,30 @@ int desktop_right_click(int x, int y) {
     extern desktop_state_t *desktop_get_state(void);
     desktop_state_t *st = desktop_get_state();
     const char *png_name = 0;
+    const char *text_name = 0;
     for (int i = 0; i < st->icon_count; i++) {
-        if (st->icons[i].selected && desktop_name_is_png(st->icons[i].name)) {
+        if (!st->icons[i].selected) continue;
+        if (desktop_name_is_png(st->icons[i].name) && !png_name)
             png_name = st->icons[i].name;
-            break;
-        }
+        else if (desktop_name_is_text(st->icons[i].name) && !text_name)
+            text_name = st->icons[i].name;
+    }
+
+    if (text_name) {
+        int o = 0;
+        s_rc_text_path[o++] = '/';
+        for (int i = 0; text_name[i] && o < 255; i++)
+            s_rc_text_path[o++] = text_name[i];
+        s_rc_text_path[o] = 0;
+        static const ctx_menu_item_t items[5] = {
+            { "Open in Editor", rc_open_in_editor, 0, 1 },
+            { "-",          0,             0, 1 },
+            { "New folder", rc_new_folder, 0, 1 },
+            { "Settings",   rc_settings,   0, 1 },
+            { "Wallpaper",  rc_wallpaper,  0, 1 },
+        };
+        context_menu_open(x, y, items, 5);
+        return 1;
     }
 
     if (png_name) {
