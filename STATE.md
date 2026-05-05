@@ -134,6 +134,15 @@ session. Three sections, that's it.
   `programs/demos/two_speeds.zp` run end-to-end (5 ticks → 5
   emissions; 6 ticks → 9 emissions across two rates).
 
+- **Runtime v2: forks + real delta (commit `2b79948`).** Forks
+  evaluate every branch against upstream — `a -> { b, c, d }` runs
+  3 sinks per tick. `delta` tracks previous value across ticks via
+  `call_state` keyed by span (per-call-site isolation). Bare-path
+  builtins (`data -> delta -> sink`) dispatch through the same
+  `dispatch_builtin` as full-call forms. New demos:
+  `programs/demos/fanout.zp` (3-way fork), `programs/demos/ramp.zp`
+  (delta computing differences).
+
 - **Runtime v1.5: two independent time knobs (commit `4a41139`).**
   `RuntimeConfig::ticks_per_real_second` (wall-clock pacing) and
   `RuntimeConfig::simulated_ms_per_tick` (what a tick *means* in
@@ -146,8 +155,8 @@ session. Three sections, that's it.
   simulation. CLI: `zplus-run ... --ms-per-tick 60000`.
 
   All three corpus ratchets (merge arity, Flow connectivity,
-  named-arg types) stay at zero. **143 tests green** (115 unit +
-  28 integration).
+  named-arg types) stay at zero. **149 tests green** (119 unit +
+  30 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -222,26 +231,22 @@ session. Three sections, that's it.
   args today. Add a `positional: Vec<Type>` to the side-table and
   walk Positional args by index.
 
-- **Runtime v2.** v1 + v1.5 cover ticks, time-as-derived, merges,
-  taps, sinks. Next:
-  - **Real-time pacing.** `RuntimeConfig::ticks_per_real_second` is
-    captured but the runtime doesn't sleep yet. Implement
-    sleep-to-pace mode for hardware-bound demos.
-  - **Forks.** AST has them; runtime is a no-op. Wire each branch's
-    body against the upstream value, run all branches per tick.
+- **Runtime v3.** Forks and delta done. Remaining:
+  - **`rate(per: D)` real semantics.** Track fires within a window;
+    emit count / window. Needs CallState for per-tick fire history.
+  - **`baseline(window: D)`.** Rolling mean over the window.
+  - **`count(within: D)`.** Already exists as a stub; needs window
+    semantics.
+  - **`decay(half_life: D)`.** Exponential filter.
   - **Real merge timing windows.** `Within(30s)` should buffer
-    inputs in a sliding window and resolve when the window completes.
-    Currently falls back to All.
-  - **Real semantics for identity-stub transformers** (`delta`,
-    `rate`, `baseline`, `deviation`, `decay`, `normalize`). Each has
-    a SEMANTIC_CONTRACTS.md contract; the runtime should implement
-    it. `delta` needs to remember the previous value; `rate` needs a
-    sliding window; `baseline` needs a long-window mean; `decay`
-    needs an exponential filter.
-  - **File / network I/O.** `fs("...")` should actually read a file;
-    `net.listen(...)` should actually bind a port (in test mode at
-    least). For the test runner per `OPT_IN_TEST_REPORTING.md`, an
-    in-memory file source would be enough.
+    inputs in a sliding window. Currently falls back to All.
+  - **Real-time pacing.** `RuntimeConfig::ticks_per_real_second`
+    captured but no sleep yet. Implement sleep-to-pace.
+  - **File / network I/O.** `fs("...")` should actually read; an
+    in-memory file source for the test runner would be enough.
+  - **`gate` real predicate eval.** Currently passes everything
+    through if no Bool predicate is found. Should evaluate the
+    arg as a predicate against the upstream.
 
 - **IR / `.zpc` bytecode.** Once the runtime is feature-complete
   enough to be useful, the next step is a serialized form so chains
