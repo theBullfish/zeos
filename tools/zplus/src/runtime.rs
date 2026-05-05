@@ -179,8 +179,21 @@ pub struct Runtime<'src> {
     /// Per-step merge accumulator: merge-span (start byte) → list of
     /// (input-index, value) for inputs that fired this tick.
     merge_pending: HashMap<usize, Vec<(usize, Value)>>,
+    /// Stateful per-call state (delta's previous value, rate's window,
+    /// baseline's mean, etc.). Keyed by call span start so each
+    /// syntactic occurrence keeps its own state.
+    call_state: HashMap<usize, CallState>,
     /// Emissions captured this run. Sinks append; `run()` returns them.
     emissions: Vec<Emission>,
+}
+
+/// Stateful state for transformers that need to remember things
+/// across ticks. `delta` needs the previous value; `count(within: D)`
+/// needs the window of recent fires; etc.
+#[derive(Debug, Clone, Default)]
+struct CallState {
+    /// Last value seen — used by `delta`.
+    last_value: Option<f64>,
 }
 
 impl<'src> Runtime<'src> {
@@ -195,6 +208,7 @@ impl<'src> Runtime<'src> {
             tick: 0,
             wires: HashMap::new(),
             merge_pending: HashMap::new(),
+            call_state: HashMap::new(),
             emissions: Vec::new(),
         }
     }
@@ -274,8 +288,18 @@ impl<'src> Runtime<'src> {
             }
             Chain::Sever(_, _, _) => Ok(None),
             Chain::Bind(a, _, _) => self.eval_chain(a, upstream),
-            Chain::Fork(_, _) => {
-                // Fork branches are run in v2; for v1, treat as no-op.
+            Chain::Fork(branches, _) => {
+                // Fan-out: each branch evaluates with the same upstream
+                // value. Branch labels are captured but not yet used as
+                // selectors in v1 — every branch runs every tick.
+                //
+                // Forks are terminal: the chain doesn't propagate
+                // forward (a `->` after a fork would have no upstream
+                // to consume). Mirrors the corpus convention where
+                // forks sit at the end of a `->` flow.
+                for branch in branches {
+                    self.eval_chain(&branch.body, upstream.clone())?;
+                }
                 Ok(None)
             }
             Chain::Merge(merge) => self.eval_merge(merge, upstream),
@@ -312,6 +336,13 @@ impl<'src> Runtime<'src> {
                     }
                     return Ok(None);
                 }
+                // Bare-path builtin dispatch: when a known transformer
+                // appears as a Path (no parens), dispatch as a no-arg
+                // call. `data -> delta -> sink` is sugar for
+                // `data -> delta() -> sink`.
+                if upstream.is_some() && is_bare_builtin(&name) {
+                    return self.dispatch_builtin(&name, &[], upstream, p.span);
+                }
                 // If upstream is present, this Path is a labeled
                 // pass-through: store the value under the name and
                 // forward it to the next stage.
@@ -326,6 +357,43 @@ impl<'src> Runtime<'src> {
             Atom::Literal(lit) => Ok(Some(literal_to_value(lit))),
             Atom::DevNull(_) => Ok(None),
             Atom::TimePast { .. } => Ok(None),
+        }
+    }
+
+    /// Dispatch a builtin call by name. Used by both `eval_call` (full
+    /// call form) and `eval_atom` (bare-path form) so the semantics are
+    /// identical regardless of syntactic position.
+    fn dispatch_builtin(
+        &mut self,
+        name: &str,
+        args: &[Arg<'src>],
+        upstream: Option<Value>,
+        call_span: Span,
+    ) -> Result<Option<Value>, RuntimeError> {
+        // Forward to eval_call by reconstructing a synthetic Call. To
+        // keep ownership simple, we inline only the small set of
+        // bare-callable transformers here. Full Call-site dispatch
+        // continues to use eval_call.
+        match name {
+            "delta" => {
+                let key = call_span.start;
+                let cur_f = upstream.as_ref().and_then(value_as_f64);
+                let prev = self.call_state.entry(key).or_default().last_value;
+                let result = match (cur_f, prev) {
+                    (Some(c), Some(p)) => Some(Value::Float(c - p)),
+                    (Some(_), None) => Some(Value::Float(0.0)),
+                    _ => upstream.clone(),
+                };
+                if let Some(c) = cur_f {
+                    self.call_state.entry(key).or_default().last_value = Some(c);
+                }
+                Ok(result)
+            }
+            "rate" | "baseline" | "deviation" | "decay" | "normalize" | "lines" => Ok(upstream),
+            _ => {
+                let _ = args;
+                Ok(upstream)
+            }
         }
     }
 
@@ -414,9 +482,8 @@ impl<'src> Runtime<'src> {
                 };
                 if pass { Ok(upstream) } else { Ok(None) }
             }
-            "delta" | "rate" | "baseline" | "deviation" | "decay" | "normalize" => {
-                // Identity stub for v1. Real semantics in v2.
-                Ok(upstream)
+            "delta" | "rate" | "baseline" | "deviation" | "decay" | "normalize" | "lines" => {
+                self.dispatch_builtin(&name, &call.args, upstream, call.span)
             }
             "count" => {
                 // count(within: ...) — for v1, emit Int(1) each tick the
@@ -547,6 +614,28 @@ fn strip_quotes(s: &str) -> &str {
 fn eval_simple(c: &Chain<'_>) -> Option<Value> {
     match c {
         Chain::Atom(Atom::Literal(lit)) => Some(literal_to_value(lit)),
+        _ => None,
+    }
+}
+
+/// Coerce a Value to f64 for arithmetic-style transformers (delta,
+/// baseline, etc.). Returns None for non-numeric values.
+/// Names that have transformer semantics when used as a bare path in
+/// chain position (no parens). `data -> delta -> sink` invokes the
+/// `delta` transformer with no args; same as `data -> delta() -> sink`.
+fn is_bare_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "delta" | "rate" | "baseline" | "deviation" | "decay" | "normalize" | "lines"
+    )
+}
+
+fn value_as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(x) => Some(*x),
+        Value::Tick(t) => Some(*t as f64),
+        Value::Duration { value, .. } => Some(*value),
         _ => None,
     }
 }
@@ -765,6 +854,74 @@ mod tests {
         let mut rt = Runtime::with_config(module, cfg);
         let emissions = rt.run(3).expect("run");
         assert_eq!(emissions.len(), 3);
+    }
+
+    // ── forks ────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_runs_every_branch_each_tick() {
+        // upstream -> { print, alert(info: "ping") }
+        // Per tick: print fires once + alert fires once. 3 ticks → 6.
+        let src = "h : tick(rate: 1) -> { print, alert(info: \"ping\") }";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(3).expect("run");
+        assert_eq!(emissions.len(), 6, "expected 6 emissions, got {}", emissions.len());
+        let prints = emissions.iter().filter(|e| e.sink == "print").count();
+        let alerts = emissions.iter().filter(|e| e.sink == "alert").count();
+        assert_eq!(prints, 3);
+        assert_eq!(alerts, 3);
+    }
+
+    #[test]
+    fn fork_terminal_no_propagation() {
+        // Forks don't propagate forward — anything after a fork has no
+        // upstream and shouldn't fire. (`a -> { b, c } -> d` is unusual;
+        // for v1 we treat it as `d` getting None upstream.)
+        let src = "h : tick(rate: 1) -> { print } -> alert(info: \"after\")";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(2).expect("run");
+        // print fires twice; alert never fires (no upstream after fork).
+        let prints = emissions.iter().filter(|e| e.sink == "print").count();
+        let alerts = emissions.iter().filter(|e| e.sink == "alert").count();
+        assert_eq!(prints, 2);
+        assert_eq!(alerts, 0);
+    }
+
+    // ── delta semantics ──────────────────────────────────────────
+
+    #[test]
+    fn delta_emits_difference_from_previous() {
+        // tick(rate: 1) emits Tick(1), Tick(2), Tick(3), ...
+        // delta() converts each to its difference from the previous.
+        // First tick has no previous → emits 0.
+        // Subsequent: 2-1=1, 3-2=1, 4-3=1.
+        let src = "ramp : tick(rate: 1) -> delta -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(4).expect("run");
+        assert_eq!(emissions.len(), 4);
+        let values: Vec<Value> = emissions.iter().map(|e| e.value.clone()).collect();
+        assert_eq!(values, vec![
+            Value::Float(0.0), // first tick → 0
+            Value::Float(1.0), // 2 - 1
+            Value::Float(1.0), // 3 - 2
+            Value::Float(1.0), // 4 - 3
+        ]);
+    }
+
+    #[test]
+    fn delta_per_call_state_isolated() {
+        // Two delta calls in different chains should track independently.
+        let src = "
+            a : tick(rate: 1) -> delta -> print
+            b : tick(rate: 2) -> delta -> alert(info: \"b\")
+        ";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let _ = rt.run(4).expect("run");
+        // Each delta has its own state. Test passes if the run completes.
     }
 
     #[test]

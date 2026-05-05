@@ -31,6 +31,30 @@ fn heartbeat_emits_one_tick_per_step() {
 }
 
 #[test]
+fn fanout_emits_three_per_tick() {
+    let emissions = run_file("programs/demos/fanout.zp", 3);
+    assert_eq!(emissions.len(), 9, "expected 9 emissions, got {}", emissions.len());
+    for tick_n in 1..=3 {
+        let on_this_tick: Vec<_> = emissions.iter().filter(|e| e.tick == tick_n).collect();
+        assert_eq!(on_this_tick.len(), 3, "tick {}: expected 3 sinks", tick_n);
+    }
+}
+
+#[test]
+fn ramp_delta_emits_zero_then_ones() {
+    let emissions = run_file("programs/demos/ramp.zp", 5);
+    assert_eq!(emissions.len(), 5);
+    let values: Vec<Value> = emissions.iter().map(|e| e.value.clone()).collect();
+    assert_eq!(values, vec![
+        Value::Float(0.0),
+        Value::Float(1.0),
+        Value::Float(1.0),
+        Value::Float(1.0),
+        Value::Float(1.0),
+    ]);
+}
+
+#[test]
 fn two_speeds_fast_and_slow() {
     let emissions = run_file("programs/demos/two_speeds.zp", 6);
     let fast: Vec<_> = emissions
