@@ -31,7 +31,7 @@
 //! exists, runs on a `Module`, and fails fast on chord-rule violations.
 
 use crate::ast::*;
-use crate::ty::{Prim, RecordField, Type, UnitTag};
+use crate::ty::{Prim, Type, UnitTag};
 use std::collections::HashMap;
 
 /// Built-in environment — name → signature. Pre-populated with the
@@ -135,15 +135,121 @@ impl std::fmt::Display for TypeError {
 
 impl std::error::Error for TypeError {}
 
-/// Walk a parsed `Module` and collect type errors. Every error is independent
-/// — the checker keeps going past the first one so a single run surfaces
-/// every violation in the file.
+/// Walk a parsed `Module` and collect type errors from the merge-arity
+/// check (chord rule). Every error is independent — the checker keeps
+/// going past the first one so a single run surfaces every violation
+/// in the file.
 pub fn check_module(m: &Module<'_>) -> Vec<TypeError> {
     let mut errors = Vec::new();
     for stmt in &m.stmts {
         check_stmt(stmt, &mut errors);
     }
     errors
+}
+
+/// Run Flow connectivity on the module: for every `Flow(a, b)` (and
+/// `Tap(a, b)`) inside any chain, verify `infer_chain(a)` is compatible
+/// with `infer_chain(b)`. Skips when either side resolves to `Unknown`
+/// — that's the "deferred to runtime" case.
+///
+/// This is separate from `check_module` so callers can opt in. The v1
+/// merge-arity check has no env dependency; this one does.
+pub fn check_flow_connectivity(m: &Module<'_>, env: &TypeEnv) -> Vec<TypeError> {
+    let mut errors = Vec::new();
+    for stmt in &m.stmts {
+        let chain = match stmt {
+            Stmt::Wire(w) => &w.chain,
+            Stmt::Connect(c) => c,
+        };
+        walk_flows(chain, env, &mut errors);
+    }
+    errors
+}
+
+fn walk_flows<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
+    match c {
+        Chain::Flow(a, b, span) | Chain::Tap(a, b, span) => {
+            walk_flows(a, env, errors);
+            walk_flows(b, env, errors);
+            let out_a = infer_chain(a, env);
+            let in_b = infer_chain(b, env);
+            // Unknown on either side defers to runtime — the v2 inference
+            // pass simply doesn't have enough info to decide.
+            if matches!(out_a, Type::Unknown(_)) || matches!(in_b, Type::Unknown(_)) {
+                return;
+            }
+            if !types_compatible(&out_a, &in_b) {
+                errors.push(TypeError {
+                    message: format!(
+                        "flow type mismatch: upstream produces {} but downstream expects {}",
+                        format_type(&out_a),
+                        format_type(&in_b),
+                    ),
+                    span: *span,
+                });
+            }
+        }
+        Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
+            walk_flows(a, env, errors);
+            walk_flows(b, env, errors);
+        }
+        Chain::Atom(_) => {}
+        Chain::Call(call) => {
+            for arg in &call.args {
+                let child = match arg {
+                    Arg::Positional(c) => c,
+                    Arg::Named { value, .. } => value,
+                };
+                walk_flows(child, env, errors);
+            }
+        }
+        Chain::Fork(branches, _) => {
+            for branch in branches {
+                if let Some(label) = &branch.label {
+                    walk_flows(label, env, errors);
+                }
+                walk_flows(&branch.body, env, errors);
+            }
+        }
+        Chain::Merge(merge) => {
+            for input in &merge.inputs {
+                walk_flows(input, env, errors);
+            }
+            if let Some(d) = &merge.downstream {
+                walk_flows(d, env, errors);
+            }
+        }
+        Chain::BinExpr { lhs, rhs, .. } => {
+            walk_flows(lhs, env, errors);
+            walk_flows(rhs, env, errors);
+        }
+        Chain::UnaryCmp { rhs, .. } => walk_flows(rhs, env, errors),
+    }
+}
+
+/// Short pretty-print for a Type used in error messages. Avoids the
+/// noise of `Debug` (which dumps full spans).
+fn format_type(t: &Type) -> String {
+    match t {
+        Type::Prim(p) => format!("{:?}", p),
+        Type::Sig(inner, _) => format!("Sig<{}>", format_type(inner)),
+        Type::Tagged { inner, unit, .. } => format!("Tagged<{}, {:?}>", format_type(inner), unit),
+        Type::Nominal(name, _) => name.clone(),
+        Type::Unknown(_) => "?".into(),
+        Type::Any(_) => "Any".into(),
+        Type::Never(_) => "!".into(),
+        Type::Range(inner, _) => format!("Range<{}>", format_type(inner)),
+        Type::Tuple(items, _) => {
+            let parts: Vec<String> = items.iter().map(format_type).collect();
+            format!("({})", parts.join(", "))
+        }
+        Type::List(inner, _) => format!("List<{}>", format_type(inner)),
+        Type::Fn { params, returns, .. } => {
+            let p: Vec<String> = params.iter().map(format_type).collect();
+            format!("Fn<{} -> {}>", p.join(", "), format_type(returns))
+        }
+        other => format!("{:?}", other),
+    }
 }
 
 fn check_stmt(stmt: &Stmt<'_>, errors: &mut Vec<TypeError>) {
@@ -267,7 +373,15 @@ pub fn infer_chain(c: &Chain<'_>, env: &TypeEnv) -> Type {
         }
         Chain::Atom(Atom::Path(p)) => {
             let name = p.joined();
-            env.lookup(&name).cloned().unwrap_or(Type::Unknown(span))
+            // A bare Path in chain-term position is implicitly applied —
+            // `... -> on_silence -> ...` means "apply on_silence to the
+            // upstream signal." So when the env entry is a `Fn`, return
+            // its `returns` rather than the Fn itself.
+            match env.lookup(&name) {
+                Some(Type::Fn { returns, .. }) => (**returns).clone(),
+                Some(other) => other.clone(),
+                None => Type::Unknown(span),
+            }
         }
         Chain::Atom(Atom::DevNull(_)) => Type::Nominal("unit".into(), span),
         Chain::Atom(Atom::TimePast { .. }) => Type::Sig(Box::new(Type::Unknown(span)), span),
@@ -300,9 +414,10 @@ pub fn infer_chain(c: &Chain<'_>, env: &TypeEnv) -> Type {
     }
 }
 
-/// Drop one outer `Sig<...>` if present. Used when comparing a Flow's
-/// upstream output (already a Sig<T>) to a downstream's expected input
-/// (which may be expressed as bare T or Sig<T> depending on the builtin).
+/// Drop one outer `Sig<...>` if present. Test-only for now — the
+/// types_compatible function handles Sig-wrapper symmetry directly. Kept
+/// as a public helper for future passes that need to expose the carrier.
+#[cfg(test)]
 fn unwrap_sig(t: &Type) -> &Type {
     match t {
         Type::Sig(inner, _) => inner,
@@ -712,5 +827,103 @@ mod tests {
         let span = dummy();
         let sig_int = Type::Sig(Box::new(Type::Prim(Prim::Int)), span);
         assert_eq!(unwrap_sig(&sig_int), &Type::Prim(Prim::Int));
+    }
+
+    // ── flow connectivity ────────────────────────────────────────
+
+    fn module_one_stmt(c: Chain<'static>) -> Module<'static> {
+        Module {
+            stmts: vec![Stmt::Connect(c)],
+            span: dummy(),
+        }
+    }
+
+    fn lit_int(n: i64) -> Chain<'static> {
+        Chain::Atom(Atom::Literal(Literal::Int(n, dummy())))
+    }
+
+    #[test]
+    fn flow_with_unknown_either_side_passes() {
+        let env = TypeEnv::empty();
+        // `unknown_path -> sink` — both sides Unknown → no error.
+        let chain = Chain::Flow(
+            Box::new(input_atom("unknown_a")),
+            Box::new(input_atom("unknown_b")),
+            dummy(),
+        );
+        let m = module_one_stmt(chain);
+        let errs = check_flow_connectivity(&m, &env);
+        assert!(errs.is_empty(), "{:?}", errs);
+    }
+
+    #[test]
+    fn flow_compatible_types_pass() {
+        let env = TypeEnv::default_with_builtins();
+        // `fs("/log") -> lines` — fs returns Sig<Unknown>; lines lookup
+        // returns its Fn signature. Sig<Unknown> vs Fn isn't directly
+        // compatible, but Unknown defers, so this should pass for v1.
+        let chain = Chain::Flow(
+            Box::new(Chain::Call(Call {
+                callee: Path::one("fs", dummy()),
+                args: vec![],
+                span: dummy(),
+            })),
+            Box::new(input_atom("lines")),
+            dummy(),
+        );
+        let m = module_one_stmt(chain);
+        let errs = check_flow_connectivity(&m, &env);
+        assert!(errs.is_empty(), "{:?}", errs);
+    }
+
+    #[test]
+    fn flow_int_to_string_concrete_mismatch_fires() {
+        // Two literals: Sig<Int> -> Sig<String> — concrete mismatch on
+        // both sides. With literal Sig-lift, this should report a
+        // mismatch.
+        let mut env = TypeEnv::empty();
+        let span = dummy();
+        // Pretend `string_sink` is a builtin that takes Sig<String> and
+        // returns unit. We register it explicitly.
+        env.bindings.insert(
+            "string_sink".into(),
+            Type::Sig(Box::new(Type::Prim(Prim::String)), span),
+        );
+        let chain = Chain::Flow(
+            Box::new(lit_int(5)),
+            Box::new(input_atom("string_sink")),
+            dummy(),
+        );
+        let m = module_one_stmt(chain);
+        let errs = check_flow_connectivity(&m, &env);
+        assert_eq!(errs.len(), 1, "{:?}", errs);
+        assert!(errs[0].message.contains("flow type mismatch"));
+    }
+
+    #[test]
+    fn flow_int_to_float_promotes_silently() {
+        let mut env = TypeEnv::empty();
+        let span = dummy();
+        env.bindings.insert(
+            "float_sink".into(),
+            Type::Sig(Box::new(Type::Prim(Prim::Float)), span),
+        );
+        let chain = Chain::Flow(
+            Box::new(lit_int(5)),
+            Box::new(input_atom("float_sink")),
+            dummy(),
+        );
+        let m = module_one_stmt(chain);
+        let errs = check_flow_connectivity(&m, &env);
+        assert!(errs.is_empty(), "Int → Float should promote: {:?}", errs);
+    }
+
+    #[test]
+    fn format_type_handles_common_shapes() {
+        let span = dummy();
+        assert_eq!(format_type(&Type::Prim(Prim::Int)), "Int");
+        assert_eq!(format_type(&Type::Sig(Box::new(Type::Prim(Prim::String)), span)), "Sig<String>");
+        assert_eq!(format_type(&Type::Unknown(span)), "?");
+        assert_eq!(format_type(&Type::Nominal("color".into(), span)), "color");
     }
 }

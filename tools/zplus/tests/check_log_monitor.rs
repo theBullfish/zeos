@@ -6,7 +6,7 @@
 //! have arity constraints that the inputs violate.
 
 use std::fs;
-use zplus::{check_module, parse};
+use zplus::{check_flow_connectivity, check_module, parse, TypeEnv};
 
 fn read_log_monitor() -> String {
     for c in ["../../programs/02_log_monitor.zp", "programs/02_log_monitor.zp"] {
@@ -26,6 +26,78 @@ fn checker_finds_no_errors_on_log_monitor() {
         errors.is_empty(),
         "checker produced errors on log_monitor: {:?}",
         errors
+    );
+}
+
+/// Flow connectivity on the green-light fixture — should pass cleanly
+/// with the default builtin env. Mismatches here would be real bugs in
+/// either the inference or the env signatures.
+#[test]
+fn flow_connectivity_clean_on_log_monitor() {
+    let src = read_log_monitor();
+    let module = parse(&src).expect("parse failed");
+    let env = TypeEnv::default_with_builtins();
+    let errors = check_flow_connectivity(&module, &env);
+    assert!(
+        errors.is_empty(),
+        "flow connectivity errors on log_monitor: {:?}",
+        errors
+    );
+}
+
+/// Corpus-wide ratchet for Flow connectivity. Currently 2 — both in
+/// `quill.zp` lines 326-327 where `opacity(0 -> 1, ...)` and
+/// `scale(0.8 -> 1, ...)` overload `->` for value-range semantics
+/// rather than signal flow. The type checker correctly identifies the
+/// type mismatch (Tagged<Float, percent> vs Int; Float vs Int); the
+/// fix is at the language-syntax layer (use `..` for ranges instead
+/// of `->`), not here. Until that's settled, ratchet at 2.
+#[test]
+fn flow_connectivity_corpus_ratchet() {
+    use std::path::{Path, PathBuf};
+
+    const MAX_FLOW_MISMATCHES: usize = 2;
+
+    fn programs_dir() -> PathBuf {
+        for c in ["../../programs", "programs"] {
+            let p = Path::new(c);
+            if p.is_dir() { return p.to_path_buf(); }
+        }
+        panic!("could not locate programs/");
+    }
+
+    fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().and_then(|s| s.to_str()) == Some("zp") {
+                out.push(path);
+            }
+        }
+    }
+
+    let env = TypeEnv::default_with_builtins();
+    let root = programs_dir();
+    let mut files = Vec::new();
+    collect(&root, &mut files);
+    let mut mismatches: Vec<String> = Vec::new();
+    for path in &files {
+        let src = fs::read_to_string(path).unwrap();
+        let module = match parse(&src) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        for err in check_flow_connectivity(&module, &env) {
+            mismatches.push(format!("{}: {}", path.display(), err.message));
+        }
+    }
+    assert!(
+        mismatches.len() <= MAX_FLOW_MISMATCHES,
+        "flow connectivity regression: {} mismatches (was {}). Sample:\n{}",
+        mismatches.len(),
+        MAX_FLOW_MISMATCHES,
+        mismatches.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
     );
 }
 

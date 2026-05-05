@@ -17,7 +17,8 @@ pub mod parse;
 pub mod ty;
 
 pub use check::{
-    check_module, infer_chain, type_of_literal, types_compatible, TypeEnv, TypeError,
+    check_flow_connectivity, check_module, infer_chain, type_of_literal,
+    types_compatible, TypeEnv, TypeError,
 };
 pub use lex::{lex, Lexer, Token, TokenKind};
 pub use parse::{parse, ParseError};
