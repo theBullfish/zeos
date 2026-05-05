@@ -821,7 +821,20 @@ void smp_print_selftest_line(void)
     }
     if (s_partition_active_flag) {
         smp_refresh_tps_sample();
-        kputs(", ticking — ");
+        /* Count chains lifted off BSP-only (affinity != 0). */
+        int lifted = 0;
+        int total_chains = 0;
+        for (int id = 0; id < MAX_CHAINS; id++) {
+            chain_t *cc = chain_get(id);
+            if (!cc) continue;
+            total_chains++;
+            if (cc->affinity == CHAIN_AFFINITY_ANY) lifted++;
+        }
+        if (lifted > 0) {
+            kputs(", RESOLVING — ");
+        } else {
+            kputs(", ticking — ");
+        }
         for (int i = 0; i < s_cpu_count; i++) {
             if (i > 0) kputs(", ");
             if (s_cpus[i].is_bsp) {
@@ -833,6 +846,13 @@ void smp_print_selftest_line(void)
             }
             kput_dec((uint64_t)s_tps_per_cpu[i]);
             kputs("tps");
+        }
+        if (lifted > 0) {
+            kputs(" — ");
+            kput_dec((uint64_t)lifted);
+            kputc('/');
+            kput_dec((uint64_t)total_chains);
+            kputs(" chains lifted");
         }
     } else {
         kputs(" (BSP + ");

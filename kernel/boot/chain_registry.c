@@ -1215,6 +1215,67 @@ int chain_registry_init(void)
             chain_t *c = chain_get(id);
             if (c) c->affinity = 0;
         }
+
+        /* ── Per-chain SMP lifts (2026-05-03 audit pass) ───────────
+         * After the per-driver SMP lock landed in commit 7c25027 and
+         * the submit-staging locks landed in this commit, the audit
+         * verdict for each candidate chain is:
+         *
+         *   CHAIN_MDE     : LIFTED. submit lock + per-chain try-lock.
+         *                   The per-chain serialization makes the
+         *                   non-atomic inflight_count++/-- safe;
+         *                   only one CPU runs the MDE chain body at
+         *                   a time. Boots clean -smp 4.
+         *
+         *   CHAIN_NET_TX  : LOCKS LANDED, LIFT GATED. Submit lock +
+         *                   per-chain try-lock + virtio-net per-queue
+         *                   tx lock are all in place. End-to-end
+         *                   -smp 4 first-boot test shows the system
+         *                   wedges shortly after AP-side resolves
+         *                   begin running this chain. Failure is not
+         *                   in the per-driver layer (already audited)
+         *                   nor the staging lock; bisect points at
+         *                   the AP scheduler or chain framework. Keep
+         *                   affinity=0 until rooted out.
+         *
+         *   CHAIN_BLOCK   : LOCKS LANDED, LIFT GATED. Submit lock +
+         *                   per-chain try-lock + masq_journal lock +
+         *                   per-driver queue locks (NVMe SQ/CQ +
+         *                   admin, AHCI port, USB-MSC). Same wedge
+         *                   profile as NET_TX when lifted; see above.
+         *
+         *   CHAIN_AUDIO   : LOCKS LANDED, LIFT GATED. Submit lock +
+         *                   per-chain try-lock + IRQ-safe codec_lock
+         *                   for verb traffic. Same wedge profile.
+         *
+         *   CHAIN_NET_RX  : LIFT NOT EVEN ATTEMPTED. RX deliver path
+         *                   feeds arp_process, ip_process →
+         *                   udp/tcp/dns, mutating arp_cache,
+         *                   dhcp_state, tcp_conns, dns_cache — none
+         *                   of those tables is locked. Sweep needs
+         *                   to land before lift can be considered.
+         *
+         * Lifting is opt-in by chain ID; everything else stays at
+         * affinity=0. */
+        /* CHAIN_MDE: lifted. Per-chain try-lock + g_mde_submit_lock
+         * around staging fully serialize resolves. With the MDE chain
+         * mapping to BSP via id-mod the lift currently doesn't move
+         * work onto an AP, but the affinity=-1 marker reflects the
+         * audit's verdict: this chain is SMP-safe wherever it runs.
+         *
+         * CHAIN_NET_TX, CHAIN_BLOCK, CHAIN_AUDIO: deferred. End-to-end
+         * boot test (-smp 4 + first cold-boot enrollment + initial
+         * scheduler tick) shows the system becomes unresponsive when
+         * any of these three lifts ride on an AP. The submit-staging
+         * locks in this commit are real and correct; the failure is
+         * elsewhere in the AP scheduler / chain resolve path and
+         * needs its own bisect pass. Keeping these BSP-pinned until
+         * the AP-side crash is rooted out — the locks land for the
+         * future lift, but the lift itself stays gated. */
+        if (CHAIN_MDE >= 0) {
+            chain_t *c = chain_get(CHAIN_MDE);
+            if (c) c->affinity = -1;
+        }
     }
 
     /* ── Step 6: Dump the full graph ────────────────────────────── */

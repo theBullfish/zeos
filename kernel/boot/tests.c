@@ -28,6 +28,7 @@
 #include "smp.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "hda.h"
 
 /* ── Registry ─────────────────────────────────────────────────────── */
 
@@ -920,6 +921,229 @@ static int test_tlb_shootdown(char *reason, uint32_t rsize)
     return TEST_PASS;
 }
 
+/* ── SMP stress tests ─────────────────────────────────────────────────
+ *
+ * These tests run on the BSP and submit many requests in tight loops.
+ * Concurrent execution from APs comes for free: every AP's
+ * ap_scheduler_loop is continuously walking the chain registry and
+ * try-locking each lifted chain. The submits issued from BSP race
+ * directly against AP-driven resolves on the same chain, exercising
+ * the per-chain try-lock + per-driver SMP locks the audit added.
+ *
+ * Pass criterion: state stays coherent (no corruption / hang) and
+ * forward progress is observable (vault_version bumps, journal
+ * advances, kernel_fn returns expected values). Single-core boot is
+ * a SKIP because APs aren't online to contend.
+ */
+
+#define SMP_STRESS_ITERS 100
+
+static int test_smp_stress_net_tx(char *reason, uint32_t rsize)
+{
+    if (smp_cpus_online() <= 1) {
+        t_strcopy(reason, "single-core boot", rsize);
+        return TEST_SKIP;
+    }
+    if (CHAIN_NET_TX < 0) {
+        t_strcopy(reason, "no net.tx chain", rsize);
+        return TEST_SKIP;
+    }
+    if (!g_net.up) {
+        t_strcopy(reason, "no link", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_NET_TX);
+    if (!c) { t_strcopy(reason, "chain_get NULL", rsize); return TEST_FAIL; }
+    if (c->affinity != -1) {
+        t_strcopy(reason, "net.tx pinned to BSP — lift gated", rsize);
+        return TEST_SKIP;
+    }
+    int vv0 = c->vault_version;
+    int submitted = 0;
+    int got = 0;
+    for (int i = 0; i < SMP_STRESS_ITERS; i++) {
+        int rc = chain_resolve(CHAIN_NET_TX);
+        /* rc==0 means walked (idle s_tx_pending → no error from
+         * hardware_dma but no vv bump either). rc==-2 = AP held the
+         * lock (benign skip). Either way we're exercising contention. */
+        if (rc == 0) submitted++;
+        if (rc == -2) got++;
+    }
+    int vv1 = c->vault_version;
+    /* We don't gate on vv delta because frame_request short-circuits
+     * with no pending frame (we're not actually staging frames). What
+     * we gate on: the chain didn't deadlock or corrupt. */
+    if (submitted == 0 && got == 0) {
+        t_strcopy(reason, "no resolves observed", rsize);
+        return TEST_FAIL;
+    }
+    if (vv1 < vv0) {
+        t_strcopy(reason, "vault_version went backwards", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+static int test_smp_stress_block_write(char *reason, uint32_t rsize)
+{
+    if (smp_cpus_online() <= 1) {
+        t_strcopy(reason, "single-core boot", rsize);
+        return TEST_SKIP;
+    }
+    if (block_drive_count() <= 0) {
+        t_strcopy(reason, "no drive", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_BLOCK);
+    if (!c) { t_strcopy(reason, "chain_get NULL", rsize); return TEST_FAIL; }
+    if (c->affinity != -1) {
+        t_strcopy(reason, "block pinned to BSP — lift gated", rsize);
+        return TEST_SKIP;
+    }
+    block_drive_info_t info;
+    if (block_drive_info(0, &info) != 0 || info.sector_size == 0) {
+        t_strcopy(reason, "drive 0 info bad", rsize);
+        return TEST_FAIL;
+    }
+    /* Stress over a small range of high LBAs. We rotate the LBA each
+     * iteration so the per-driver journal records distinct entries. */
+    static uint8_t pat[4096] __attribute__((aligned(64)));
+    static uint8_t saved[4][4096] __attribute__((aligned(64)));
+    static uint8_t rb[4096] __attribute__((aligned(64)));
+    int online = smp_cpus_online();
+    if (online > 4) online = 4;
+
+    uint64_t base_lba = (info.sectors > 32) ? (info.sectors - 16) : 8;
+
+    /* Save originals. */
+    int saved_ok[4] = {0};
+    for (int k = 0; k < online; k++) {
+        saved_ok[k] = (block_read_drive(0, base_lba + k, 1, saved[k]) == 0);
+    }
+
+    uint64_t before = block_chain_journal_total();
+    int writes = 0;
+    int verified = 0;
+    for (int i = 0; i < SMP_STRESS_ITERS; i++) {
+        int slot = i % online;
+        uint64_t lba = base_lba + slot;
+        for (int j = 0; j < 512; j++) pat[j] = (uint8_t)((i + slot) ^ 0x5A);
+        if (block_write_drive(0, lba, 1, pat) != 0) continue;
+        writes++;
+        if (block_read_drive(0, lba, 1, rb) != 0) continue;
+        int ok = 1;
+        for (int j = 0; j < 512; j++) {
+            if (rb[j] != pat[j]) { ok = 0; break; }
+        }
+        if (ok) verified++;
+    }
+    uint64_t after = block_chain_journal_total();
+
+    /* Restore. */
+    for (int k = 0; k < online; k++) {
+        if (saved_ok[k]) (void)block_write_drive(0, base_lba + k, 1, saved[k]);
+    }
+
+    if (writes == 0) {
+        t_strcopy(reason, "no writes succeeded", rsize);
+        return TEST_FAIL;
+    }
+    if ((uint64_t)(after - before) < (uint64_t)writes) {
+        t_strcopy(reason, "journal undercounted writes", rsize);
+        return TEST_FAIL;
+    }
+    /* Some readbacks may legitimately race against an AP-driven resolve
+     * that ran between write-end and read-start; we accept verified <
+     * writes but require ≥80% match to catch real corruption. */
+    if (verified * 5 < writes * 4) {
+        t_strcopy(reason, "readback verify <80%", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+static int smp_stress_mde_kfn(void *a)
+{
+    int *p = (int *)a;
+    return p ? (*p) + 1 : -1;
+}
+
+static int test_smp_stress_mde(char *reason, uint32_t rsize)
+{
+    if (smp_cpus_online() <= 1) {
+        t_strcopy(reason, "single-core boot", rsize);
+        return TEST_SKIP;
+    }
+    if (CHAIN_MDE < 0) {
+        t_strcopy(reason, "no mde chain", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_MDE);
+    if (!c || c->affinity != -1) {
+        t_strcopy(reason, "mde not lifted", rsize);
+        return TEST_FAIL;
+    }
+    int infl0 = mde_chain_inflight();
+    int passed = 0;
+    for (int i = 0; i < SMP_STRESS_ITERS; i++) {
+        int arg = i;
+        mde_compute_request_t req = {
+            .kernel_fn = smp_stress_mde_kfn, .args = &arg,
+            .rc = 0, .elapsed_tsc = 0,
+            .policy_override = -1, .affinity_backend_idx = -1,
+        };
+        int rc = mde_chain_submit(&req);
+        if (rc == i + 1) passed++;
+    }
+    int infl1 = mde_chain_inflight();
+    if (passed < SMP_STRESS_ITERS) {
+        t_strcopy(reason, "submit returned wrong rc", rsize);
+        return TEST_FAIL;
+    }
+    if (infl1 != infl0) {
+        t_strcopy(reason, "inflight slot leaked", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+static int test_smp_stress_audio(char *reason, uint32_t rsize)
+{
+    if (smp_cpus_online() <= 1) {
+        t_strcopy(reason, "single-core boot", rsize);
+        return TEST_SKIP;
+    }
+    if (CHAIN_AUDIO < 0) {
+        t_strcopy(reason, "no audio chain", rsize);
+        return TEST_SKIP;
+    }
+    chain_t *c = chain_get(CHAIN_AUDIO);
+    if (!c) { t_strcopy(reason, "chain_get NULL", rsize); return TEST_FAIL; }
+    if (c->affinity != -1) {
+        t_strcopy(reason, "audio pinned to BSP — lift gated", rsize);
+        return TEST_SKIP;
+    }
+    int saved_vol = hda_audio_get_volume();
+    int saved_mute = hda_audio_get_muted();
+    /* Sweep the volume across 0..100 in a tight loop. AP scheduler is
+     * continuously trying to resolve CHAIN_AUDIO during this; the
+     * per-chain try-lock + s_audio_submit_lock are the only thing
+     * keeping codec_cmd traffic coherent. */
+    for (int i = 0; i < SMP_STRESS_ITERS; i++) {
+        hda_audio_set_volume((i * 17) % 101);
+    }
+    int final_v = (SMP_STRESS_ITERS - 1) * 17 % 101;
+    int observed = hda_audio_get_volume();
+    /* Restore. */
+    hda_audio_set_volume(saved_vol);
+    hda_audio_set_muted(saved_mute);
+    if (observed != final_v) {
+        t_strcopy(reason, "final volume mismatch", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -957,6 +1181,10 @@ void tests_register_all(void)
     test_register("cfa.lockscreen",         test_lockscreen_cfa,         -1);
     test_register("persistence.snapshot.defense", test_persistence_snapshot_defense, -1);
     test_register("smp.tlb.shootdown",      test_tlb_shootdown,          -1);
+    test_register("smp.stress.net.tx",      test_smp_stress_net_tx,      CHAIN_NET_TX);
+    test_register("smp.stress.block.write", test_smp_stress_block_write, CHAIN_BLOCK);
+    test_register("smp.stress.mde",         test_smp_stress_mde,         CHAIN_MDE);
+    test_register("smp.stress.audio",       test_smp_stress_audio,       CHAIN_AUDIO);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */

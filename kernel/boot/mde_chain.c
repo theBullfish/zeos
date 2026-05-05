@@ -20,8 +20,16 @@
 #include "gpu_compute.h"
 #include "kprint.h"
 #include "timer.h"
+#include "spinlock.h"
 #include <stdint.h>
 #include <stddef.h>
+
+/* Submit lock — protects s_slot across stage+resolve. Per-chain
+ * try-lock inside chain_resolve covers the node walk (and thus the
+ * inflight_count inc/dec inside execute_resolve via
+ * gpu_compute_dispatch_tracked); this lock covers the staging window.
+ * MULTI-CORE SAFE (2026-05-03). */
+static zeos_spinlock_t g_mde_submit_lock = ZEOS_SPINLOCK_INIT;
 
 int CHAIN_MDE = -1;
 
@@ -69,6 +77,15 @@ typedef struct {
 static mde_chain_slot_t s_slot;
 
 /* ── Node resolves ─────────────────────────────────────────────── */
+/*
+ * MULTI-CORE SAFE (2026-05-03). All MDE node resolves run inside the
+ * per-chain try-lock from chain_resolve. s_slot staging is protected
+ * by g_mde_submit_lock in mde_chain_submit. Per-chain serialization
+ * makes inflight_count++/-- inside gpu_compute_dispatch_tracked safe
+ * — only one CPU at a time runs the execute_resolve body. The CPU
+ * backend's kernel_fn is invoked under that same serialization.
+ */
+
 
 /*
  * compute_request: copy the caller's request pointer into chain-local
@@ -318,6 +335,8 @@ int mde_chain_submit(mde_compute_request_t *req)
     if (CHAIN_MDE < 0)             return -1;
     if (!req || !req->kernel_fn)   return -1;
 
+    spin_lock(&g_mde_submit_lock);
+
     s_slot.valid     = 1;
     s_slot.error     = 0;
     s_slot.admitted  = 0;
@@ -335,6 +354,8 @@ int mde_chain_submit(mde_compute_request_t *req)
     int kfrc  = s_slot.res.rc;
     s_slot.valid = 0;
     s_slot.req   = 0;
+
+    spin_unlock(&g_mde_submit_lock);
 
     if (rc != 0) return -1;
     if (err)     return -1;

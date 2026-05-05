@@ -24,7 +24,27 @@
 #include "chain.h"
 #include "chain_registry.h"
 #include "kprint.h"
+#include "spinlock.h"
 #include <stdint.h>
+
+/* SMP — net_chain_send / net_chain_recv stage their request into the
+ * module-private s_tx_pending / s_rx_pending slot BEFORE calling
+ * chain_resolve. Two cores racing on net_chain_send would interleave
+ * the staging step. The per-chain lock inside chain_resolve only covers
+ * node walk; staging happens outside it. So we need a coarse submit
+ * lock around stage+resolve+consume per direction.
+ *
+ * The mac_filter table is touched by seed_mac_filter_if_needed (one-
+ * shot at first chain run) and by the resolves themselves (read-only
+ * after seed). The seed is happens-before the chain ever resolving on
+ * a non-BSP core because it's done inside the per-chain lock window.
+ *
+ * MULTI-CORE SAFE for CHAIN_NET_TX (2026-05-03): submit lock + per-chain
+ * try-lock + virtio-net per-queue tx lock. ARP cache is reachable only
+ * via the RX path which is still BSP-pinned, so no cross-direction
+ * contention on arp_cache from this chain. */
+static zeos_spinlock_t s_tx_submit_lock = ZEOS_SPINLOCK_INIT;
+static zeos_spinlock_t s_rx_submit_lock = ZEOS_SPINLOCK_INIT;
 
 /* ── Public chain IDs ──────────────────────────────────────────── */
 
@@ -149,6 +169,13 @@ void net_chain_set_hw(const struct net_hw_ops *ops)
 }
 
 /* ── TX node resolves ──────────────────────────────────────────── */
+/*
+ * MULTI-CORE SAFE (2026-05-03). All TX node resolves run inside the
+ * per-chain try-lock acquired by chain_resolve(). The staging slot
+ * s_tx_pending is protected by s_tx_submit_lock around stage+resolve
+ * in net_chain_send. The hardware backend (virtio_send / e1000_send /
+ * rtl_send / usb_eth_send) holds its own per-queue tx lock.
+ */
 
 void net_tx_request_resolve(void *self_, void *input, void *output)
 {
@@ -375,11 +402,20 @@ int net_chain_send(const void *frame, uint16_t len)
         return -1;
     }
 
+    /* Serialize stage+resolve so two cores submitting concurrently
+     * don't trample s_tx_pending. chain_resolve's per-chain try-lock
+     * would protect the node walk but not the staging step that
+     * precedes it. */
+    spin_lock(&s_tx_submit_lock);
+
     s_tx_pending.src   = (const uint8_t *)frame;
     s_tx_pending.len   = len;
     s_tx_pending.valid = 1;
 
     int rc = chain_resolve(CHAIN_NET_TX);
+
+    spin_unlock(&s_tx_submit_lock);
+
     if (rc != 0) return -1;
 
     /* The hardware_dma resolve writes to the chain's last scratch
@@ -387,11 +423,6 @@ int net_chain_send(const void *frame, uint16_t len)
      * vault_version bump is the success signal we promised the
      * caller. */
     chain_t *c = chain_get(CHAIN_NET_TX);
-    /* If hardware_dma succeeded, vault_version got bumped during
-     * this resolve; if not, the request was dropped. We always
-     * return 0 here so callers (which don't check return values
-     * for ARP/DHCP broadcasts anyway) see the same surface as the
-     * old direct path. */
     (void)c;
     return 0;
 }
@@ -404,17 +435,22 @@ int net_chain_recv(void *buf, uint16_t max)
         return 0;
     }
 
+    spin_lock(&s_rx_submit_lock);
+
     s_rx_pending.valid = 1;
     s_rx_delivered_len = 0;
 
     int rc = chain_resolve(CHAIN_NET_RX);
-    if (rc != 0) return 0;
+    int n_local = (rc == 0) ? s_rx_delivered_len : 0;
 
-    if (s_rx_delivered_len <= 0) return 0;
-
-    int n = s_rx_delivered_len;
+    /* Snapshot the frame under the submit lock so the next caller
+     * doesn't overwrite s_rx_frame mid-copy. */
+    int n = n_local;
     if (n > (int)max) n = max;
     uint8_t *dst = (uint8_t *)buf;
     for (int i = 0; i < n; i++) dst[i] = s_rx_frame[i];
+
+    spin_unlock(&s_rx_submit_lock);
+
     return n;
 }

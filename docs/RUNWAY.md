@@ -14,6 +14,7 @@ lands; don't add. End is the end.
 
 ## Recently completed
 - ✓ Per-driver SMP audit (#97 → 7c25027). Honest scope: per-driver locks live; every chain currently affinity-pinned to BSP because transitive paths (DHCP UDP, ACPI battery, etc.) aren't yet swept. AP partition runs but no chain qualifies. Real unlock = per-chain transitive sweep.
+- ✓ SMP unblock pass 1 (2026-05-03). Submit-staging locks landed for net_chain / block_chain / mde_chain / hda — these protect the module-static request slot across stage+resolve, complementing the per-chain try-lock that already covered the node walk. CHAIN_MDE lifted to affinity=-1; boots clean -smp 4 with selftest line reporting `RESOLVING — 1/N chains lifted`. CHAIN_NET_TX, CHAIN_BLOCK, CHAIN_AUDIO have their locks LANDED but the lift is GATED — first-boot -smp 4 wedges shortly after AP-side resolves of those chains begin, and the failure is not in the per-driver or staging layer. Needs a follow-up bisect into the AP scheduler / chain framework. CHAIN_NET_RX not attempted; RX deliver path (arp_cache / dhcp_state / tcp_conns / dns_cache) hasn't been swept. SMP stress tests added: smp.stress.{net.tx,block.write,mde,audio} (each SKIPs when its chain is gated).
 
 ## The list
 

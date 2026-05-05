@@ -34,6 +34,14 @@
 /* Single ring; multiple cores writing at once would corrupt it. */
 static zeos_spinlock_t g_journal_lock = ZEOS_SPINLOCK_INIT;
 
+/* Submit lock — protects the staging slot s_req across stage+resolve
+ * since the per-chain try-lock inside chain_resolve only covers the
+ * node walk, not the pre-write into s_req. With this lock CHAIN_BLOCK
+ * is MULTI-CORE SAFE (2026-05-03): submit serialization + per-chain
+ * try-lock + masq_journal lock + per-driver queue locks (NVMe SQ/CQ,
+ * AHCI port, USB-MSC). */
+static zeos_spinlock_t g_block_submit_lock = ZEOS_SPINLOCK_INIT;
+
 /* ── Public chain ID ───────────────────────────────────────────── */
 
 int CHAIN_BLOCK = -1;
@@ -218,6 +226,13 @@ void block_chain_dump_journal(int n)
 }
 
 /* ── Node resolves ─────────────────────────────────────────────── */
+/*
+ * MULTI-CORE SAFE (2026-05-03). All block node resolves run inside
+ * the per-chain try-lock from chain_resolve. s_req staging is
+ * protected by g_block_submit_lock across stage+resolve in
+ * block_chain_submit. journal_append takes g_journal_lock. Hardware
+ * dispatch (NVMe / AHCI / USB-MSC) holds per-queue locks internally.
+ */
 
 static void block_request_resolve(chain_node_t *self, void *input, void *output)
 {
@@ -378,6 +393,8 @@ int block_chain_submit(int drive_id, uint64_t lba, uint32_t count,
      * direct path. block.c handles that decision. */
     if (CHAIN_BLOCK < 0) return -1;
 
+    spin_lock(&g_block_submit_lock);
+
     s_req.valid    = 1;
     s_req.drive_id = drive_id;
     s_req.lba      = lba;
@@ -394,6 +411,8 @@ int block_chain_submit(int drive_id, uint64_t lba, uint32_t count,
     int err     = s_req.error;
     int hw_rc   = s_req.hw_rc;
     s_req.valid = 0;
+
+    spin_unlock(&g_block_submit_lock);
 
     if (rc != 0) return -1;
     if (err)     return (hw_rc != 0) ? hw_rc : -1;

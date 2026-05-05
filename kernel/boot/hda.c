@@ -162,6 +162,17 @@ static uint16_t           rirb_rp;
  * through codec_cmd, so this lock is the real exposure point. */
 static zeos_spinlock_t    s_codec_lock = ZEOS_SPINLOCK_INIT;
 
+/* Submit lock for the volume/mute set + chain_resolve staging window.
+ * The pending_change/volume/muted fields on s_volume_filter are written
+ * before chain_resolve and consumed inside the volume_filter resolve.
+ * Two cores racing on hda_audio_set_volume would interleave the staging
+ * step. With this lock CHAIN_AUDIO is MULTI-CORE SAFE (2026-05-03):
+ * submit lock + per-chain try-lock + codec_lock for verb traffic. */
+static zeos_spinlock_t    s_audio_submit_lock = ZEOS_SPINLOCK_INIT;
+/* Same lock guards the PCM playback path: hda_play_pcm stages
+ * s_pcm_source.pending and resolves the chain. Two cores playing
+ * audio concurrently would interleave the staging. */
+
 struct bdl_entry { uint32_t addr_lo, addr_hi, length, flags; };
 
 #define HDA_AUDIO_BYTES   (64 * 1024)
@@ -735,6 +746,15 @@ void *hda_dma_state(void)           { return &s_hda_dma; }
 
 /* ── Chain node resolves ───────────────────────────────────────────── */
 /*
+ * MULTI-CORE SAFE (2026-05-03). All audio node resolves run inside
+ * the per-chain try-lock from chain_resolve. Staging
+ * (s_pcm_source.pending, s_volume_filter.pending_*) is protected by
+ * s_audio_submit_lock in hda_play_pcm / hda_audio_set_*. codec_cmd
+ * uses the IRQ-safe s_codec_lock so verb traffic from the chain
+ * doesn't interleave with verb traffic from other paths.
+ */
+
+/*
  * Each resolve has the signature
  *   void f(chain_node_t *self, void *input, void *output)
  * and reads/writes scratch buffers supplied by chain_resolve.
@@ -996,33 +1016,39 @@ void hda_audio_set_volume(int pct)
     if (pct < 0)   pct = 0;
     if (pct > 100) pct = 100;
 
+    spin_lock(&s_audio_submit_lock);
     s_volume_filter.pending_volume = pct;
     s_volume_filter.pending_muted  = s_volume_filter.muted;
     s_volume_filter.pending_change = 1;
 
     if (CHAIN_AUDIO >= 0) {
         (void)chain_resolve(CHAIN_AUDIO);
+        spin_unlock(&s_audio_submit_lock);
         return;
     }
     /* Fallback (very early boot, pre-registration). */
     G_AUDIO_VOLUME = pct;
     hda_audio_apply_amps();
     (void)hda_audio_save_to_vault();
+    spin_unlock(&s_audio_submit_lock);
 }
 
 void hda_audio_set_muted(int muted)
 {
+    spin_lock(&s_audio_submit_lock);
     s_volume_filter.pending_volume = s_volume_filter.volume;
     s_volume_filter.pending_muted  = muted ? 1 : 0;
     s_volume_filter.pending_change = 1;
 
     if (CHAIN_AUDIO >= 0) {
         (void)chain_resolve(CHAIN_AUDIO);
+        spin_unlock(&s_audio_submit_lock);
         return;
     }
     G_AUDIO_MUTED = muted ? 1 : 0;
     hda_audio_apply_amps();
     (void)hda_audio_save_to_vault();
+    spin_unlock(&s_audio_submit_lock);
 }
 
 void hda_audio_toggle_mute(void)
@@ -1105,7 +1131,10 @@ int hda_play_pcm(const int16_t *samples, int num_samples, int sample_rate)
         return 0;
     }
 
-    /* Stage the request and resolve the chain. */
+    /* Stage the request and resolve the chain. Hold the submit lock
+     * across stage+resolve so two cores playing concurrently don't
+     * interleave their pending requests. */
+    spin_lock(&s_audio_submit_lock);
     s_pcm_source.pending.samples     = samples;
     s_pcm_source.pending.num_samples = num_samples;
     s_pcm_source.pending.sample_rate = sample_rate;
@@ -1113,5 +1142,6 @@ int hda_play_pcm(const int16_t *samples, int num_samples, int sample_rate)
     s_pcm_source.pending.error       = 0;
 
     int rc = chain_resolve(CHAIN_AUDIO);
+    spin_unlock(&s_audio_submit_lock);
     return (rc == 0) ? 0 : -3;
 }
