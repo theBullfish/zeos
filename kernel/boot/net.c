@@ -157,6 +157,16 @@ void net_poll(void)
     /* Check retransmission timers after processing any packet */
     tcp_retransmit_tick();
     tcp6_retransmit_tick();
+
+    /* Drive the std.http accept-loop drain.  Weak-linked: if std_http
+     * isn't compiled into this build, the symbol resolves to 0 and the
+     * call is skipped.  Skip until at least one listener is armed so
+     * the early DHCP/ARP path stays a tight busy-poll. */
+    extern int  tcp_listener_count(void) __attribute__((weak));
+    extern void zp_http_poll(void)       __attribute__((weak));
+    if (&tcp_listener_count && &zp_http_poll &&
+        tcp_listener_count() > 0)
+        zp_http_poll();
 }
 
 void net_poll_wait(uint32_t timeout_ms)

@@ -1,27 +1,41 @@
 // 53_stdlib_demo.zp
-// Pass 3 — stdlib (time + crypto + json).
+// Pass 3 — stdlib (time + crypto + json + http listen).
 //
-// Imports std.time, std.crypto, std.json.  Each chain demonstrates
-// one verb on a known input.
+// Imports std.time, std.crypto, std.json, std.http.  Each chain
+// demonstrates one verb on a known input. The http chain registers
+// a listener on port 8080; the kernel TCP stack now answers SYNs for
+// that port (net_tcp.c tcp_listen) and zp_http_poll() drains accepted
+// connections each net_poll tick — `curl http://<vm>:8080/` returns
+// HTTP/1.1 200 ok.
 //
 // Expected tap.log:
 //   <epoch>     (current Unix seconds)
 //   <hex>       (32-char hex random)
 //   {"a":1,"b":"hello"} -> JSON-emitted struct (string handle)
+//   <port>      (port the listener bound to, 8080)
 
-import std.time as t
+import std.time   as t
 import std.crypto as c
-import std.json as j
+import std.json   as j
+import std.http   as http
 
 src   : emit(16)
 doc   : emit("{\"a\":1,\"b\":\"hello\"}")
+port  : emit(8080)
 now   : input -> time.now
 rng   : input -> crypto.random
 jp    : input -> json.parse
+listen: input -> http.listen
+respond: input -> http.respond
 log   : input -> tap.log
 
-src -> rng -> log
-doc -> jp  -> log
-now -> log
+src  -> rng     -> log
+doc  -> jp      -> log
+port -> listen  -> log
+now  -> log
+
+chain echo {
+    in : input -> http.respond
+}
 
 chain demo { src rng log }

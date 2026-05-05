@@ -17,10 +17,12 @@
 
 /* ── Limits ──────────────────────────────────── */
 
-#define TCP_MAX_CONNECTIONS  8
+#define TCP_MAX_CONNECTIONS  16
 #define TCP_RX_BUF_SIZE      16384
 #define TCP_RETX_BUF_SIZE    1500    /* Max segment to retransmit */
 #define TCP_RETX_MAX         3       /* Retransmit attempts before error */
+#define TCP_MAX_LISTENERS    16
+#define TCP_LISTEN_BACKLOG   16
 
 /* ── TCP header ──────────────────────────────── */
 
@@ -48,6 +50,7 @@ struct tcp_hdr {
 enum tcp_state {
     TCP_CLOSED,
     TCP_SYN_SENT,
+    TCP_SYN_RECEIVED,   /* Server accepted SYN, sent SYN+ACK, waiting final ACK */
     TCP_ESTABLISHED,
     TCP_FIN_WAIT_1,
     TCP_FIN_WAIT_2,
@@ -72,6 +75,9 @@ struct tcp_conn {
     uint32_t         ack;           /* Next expected from remote */
     enum tcp_state   state;
     int              in_use;        /* Slot occupied? */
+    int              server_side;   /* 1 if accepted from a listener */
+    int              listener_idx;  /* Listener that owns this (server) */
+    int              dispatched;    /* HTTP/server dispatch already fired */
 
     /* Receive buffer */
     uint8_t          rx_buf[TCP_RX_BUF_SIZE];
@@ -100,8 +106,22 @@ int tcp_send_on(tcp_handle_t h, const void *data, uint16_t len);
 /* Receive data on a handle. Returns bytes received, 0 on close/timeout. */
 int tcp_recv_on(tcp_handle_t h, void *buf, uint16_t max_len);
 
+/* Non-blocking variant of tcp_recv_on. Returns:
+ *   >0  bytes copied
+ *    0  no data ready (or remote closed and buffer empty)
+ *   -1  invalid handle */
+int tcp_recv_on_nb(tcp_handle_t h, void *buf, uint16_t max_len);
+
+/* Send data on a handle non-blocking — does not wait for ACK.
+ * Caller is responsible for the lifetime of the buffer. */
+int tcp_send_on_raw(tcp_handle_t h, const void *data, uint16_t len);
+
 /* Close a connection by handle. */
 void tcp_close_on(tcp_handle_t h);
+
+/* Half-close: send FIN, transition to FIN_WAIT_1, do not wait.  The
+ * remote ACK + FIN are processed asynchronously by tcp_process. */
+void tcp_close_on_async(tcp_handle_t h);
 
 /* Check if a handle is connected. */
 int tcp_is_connected(tcp_handle_t h);
@@ -131,5 +151,28 @@ int tcp_recv_nb(struct tcp_conn *conn, void *buf, uint16_t max_len);
 
 /* Process incoming TCP segment (called by ip_process). */
 void tcp_process(const void *frame, uint16_t len);
+
+/* ── Server-side listen / accept ─────────────── */
+
+/* Accept callback: invoked when a new connection completes the
+ * 3-way handshake. The handle is the connection's slot index. */
+typedef void (*tcp_accept_cb_t)(tcp_handle_t h);
+
+/* Register a listener on `port`. accept_cb may be NULL (callers can
+ * still poll via tcp_accept_nb).  Returns 0 on success, -1 if the
+ * table is full or port is already listening. */
+int  tcp_listen(uint16_t port, tcp_accept_cb_t accept_cb);
+
+/* Remove a listener; in-flight accepted connections survive. */
+int  tcp_unlisten(uint16_t port);
+
+/* Non-blocking accept: pop one ready connection out of the listener's
+ * pending queue.  *out_handle filled on success.
+ * Returns 1 if a connection is ready, 0 if queue empty, -1 on error. */
+int  tcp_accept_nb(uint16_t port, tcp_handle_t *out_handle);
+
+/* Selftest counters. */
+int  tcp_listener_count(void);
+int  tcp_accepted_count(void);
 
 #endif /* ZEOS_NET_TCP_H */

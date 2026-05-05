@@ -9,12 +9,72 @@
 
 #include "net_tcp.h"
 #include "net_ip.h"
+#include "chain.h"
+#include "chain_registry.h"
 #include "timer.h"
 #include "kprint.h"
 
 /* ── Connection pool ─────────────────────────── */
 
 static struct tcp_conn connections[TCP_MAX_CONNECTIONS];
+
+/* ── Listener table ──────────────────────────── */
+
+struct tcp_listener {
+    int              in_use;
+    uint16_t         port;
+    tcp_accept_cb_t  accept_cb;
+    int              pending[TCP_LISTEN_BACKLOG]; /* connection slot indices, -1 = empty */
+    int              pending_count;
+    int              accepted_total;             /* lifetime count for selftest */
+};
+
+static struct tcp_listener listeners[TCP_MAX_LISTENERS];
+
+static struct tcp_listener *listener_find(uint16_t port)
+{
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) {
+        if (listeners[i].in_use && listeners[i].port == port)
+            return &listeners[i];
+    }
+    return 0;
+}
+
+static int listener_idx_for_port(uint16_t port)
+{
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) {
+        if (listeners[i].in_use && listeners[i].port == port)
+            return i;
+    }
+    return -1;
+}
+
+static void listener_push(struct tcp_listener *L, int slot)
+{
+    for (int i = 0; i < TCP_LISTEN_BACKLOG; i++) {
+        if (L->pending[i] < 0) {
+            L->pending[i] = slot;
+            L->pending_count++;
+            return;
+        }
+    }
+    /* Backlog full — silently drop. The half-open conn will time out
+     * via the SYN retransmit chain on the client side. */
+}
+
+static int listener_pop(struct tcp_listener *L) __attribute__((unused));
+static int listener_pop(struct tcp_listener *L)
+{
+    for (int i = 0; i < TCP_LISTEN_BACKLOG; i++) {
+        if (L->pending[i] >= 0) {
+            int s = L->pending[i];
+            L->pending[i] = -1;
+            L->pending_count--;
+            return s;
+        }
+    }
+    return -1;
+}
 
 /* ── Internal helpers ────────────────────────── */
 
@@ -194,6 +254,9 @@ static void conn_init(struct tcp_conn *conn, struct ipv4_addr dst,
     conn->ack = 0;
     conn->state = TCP_CLOSED;
     conn->in_use = 1;
+    conn->server_side = 0;
+    conn->listener_idx = -1;
+    conn->dispatched = 0;
     conn->rx_len = 0;
     conn->rx_read = 0;
     conn->remote_closed = 0;
@@ -290,6 +353,45 @@ int tcp_send_on(tcp_handle_t h, const void *data, uint16_t len)
     return sent;
 }
 
+int tcp_recv_on_nb(tcp_handle_t h, void *buf, uint16_t max_len)
+{
+    struct tcp_conn *conn = conn_get(h);
+    if (!conn) return -1;
+
+    /* Return any data already in the buffer */
+    if (conn->rx_read < conn->rx_len) {
+        uint16_t avail = conn->rx_len - conn->rx_read;
+        uint16_t to_copy = avail > max_len ? max_len : avail;
+        uint8_t *dst = (uint8_t *)buf;
+        for (uint16_t i = 0; i < to_copy; i++)
+            dst[i] = conn->rx_buf[conn->rx_read + i];
+        conn->rx_read += to_copy;
+        return to_copy;
+    }
+    /* Reset window so future packets land at offset 0. */
+    conn->rx_len = 0;
+    conn->rx_read = 0;
+    return 0;
+}
+
+int tcp_send_on_raw(tcp_handle_t h, const void *data, uint16_t len)
+{
+    struct tcp_conn *conn = conn_get(h);
+    if (!conn || conn->state != TCP_ESTABLISHED) return -1;
+
+    uint16_t mss = 1460;
+    uint16_t sent = 0;
+    while (sent < len) {
+        uint16_t chunk = len - sent;
+        if (chunk > mss) chunk = mss;
+        tcp_send_segment(conn, TCP_ACK | TCP_PSH,
+                          (const uint8_t *)data + sent, chunk);
+        conn->seq += chunk;
+        sent += chunk;
+    }
+    return sent;
+}
+
 int tcp_recv_on(tcp_handle_t h, void *buf, uint16_t max_len)
 {
     struct tcp_conn *conn = conn_get(h);
@@ -333,6 +435,19 @@ int tcp_recv_on(tcp_handle_t h, void *buf, uint16_t max_len)
     }
 
     return 0;  /* Timeout */
+}
+
+void tcp_close_on_async(tcp_handle_t h)
+{
+    struct tcp_conn *conn = conn_get(h);
+    if (!conn) return;
+    if (conn->state != TCP_ESTABLISHED && conn->state != TCP_SYN_RECEIVED)
+        return;
+
+    conn->state = TCP_FIN_WAIT_1;
+    uint32_t fin_expected_ack = conn->seq + 1;
+    tcp_send_tracked(conn, TCP_FIN | TCP_ACK, 0, 0, fin_expected_ack);
+    conn->seq++;
 }
 
 void tcp_close_on(tcp_handle_t h)
@@ -532,6 +647,118 @@ int tcp_close(struct tcp_conn *conn)
     return 0;
 }
 
+/* ── Server-side listen / accept ─────────────── */
+
+int tcp_listen(uint16_t port, tcp_accept_cb_t accept_cb)
+{
+    /* Already listening? Update callback and return. */
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) {
+        if (listeners[i].in_use && listeners[i].port == port) {
+            listeners[i].accept_cb = accept_cb;
+            return 0;
+        }
+    }
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) {
+        if (!listeners[i].in_use) {
+            listeners[i].in_use = 1;
+            listeners[i].port = port;
+            listeners[i].accept_cb = accept_cb;
+            for (int j = 0; j < TCP_LISTEN_BACKLOG; j++)
+                listeners[i].pending[j] = -1;
+            listeners[i].pending_count = 0;
+            listeners[i].accepted_total = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tcp_unlisten(uint16_t port)
+{
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) {
+        if (listeners[i].in_use && listeners[i].port == port) {
+            listeners[i].in_use = 0;
+            listeners[i].port = 0;
+            listeners[i].accept_cb = 0;
+            for (int j = 0; j < TCP_LISTEN_BACKLOG; j++)
+                listeners[i].pending[j] = -1;
+            listeners[i].pending_count = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tcp_accept_nb(uint16_t port, tcp_handle_t *out_handle)
+{
+    if (!out_handle) return -1;
+    struct tcp_listener *L = listener_find(port);
+    if (!L) return -1;
+
+    for (int i = 0; i < TCP_LISTEN_BACKLOG; i++) {
+        int slot = L->pending[i];
+        if (slot < 0) continue;
+        struct tcp_conn *c = &connections[slot];
+        if (!c->in_use) {
+            L->pending[i] = -1;
+            if (L->pending_count > 0) L->pending_count--;
+            continue;
+        }
+        if (c->state != TCP_ESTABLISHED) continue;
+
+        L->pending[i] = -1;
+        if (L->pending_count > 0) L->pending_count--;
+        *out_handle = slot;
+        return 1;
+    }
+    return 0;
+}
+
+int tcp_listener_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++) if (listeners[i].in_use) n++;
+    return n;
+}
+
+int tcp_accepted_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < TCP_MAX_LISTENERS; i++)
+        if (listeners[i].in_use) n += listeners[i].accepted_total;
+    return n;
+}
+
+/* Allocate a server-side connection slot and arm SYN_RECEIVED state.
+ * Returns slot index or -1. */
+static int conn_alloc_server(struct ipv4_addr src_ip, uint16_t src_port,
+                              uint16_t dst_port, uint32_t client_isn,
+                              int listener_idx)
+{
+    int slot = conn_alloc();
+    if (slot < 0) return -1;
+
+    struct tcp_conn *c = &connections[slot];
+    c->remote_ip      = src_ip;
+    c->remote_port    = src_port;
+    c->local_port     = dst_port;
+    c->seq            = (uint32_t)(read_tsc_tcp() & 0xFFFFFFFF);
+    c->ack            = client_isn + 1;
+    c->state          = TCP_SYN_RECEIVED;
+    c->in_use         = 1;
+    c->server_side    = 1;
+    c->listener_idx   = listener_idx;
+    c->dispatched     = 0;
+    c->rx_len         = 0;
+    c->rx_read        = 0;
+    c->remote_closed  = 0;
+    c->retx_len       = 0;
+    c->retx_count     = 0;
+    c->retx_tsc       = 0;
+    c->retx_expected_ack = 0;
+    return slot;
+}
+
 /* ── Incoming packet processing ──────────────── */
 
 void tcp_process(const void *frame, uint16_t len)
@@ -546,15 +773,34 @@ void tcp_process(const void *frame, uint16_t len)
 
     uint16_t src_port = ntohs(tcp->src_port);
     uint16_t dst_port = ntohs(tcp->dst_port);
+    uint8_t  flags    = tcp->flags;
+    uint32_t seg_seq  = ntohl(tcp->seq);
 
     /* Demux to the right connection */
     struct tcp_conn *conn = conn_find(ip->src, src_port, dst_port);
+
+    /* No matching conn + SYN-only segment + listener on dst_port =>
+     * accept the half-open and reply SYN+ACK. */
+    if (!conn && (flags & TCP_SYN) && !(flags & TCP_ACK)) {
+        int lidx = listener_idx_for_port(dst_port);
+        if (lidx < 0) return;  /* no listener — silently drop (RST optional) */
+
+        int slot = conn_alloc_server(ip->src, src_port, dst_port,
+                                      seg_seq, lidx);
+        if (slot < 0) return;
+
+        struct tcp_conn *nc = &connections[slot];
+        /* Send SYN+ACK (tracked).  seq is our ISN; ack is client ISN+1. */
+        uint32_t synack_expected_ack = nc->seq + 1;
+        tcp_send_tracked(nc, TCP_SYN | TCP_ACK, 0, 0, synack_expected_ack);
+        nc->seq++;  /* SYN consumes one sequence number */
+        return;
+    }
+
     if (!conn)
         return;
 
-    uint32_t seg_seq = ntohl(tcp->seq);
     uint32_t seg_ack = ntohl(tcp->ack);
-    uint8_t flags = tcp->flags;
     uint16_t tcp_hdr_len = ((tcp->data_off >> 4) & 0x0F) * 4;
     uint16_t ip_total = ntohs(ip->total_len);
     uint16_t data_len = ip_total - ip_hdr_len - tcp_hdr_len;
@@ -578,6 +824,12 @@ void tcp_process(const void *frame, uint16_t len)
             (conn->state == TCP_SYN_SENT && (flags & TCP_SYN)))
             retx_clear(conn);
     }
+    /* SYN_RECEIVED: SYN+ACK was tracked with retx_len=0 (no payload). */
+    if (conn->state == TCP_SYN_RECEIVED && conn->retx_expected_ack != 0 &&
+        (flags & TCP_ACK)) {
+        if (seg_ack >= conn->retx_expected_ack)
+            retx_clear(conn);
+    }
     /* SYN has retx_len=0 (no payload) but retx_expected_ack set.
        Clear on SYN-ACK even though retx_len test above skipped it. */
     if (conn->state == TCP_SYN_SENT && conn->retx_expected_ack != 0 &&
@@ -594,6 +846,60 @@ void tcp_process(const void *frame, uint16_t len)
             retx_clear(conn);
             /* Send ACK (no tracking needed — pure ACK) */
             tcp_send_segment(conn, TCP_ACK, 0, 0);
+        }
+        break;
+
+    case TCP_SYN_RECEIVED:
+        /* Final ACK of the 3-way handshake completes the connection.
+         * Some clients piggyback request data on the same ACK; handle
+         * that by falling through to the ESTABLISHED data path below. */
+        if ((flags & TCP_ACK) && seg_ack >= conn->retx_expected_ack) {
+            retx_clear(conn);
+            conn->state = TCP_ESTABLISHED;
+
+            int slot_idx = (int)(conn - connections);
+            int lidx = conn->listener_idx;
+            if (lidx >= 0 && lidx < TCP_MAX_LISTENERS &&
+                listeners[lidx].in_use) {
+                listeners[lidx].accepted_total++;
+                listener_push(&listeners[lidx], slot_idx);
+
+                /* MasQ: accept = state mutation on the rx pipeline.
+                 * Bump CHAIN_NET_RX's vault_version so observers see the
+                 * port-level transition. */
+                if (CHAIN_NET_RX >= 0) {
+                    chain_t *cc = chain_get(CHAIN_NET_RX);
+                    if (cc) cc->vault_version++;
+                }
+
+                /* Fire accept callback (if set). The callback receives
+                 * the new handle and may install its own data handling
+                 * (most callers route through the std.http drainer). */
+                tcp_accept_cb_t cb = listeners[lidx].accept_cb;
+                if (cb) cb((tcp_handle_t)slot_idx);
+            }
+
+            /* Same-segment piggybacked data */
+            if (data_len > 0) {
+                uint16_t space = TCP_RX_BUF_SIZE - conn->rx_len;
+                uint16_t to_copy = data_len > space ? space : data_len;
+                for (uint16_t i = 0; i < to_copy; i++)
+                    conn->rx_buf[conn->rx_len + i] = data[i];
+                conn->rx_len += to_copy;
+                conn->ack = seg_seq + data_len;
+                tcp_send_segment(conn, TCP_ACK, 0, 0);
+            }
+
+            /* FIN piggybacked? */
+            if (flags & TCP_FIN) {
+                conn->ack = seg_seq + data_len + 1;
+                conn->remote_closed = 1;
+                tcp_send_segment(conn, TCP_ACK, 0, 0);
+                conn->state = TCP_CLOSE_WAIT;
+                tcp_send_segment(conn, TCP_FIN | TCP_ACK, 0, 0);
+                conn->seq++;
+                conn->state = TCP_LAST_ACK;
+            }
         }
         break;
 

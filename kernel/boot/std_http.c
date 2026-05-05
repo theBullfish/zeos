@@ -4,11 +4,44 @@
 
 #include "std_http.h"
 #include "net_tcp.h"
+#include "signal.h"
 #include "kprint.h"
 
 static struct http_listener g_listeners[HTTP_MAX_LISTENERS];
 static struct http_route    g_routes   [HTTP_MAX_ROUTES];
 static int g_inited = 0;
+
+/* HTTP-owned accepted connections.  Populated by the accept callback,
+ * drained by zp_http_poll().  Each entry is a tcp_handle_t (>=0). */
+#define HTTP_OWNED_MAX  16
+static int g_owned[HTTP_OWNED_MAX];
+static int g_accepted_total = 0;
+static int g_responses_total = 0;
+
+static void owned_init_once(void)
+{
+    static int once = 0;
+    if (once) return;
+    for (int i = 0; i < HTTP_OWNED_MAX; i++) g_owned[i] = -1;
+    once = 1;
+}
+
+static void owned_add(int h)
+{
+    owned_init_once();
+    for (int i = 0; i < HTTP_OWNED_MAX; i++) {
+        if (g_owned[i] == -1) { g_owned[i] = h; return; }
+    }
+    /* Owned table full — close the connection so we don't leak. */
+    tcp_close_on_async(h);
+}
+
+/* Accept callback — runs from inside tcp_process(). Keep it tiny. */
+static void zp_http_accept_cb(tcp_handle_t h)
+{
+    g_accepted_total++;
+    owned_add((int)h);
+}
 
 static int h_streq(const char *a, const char *b)
 {
@@ -33,22 +66,38 @@ void zp_http_init(void)
 int zp_http_listen(uint16_t port, int chain_id)
 {
     zp_http_init();
+    owned_init_once();
+
+    int idx = -1;
     /* Replace if same port already registered. */
     for (int i = 0; i < HTTP_MAX_LISTENERS; i++) {
         if (g_listeners[i].in_use && g_listeners[i].port == port) {
             g_listeners[i].chain_id = chain_id;
-            return i;
+            idx = i;
+            break;
         }
     }
-    for (int i = 0; i < HTTP_MAX_LISTENERS; i++) {
-        if (!g_listeners[i].in_use) {
-            g_listeners[i].in_use = 1;
-            g_listeners[i].port = port;
-            g_listeners[i].chain_id = chain_id;
-            return i;
+    if (idx < 0) {
+        for (int i = 0; i < HTTP_MAX_LISTENERS; i++) {
+            if (!g_listeners[i].in_use) {
+                g_listeners[i].in_use = 1;
+                g_listeners[i].port = port;
+                g_listeners[i].chain_id = chain_id;
+                idx = i;
+                break;
+            }
         }
     }
-    return -1;
+    if (idx < 0) return -1;
+
+    /* Arm the kernel TCP listener so real SYNs get answered. */
+    int rc = tcp_listen(port, zp_http_accept_cb);
+    if (rc != 0) {
+        kputs("[http] tcp_listen failed on port ");
+        kput_dec(port);
+        kputc('\n');
+    }
+    return idx;
 }
 
 int zp_http_route(const char *method, const char *path, int chain_id)
@@ -117,11 +166,11 @@ int zp_http_respond(int tcp_handle, int status, const char *body, int body_len,
     hdr[n++] = '\r'; hdr[n++] = '\n';
     hdr[n++] = '\r'; hdr[n++] = '\n';
 
-    int rc = tcp_send_on(tcp_handle, hdr, (uint16_t)n);
+    int rc = tcp_send_on_raw(tcp_handle, hdr, (uint16_t)n);
     if (rc < 0) return -1;
     int total = n;
     if (body && body_len > 0) {
-        rc = tcp_send_on(tcp_handle, body, (uint16_t)body_len);
+        rc = tcp_send_on_raw(tcp_handle, body, (uint16_t)body_len);
         if (rc < 0) return -1;
         total += body_len;
     }
@@ -164,3 +213,138 @@ int zp_http_parse_request(const char *buf, int buf_len,
     if (mn == 0 || pn == 0) return -1;
     return 0;
 }
+
+/* ── Accept-drain poll ───────────────────────── */
+
+/* Find a route whose method+path match exactly. Returns chain_id or -1. */
+static int zp_http_route_lookup(const char *method, const char *path)
+{
+    for (int i = 0; i < HTTP_MAX_ROUTES; i++) {
+        if (!g_routes[i].in_use) continue;
+        if (h_streq(g_routes[i].method, method) &&
+            h_streq(g_routes[i].path,   path))
+            return g_routes[i].chain_id;
+    }
+    return -1;
+}
+
+/* Try to dispatch a single HTTP-owned handle.  Returns:
+ *   1  request handled (response sent, connection closed)
+ *   0  no full request yet (still buffering)
+ *  -1  connection died / parse error (caller should remove from owned) */
+static int zp_http_drive_handle(int h)
+{
+    /* Pull any queued bytes from the connection's rx buffer (non-blocking). */
+    char buf[HTTP_REQ_BUF];
+    int got = tcp_recv_on_nb(h, buf, (uint16_t)(sizeof(buf) - 1));
+    if (got <= 0) {
+        /* Either remote closed or no data this poll. tcp_recv_on returns 0
+         * on close+empty and on timeout; conservatively treat 0 as "no data
+         * yet" so a slow client gets another tick. The owned slot is GC'd
+         * when the handle leaves ESTABLISHED (checked by the poll loop). */
+        return 0;
+    }
+    buf[got] = 0;
+
+    /* Need the full request line + headers terminator (\r\n\r\n) to be
+     * confident we have a parseable request. The kernel parser only
+     * needs method+path, so a single \r\n suffices for our minimal
+     * server, but we still wait for the empty-line terminator to match
+     * curl behavior. */
+    int has_terminator = 0;
+    for (int i = 0; i + 3 < got; i++) {
+        if (buf[i] == '\r' && buf[i+1] == '\n' &&
+            buf[i+2] == '\r' && buf[i+3] == '\n') {
+            has_terminator = 1; break;
+        }
+    }
+    if (!has_terminator) {
+        /* Only a partial request — not enough to parse confidently. */
+        return 0;
+    }
+
+    char method[8] = {0};
+    char path  [64] = {0};
+    if (zp_http_parse_request(buf, got, method, (int)sizeof(method),
+                               path, (int)sizeof(path)) != 0) {
+        /* Malformed: send 400 then close. */
+        zp_http_respond(h, 400, "bad request\n", 12, "text/plain");
+        g_responses_total++;
+        tcp_close_on_async(h);
+        return -1;
+    }
+
+    /* Find which listener owns this handle (by local_port).  Kernel
+     * connection table is opaque from here, so we walk the listener
+     * record using a port lookup that mirrors the conn's port. The
+     * tcp_handle_t IS the slot index; the kernel exposes local_port
+     * through tcp_is_connected style probes — we read port indirectly
+     * by trying every listener and dispatching the first one whose
+     * route table matches.  In practice listeners are 1–2 entries. */
+    int chain_id = -1;
+
+    /* Route table override (method+path exact match). */
+    int rc_id = zp_http_route_lookup(method, path);
+    if (rc_id >= 0) chain_id = rc_id;
+
+    if (chain_id < 0) {
+        /* Fallback: first listener record. (We don't have a public
+         * accessor for the conn's local port; the listener table is
+         * walked here so a single-port server still works deterministically.
+         * Multi-port servers should populate the route table.) */
+        for (int i = 0; i < HTTP_MAX_LISTENERS; i++) {
+            if (g_listeners[i].in_use) {
+                chain_id = g_listeners[i].chain_id;
+                break;
+            }
+        }
+    }
+
+    if (chain_id >= 0) {
+        struct sig_data trigger;
+        trigger.size = 0;
+        sig_data_write_i32(&trigger, h);
+        /* Inject into node 0; runtime walks the chain and any
+         * http.respond reads the handle off the wire. */
+        sig_inject(chain_id, 0, &trigger);
+        sig_resolve(chain_id);
+        g_responses_total++;
+    } else {
+        /* No handler chain — send a default 200 ok body. */
+        const char *body = "ok\n";
+        zp_http_respond(h, 200, body, 3, "text/plain");
+        g_responses_total++;
+    }
+
+    tcp_close_on_async(h);
+    return 1;
+}
+
+void zp_http_poll(void)
+{
+    static int in_poll = 0;
+    if (in_poll) return;          /* re-entry from tcp_send_on/net_poll */
+    in_poll = 1;
+
+    owned_init_once();
+    for (int i = 0; i < HTTP_OWNED_MAX; i++) {
+        int h = g_owned[i];
+        if (h < 0) continue;
+
+        /* Drop entries that lost their connection. */
+        if (!tcp_is_connected(h)) {
+            g_owned[i] = -1;
+            continue;
+        }
+
+        int rc = zp_http_drive_handle(h);
+        if (rc != 0) {
+            /* Handled or errored — release the slot. */
+            g_owned[i] = -1;
+        }
+    }
+    in_poll = 0;
+}
+
+int zp_http_accepted_total(void)  { return g_accepted_total; }
+int zp_http_responses_total(void) { return g_responses_total; }

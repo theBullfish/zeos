@@ -1,18 +1,16 @@
 /*
  * Zeos — std.http (server side)
  *
- * Listener registry + request parser.  Today the kernel TCP layer
- * (net_tcp.c) only exposes outbound connections (tcp_open / tcp_send_on).
- * std.http registers listener records and parses inbound HTTP/1.1
- * requests off any TCP handle that the runtime hands it (via
- * zp_http_feed_handle).  The chain wiring layer is the "accept loop":
- * when a new tcp handle is established, it is fed to the matching
- * listener and a typed http_request is emitted on the registered chain.
+ * Listener registry + request parser + accept-loop drain.
  *
- * Honest gap: until net_tcp grows a real listen+accept primitive, no
- * unsolicited inbound SYN can arrive, so the listener will not see real
- * traffic in QEMU.  All registered listeners and the routing table are
- * inspectable; the parser and respond path are real.
+ * zp_http_listen(port, chain_id) registers a listener record and also
+ * arms a real TCP listen on the same port (tcp_listen).  When a SYN
+ * arrives on that port the kernel TCP state machine completes the
+ * three-way handshake and pushes the new connection to the listener's
+ * pending queue; the accept callback marks the handle as HTTP-owned.
+ * zp_http_poll() drains owned handles each net_poll tick: it parses
+ * the request line, runs the registered chain (or sends a default
+ * 200/ok response when chain_id < 0), and closes the connection.
  */
 
 #ifndef ZEOS_STD_HTTP_H
@@ -56,5 +54,14 @@ int  zp_http_route_count(void);
 int  zp_http_parse_request(const char *buf, int buf_len,
                            char *method, int method_max,
                            char *path,   int path_max);
+
+/* Drain accepted server connections: parse HTTP/1.1 request lines off
+ * each owned connection, fire the registered chain, send the response.
+ * Called from net_poll(). */
+void zp_http_poll(void);
+
+/* Selftest counters. */
+int  zp_http_accepted_total(void);
+int  zp_http_responses_total(void);
 
 #endif

@@ -2185,24 +2185,30 @@ static const char zp_module_demo[] =
     "  bn : emit(3) -> math.triple -> tap.log\n"
     "}\n";
 
-/* Pass 3 stdlib demo — exercises std.time, std.crypto, std.json. */
+/* Pass 3 stdlib demo — exercises std.time, std.crypto, std.json,
+ * std.http (server-side accept loop on port 8080). */
 static const char zp_stdlib_demo[] =
-    "// Pass 3 — stdlib demo\n"
-    "import std.time as t\n"
+    "// Pass 3 — stdlib demo (now with real http listen on 8080)\n"
+    "import std.time   as t\n"
     "import std.crypto as c\n"
-    "import std.json as j\n"
+    "import std.json   as j\n"
+    "import std.http   as http\n"
     "\n"
     "src   : emit(16)\n"
     "doc   : emit(\"{\\\"a\\\":1,\\\"b\\\":\\\"hello\\\"}\")\n"
+    "port  : emit(8080)\n"
     "now   : input -> time.now\n"
     "rng   : input -> crypto.random\n"
     "jp    : input -> json.parse\n"
+    "listen: input -> http.listen\n"
     "log   : input -> tap.log\n"
     "\n"
-    "src -> rng -> log\n"
-    "doc -> jp  -> log\n"
-    "now -> log\n"
+    "src  -> rng    -> log\n"
+    "doc  -> jp     -> log\n"
+    "port -> listen -> log\n"
+    "now  -> log\n"
     "\n"
+    "chain echo { in : input -> http.respond }\n"
     "chain demo { src rng log }\n";
 
 /* kv-zeos — Replacement #1: Redis core in Z+. ~50 lines of Z+ vs
@@ -4657,6 +4663,21 @@ vault_done:
         kputs("  Z+ stdlib ............ ");
         kput_dec((uint64_t)sc);
         kputs(" modules registered (http/json/regex/cmd/time/crypto/btree/fs)\n");
+        passes++;
+    }
+
+    /* TCP listen: server-side accept primitive.  Reports count of armed
+     * listener ports and lifetime accepted connections. */
+    {
+        extern int tcp_listener_count(void);
+        extern int tcp_accepted_count(void);
+        int n = tcp_listener_count();
+        int m = tcp_accepted_count();
+        kputs("  TCP listen ............ ");
+        kput_dec((uint64_t)n);
+        kputs(" ports listening, ");
+        kput_dec((uint64_t)m);
+        kputs(" connections accepted\n");
         passes++;
     }
 
