@@ -220,6 +220,29 @@ impl<'src> Parser<'src> {
     fn parse_chain(&mut self) -> Result<Chain<'src>, ParseError> {
         let mut left = self.parse_chain_term()?;
         loop {
+            // Arithmetic at chain level: `a + b * c -> sink`. Encoded as
+            // synthetic Calls so the chain-op loop can keep treating them
+            // as values feeding into the next `->`. Tightly bound — runs
+            // before the chain-op probe so multi-line chains still work.
+            let arith_callee = match self.peek_kind() {
+                Some(TokenKind::Plus) => Some("__add__"),
+                Some(TokenKind::Minus) => Some("__sub__"),
+                Some(TokenKind::Star) => Some("__mul__"),
+                Some(TokenKind::Slash) => Some("__div__"),
+                Some(TokenKind::Percent) => Some("__mod__"),
+                _ => None,
+            };
+            if let Some(callee) = arith_callee {
+                self.advance();
+                let right = self.parse_chain_term()?;
+                let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
+                left = Chain::Call(Call {
+                    callee: Path::one(callee, span),
+                    args: vec![Arg::Positional(left), Arg::Positional(right)],
+                    span,
+                });
+                continue;
+            }
             // Look past newlines: if the next non-newline token is a chain
             // op, fold the newlines and continue. Otherwise stop here.
             let mut probe = self.pos;
@@ -231,11 +254,17 @@ impl<'src> Parser<'src> {
                 Some(TokenKind::Tap) => Some(TokenKind::Tap),
                 Some(TokenKind::Sever) => Some(TokenKind::Sever),
                 Some(TokenKind::BindLeft) => Some(TokenKind::BindLeft),
-                // `then` keyword acts as a Flow with temporal-sequencing
-                // semantics (`a then b` = a happens, then b). For v1 we
-                // alias it to Flow; the runtime carries the "then" intent
-                // via stmt position.
-                Some(TokenKind::Ident) if self.tokens.get(probe).map(|t| t.text) == Some("then") => Some(TokenKind::Flow),
+                // `then` keyword acts as Flow with temporal sequencing
+                // semantics — but ONLY when not used as a named-arg label
+                // (`then: time ascending`). Followed-by-Colon means it's
+                // the name half of a named arg and stays out of chain-op
+                // territory.
+                Some(TokenKind::Ident)
+                    if self.tokens.get(probe).map(|t| t.text) == Some("then")
+                        && self.kind_at(probe + 1) != Some(TokenKind::Colon) =>
+                {
+                    Some(TokenKind::Flow)
+                }
                 _ => None,
             };
             let Some(op_kind) = op else { break };
@@ -433,6 +462,22 @@ impl<'src> Parser<'src> {
             }
             TokenKind::LBrace => self.parse_fork()?,
             TokenKind::LBracket => self.parse_list()?,
+            TokenKind::LParen => {
+                // Parenthesized chain expression: `(a + b) * c`. v1 absorbs
+                // it as a `__paren__` Call so precedence info is preserved
+                // in the AST.
+                let start = cur.start;
+                self.advance();
+                self.skip_newlines();
+                let inner = self.parse_arg_expr()?;
+                self.skip_newlines();
+                self.expect(TokenKind::RParen)?;
+                Chain::Call(Call {
+                    callee: Path::one("__paren__", Span::new(start, self.prev_end())),
+                    args: vec![Arg::Positional(inner)],
+                    span: Span::new(start, self.prev_end()),
+                })
+            }
             TokenKind::Pipe => {
                 // `|` standalone — start of a merge fragment with no inputs yet.
                 // Forms accepted:
@@ -472,28 +517,37 @@ impl<'src> Parser<'src> {
     ///     chat_system, etc. use `name : { fields }` to declare structure)
     fn maybe_unit_annotate(&mut self, mut term: Chain<'src>) -> Result<Chain<'src>, ParseError> {
         loop {
-            // `@ Ident (/ Ident)*` form. Allows compound units like
-            // `@ m/s` or `@ kg/m^3` (only the slash variant is in the corpus
-            // for now). All segments are absorbed into the unit path text.
+            // `@ <unit>` form. Unit can be a path (`@ percent`), a compound
+            // path (`@ m/s`), or a call (`@ mde("payload.zdx")`,
+            // `@ goya(0)` for hardware-pinning forms).
             if self.peek_kind() == Some(TokenKind::At) {
                 self.advance();
+                // Parse a path first; if a LParen follows, lift to Call.
                 let mut unit_path = self.parse_path()?;
                 while self.peek_kind() == Some(TokenKind::Slash)
                     && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
                 {
-                    self.advance(); // /
+                    self.advance();
                     let seg = self.expect(TokenKind::Ident)?;
                     let new_end = seg.end;
                     unit_path.segments.push(Ident { text: seg.text, span: Span::new(seg.start, seg.end) });
                     unit_path.span.end = new_end;
                 }
-                let span = Span::new(self.span_of(&term).start, unit_path.span.end);
+                let unit_chain: Chain<'src> = if self.peek_kind() == Some(TokenKind::LParen) {
+                    let args = self.parse_args()?;
+                    let end = self.prev_end();
+                    Chain::Call(Call {
+                        callee: unit_path.clone(),
+                        args,
+                        span: Span::new(unit_path.span.start, end),
+                    })
+                } else {
+                    Chain::Atom(Atom::Path(unit_path))
+                };
+                let span = Span::new(self.span_of(&term).start, self.span_of(&unit_chain).end);
                 term = Chain::Call(Call {
                     callee: Path::one("__unit__", Span::new(span.start, span.end)),
-                    args: vec![
-                        Arg::Positional(term),
-                        Arg::Positional(Chain::Atom(Atom::Path(unit_path))),
-                    ],
+                    args: vec![Arg::Positional(term), Arg::Positional(unit_chain)],
                     span,
                 });
                 continue;
@@ -598,6 +652,21 @@ impl<'src> Parser<'src> {
 
     fn parse_fork_branch(&mut self) -> Result<ForkBranch<'src>, ParseError> {
         let start = self.cur_pos();
+        // Implicit-flow leading `->` branch: `{ -> encode(...) -> store, -> ... }`
+        // means each branch implicitly receives the upstream of the fork.
+        // For v1 we model this as a Call to a synthetic `__from_upstream__`
+        // followed by the rest of the chain.
+        if self.peek_kind() == Some(TokenKind::Flow) {
+            self.advance();
+            let rest = self.parse_arg_expr()?;
+            let span = Span::new(start, self.span_of(&rest).end);
+            let body = Chain::Flow(
+                Box::new(Chain::Atom(Atom::Path(Path::one("__from_upstream__", Span::new(start, start))))),
+                Box::new(rest),
+                span,
+            );
+            return Ok(ForkBranch { label: None, body, span });
+        }
         let first = self.parse_arg_expr()?;
         // Labeled branch: `label : body`. Heuristic — a Colon at fork-branch
         // depth (we're inside `{...}`, so the parser hasn't consumed it yet)
