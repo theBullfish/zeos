@@ -73,9 +73,9 @@ impl<'src> Parser<'src> {
     /// If `stmt` is a vertical-merge fragment, fold it into a running
     /// `Merge` in `stmts`. Two fragment shapes:
     ///   1. `INPUT -> |` / `INPUT -> | -> DOWNSTREAM`
-    ///        → `Connect(Flow(INPUT, Merge { inputs: [], ... }))`
+    ///      → `Connect(Flow(INPUT, Merge { inputs: [], ... }))`
     ///   2. `| policy | -> DOWNSTREAM` (no input)
-    ///        → `Connect(Merge { inputs: [], policy, downstream })`
+    ///      → `Connect(Merge { inputs: [], policy, downstream })`
     ///
     /// Returns `Some(stmt)` if a brand-new statement should be pushed, or
     /// `None` if the stmt was absorbed into an already-present Merge.
@@ -742,7 +742,7 @@ impl<'src> Parser<'src> {
         // Postfix annotations on a chain term:
         //   `<term> @ ident`           — unit annotation (separated form)
         //   `<numeric> Ident` (tight)  — unit annotation (no-space form, e.g. `60Hz`)
-        Ok(self.maybe_unit_annotate(term)?)
+        self.maybe_unit_annotate(term)
     }
 
     /// Apply postfix annotations to a parsed term:

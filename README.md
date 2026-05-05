@@ -164,6 +164,8 @@ Z+ compiles to Zeos kernel native, ARM bare-metal, FPGA bitstream, and WebAssemb
 
 **Full spec:** [docs/ZPLUS_LANGUAGE.md](docs/ZPLUS_LANGUAGE.md)
 
+**Status:** the bootstrap toolchain in [tools/zplus/](tools/zplus/) is the working frontend — lex → parse → typed AST → 3-layer type checker → tree-walking runtime. All 68 programs in [`programs/*.zp`](programs/) parse cleanly; demos in [`programs/demos/`](programs/demos/) execute end-to-end. CLIs: `zplus-lex`, `zplus-parse`, `zplus-check`, `zplus-run`. Native code-gen is queued; the runtime is sufficient to demo and test today.
+
 ---
 
 ## One Image. Every Machine.

@@ -170,7 +170,7 @@ impl<'a> Lexer<'a> {
 
         // Hex color: # followed by 1+ hex digits. Corpus uses 3-, 6-, and 8-digit
         // forms. Match greedily up to 8 hex digits.
-        if b == b'#' && self.peek_at(1).map_or(false, is_hex_digit) {
+        if b == b'#' && self.peek_at(1).is_some_and(is_hex_digit) {
             self.pos += 1; // #
             let mut count = 0;
             while count < 8 {
@@ -338,7 +338,7 @@ impl<'a> Lexer<'a> {
             }
             if &self.src[start..self.pos] == "t"
                 && self.peek() == Some(b'-')
-                && self.peek_at(1).map_or(false, |c| c.is_ascii_digit())
+                && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())
             {
                 self.pos += 1; // -
                 while let Some(c) = self.peek() {
@@ -394,7 +394,7 @@ impl<'a> Lexer<'a> {
         // Ratio(x) or similar.
         if self.peek() == Some(b'0')
             && self.peek_at(1) == Some(b'x')
-            && self.peek_at(2).map_or(false, is_hex_digit)
+            && self.peek_at(2).is_some_and(is_hex_digit)
         {
             self.pos += 2; // 0x
             while let Some(c) = self.peek() {
@@ -418,7 +418,7 @@ impl<'a> Lexer<'a> {
         // optional fractional part — but only if followed by a digit, so that
         // `1.5x` is a Float-then-suffix while `vault.store` keeps the `.` as Dot.
         let mut is_float = false;
-        if self.peek() == Some(b'.') && self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+        if self.peek() == Some(b'.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
             is_float = true;
             self.pos += 1; // .
             while let Some(c) = self.peek() {
@@ -463,7 +463,7 @@ impl<'a> Lexer<'a> {
         }
         if self.peek() == Some(b'x') {
             // Dimension if a digit follows the x; otherwise Ratio (boundary-checked).
-            if self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+            if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
                 self.pos += 1; // x
                 while let Some(c) = self.peek() {
                     if c.is_ascii_digit() {
@@ -505,7 +505,7 @@ impl<'a> Lexer<'a> {
     /// identifier-continuation character. Used to gate numeric suffixes so
     /// they don't swallow the leading char of a following identifier.
     fn at_boundary(&self, offset: usize) -> bool {
-        !self.peek_at(offset).map_or(false, is_ident_continue)
+        !self.peek_at(offset).is_some_and(is_ident_continue)
     }
 
     fn tok(&self, kind: TokenKind, start: usize) -> Token<'a> {
@@ -534,10 +534,9 @@ fn is_hex_digit(b: u8) -> bool {
 }
 
 fn utf8_char_len(first_byte: u8) -> usize {
-    if first_byte < 0x80 {
+    // ASCII (< 0x80) and continuation bytes (0x80..0xC0) both advance by 1.
+    if first_byte < 0xC0 {
         1
-    } else if first_byte < 0xC0 {
-        1 // continuation byte; advance by 1 to make progress
     } else if first_byte < 0xE0 {
         2
     } else if first_byte < 0xF0 {

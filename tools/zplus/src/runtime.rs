@@ -425,7 +425,7 @@ impl<'src> Runtime<'src> {
                     }
                     _ => 1,
                 };
-                if self.tick % period.max(1) == 0 {
+                if self.tick.is_multiple_of(period.max(1)) {
                     Ok(Some(Value::Tick(self.tick)))
                 } else {
                     Ok(None)

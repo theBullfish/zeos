@@ -47,6 +47,7 @@ fn call_args_clean_on_log_monitor() {
 /// rewind by, net.listen port) all match how the corpus actually uses
 /// them. Any new mismatch fails fast.
 #[test]
+#[allow(clippy::absurd_extreme_comparisons)]
 fn call_args_corpus_ratchet() {
     use std::path::{Path, PathBuf};
 
@@ -118,6 +119,7 @@ fn flow_connectivity_clean_on_log_monitor() {
 /// (the corpus's standard range form). Now zero. Any new mismatch
 /// fails fast.
 #[test]
+#[allow(clippy::absurd_extreme_comparisons)]
 fn flow_connectivity_corpus_ratchet() {
     use std::path::{Path, PathBuf};
 
@@ -173,6 +175,7 @@ fn flow_connectivity_corpus_ratchet() {
 /// on `->` Flow RHS for `IDENT | IDENT` shorthand. The corpus now has
 /// zero chord-rule violations. New regressions fail fast.
 #[test]
+#[allow(clippy::absurd_extreme_comparisons)]
 fn checker_corpus_violations_are_capped() {
     use std::path::{Path, PathBuf};
 

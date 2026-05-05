@@ -226,3 +226,27 @@ Z+ eliminates #2 and #3 entirely. The 5% that remains is the actual logic — an
 *The core — arrows, gates, knees, deltas, temporal access — is proven.*
 
 **Codex Labs LLC — 2026**
+
+---
+
+## Update — corpus expansion + working toolchain (2026-05-05)
+
+The numbers above are from the original 12-program write-up. The
+`programs/` corpus has since grown to **68 programs**. The
+"~2,458 lines" count earlier in this doc is also stale.
+
+A working bootstrap toolchain now exists in `tools/zplus/`:
+
+- **Lexer** — all 68 files tokenize cleanly
+- **Parser** — all 68 files parse to AST
+- **Type checker** — three structural ratchets all at zero across
+  the corpus (merge arity / chord rule, Flow connectivity, named-arg
+  types)
+- **Runtime** — tree-walking interpreter; tick model, sources,
+  transformers (real `delta`, real `gate`), forks, merges with
+  chord-policy resolution, stateful per-call-site state
+- **CLIs** — `zplus-lex`, `zplus-parse`, `zplus-check`, `zplus-run`
+
+The "WORKED / NEEDED / AMBIGUOUS" notes above are mostly resolved by
+the parser + checker landings. Native code-gen is the remaining big
+piece. See `STATE.md` at repo root.
