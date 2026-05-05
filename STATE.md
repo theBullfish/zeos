@@ -119,10 +119,23 @@ session. Three sections, that's it.
   and renders errors with file:line:col header, source line, and
   carat. `infer_arg_value(c, env)` peers through `UnaryCmp` /
   `BinExpr` predicate wrappers so `on_silence(within: > 5m)` checks
-  against the underlying Duration. Three ratchets stay at zero
-  across the corpus.
+  against the underlying Duration.
 
-  **126 tests green** (100 unit + 26 integration).
+- **Runtime v1 landed (commit `ffafa62`). Z+ programs RUN.**
+  `src/runtime.rs` is a tree-walking interpreter with a tick model.
+  Sources (`tick(rate: N)`), sinks (`print`, `alert`, `vault.*`),
+  transformers (`gate`, `count`), and synthetic ops (`__add__`,
+  `__neg__`, `__paren__`) all evaluate. **Merge resolves per chord
+  policy in code** — All / Any / Quorum / Fastest. Tap is read-only
+  (preserves upstream). Unknown calls act as identity.
+
+  CLI: `zplus-run <file.zp> [ticks]` — emits captured records:
+  `[t=1] print: tick(1)`. Demos in `programs/demos/heartbeat.zp` and
+  `programs/demos/two_speeds.zp` run end-to-end (5 ticks → 5
+  emissions; 6 ticks → 9 emissions across two rates).
+
+  All three corpus ratchets (merge arity, Flow connectivity, named-arg
+  types) stay at zero. **138 tests green** (110 unit + 28 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -197,13 +210,24 @@ session. Three sections, that's it.
   args today. Add a `positional: Vec<Type>` to the side-table and
   walk Positional args by index.
 
-- **IR / lowering / runtime.** The checker is corpus-clean. Next
-  major milestone: lower the typed AST to an executable form. Open
-  question still — LLVM IR via `inkwell` vs custom backend. The
-  chord-rule semantics suggest custom (LLVM has no Merge primitive).
-  Smallest cut: a tree-walking interpreter that takes a `Module` and
-  a tick budget, runs the chains, prints emissions. No Goya / no
-  MDE / no real hardware — just prove the semantics in software.
+- **Runtime v2.** v1 runs heartbeats and merges. Next:
+  - Wall-clock time. `tick(rate: 1m)` should fire once per minute,
+    not once per step. Either real-time mode (sleep between steps)
+    or simulated-time mode (advance by configurable dt).
+  - Forks. AST has them; runtime is a no-op. Wire each branch's body
+    against the upstream value.
+  - Real merge timing windows. `Within(30s)` should buffer inputs
+    in a sliding window and resolve when the window's complete.
+  - Real semantics for the identity-stub transformers (`delta`,
+    `rate`, `baseline`, etc.). Each has a SEMANTIC_CONTRACTS.md
+    contract; the runtime should implement it.
+  - File / network I/O. `fs("...")` should actually read a file;
+    `net.listen(...)` should actually bind a port (in test mode at
+    least).
+
+- **IR / `.zpc` bytecode.** Once the runtime is feature-complete
+  enough to be useful, the next step is a serialized form so chains
+  can ship as artifacts. `.zpc` per `docs/FOUNDATIONAL_PROGRAMS.md`.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
