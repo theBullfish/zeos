@@ -28,6 +28,7 @@ typedef enum {
     QL_KIND_UNKNOWN,
     QL_KIND_TEXT,
     QL_KIND_PNG,
+    QL_KIND_JPEG,
 } ql_kind_t;
 
 /* Open Quick Look on a file path. The host loader fills bytes via

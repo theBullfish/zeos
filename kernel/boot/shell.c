@@ -30,6 +30,7 @@
 #include "crypto_disk.h"
 #include "print.h"
 #include "identity.h"
+#include "welcome.h"
 #include "calendar.h"
 #include "notes_zeos.h"
 #include "chat_zeos.h"
@@ -836,6 +837,7 @@ static const struct shell_cmd commands[] = {
     {"lid-open",  "show/set lid-open action (wake|nothing)", cmd_lid_open, VIS_ALWAYS},
     {"power",     "combined power view (buttons, lid, battery)", cmd_power, VIS_ALWAYS},
     {"about",   "about Zeos",                     cmd_about,   VIS_FULL},
+    {"tour",    "guided walkthrough of the five replacements", cmd_tour, VIS_ALWAYS},
 
     /* FAT32 (USB / SD / ESP / NVMe) read+write */
     {"fat-mount","mount FAT32 (fat-mount [<drive> <part-lba>])", cmd_fat_mount, VIS_ALWAYS},
@@ -876,32 +878,133 @@ static const struct shell_cmd commands[] = {
 
 /* ── Core commands (unchanged logic) ────────────── */
 
+/* Surface classifier for `help`. Returns one of:
+ *   0 SHELL  1 APPS  2 NETWORK  3 IDENTITY  4 DESIGN  5 FILES  6 SYSTEM
+ * The name list below is intentionally exhaustive — if a command
+ * doesn't match, it falls into SYSTEM (catch-all). */
+static int help_surface_for(const char *n)
+{
+    /* SHELL — meta + persona */
+    static const char *shell_cmds[] = {
+        "help","clear","raise","zeros","derez","tour","about", 0
+    };
+    /* APPS — windowed programs + REPL apps */
+    static const char *app_cmds[] = {
+        "zkv","webview","bview","notesui","chatui","edit","fm","top",
+        "calc","cal","clock","alarm","alarms","timer","stopwatch",
+        "view","camera",
+        "notes","chat","web","build","programs","run","viz",
+        0
+    };
+    /* NETWORK — anything that talks bytes off-host */
+    static const char *net_cmds[] = {
+        "ping","ping6","dns","fetch","https","static-ip","ip6",
+        "nslookup6","portscan","sweep","nc","wifi","wifi-scan",
+        "bt","bt-l2cap","netinfo","firewall",
+        0
+    };
+    /* IDENTITY — identity contexts + lock + power gates */
+    static const char *id_cmds[] = {
+        "whoami","contexts","switch-context","new-context","delete-context",
+        "lock","pin","cold-boot-login","power-button","lid-close","lid-open",
+        "power","crypto",
+        0
+    };
+    /* DESIGN — visual / animation / theme */
+    static const char *des_cmds[] = {
+        "display","brightness","volume","mute","beep","idle",
+        0
+    };
+    /* FILES — VAULT + FAT32 + trash */
+    static const char *file_cmds[] = {
+        "ls","cat","save","mkdir","df","touch","rm","trash",
+        "truncate","echo","fat-mount","fat-ls","fat-cat","cp","wc",
+        "xxd","sha256","fs-undo","print","printers","printer",
+        "print-queue","print-cancel",
+        0
+    };
+
+    for (int i = 0; shell_cmds[i]; i++) {
+        const char *a = shell_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 0;
+    }
+    for (int i = 0; app_cmds[i]; i++) {
+        const char *a = app_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 1;
+    }
+    for (int i = 0; net_cmds[i]; i++) {
+        const char *a = net_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 2;
+    }
+    for (int i = 0; id_cmds[i]; i++) {
+        const char *a = id_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 3;
+    }
+    for (int i = 0; des_cmds[i]; i++) {
+        const char *a = des_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 4;
+    }
+    for (int i = 0; file_cmds[i]; i++) {
+        const char *a = file_cmds[i], *b = n;
+        while (*a && *b && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) return 5;
+    }
+    return 6; /* SYSTEM catch-all (settings, sensors, hardware probes,
+                 chains, scheduler, drivers, persistence, tests, ...) */
+}
+
 static void cmd_help(const char *args)
 {
     (void)args;
     kputs("\n");
     persona_banner_colored();
 
-    for (int i = 0; i < (int)NUM_COMMANDS; i++) {
-        if (cmd_visible(&commands[i], g_persona)) {
-            kputs("  ");
+    static const char *surface_names[] = {
+        "SHELL", "APPS", "NETWORK", "IDENTITY", "DESIGN", "FILES", "SYSTEM"
+    };
+    int n_surfaces = (int)(sizeof(surface_names)/sizeof(surface_names[0]));
+
+    for (int s = 0; s < n_surfaces; s++) {
+        /* Skip empty surfaces silently. */
+        int any = 0;
+        for (int i = 0; i < (int)NUM_COMMANDS; i++) {
+            if (!cmd_visible(&commands[i], g_persona)) continue;
+            if (help_surface_for(commands[i].name) != s) continue;
+            any = 1; break;
+        }
+        if (!any) continue;
+
+        kputs("  ");
+        kputs(surface_names[s]);
+        kputs("\n");
+
+        for (int i = 0; i < (int)NUM_COMMANDS; i++) {
+            if (!cmd_visible(&commands[i], g_persona)) continue;
+            if (help_surface_for(commands[i].name) != s) continue;
+            kputs("    ");
             kputs(commands[i].name);
-            /* Pad to 10 chars */
             int len = 0;
             const char *p = commands[i].name;
             while (*p++) len++;
-            for (int j = len; j < 10; j++)
-                kputc(' ');
+            for (int j = len; j < 18; j++) kputc(' ');
             kputs(commands[i].desc);
             kputs("\n");
         }
+        kputs("\n");
+    }
+
+    kputs("  See /docs for deep dives. specs/DESIGN_SYSTEM.md for the visual\n");
+    kputs("  language. README.md for the paradigm.\n");
+    if (g_persona != PERSONA_FULL) {
+        kputs("\n  Tip: any command works even if not listed. ");
+        kputs("'raise' shows all.\n");
     }
     kputs("\n");
-
-    if (g_persona != PERSONA_FULL) {
-        kputs("  Tip: any command works even if not listed. ");
-        kputs("'raise' shows all.\n\n");
-    }
 }
 
 static void cmd_info(const char *args)
@@ -1604,16 +1707,77 @@ static void cmd_signal(const char *args)
     }
 }
 
+#ifndef ZEOS_VERSION
+#define ZEOS_VERSION "alpha-0.2"
+#endif
+#ifndef ZEOS_COMMIT
+#define ZEOS_COMMIT  "unknown"
+#endif
+
+/* identity_context_list callback that captures the active context's
+ * name into the user pointer. */
+struct about_ctx_capture { int want_id; char name[32]; };
+static void about_capture_active(const identity_context_t *c, void *user)
+{
+    struct about_ctx_capture *cap = (struct about_ctx_capture *)user;
+    if (c && c->id == cap->want_id) {
+        int i = 0;
+        while (i < 31 && c->name[i]) { cap->name[i] = c->name[i]; i++; }
+        cap->name[i] = 0;
+    }
+}
+
 static void cmd_about(const char *args)
 {
     (void)args;
+
+    /* Resolve identity context name. */
+    int ctx_id = identity_context_active();
+    struct about_ctx_capture cap = { ctx_id, { 0 } };
+    if (ctx_id > 0) identity_context_list(about_capture_active, &cap);
+    if (!cap.name[0]) {
+        const char *fallback = "(none)";
+        int i = 0; while (fallback[i] && i < 31) { cap.name[i] = fallback[i]; i++; }
+        cap.name[i] = 0;
+    }
+
+    const char *persona_label = "Full";
+    switch (g_persona) {
+        case PERSONA_ZEROS: persona_label = "Zeros"; break;
+        case PERSONA_DEREZ: persona_label = "DereZ"; break;
+        case PERSONA_FULL:  persona_label = "Full";  break;
+    }
+
     kputs("\n");
-    kputs("  Zeos\n");
-    kputs("  The first operating system with proprioception.\n");
+    kputs("  Zeos ");
+    kputs(ZEOS_VERSION);
+    kputs("  (commit ");
+    kputs(ZEOS_COMMIT);
+    kputs(")\n");
     kputs("  Built by Codex Labs LLC.\n\n");
-    kputs("  Signal chains, not processes.\n");
-    kputs("  CFA addressing, not flat memory.\n");
-    kputs("  TRISA decides. The machine feels.\n\n");
+
+    kputs("  Chains live ............. ");
+    kput_dec((uint64_t)chain_count());
+    kputs("\n");
+    kputs("  CFA handles wrapped ..... ");
+    kput_dec((uint64_t)cfa_handle_count());
+    kputs("\n");
+    kputs("  Persona ................. ");
+    kputs(persona_label);
+    kputs("\n");
+    kputs("  Identity context ........ ");
+    kputs(cap.name);
+    kputs(" (id=");
+    kput_dec((uint64_t)(ctx_id > 0 ? ctx_id : 0));
+    kputs(")\n\n");
+
+    kputs("  Visual identity:\n");
+    kputs("  Zeros = teal. DereZ = magenta. Full = steel blue.\n");
+    kputs("  Sovereign tints gold. Reference tints blue.\n");
+    kputs("  No pure black, no pure white. Every motion is a spring.\n\n");
+
+    kputs("  498 lines of Z+ replacing ~1M LOC of conventional software,\n");
+    kputs("  on this hardware.\n\n");
 }
 
 /* ── Persona switching ──────────────────────────── */
@@ -1695,6 +1859,17 @@ static void cmd_derez(const char *args)
     persona_transition(old, PERSONA_DEREZ);
     kputs("\n");
     persona_banner_colored();
+}
+
+/* External persona setter for welcome.c (and any other module that
+ * needs to apply a persona without going through the cmd table). */
+void shell_set_persona(int p)
+{
+    int old = (int)g_persona;
+    if (p == PERSONA_ZEROS || p == PERSONA_DEREZ || p == PERSONA_FULL) {
+        g_persona = (enum persona)p;
+        if (old != p) persona_transition(old, (enum persona)p);
+    }
 }
 
 /* ── Zeros persona commands ─────────────────────── */
@@ -5255,7 +5430,7 @@ vault_done:
         extern uint32_t image_viewer_total_opens(void);
         extern uint32_t image_viewer_total_decodes_ok(void);
         extern uint32_t image_viewer_total_decodes_fail(void);
-        kputs("  Image viewer .......... ready (lodepng-backed, PNG only) (opens=");
+        kputs("  Image viewer .......... ready (formats: PNG, JPEG) (opens=");
         kput_dec((uint64_t)image_viewer_total_opens());
         kputs(" ok=");
         kput_dec((uint64_t)image_viewer_total_decodes_ok());

@@ -30,6 +30,7 @@
 #include "fat32.h"
 #include "kprint.h"
 #include "lodepng/lodepng.h"
+#include "jpeg.h"
 
 /* lodepng allocator shims (defined in browser.c, also reused by quick_look). */
 extern void *lodepng_malloc(uint64_t size);
@@ -170,6 +171,17 @@ static int iv_has_png_ext(const char *name) {
     if (n < 4) return 0;
     const char *e = name + n - 4;
     return iv_strcaseeq(e, ".png");
+}
+
+/* True if filename has a known image suffix (PNG or JPEG). */
+static int iv_has_image_ext(const char *name) {
+    int n = iv_strlen(name);
+    if (n < 4) return 0;
+    const char *e4 = name + n - 4;
+    if (iv_strcaseeq(e4, ".png")) return 1;
+    if (iv_strcaseeq(e4, ".jpg")) return 1;
+    if (n >= 5 && iv_strcaseeq(name + n - 5, ".jpeg")) return 1;
+    return 0;
 }
 
 static iv_fmt_t iv_sniff_fmt(const uint8_t *b, int n, const char *path) {
@@ -342,6 +354,80 @@ static int iv_decode_png(const char *path, uint64_t size) {
     return 1;
 }
 
+/* Read and decode a baseline JPEG file. Returns 1 on success.
+ * Mirrors iv_decode_png — same caps, same buffer lifecycle. */
+static int iv_decode_jpeg(const char *path, uint64_t size) {
+    if (size == 0 || size > IV_MAX_FILE_BYTES) {
+        g_iv.state = IV_STATE_TOO_BIG;
+        iv_strncpy(g_iv.err, "File exceeds 32 MB cap.", sizeof(g_iv.err));
+        return 0;
+    }
+    if (!fat32_mounted() || path[0] != '/') {
+        g_iv.state = IV_STATE_FAIL;
+        iv_strncpy(g_iv.err, "FAT32 not mounted or non-absolute path.",
+                   sizeof(g_iv.err));
+        return 0;
+    }
+    uint64_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) {
+        g_iv.state = IV_STATE_FAIL;
+        iv_strncpy(g_iv.err, "Out of memory (input buffer).", sizeof(g_iv.err));
+        return 0;
+    }
+    uint8_t *in = (uint8_t *)phys;
+    struct fat32_file f;
+    if (fat32_open(path, &f) < 0) {
+        for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+        g_iv.state = IV_STATE_FAIL;
+        iv_strncpy(g_iv.err, "Open failed.", sizeof(g_iv.err));
+        return 0;
+    }
+    int got = fat32_read(&f, in, (uint32_t)size);
+    if (got <= 0) {
+        for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+        g_iv.state = IV_STATE_FAIL;
+        iv_strncpy(g_iv.err, "Read failed.", sizeof(g_iv.err));
+        return 0;
+    }
+    unsigned char *pixels = 0;
+    unsigned w = 0, h = 0;
+    jpeg_status_t st = jpeg_decode_rgba(in, (size_t)got, &pixels, &w, &h);
+    for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+
+    if (st == JPEG_TOO_BIG) {
+        if (pixels) lodepng_free(pixels);
+        g_iv.state = IV_STATE_TOO_BIG;
+        iv_strncpy(g_iv.err, "JPEG exceeds 4096x4096 preview cap.",
+                   sizeof(g_iv.err));
+        g_total_decodes_fail++;
+        return 0;
+    }
+    if (st == JPEG_UNSUPPORTED) {
+        if (pixels) lodepng_free(pixels);
+        g_iv.state = IV_STATE_UNSUPPORTED;
+        iv_strncpy(g_iv.err,
+                   "JPEG variant not supported (baseline only).",
+                   sizeof(g_iv.err));
+        g_total_decodes_fail++;
+        return 0;
+    }
+    if (st != JPEG_OK || !pixels || w == 0 || h == 0) {
+        if (pixels) lodepng_free(pixels);
+        g_iv.state = IV_STATE_FAIL;
+        iv_strncpy(g_iv.err, "JPEG decode failed.", sizeof(g_iv.err));
+        g_total_decodes_fail++;
+        return 0;
+    }
+    iv_release_pixels();
+    g_iv.pixels = pixels;
+    g_iv.img_w  = w;
+    g_iv.img_h  = h;
+    g_iv.state  = IV_STATE_LOADED;
+    g_total_decodes_ok++;
+    return 1;
+}
+
 /* ── Public API ── */
 
 static void iv_layout(void) {
@@ -383,12 +469,14 @@ int image_viewer_open(const char *path)
     if (g_iv.fmt == IV_FMT_PNG) {
         ok = iv_decode_png(path, size);
         if (ok) iv_set_fit();
-    } else if (g_iv.fmt == IV_FMT_JPEG ||
-               g_iv.fmt == IV_FMT_WEBP ||
+    } else if (g_iv.fmt == IV_FMT_JPEG) {
+        ok = iv_decode_jpeg(path, size);
+        if (ok) iv_set_fit();
+    } else if (g_iv.fmt == IV_FMT_WEBP ||
                g_iv.fmt == IV_FMT_HEIC) {
         g_iv.state = IV_STATE_UNSUPPORTED;
         iv_strncpy(g_iv.err,
-                   "Format not yet supported (PNG only).",
+                   "Format not yet supported (PNG / JPEG only).",
                    sizeof(g_iv.err));
     } else {
         g_iv.state = IV_STATE_UNSUPPORTED;
@@ -421,7 +509,7 @@ int image_viewer_open_if_supported(const char *path) {
      * accepted but show "unsupported" — better to refuse the open. */
     char dir[IV_PATH_MAX], name[IV_PATH_MAX];
     iv_split_path(path, dir, sizeof(dir), name, sizeof(name));
-    if (!iv_has_png_ext(name)) return 0;
+    if (!iv_has_image_ext(name)) return 0;
     return image_viewer_open(path);
 }
 
@@ -684,7 +772,7 @@ void image_viewer_draw(void)
         int tw = iv_strlen(msg) * 8;
         fb_text(vx + (vw - tw) / 2, vy + vh / 2 - 8, msg, COLOR_ON_SURFACE_2);
         if (g_iv.state == IV_STATE_UNSUPPORTED) {
-            const char *hint = "JPEG / WebP / HEIC decoders not yet implemented.";
+            const char *hint = "WebP / HEIC decoders not yet implemented.";
             int hw = iv_strlen(hint) * 8;
             fb_text(vx + (vw - hw) / 2, vy + vh / 2 + 8, hint,
                     COLOR_ON_SURFACE_3);

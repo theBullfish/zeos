@@ -28,6 +28,7 @@
 #include "fat32.h"
 #include "ui_states.h"
 #include "lodepng/lodepng.h"
+#include "jpeg.h"
 
 /* lodepng allocator shims live in browser.c — reuse them here. */
 extern void *lodepng_malloc(uint64_t size);
@@ -115,6 +116,8 @@ static uint32_t g_total_decodes_fail = 0;
 static ql_kind_t ql_sniff(const uint8_t *b, int n) {
     if (n >= 4 && b[0] == 0x89 && b[1] == 0x50 &&
         b[2] == 0x4E && b[3] == 0x47) return QL_KIND_PNG;
+    if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF)
+        return QL_KIND_JPEG;
 
     /* Plain text heuristic: all bytes in first 64 either printable
      * ASCII (0x20..0x7E) or whitespace (\t \n \r). */
@@ -146,6 +149,64 @@ static void ql_release_png(void) {
     }
     g_ql.png_decoded_w = 0;
     g_ql.png_decoded_h = 0;
+}
+
+/* JPEG decoder for Quick Look. Same buffer slot as PNG (we just decode
+ * a JPEG into the png_pixels field; preview-time blit doesn't care
+ * which decoder produced the bytes). */
+static void ql_decode_jpeg(void) {
+    if (g_ql.size == 0 || g_ql.size > MAX_PNG_FILE_BYTES) {
+        g_ql.png_state = QL_PNG_TOO_BIG;
+        return;
+    }
+    if (!fat32_mounted() || g_ql.path[0] != '/') {
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    uint64_t pages = (g_ql.size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t phys = pmm_alloc_contiguous(pages);
+    if (!phys) {
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    uint8_t *in_buf = (uint8_t *)phys;
+    struct fat32_file f;
+    if (fat32_open(g_ql.path, &f) < 0) {
+        for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    int got = fat32_read(&f, in_buf, (uint32_t)g_ql.size);
+    if (got <= 0) {
+        for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+        g_ql.png_state = QL_PNG_FAIL;
+        return;
+    }
+    unsigned char *pixels = 0;
+    unsigned w = 0, h = 0;
+    jpeg_status_t st = jpeg_decode_rgba(in_buf, (size_t)got, &pixels, &w, &h);
+    for (uint64_t i = 0; i < pages; i++) pmm_free(phys + i * PAGE_SIZE);
+
+    if (st == JPEG_TOO_BIG ||
+        (st == JPEG_OK && (w > MAX_PREVIEW_W || h > MAX_PREVIEW_H))) {
+        if (pixels) lodepng_free(pixels);
+        g_ql.png_state = QL_PNG_TOO_BIG;
+        g_ql.png_w = (int)w;
+        g_ql.png_h = (int)h;
+        g_total_decodes_fail++;
+        return;
+    }
+    if (st != JPEG_OK || !pixels || w == 0 || h == 0) {
+        if (pixels) lodepng_free(pixels);
+        g_ql.png_state = QL_PNG_FAIL;
+        g_total_decodes_fail++;
+        return;
+    }
+    g_ql.png_pixels    = pixels;
+    g_ql.png_decoded_w = w;
+    g_ql.png_decoded_h = h;
+    g_ql.png_state     = QL_PNG_OK;
+    g_total_decodes_ok++;
 }
 
 /* Pull the entire PNG into a contiguous PMM buffer, decode, then
@@ -273,6 +334,10 @@ void quick_look_open(const char *path, uint64_t size, uint64_t mtime,
             /* Defer decode to first draw — gives the compositor a
              * frame to paint the spinner before we burn cycles in
              * inflate(). */
+            g_ql.png_state = QL_PNG_PENDING;
+        } else if (g_ql.kind == QL_KIND_JPEG) {
+            /* JPEG dims are buried inside SOF0; we let the decoder
+             * report them. Defer decode same as PNG. */
             g_ql.png_state = QL_PNG_PENDING;
         }
     }
@@ -458,18 +523,20 @@ void quick_look_draw(void)
 
     if (g_ql.kind == QL_KIND_TEXT && g_ql.buf_used > 0) {
         ql_draw_text_body(body_x, body_y, body_w, body_h);
-    } else if (g_ql.kind == QL_KIND_PNG) {
+    } else if (g_ql.kind == QL_KIND_PNG || g_ql.kind == QL_KIND_JPEG) {
         if (g_ql.png_state == QL_PNG_PENDING) {
             /* Spinner via list_render_state — first frame after open. */
             list_state_ctx_t lc = {
                 .x = body_x, .y = body_y, .w = body_w, .h = body_h,
                 .state = LIST_LOADING,
-                .message = "Decoding PNG…",
+                .message = (g_ql.kind == QL_KIND_JPEG)
+                           ? "Decoding JPEG…" : "Decoding PNG…",
                 .cta = 0, .retry_cb = 0, .retry_ctx = 0,
             };
             list_render_state(&lc);
             /* Trigger decode and request another paint. */
-            ql_decode_png();
+            if (g_ql.kind == QL_KIND_JPEG) ql_decode_jpeg();
+            else                            ql_decode_png();
             compositor_dirty(qx, qy, QL_W, QL_H);
             return;
         }
