@@ -152,6 +152,79 @@ pub struct Emission {
     pub label: Option<String>,
 }
 
+/// Runtime instrumentation event. Observers receive these in tick
+/// order. Used by the reporter / tuning subsystems (see
+/// `specs/MEASUREMENT_TARGETS.md` for the categories these feed).
+#[derive(Debug, Clone)]
+pub enum RuntimeEvent {
+    /// New tick begins. Carries the tick number and the simulated
+    /// time at the start of the tick (in ms).
+    TickStart { tick: u64, simulated_ms: u64 },
+    /// A merge resolved per its policy. `fired` = how many inputs
+    /// fired this tick; `total` = how many inputs the merge has;
+    /// `passed` = whether the merge produced a downstream value.
+    /// This is the chord-rule observability hook — `passed = false`
+    /// when fired < required-by-policy is interesting (it means the
+    /// chord didn't form this tick).
+    MergeResolved {
+        tick: u64,
+        policy: String,
+        fired: usize,
+        total: usize,
+        passed: bool,
+    },
+    /// A builtin call evaluated. `name` is the callee path.
+    /// `produced_value` indicates whether the call emitted (vs
+    /// returned None / was filtered out by a gate).
+    BuiltinCall {
+        tick: u64,
+        name: String,
+        produced_value: bool,
+    },
+    /// A sink fired. Mirror of `Emission` but in the event stream so
+    /// observers see it in flow order.
+    Emitted(Emission),
+}
+
+/// Observer interface — anything that wants to receive runtime events.
+/// Implement this to hook into the runtime; `Runtime::set_observer`
+/// installs one. Observers see events as they happen, in tick order.
+///
+/// Use cases:
+/// - **Reporter** (next): aggregate per-window for opt-in test reports
+/// - **Tuning** (after that): collect data to suggest better
+///   `RuntimeConfig` settings
+/// - **Visualizer**: render the chain graph live
+/// - **Tests**: assert specific event sequences
+///
+/// Observers must be `Send` so the runtime can use them across
+/// threads if it wants to (real-time mode in the future).
+pub trait Observer: Send {
+    fn on_event(&mut self, event: &RuntimeEvent);
+}
+
+/// Convenience observer that buffers every event into a `Vec`. Useful
+/// for tests and one-shot replay.
+#[derive(Debug, Default)]
+pub struct VecObserver {
+    pub events: Vec<RuntimeEvent>,
+}
+
+impl Observer for VecObserver {
+    fn on_event(&mut self, event: &RuntimeEvent) {
+        self.events.push(event.clone());
+    }
+}
+
+/// No-op observer — the default when none is installed. Saves a
+/// branch in the hot path.
+#[derive(Debug, Default)]
+struct NullObserver;
+
+impl Observer for NullObserver {
+    fn on_event(&mut self, _event: &RuntimeEvent) {}
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeError {
     pub tick: u64,
@@ -185,6 +258,8 @@ pub struct Runtime<'src> {
     call_state: HashMap<usize, CallState>,
     /// Emissions captured this run. Sinks append; `run()` returns them.
     emissions: Vec<Emission>,
+    /// Observer to notify on runtime events. Defaults to no-op.
+    observer: Box<dyn Observer>,
 }
 
 /// Stateful state for transformers that need to remember things
@@ -210,7 +285,22 @@ impl<'src> Runtime<'src> {
             merge_pending: HashMap::new(),
             call_state: HashMap::new(),
             emissions: Vec::new(),
+            observer: Box::new(NullObserver),
         }
+    }
+
+    /// Install an observer to receive runtime events. Replaces any
+    /// existing observer.
+    pub fn set_observer<O: Observer + 'static>(&mut self, observer: O) {
+        self.observer = Box::new(observer);
+    }
+
+    /// Record an emission: push to the captured list AND fire the
+    /// observer's `Emitted` event. All sink paths go through here so
+    /// the two stay in sync.
+    fn record_emission(&mut self, emission: Emission) {
+        self.observer.on_event(&RuntimeEvent::Emitted(emission.clone()));
+        self.emissions.push(emission);
     }
 
     /// Current simulated time in milliseconds — `tick * sim_ms_per_tick`.
@@ -235,6 +325,11 @@ impl<'src> Runtime<'src> {
             *v = None;
         }
         self.merge_pending.clear();
+        let sim_ms = self.simulated_time_ms();
+        self.observer.on_event(&RuntimeEvent::TickStart {
+            tick: self.tick,
+            simulated_ms: sim_ms,
+        });
 
         // Walk every stmt; sources fire, transformers and sinks run.
         // A snapshot of stmts since we mutate self.
@@ -327,8 +422,9 @@ impl<'src> Runtime<'src> {
                 // Special-case sink names so we capture emissions.
                 if matches!(name.as_str(), "print" | "log") {
                     if let Some(v) = upstream.clone() {
-                        self.emissions.push(Emission {
-                            tick: self.tick,
+                        let tick = self.tick;
+                        self.record_emission(Emission {
+                            tick,
                             sink: name.clone(),
                             value: v,
                             label: None,
@@ -443,8 +539,9 @@ impl<'src> Runtime<'src> {
                     },
                 });
                 if let Some(v) = upstream {
-                    self.emissions.push(Emission {
-                        tick: self.tick,
+                    let tick = self.tick;
+                    self.record_emission(Emission {
+                        tick,
                         sink: name.clone(),
                         value: v,
                         label,
@@ -456,8 +553,9 @@ impl<'src> Runtime<'src> {
                 // Storage sink — for v1 just capture as Emission so the
                 // test harness can verify the chain fired.
                 if let Some(v) = upstream {
-                    self.emissions.push(Emission {
-                        tick: self.tick,
+                    let tick = self.tick;
+                    self.record_emission(Emission {
+                        tick,
                         sink: name.clone(),
                         value: v,
                         label: None,
@@ -567,6 +665,14 @@ impl<'src> Runtime<'src> {
         }
         let n_inputs = merge.inputs.len();
         let n_fired = fired.len();
+        let policy_label = match &merge.policy {
+            MergePolicy::All => "all".to_string(),
+            MergePolicy::Any => "any".to_string(),
+            MergePolicy::Quorum { n, m } => format!("quorum({}/{})", n, m),
+            MergePolicy::Fastest(n) => format!("fastest({})", n),
+            MergePolicy::Within(_) => "within".to_string(),
+            MergePolicy::By(p) => format!("by({})", p.joined()),
+        };
 
         let resolved = match &merge.policy {
             MergePolicy::All => {
@@ -600,6 +706,15 @@ impl<'src> Runtime<'src> {
                 }
             }
         };
+
+        let passed = resolved.is_some();
+        self.observer.on_event(&RuntimeEvent::MergeResolved {
+            tick: self.tick,
+            policy: policy_label,
+            fired: n_fired,
+            total: n_inputs,
+            passed,
+        });
 
         // If resolved and there's a downstream, propagate.
         if let Some(v) = resolved {
@@ -987,6 +1102,87 @@ mod tests {
         // Tick(N) should be comparable to Int(N) via numeric coercion.
         let r = eval_binop(BinOp::Gt, Some(Value::Tick(5)), Some(Value::Int(3)));
         assert_eq!(r, Some(Value::Bool(true)));
+    }
+
+    // ── observer / events ────────────────────────────────────────
+
+    #[test]
+    fn observer_sees_tick_start_per_step() {
+        let module = parse("x : tick(rate: 1) -> print").expect("parse");
+        let mut rt = Runtime::new(module);
+        rt.set_observer(VecObserver::default());
+        rt.run(3).expect("run");
+        // We can't extract back from boxed observer easily; verify via
+        // the emissions count instead, plus the merge-events case below.
+        assert_eq!(rt.emissions.len(), 3);
+    }
+
+    #[test]
+    fn observer_records_full_event_stream() {
+        // Use a shared Vec via Arc<Mutex<Vec>> for a test-friendly observer.
+        use std::sync::{Arc, Mutex};
+        struct SharedObserver(Arc<Mutex<Vec<RuntimeEvent>>>);
+        impl Observer for SharedObserver {
+            fn on_event(&mut self, e: &RuntimeEvent) {
+                self.0.lock().unwrap().push(e.clone());
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let module = parse("x : tick(rate: 1) -> print").expect("parse");
+        let mut rt = Runtime::new(module);
+        rt.set_observer(SharedObserver(log.clone()));
+        rt.run(3).expect("run");
+        let events = log.lock().unwrap().clone();
+        // Expected: 3 TickStart events + 3 Emitted events. No merges
+        // in this simple chain.
+        let tick_starts = events
+            .iter()
+            .filter(|e| matches!(e, RuntimeEvent::TickStart { .. }))
+            .count();
+        let emits = events
+            .iter()
+            .filter(|e| matches!(e, RuntimeEvent::Emitted(_)))
+            .count();
+        assert_eq!(tick_starts, 3);
+        assert_eq!(emits, 3);
+    }
+
+    #[test]
+    fn observer_records_merge_resolution() {
+        use std::sync::{Arc, Mutex};
+        struct SharedObserver(Arc<Mutex<Vec<RuntimeEvent>>>);
+        impl Observer for SharedObserver {
+            fn on_event(&mut self, e: &RuntimeEvent) {
+                self.0.lock().unwrap().push(e.clone());
+            }
+        }
+        // Two-input merge with All policy. Both fire every tick →
+        // chord forms each tick → MergeResolved with passed: true.
+        let src = "
+            a : tick(rate: 1) -> a_wire
+            b : tick(rate: 1) -> b_wire
+            a_wire -> |
+            b_wire -> | -> alert(info: \"both\")
+        ";
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        rt.set_observer(SharedObserver(log.clone()));
+        rt.run(2).expect("run");
+        let events = log.lock().unwrap().clone();
+        let merges: Vec<&RuntimeEvent> = events
+            .iter()
+            .filter(|e| matches!(e, RuntimeEvent::MergeResolved { .. }))
+            .collect();
+        assert!(!merges.is_empty(), "expected at least one MergeResolved event");
+        for ev in &merges {
+            if let RuntimeEvent::MergeResolved { policy, fired, total, passed, .. } = ev {
+                assert_eq!(policy, "all");
+                assert_eq!(*fired, 2);
+                assert_eq!(*total, 2);
+                assert!(*passed, "All-policy with both inputs firing should pass");
+            }
+        }
     }
 
     #[test]
