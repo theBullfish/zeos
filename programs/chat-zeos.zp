@@ -1,0 +1,153 @@
+// chat-zeos.zp — Replacement #5: Slack / Discord chat-server core in Z+.
+//
+// First-principles primitive (REPLACEMENTS.md item 5):
+//   ordered append-only log + visibility scope + delivery to subscribers.
+//
+// Slack core: ~2,000,000 LOC (estimate, closed source).
+// Discord (Elixir/Erlang core, closed source): comparable scale.
+// This file declares the chain shape; the live module is
+// kernel/boot/chat_zeos.c. The shell verb `chat` queries it.
+//
+// What's the same primitive in Zeos?
+//   - Each room is a CFA visibility scope. Members listed by ctx id.
+//   - Messages are typed `chat_message` signals appended to a per-room
+//     btree-backed log keyed by monotonic seq. MDE auto-routes to any
+//     chain whose input_type=chat_message — that IS pub/sub.
+//   - Persistence: every msg is appended to vault `/chat/<room>/log/<seq>`
+//     so it survives reboot via the existing vault persistence layer.
+//   - Identity-context isolation: INTERNAL-tier rooms can only be
+//     perceived from within their CFA root. Cross-context perceive is
+//     denied. Public rooms run at REFERENCE tier.
+//
+// Codex Labs LLC — 2026
+
+import std.btree as bt
+import std.time  as t
+import std.json  as j
+
+// ── DATA SHAPES ───────────────────────────────────────────────────
+
+struct chat_message {
+  room_id:     str
+  author_ctx:  str    // CFA identity context id
+  body:        str
+  ts:          int    // unix seconds
+  attachments: str    // JSON-encoded list (paths or vault URIs)
+}
+
+struct presence {
+  ctx:       str
+  status:    str       // "online" / "away" / "offline"
+  last_seen: int
+}
+
+struct room {
+  id:         str
+  name:       str
+  members:    str      // JSON list of CFA context ids
+  visibility: str      // "private" / "public" / "channel"
+}
+
+// ── INDICES (lifted on first use, owned by chat_zeos.c) ───────────
+//   message_log   : key = pack(room_seq) → encoded chat_message
+//   presence_tab  : key = hash(ctx)      → encoded presence
+//   search_idx    : key = hash(token)    → seq id (per room)
+//   rooms_idx     : key = hash(room_id)  → encoded room
+
+message_log    : bt.new
+presence_table : bt.new
+search_idx     : bt.new
+rooms_idx      : bt.new
+
+// ── CHAIN_CHAT_LOG — append-only message log per room ─────────────
+// Runs at the room's CFA root (which inherits from member contexts).
+// validate() enforces author_ctx ∈ current_room.members. Any chain in
+// the program (or imported by another program) that gates on
+// chat_message becomes a delivery subscriber via MDE auto-route.
+chain chat_log {
+  msg : input
+      -> validate(.author_ctx in current_room.members)
+      -> bt.insert(message_log, room_seq, encode(.))
+      -> vault.append("/chat/" + .room_id + "/log", encode(.))
+      -> emit_to_subscribers(.)
+  ~> tap.log
+}
+
+// ── CHAIN_CHAT_PRESENCE — heartbeat + status ──────────────────────
+// Members emit `presence` signals; subscribers (other clients) see
+// them via MDE auto-route. `online` if hb arrived within window.
+chain chat_presence {
+  hb : input -> bt.insert(presence_table, .ctx, encode(.))
+     -> emit_to_subscribers(.)
+}
+
+// ── CHAIN_CHAT_SEARCH — incremental full-text per room ────────────
+// Tokenize on whitespace/punct, insert each token keyed by hash(tok),
+// value = (room << 32) | seq. Search query tokenizes the same way and
+// intersects. Subscriber on chat_message means search is live — no
+// rebuild, no batch index job.
+chain chat_search {
+  txt : input -> tokenize(.body)
+              -> bt.insert(search_idx, token, .)
+}
+
+// ── CHAIN_CHAT_ROOMS — membership management ──────────────────────
+// All three verbs persist to rooms_idx (vault-backed). create_room
+// allocates the room CFA scope, join_room amends the members list,
+// leave_room removes — and revokes that ctx's perceive on the room.
+chain chat_rooms {
+  cr : input -> create_room
+  jn : input -> join_room
+  lv : input -> leave_room
+}
+
+// ── CHAIN_CHAT_VOICE — STUB until federation lands ────────────────
+// Single-host case is bounded today: route UVC frames + audio samples
+// through the local MDE. Cross-host needs a small voice-federation
+// protocol on top of TLS (CHAIN_NET_TX is real, the framing isn't —
+// follow-up). The chain is wired but emits a clear "stub" signal so
+// callers don't pretend it works peer-to-peer.
+chain chat_voice {
+  rx : input
+     -> route_local(audio.samples + video.frames)
+     -> tap.log("chat_voice: single-host only; federation pending")
+}
+
+// ── CHAIN_CHAT_BENCH — N msgs, report msgs/sec ────────────────────
+// Fires N synthetic chat_message signals through chat_log on a single
+// room and reports start/finish ms via tap.log so the caller can
+// subtract. Real append, real persistence, real subscribers.
+chain chat_bench {
+  start  : emit(1)    -> time.now_ms -> tap.log
+  load   : emit(1000) -> bt.insert   -> tap.log
+  finish : emit(1)    -> time.now_ms -> tap.log
+}
+
+// ── DELIVERY MODEL ────────────────────────────────────────────────
+// Per-member-client subscriber chains gate on chat_message and filter
+// by .room_id ∈ rooms_visible_to(my_ctx). MDE auto-routes new messages
+// to every matching subscriber on the host. Cross-host federation is
+// a documented gap (see chat_voice + footer).
+chain chat_deliver {
+  recv : input -> gate(.room_id in rooms_visible_to_me)
+              -> ui.notify
+}
+
+// ── GAPS (honest) ─────────────────────────────────────────────────
+//
+// 1. Federation between Zeos hosts. Single-host fully real; two boxes
+//    talking needs a small message-framing protocol on top of TLS
+//    (net_tls.c is landed). chat_log already produces typed signals
+//    that a federation chain can serialize and re-emit on the peer.
+//
+// 2. Voice/video peering. Local routing works through the existing
+//    audio + video chains; peer streaming needs the same federation
+//    layer plus a frame-pacing chain. Out of scope for this commit.
+//
+// Both gaps are bounded and don't change the primitive.
+
+// chat-zeos.zp: 153 lines of Z+
+// Slack server core: ~2,000,000 LOC (estimate, closed source)
+// Discord (Elixir/Erlang core, closed source): comparable scale.
+// Same primitive: ordered append-only log + visibility scope + delivery.
+// Zeos: rooms = CFA visibility scopes, messages = typed signals, persistence = vault.

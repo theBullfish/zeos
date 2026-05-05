@@ -32,6 +32,7 @@
 #include "identity.h"
 #include "calendar.h"
 #include "notes_zeos.h"
+#include "chat_zeos.h"
 #include "std_http.h"
 #include "nvme.h"
 #include "ahci.h"
@@ -264,6 +265,7 @@ static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
 static void cmd_notes(const char *args);
+static void cmd_chat(const char *args);
 static void cmd_web(const char *args);
 
 /* USB UVC webcams */
@@ -766,6 +768,7 @@ static const struct shell_cmd commands[] = {
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
     {"notes",   "notes-zeos: backlinks <path> | search <q> | index-stats", cmd_notes, VIS_ALWAYS},
+    {"chat",    "chat-zeos: rooms | send <r> <body> | tail <r> [N] | search <q> | presence", cmd_chat, VIS_ALWAYS},
     {"web",     "web-zeos: start [port] | add-route <m> <p> <h> | stop | stats | bench", cmd_web, VIS_ALWAYS},
 
     /* USB UVC webcams */
@@ -2658,6 +2661,143 @@ static void cmd_notes(const char *args)
         return;
     }
     kputs("  notes: unknown subcommand '"); kputs(sub); kputs("'\n");
+}
+
+/* chat-zeos — Replacement #5: Slack / Discord chat-server core in Z+.
+ *
+ *   chat rooms                       — list rooms visible to current ctx
+ *   chat create <id> [public]        — create a room (private by default)
+ *   chat join <id> [ctx]             — add a member ctx (default: self)
+ *   chat send <room> <body...>       — append a message
+ *   chat tail <room> [N]             — show last N messages (default 10)
+ *   chat search <query>              — full-text across visible rooms
+ *   chat presence [status]           — set self status / list presence
+ *   chat stats                       — counters
+ *   chat bench [N]                   — benchmark N synthetic messages
+ *   chat voice                       — voice/federation status (stub)
+ *
+ * Real append-only log via std.btree, real persistence to vault under
+ * /chat/<room>/log, real CFA-context-scoped visibility (private rooms
+ * INTERNAL tier, public/channel REFERENCE tier). Voice and cross-host
+ * federation are explicit stubs — see `chat voice`.
+ */
+static void cmd_chat(const char *args)
+{
+    chat_zeos_init();
+    const char *p = args;
+    while (*p == ' ') p++;
+    char sub[24];
+    int si = 0;
+    while (*p && *p != ' ' && si < 23) sub[si++] = *p++;
+    sub[si] = 0;
+    while (*p == ' ') p++;
+    const char *rest = p;
+
+    if (sub[0] == 0) {
+        kputs("  Usage:\n");
+        kputs("    chat rooms\n");
+        kputs("    chat create <id> [public]\n");
+        kputs("    chat join <id> [ctx]\n");
+        kputs("    chat send <room> <body...>\n");
+        kputs("    chat tail <room> [N]\n");
+        kputs("    chat search <query>\n");
+        kputs("    chat presence [online|away|offline]\n");
+        kputs("    chat stats\n");
+        kputs("    chat bench [N]\n");
+        kputs("    chat voice\n");
+        return;
+    }
+
+    if (sub[0] == 'r' && sub[1] == 'o') {                        /* rooms */
+        chat_zeos_print_rooms(chat_zeos_current_ctx());
+        return;
+    }
+    if (sub[0] == 'c' && sub[1] == 'r') {                        /* create */
+        char id[64]; int i = 0;
+        while (*rest && *rest != ' ' && i < 63) id[i++] = *rest++;
+        id[i] = 0;
+        if (!id[0]) { kputs("  Usage: chat create <id> [public]\n"); return; }
+        while (*rest == ' ') rest++;
+        int vis = 0;
+        if (rest[0] == 'p') vis = 1;
+        else if (rest[0] == 'c') vis = 2;
+        int rc = chat_zeos_create_room(id, id, vis);
+        if (rc == 0) { kputs("  created room "); kputs(id); kputs("\n"); }
+        else         { kputs("  could not create room (exists or full)\n"); }
+        return;
+    }
+    if (sub[0] == 'j' && sub[1] == 'o') {                        /* join */
+        char id[64]; int i = 0;
+        while (*rest && *rest != ' ' && i < 63) id[i++] = *rest++;
+        id[i] = 0;
+        if (!id[0]) { kputs("  Usage: chat join <id> [ctx]\n"); return; }
+        while (*rest == ' ') rest++;
+        const char *who = (*rest) ? rest : chat_zeos_current_ctx();
+        int rc = chat_zeos_join_room(id, who);
+        if (rc == 0) { kputs("  "); kputs(who); kputs(" joined "); kputs(id); kputs("\n"); }
+        else         { kputs("  join failed (no such room or full)\n"); }
+        return;
+    }
+    if (sub[0] == 's' && sub[1] == 'e' && sub[2] == 'n') {       /* send */
+        char id[64]; int i = 0;
+        while (*rest && *rest != ' ' && i < 63) id[i++] = *rest++;
+        id[i] = 0;
+        while (*rest == ' ') rest++;
+        if (!id[0] || !*rest) {
+            kputs("  Usage: chat send <room> <body...>\n");
+            return;
+        }
+        int seq = chat_zeos_send(id, chat_zeos_current_ctx(), rest);
+        if (seq >= 0) {
+            kputs("  sent ["); kput_dec((unsigned)seq); kputs("] -> ");
+            kputs(id); kputs("\n");
+        } else if (seq == -2) { kputs("  no such room: "); kputs(id); kputs("\n"); }
+          else if (seq == -3) { kputs("  denied: not a member of "); kputs(id); kputs("\n"); }
+          else                { kputs("  send failed\n"); }
+        return;
+    }
+    if (sub[0] == 't' && sub[1] == 'a') {                        /* tail */
+        char id[64]; int i = 0;
+        while (*rest && *rest != ' ' && i < 63) id[i++] = *rest++;
+        id[i] = 0;
+        if (!id[0]) { kputs("  Usage: chat tail <room> [N]\n"); return; }
+        while (*rest == ' ') rest++;
+        int n = 10;
+        if (*rest >= '0' && *rest <= '9') {
+            n = 0;
+            while (*rest >= '0' && *rest <= '9') { n = n * 10 + (*rest - '0'); rest++; }
+        }
+        chat_zeos_print_tail(id, chat_zeos_current_ctx(), n);
+        return;
+    }
+    if (sub[0] == 's' && sub[1] == 'e' && sub[2] == 'a') {       /* search */
+        chat_zeos_print_search(chat_zeos_current_ctx(), rest);
+        return;
+    }
+    if (sub[0] == 'p' && sub[1] == 'r') {                        /* presence */
+        if (*rest) chat_zeos_presence(chat_zeos_current_ctx(), rest);
+        chat_zeos_print_presence(chat_zeos_current_ctx());
+        return;
+    }
+    if (sub[0] == 's' && sub[1] == 't') {                        /* stats */
+        kputs("  chat-zeos stats:\n");
+        kputs("    rooms     : "); kput_dec(chat_zeos_total_rooms());    kputs("\n");
+        kputs("    messages  : "); kput_dec(chat_zeos_total_messages()); kputs("\n");
+        kputs("    members   : "); kput_dec(chat_zeos_total_members());  kputs("\n");
+        kputs("    self ctx  : "); kputs(chat_zeos_current_ctx());       kputs("\n");
+        return;
+    }
+    if (sub[0] == 'b' && sub[1] == 'e') {                        /* bench */
+        int n = 0;
+        while (*rest >= '0' && *rest <= '9') { n = n * 10 + (*rest - '0'); rest++; }
+        chat_zeos_bench(n > 0 ? n : 100);
+        return;
+    }
+    if (sub[0] == 'v' && sub[1] == 'o') {                        /* voice */
+        chat_zeos_voice_stub();
+        return;
+    }
+    kputs("  chat: unknown subcommand '"); kputs(sub); kputs("'\n");
 }
 
 /* ── web-zeos (Replacement #2 — nginx) ────────────────────────────
