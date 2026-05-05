@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use zplus::{lex, TokenKind};
+use zplus::{lex, parse, TokenKind};
 
 /// Files known to use lexical surface the lexer doesn't yet handle.
 /// As of v3, every .zp file in the corpus tokenizes cleanly — this
@@ -85,6 +85,43 @@ fn every_program_round_trips() {
         "{} file(s) failed round-trip:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+}
+
+/// Parser corpus-coverage tracker. Asserts a minimum number of files
+/// parse cleanly. Bumping this assertion upward is a deliberate ratchet:
+/// add parser features → coverage rises → bump the lower bound. New
+/// regressions that would push coverage back down fail this test fast.
+#[test]
+fn parser_minimum_corpus_coverage() {
+    const MINIMUM_CLEAN: usize = 25;
+
+    let root = programs_dir();
+    let mut files = Vec::new();
+    collect_zp_files(&root, &mut files);
+    let total = files.len();
+
+    let mut clean = 0;
+    let mut errors = Vec::new();
+    for path in &files {
+        let src = fs::read_to_string(path).expect("read source");
+        match parse(&src) {
+            Ok(_) => clean += 1,
+            Err(e) => errors.push(format!(
+                "{}: {}",
+                relative_key(path, &root),
+                e.message
+            )),
+        }
+    }
+    assert!(
+        clean >= MINIMUM_CLEAN,
+        "parser corpus coverage regressed: {}/{} files parse cleanly (minimum {}). \
+         Sample errors:\n{}",
+        clean,
+        total,
+        MINIMUM_CLEAN,
+        errors.iter().take(5).cloned().collect::<Vec<_>>().join("\n")
     );
 }
 

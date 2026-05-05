@@ -61,9 +61,12 @@ session. Three sections, that's it.
   canary), the within(30s) merge has 2 inputs + Within policy +
   downstream, the dashboard section produces ≥3 Tap statements.
 
-  Corpus parse coverage: **2/68** files (02_log_monitor.zp,
-  12_search_engine.zp). The other 66 exercise constructs the parser
-  doesn't yet handle — see Next up. None affect the chord rule.
+  Corpus parse coverage: **28/68** files (commit `0a7c72a`). Started
+  at 2/68; pushed up to 28 across two batches of additive parser
+  features. Tracked by a ratchet test in `tests/corpus.rs`
+  (`parser_minimum_corpus_coverage`) that asserts ≥25 clean — bump
+  the floor as coverage rises. None of the additions affect the
+  chord rule.
 
   `zplus-parse` CLI: `cd tools/zplus && cargo run --bin zplus-parse -- <file.zp>`.
 
@@ -100,10 +103,36 @@ session. Three sections, that's it.
 
 ## Next up
 
-**Expand parser corpus coverage.** 02_log_monitor.zp is the green-light
-target and works. The other 66 .zp files trip the parser on
-straightforward additive features. None of these affect the AST shape
-or the chord rule — just adding cases. Suggested order, easiest first:
+**Push parser corpus coverage past 28/68.** Top remaining error
+categories (each blocks several files; all additive, none affect
+chord rule):
+
+- **Pipe-separated alts inside fork bodies** (13, 17, 24,
+  competition/first_challenge): fork branch values like
+  `mode(quiet): gate(heat < 0.5)` followed by alts. Eat `| <atom>`
+  inside fork bodies same as named args.
+- **`Lt` in chain term** (19): `a < b` mid-chain. Add comparison
+  operators at chain level too.
+- **`Star` bare** (derez/block_builder, derez/bot_trainer): probably
+  `**` glob in non-string context.
+- **`chain X { ... }` declaration form** (30, 31, 32): top-level
+  declaration with a SPACE-separated body. Different from `{a, b, c}`
+  fork.
+- **`descending` after a value** (15): `merge(sort: price descending)`
+  — multi-word value form. Hardest one to parse cleanly.
+- **`(` as chain term** (10 still after fix): some forms still
+  trigger this — investigate per file.
+- **`{` got `{` in fork** (competition/zeros_tournament): nested
+  forks in unusual positions.
+
+After parser hits ~50/68, the architecture decisions kick in:
+
+- Type system / typed ports (CHAIN_CONTRACT.md)
+- IR design (LLVM IR vs custom — open question still)
+- Codegen + runtime
+- The other empty `tools/` dirs: zeos-build, zeos-pkg, zeos-vc
+
+Suggested order, easiest first:
 
 1. **Fork blocks `{ a, b, c }`.** Most common gap (~30 files use
    forks). Add to `parse_chain_term`: on `LBrace`, parse
