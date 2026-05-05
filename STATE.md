@@ -66,14 +66,24 @@ session. Three sections, that's it.
   `parser_minimum_corpus_coverage` is locked at 68 — any regression
   fails CI. None of the additions affect the chord rule.
 
-- Type system shape designed (next commit). `src/ty.rs` defines the
-  typed enum surface — `Type::{Prim, Tagged, Sig, Range, Rate, Tuple,
-  List, Grid, Map, Record, Union, Fn, Nominal, Quorum, Named, Unknown,
-  Any, Never}` plus `UnitTag::{Simple, Compound, HardwarePin}`. Same
+- Type system shape (commit `85e49d6`). `src/ty.rs` defines the typed
+  enum surface — `Type::{Prim, Tagged, Sig, Range, Rate, Tuple, List,
+  Grid, Map, Record, Union, Fn, Nominal, Quorum, Named, Unknown, Any,
+  Never}` plus `UnitTag::{Simple, Compound, HardwarePin}`. Same
   pattern as ast.rs — design before checker code locks the shape.
   `tools/zplus/SEMANTIC_CONTRACTS.md` enumerates each of the 28
   synthetic `__op__` callees with input/output type, runtime contract,
   and parser-emit site.
+
+- Type checker first cut (commit `502bd37`). `src/check.rs` runs over
+  a parsed Module and reports `TypeError`s. v1 enforces:
+  literal typing (every `Atom::Literal` → concrete `Type`) and Merge
+  arity (chord rule at the type layer — Quorum / Fastest / All / Any
+  / Within / By each have shape rules the runtime needs to honor).
+  The corpus sweep finds 17 known violations, all parser-limitation
+  empty-merge cases (fork-body merges aren't coalesced). Ratchet
+  capped at 17. Test integrates against `02_log_monitor.zp` cleanly.
+  **96 tests green**.
 
   `zplus-parse` CLI: `cd tools/zplus && cargo run --bin zplus-parse -- <file.zp>`.
 
@@ -112,12 +122,15 @@ session. Three sections, that's it.
 
 **Type checker.** Type-shape is in. Next session writes the actual checker:
 
-- **Type checker.** Walk the AST, infer / check types per the
-  contracts in `tools/zplus/SEMANTIC_CONTRACTS.md`. Hardware-class
-  types are nominal (per CHAIN_CONTRACT.md); language-level types
-  are structural; numeric promotion (Int → Float) is the only
-  implicit conversion. Smallest cut: type-check
-  `programs/02_log_monitor.zp` against the 28 op-contracts.
+- **Type checker — second cut.** v1 covers literals + Merge arity.
+  Next: type inference for non-literal terms, Flow connectivity, and
+  a built-in environment for `gate` / `parse` / `delta` / `rate` /
+  `vault.*` / etc. Pre-bake the built-in signatures into a `TypeEnv`
+  so the checker knows e.g. `gate: Sig<T>, Predicate<T> -> Sig<T>`,
+  `delta: Sig<T> -> Sig<Δ T>`. Smallest cut: drive the count of
+  17 known empty-merge corpus violations to zero by fixing the
+  parser to coalesce fork-body merges (the underlying bug, not
+  hiding the symptom).
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
