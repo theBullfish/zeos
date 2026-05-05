@@ -80,9 +80,22 @@ session. Three sections, that's it.
   literal typing (every `Atom::Literal` → concrete `Type`) and Merge
   arity (chord rule at the type layer — Quorum / Fastest / All / Any
   / Within / By each have shape rules the runtime needs to honor).
-  The corpus sweep finds 17 known violations, all parser-limitation
-  empty-merge cases (fork-body merges aren't coalesced). Ratchet
-  capped at 17. Test integrates against `02_log_monitor.zp` cleanly.
+  Corpus integration test against `02_log_monitor.zp` clean.
+
+- Chord-rule violations driven 17 → 0 (commit `13f3b76`). Three
+  parser fixes: fork-body merge coalescing, Bind-wrapped merge
+  coalescing at stmt level, type-union `| IDENT` shorthand on `->`
+  RHS. The full corpus now passes the chord-rule arity check with
+  zero exceptions. Ratchet locked at 0.
+
+- New feature spec: `specs/OPT_IN_TEST_REPORTING.md` (no commit yet
+  — captured 2026-05-05 from a Brad directive). Zeos ships with a
+  deep self-test suite that runs across every TRISAVERSE_STACK layer
+  and, with explicit user opt-in, sends anonymized reports back to
+  Codex Labs. P0 per `docs/FOUNDATIONAL_PROGRAMS.md` §11 — MDE's
+  heterogeneous-hardware learning depends on real-world reports.
+  No code yet; spec is the foundation.
+
   **96 tests green**.
 
   `zplus-parse` CLI: `cd tools/zplus && cargo run --bin zplus-parse -- <file.zp>`.

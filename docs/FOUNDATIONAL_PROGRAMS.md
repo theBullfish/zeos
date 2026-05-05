@@ -195,6 +195,7 @@ The philosophy: **compat first, native when it matters.** Developers start in fa
 | **Prometheus / Grafana** | COMPAT | POSIX layer | For compat workloads. P2. |
 | **Zixel telemetry** | BUILD | Native | Computation IS telemetry. No instrumentation needed. The signal graph emits its own observability data. P0. |
 | **MasQ timeline** | BUILD | Native | Temporal navigation of system state. Replaces log aggregation. P1. |
+| **zeos-test (deep self-test + opt-in reporting)** | BUILD | Native | Per-layer self-test suite that runs continuously and, with explicit user opt-in, sends anonymized reports back to Codex Labs. Spec in `specs/OPT_IN_TEST_REPORTING.md`. P0 — heterogeneous-hardware orchestration is calibrated by these reports; without them MDE flies blind on real-world thermal/aging curves. |
 
 ### Decisions needed:
 - Zixel telemetry export format: for bridging to Prometheus/Grafana in compat
