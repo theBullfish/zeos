@@ -78,6 +78,12 @@ Caught and corrected before further launches:
 ### Next batch upcoming (#11 firewall, #12 disk encryption, #13 CFA contexts)
 All three already reshaped in Zeos-back 1. Briefs OK.
 
+### Zeos-back 4 (after items 11 firewall, 12 crypto, 13 identity)
+- #11 Firewall (888b039): CHAIN_FIREWALL inserted into CHAIN_NET_TX/RX, drops fire CHAIN_NOTIFY rate-limited. Zeos-shaped.
+- #12 Disk encryption (b618562): CFA SOVEREIGN key, CHAIN_BLOCK 4→6 nodes, single authorized observer. Not LUKS. Zeos-shaped (Brad's catch).
+- #13 Identity contexts (78002aa): CFA root per context, perceive-gate cross-context tier scoping, per-context salt+key+namespace. Replaces UNIX users. Zeos-shaped.
+- Three for three, no drift. Final two items (#14 UVC, #15 print) already reshaped in Zeos-back 1.
+
 ## End state
 
 When this list closes, Zeos is:
