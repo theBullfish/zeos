@@ -110,17 +110,19 @@ session. Three sections, that's it.
 
 - Type checker fourth cut: named-arg type checking (commit `cd0b5f0`).
   `TypeEnv.named_args` side-table maps callee → (named-arg →
-  expected-type) for 10 builtins (vault.store/append ttl, tick rate,
-  rate per, baseline window, decay half_life, on_silence within,
-  count within, rewind by, net.listen port). New `check_calls(m, env)`
-  walks every Call and verifies named-arg types. Two new
-  `types_compatible` rules: cross-unit duration matching
-  (`30d` ↔ `5m`) and `Nominal("duration")` sentinel for "any
-  duration unit." Defers on Bool (UnaryCmp/BinExpr-wrapped) and
-  Unknown values; skips synthetic `__op__` callees.
+  expected-type) for 10 builtins. New `check_calls(m, env)` walks
+  every Call and verifies named-arg types. Cross-unit duration
+  matching + `Nominal("duration")` sentinel.
 
-  Three ratchets all at zero now: merge arity (chord rule), Flow
-  connectivity, named-arg types. **124 tests green**.
+- Type checker fifth cut: zplus-check CLI + peer-through (commit
+  `27b8e22`). `src/bin/zplus_check.rs` runs all three checker passes
+  and renders errors with file:line:col header, source line, and
+  carat. `infer_arg_value(c, env)` peers through `UnaryCmp` /
+  `BinExpr` predicate wrappers so `on_silence(within: > 5m)` checks
+  against the underlying Duration. Three ratchets stay at zero
+  across the corpus.
+
+  **126 tests green** (100 unit + 26 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -195,11 +197,13 @@ session. Three sections, that's it.
   args today. Add a `positional: Vec<Type>` to the side-table and
   walk Positional args by index.
 
-- **Peer through UnaryCmp / BinExpr in arg values.** Currently the
-  checker defers when a named-arg value is wrapped in a comparison
-  (e.g. `on_silence(within: > 5m)`). The Duration is in there; the
-  checker just doesn't look. Add an "unwrap predicates to find the
-  underlying value" step before type-checking the arg.
+- **IR / lowering / runtime.** The checker is corpus-clean. Next
+  major milestone: lower the typed AST to an executable form. Open
+  question still — LLVM IR via `inkwell` vs custom backend. The
+  chord-rule semantics suggest custom (LLVM has no Merge primitive).
+  Smallest cut: a tree-walking interpreter that takes a `Module` and
+  a tick budget, runs the chains, prints emissions. No Goya / no
+  MDE / no real hardware — just prove the semantics in software.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
