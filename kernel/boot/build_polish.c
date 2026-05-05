@@ -313,9 +313,16 @@ int build_polish_active(void) { return B.active; }
 
 void build_polish_print_selftest_line(void) {
     build_polish_init();
-    kputs("build-zeos polish .... DAG view ready, ");
+    /* Force build_runner_init so the seeded rules show up in the count
+     * even if the user hasn't run `build` yet. */
+    extern void build_runner_init(void);
+    extern uint32_t build_runner_last_ms(void);
+    build_runner_init();
+    kputs("build-zeos polish .... DAG view ready, rules: ");
     kput_dec((uint64_t)B.rule_count);
-    kputs(" rules registered\n");
+    kputs(", last build: ");
+    kput_dec((uint64_t)build_runner_last_ms());
+    kputs(" ms\n");
 }
 
 void build_polish_cmd(const char *args) {

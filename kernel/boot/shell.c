@@ -1996,24 +1996,58 @@ static const char zp_build_zeos[] =
 
 static void cmd_build(const char *args)
 {
-    if (args && *args == 'h') {
-        kputs("\n  build — run programs/build-zeos.zp.\n");
-        kputs("  Replaces make/bazel.  The chain registry IS the\n");
-        kputs("  dependency graph; this dispatches the build engine.\n\n");
-        kputs("  Full DSL form: programs/build-zeos.zp\n");
+    extern void build_runner_init(void);
+    extern int  build_runner_run(const char *);
+    extern int  build_runner_clean(void);
+    extern int  build_runner_rule_count(void);
+    extern uint32_t build_runner_last_ms(void);
+
+    build_runner_init();
+
+    /* Argument: "" -> show usage; "help" -> docs; "clean" -> wipe;
+     * <rule> -> run that rule end-to-end. */
+    const char *p = args;
+    while (p && *p == ' ') p++;
+    if (!p || !*p) {
+        kputs("\n  build — run programs/build-zeos.zp rules end-to-end.\n");
+        kputs("  Replaces make/bazel. Chain registry IS the dep graph.\n\n");
+        kputs("  Usage:\n");
+        kputs("    build <rule>     run a rule (resolves deps first)\n");
+        kputs("    build clean      remove every rule's output from /build/\n");
+        kputs("    build help       show DSL pointer\n");
+        kputs("\n  Registered rules: ");
+        kput_dec((uint64_t)build_runner_rule_count());
+        kputs("\n  Last build:       ");
+        kput_dec((uint64_t)build_runner_last_ms());
+        kputs(" ms\n\n");
+        return;
+    }
+    if (p[0] == 'h' && p[1] == 'e' && p[2] == 'l' && p[3] == 'p') {
+        kputs("\n  Full DSL form: programs/build-zeos.zp\n");
         kputs("  Host driver:   tools/zeos-build/zeos build\n\n");
         return;
     }
-
-    kputs("\n  build-zeos: dispatching build engine via chain registry.\n");
-    if (args && *args) {
-        kputs("  target: ");
-        kputs(args);
-        kputs("\n");
+    if (p[0] == 'c' && p[1] == 'l' && p[2] == 'e') {
+        int n = build_runner_clean();
+        kputs("\n  build clean: removed "); kput_dec((uint64_t)n);
+        kputs(" output(s)\n\n");
+        return;
     }
-    kputs("\n");
+    /* Otherwise treat as a rule name. */
+    kputs("\n  build-zeos: running rule '"); kputs(p); kputs("'\n");
+    int rc = build_runner_run(p);
+    if (rc == 0) {
+        kputs("  -> done in "); kput_dec((uint64_t)build_runner_last_ms());
+        kputs(" ms\n\n");
+    } else if (rc == -1) {
+        kputs("  -> no such rule\n\n");
+    } else if (rc == -2) {
+        kputs("  -> dep cycle detected\n\n");
+    } else {
+        kputs("  -> rule failed\n\n");
+    }
+    /* Also dispatch the canonical engine subset for chain visibility. */
     zp_run(zp_build_zeos);
-    kputs("\n  build-zeos: engine resolved.  See chains for graph state.\n\n");
 }
 
 /* ── DereZ persona commands ─────────────────────── */
