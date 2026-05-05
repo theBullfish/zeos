@@ -52,13 +52,19 @@ use std::collections::HashMap;
 /// the simplest faithful shape and document why.
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
+    /// Callee-name → return-type-or-Fn binding. Used by `infer_chain`.
     pub bindings: HashMap<String, Type>,
+    /// Callee-name → (named-arg-name → expected-type) map. Used by
+    /// `check_calls` for named-arg type checking. Only populated for
+    /// builtins with concrete named-arg signatures; missing entries
+    /// mean "no named-arg checking for this callee."
+    pub named_args: HashMap<String, HashMap<String, Type>>,
 }
 
 impl TypeEnv {
     /// Empty env — useful for tests that don't want any builtins.
     pub fn empty() -> Self {
-        Self { bindings: HashMap::new() }
+        Self { bindings: HashMap::new(), named_args: HashMap::new() }
     }
 
     /// Default env — pre-populated with the corpus builtins.
@@ -112,6 +118,26 @@ impl TypeEnv {
         env.bindings.insert("vault.write".into(), any_args_unit());
         env.bindings.insert("alert".into(), any_args_unit());
         env.bindings.insert("respond".into(), any_args_unit());
+
+        // Named-arg signatures for the builtins that have concrete
+        // expected types. The `Nominal("duration", ...)` sentinel means
+        // "any duration unit" — types_compatible has a cross-unit rule.
+        let duration = Type::Nominal("duration".into(), span);
+        let int = Type::Prim(Prim::Int);
+        let mut nm = |name: &str, args: &[(&str, Type)]| {
+            let m: HashMap<String, Type> = args.iter().map(|(k, t)| (k.to_string(), t.clone())).collect();
+            env.named_args.insert(name.into(), m);
+        };
+        nm("vault.store", &[("ttl", duration.clone())]);
+        nm("vault.append", &[("ttl", duration.clone())]);
+        nm("tick", &[("rate", duration.clone())]);
+        nm("rate", &[("per", duration.clone())]);
+        nm("baseline", &[("window", duration.clone())]);
+        nm("decay", &[("half_life", duration.clone())]);
+        nm("on_silence", &[("within", duration.clone())]);
+        nm("count", &[("within", duration.clone()), ("by", Type::Any(span))]);
+        nm("rewind", &[("by", duration.clone())]);
+        nm("net.listen", &[("port", int.clone())]);
 
         env
     }
@@ -448,8 +474,25 @@ pub fn types_compatible(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Prim(pa), Type::Prim(pb)) => pa == pb || matches!((pa, pb), (Prim::Int, Prim::Float)),
         (Type::Sig(ia, _), Type::Sig(ib, _)) => types_compatible(ia, ib),
+        // Cross-unit duration match: `Tagged<_, ms|s|m|h|d>` matches
+        // `Tagged<_, ms|s|m|h|d>` regardless of which unit. Useful for
+        // arg slots that accept "any duration" (e.g. `ttl: 30d` and
+        // `ttl: 5m` both fit `vault.store`'s named-arg slot).
+        (Type::Tagged { inner: ia, unit: ua, .. }, Type::Tagged { inner: ib, unit: ub, .. })
+            if is_duration_unit(ua) && is_duration_unit(ub) =>
+        {
+            types_compatible(ia, ib)
+        }
         (Type::Tagged { inner: ia, unit: ua, .. }, Type::Tagged { inner: ib, unit: ub, .. }) => {
             ua == ub && types_compatible(ia, ib)
+        }
+        // `Nominal("duration", _)` is the sentinel for "any duration
+        // unit" — used in builtin named-arg specs.
+        (Type::Tagged { unit, .. }, Type::Nominal(name, _))
+        | (Type::Nominal(name, _), Type::Tagged { unit, .. })
+            if name == "duration" && is_duration_unit(unit) =>
+        {
+            true
         }
         (Type::Nominal(na, _), Type::Nominal(nb, _)) => na == nb,
         (Type::Range(ia, _), Type::Range(ib, _)) => types_compatible(ia, ib),
@@ -458,6 +501,104 @@ pub fn types_compatible(a: &Type, b: &Type) -> bool {
         // operands.
         (Type::Sig(inner, _), other) | (other, Type::Sig(inner, _)) => types_compatible(inner, other),
         _ => false,
+    }
+}
+
+fn is_duration_unit(u: &UnitTag) -> bool {
+    matches!(u, UnitTag::Simple(s) if matches!(s.as_str(), "ms" | "s" | "m" | "h" | "d"))
+}
+
+/// Check named arg types in every Call against the env's `named_args`
+/// table. For each Call whose callee has a registered named-arg
+/// signature, verify each named arg's value type is compatible with the
+/// expected type. Skips when the value's inferred type is `Bool` (the
+/// arg is wrapped in a UnaryCmp / BinExpr — the v1 inference doesn't
+/// peer through those) or `Unknown` (deferred).
+pub fn check_calls(m: &Module<'_>, env: &TypeEnv) -> Vec<TypeError> {
+    let mut errors = Vec::new();
+    for stmt in &m.stmts {
+        let chain = match stmt {
+            Stmt::Wire(w) => &w.chain,
+            Stmt::Connect(c) => c,
+        };
+        walk_calls(chain, env, &mut errors);
+    }
+    errors
+}
+
+fn walk_calls<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
+    match c {
+        Chain::Call(call) => {
+            let callee = call.callee.joined();
+            // Skip synthetic ops — those are parser-emit details.
+            if !callee.starts_with("__") {
+                if let Some(expected) = env.named_args.get(&callee) {
+                    for arg in &call.args {
+                        if let Arg::Named { name, value, span } = arg {
+                            if let Some(expected_ty) = expected.get(name.text) {
+                                let actual = infer_chain(value, env);
+                                // Defer when the actual is opaque to v1
+                                // inference. Bool means "wrapped in
+                                // comparison/predicate" — the value
+                                // underneath might still be the right
+                                // type, but the inference doesn't peer
+                                // through.
+                                if matches!(actual, Type::Unknown(_) | Type::Any(_))
+                                    || matches!(actual, Type::Prim(Prim::Bool))
+                                {
+                                    continue;
+                                }
+                                if !types_compatible(&actual, expected_ty) {
+                                    errors.push(TypeError {
+                                        message: format!(
+                                            "named arg `{}` of `{}` expects {}, got {}",
+                                            name.text,
+                                            callee,
+                                            format_type(expected_ty),
+                                            format_type(&actual)
+                                        ),
+                                        span: *span,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for arg in &call.args {
+                let child = match arg {
+                    Arg::Positional(c) => c,
+                    Arg::Named { value, .. } => value,
+                };
+                walk_calls(child, env, errors);
+            }
+        }
+        Chain::Atom(_) => {}
+        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
+            walk_calls(a, env, errors);
+            walk_calls(b, env, errors);
+        }
+        Chain::Fork(branches, _) => {
+            for branch in branches {
+                if let Some(label) = &branch.label {
+                    walk_calls(label, env, errors);
+                }
+                walk_calls(&branch.body, env, errors);
+            }
+        }
+        Chain::Merge(merge) => {
+            for input in &merge.inputs {
+                walk_calls(input, env, errors);
+            }
+            if let Some(d) = &merge.downstream {
+                walk_calls(d, env, errors);
+            }
+        }
+        Chain::BinExpr { lhs, rhs, .. } => {
+            walk_calls(lhs, env, errors);
+            walk_calls(rhs, env, errors);
+        }
+        Chain::UnaryCmp { rhs, .. } => walk_calls(rhs, env, errors),
     }
 }
 
@@ -925,5 +1066,148 @@ mod tests {
         assert_eq!(format_type(&Type::Sig(Box::new(Type::Prim(Prim::String)), span)), "Sig<String>");
         assert_eq!(format_type(&Type::Unknown(span)), "?");
         assert_eq!(format_type(&Type::Nominal("color".into(), span)), "color");
+    }
+
+    // ── named-arg type checking ─────────────────────────────────
+
+    #[test]
+    fn duration_units_are_cross_compatible() {
+        let span = dummy();
+        let ms = Type::Tagged {
+            inner: Box::new(Type::Prim(Prim::Float)),
+            unit: UnitTag::Simple("ms".into()),
+            span,
+        };
+        let d = Type::Tagged {
+            inner: Box::new(Type::Prim(Prim::Float)),
+            unit: UnitTag::Simple("d".into()),
+            span,
+        };
+        assert!(types_compatible(&ms, &d), "ms should match d (both durations)");
+    }
+
+    #[test]
+    fn duration_sentinel_matches_any_duration() {
+        let span = dummy();
+        let any_dur = Type::Nominal("duration".into(), span);
+        let m_unit = Type::Tagged {
+            inner: Box::new(Type::Prim(Prim::Float)),
+            unit: UnitTag::Simple("m".into()),
+            span,
+        };
+        assert!(types_compatible(&any_dur, &m_unit));
+        assert!(types_compatible(&m_unit, &any_dur));
+    }
+
+    #[test]
+    fn vault_store_ttl_string_arg_errors() {
+        // `vault.store(ttl: "30 days")` — ttl expects a Duration, got a
+        // String. Should fire.
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path {
+                    segments: vec![
+                        Ident { text: "vault", span },
+                        Ident { text: "store", span },
+                    ],
+                    span,
+                },
+                args: vec![Arg::Named {
+                    name: Ident { text: "ttl", span },
+                    value: Chain::Atom(Atom::Literal(Literal::String("\"30 days\"", span))),
+                    span,
+                }],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].message.contains("expects duration"));
+    }
+
+    #[test]
+    fn vault_store_ttl_duration_arg_passes() {
+        // `vault.store(ttl: 30d)` — ttl expects Duration, got Duration. OK.
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path {
+                    segments: vec![
+                        Ident { text: "vault", span },
+                        Ident { text: "store", span },
+                    ],
+                    span,
+                },
+                args: vec![Arg::Named {
+                    name: Ident { text: "ttl", span },
+                    value: Chain::Atom(Atom::Literal(Literal::Duration {
+                        value: 30.0,
+                        unit: DurationUnit::D,
+                        span,
+                    })),
+                    span,
+                }],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn unknown_named_arg_is_skipped() {
+        // `vault.store(unknown_field: 5)` — vault.store doesn't have an
+        // `unknown_field` named slot; the checker should skip silently
+        // (extra named args aren't an error in v1).
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path {
+                    segments: vec![
+                        Ident { text: "vault", span },
+                        Ident { text: "store", span },
+                    ],
+                    span,
+                },
+                args: vec![Arg::Named {
+                    name: Ident { text: "unknown_field", span },
+                    value: Chain::Atom(Atom::Literal(Literal::Int(5, span))),
+                    span,
+                }],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn synthetic_op_callees_are_skipped() {
+        // `__add__(a, b)` — synthetic; checker shouldn't try to look it up.
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path::one("__add__", span),
+                args: vec![
+                    Arg::Named {
+                        name: Ident { text: "ttl", span }, // would conflict if checker matched
+                        value: Chain::Atom(Atom::Literal(Literal::String("\"bad\"", span))),
+                        span,
+                    },
+                ],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 }
