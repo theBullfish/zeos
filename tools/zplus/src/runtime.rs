@@ -81,7 +81,7 @@ use std::collections::HashMap;
 use crate::ast::{self, *};
 
 /// Runtime time configuration. See module docstring for the two-knob model.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeConfig {
     /// Wall-clock ticks per real second. `None` = unbounded (run as
     /// fast as possible). v1 records this but doesn't yet sleep — the

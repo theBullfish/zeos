@@ -16,6 +16,7 @@ pub mod lex;
 pub mod parse;
 pub mod report;
 pub mod runtime;
+pub mod tune;
 pub mod ty;
 
 pub use check::{

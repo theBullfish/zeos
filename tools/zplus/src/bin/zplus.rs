@@ -20,6 +20,7 @@ const COMMANDS: &[(&str, &str, &str)] = &[
     ("parse", "zplus-parse", "parse a .zp file and report stmt count"),
     ("check", "zplus-check", "type-check a .zp file with source-context errors"),
     ("run",   "zplus-run",   "execute a .zp file via the runtime"),
+    ("tune",  "zplus-tune",  "run + report + suggest config tunings"),
 ];
 
 fn print_help(prog: &str) {
