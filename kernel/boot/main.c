@@ -550,6 +550,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         kputs("AML catalog... ");
         kput_dec((uint64_t)n);
         kputs(" symbols.\n");
+
+        /* ACPI Embedded Controller — discover via PNP0C09 in the AML
+         * namespace. EmbeddedControl OperationRegions are routed through
+         * the EC byte protocol once initialized. Required for
+         * _BST/_BIF on every laptop with battery data behind the EC. */
+        extern int ec_discover_and_init(void);
+        extern void ec_print_selftest_line(void);
+        (void)ec_discover_and_init();
+        ec_print_selftest_line();
     }
     kputs("LAPIC init... ");
     lapic_init();

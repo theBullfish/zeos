@@ -101,6 +101,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/hotplug.c \
            boot/suspend.c \
            boot/battery.c \
+           boot/ec.c \
            boot/brightness.c \
            boot/idle.c \
            boot/lockscreen.c \

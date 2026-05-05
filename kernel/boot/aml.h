@@ -94,4 +94,30 @@ typedef struct {
 int  aml_journal_count(void);     /* number of entries currently in ring */
 const aml_journal_entry_t *aml_journal_at(int idx); /* 0..count-1, newest at count-1 */
 
+/* ── Symbol introspection (for cross-module discovery) ───────────── */
+
+typedef enum {
+    AML_SYM_NAME = 1,
+    AML_SYM_METHOD,
+    AML_SYM_OP_REGION,
+    AML_SYM_FIELD_UNIT,
+    AML_SYM_DEVICE,
+} aml_sym_kind_t;
+
+/* Total cataloged symbol slots (Name + Method + Device + Region + Field). */
+int aml_sym_total(void);
+
+/* Read kind + path of symbol at index. path_buf must be >= 64 bytes.
+ * Returns 0 on success, -1 if idx is out of range. */
+int aml_sym_info(int idx, aml_sym_kind_t *kind, char *path_buf, int path_buf_len);
+
+/* OperationRegion(EmbeddedControl) hook. The interpreter calls this when
+ * a Field declared on an EmbeddedControl region is read or written.
+ * Implementation lives in ec.c. Returns 0 on success, -1 on failure
+ * (no EC, timeout, etc). access_bytes is informational. */
+int aml_ec_region_read(uint64_t base, uint32_t byte_off, int access_bytes,
+                       uint64_t *out);
+int aml_ec_region_write(uint64_t base, uint32_t byte_off, int access_bytes,
+                        uint64_t val);
+
 #endif /* ZEOS_AML_H */

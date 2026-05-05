@@ -229,6 +229,7 @@ static void cmd_netinfo(const char *args);
 static void cmd_selftest(const char *args);
 static void cmd_suspend(const char *args);
 static void cmd_battery(const char *args);
+static void cmd_ec(const char *args);
 static void cmd_aml_eval(const char *args);
 static void cmd_tests(const char *args);
 static void cmd_beep(const char *args);
@@ -732,6 +733,7 @@ static const struct shell_cmd commands[] = {
     {"selftest","run subsystem self-test (VAULT, DNS, HTTPS)", cmd_selftest, VIS_DEREZ},
     {"suspend", "ACPI S3 suspend-to-RAM (suspend [seconds]; default 5s RTC wake)", cmd_suspend, VIS_DEREZ},
     {"battery", "battery + AC adapter status (ACPI _BAT/_AC)", cmd_battery, VIS_ALWAYS},
+    {"ec",      "ACPI EC: status / read <off> / write <off> <byte>", cmd_ec, VIS_DEREZ},
     {"aml-eval","evaluate an AML path (aml-eval <\\\\PATH>) — debug/introspection", cmd_aml_eval, VIS_DEREZ},
     {"tests",   "run per-chain test framework (tests [name|--json])", cmd_tests, VIS_DEREZ},
     {"static-ip","configure static IPv4 (use when DHCP unavailable)", cmd_static_ip, VIS_DEREZ},
@@ -1195,6 +1197,100 @@ static void cmd_battery(const char *args)
         }
         kputs("\n");
     }
+}
+
+/* ── ACPI Embedded Controller introspection ─────────────────────── */
+
+#include "ec.h"
+
+static int ec_parse_byte(const char *p, uint8_t *out)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    int base = 10;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { base = 16; p += 2; }
+    if (!*p) return 0;
+    uint32_t v = 0;
+    while (*p && *p != ' ' && *p != '\t') {
+        char c = *p++;
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (base == 16 && c >= 'a' && c <= 'f') d = 10 + (c - 'a');
+        else if (base == 16 && c >= 'A' && c <= 'F') d = 10 + (c - 'A');
+        else return 0;
+        if (d >= base) return 0;
+        v = v * (uint32_t)base + (uint32_t)d;
+        if (v > 0xFF) return 0;
+    }
+    *out = (uint8_t)v;
+    return 1;
+}
+
+static const char *ec_skip_word(const char *p, char *buf, int buf_len)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    int i = 0;
+    while (*p && *p != ' ' && *p != '\t' && i < buf_len - 1) buf[i++] = *p++;
+    buf[i] = 0;
+    return p;
+}
+
+static void cmd_ec(const char *args)
+{
+    char sub[16];
+    const char *p = ec_skip_word(args ? args : "", sub, sizeof(sub));
+
+    if (!sub[0]) {
+        if (!ec_present()) {
+            kputs("EC: not present (no _HID PNP0C09 in ACPI namespace)\n");
+            return;
+        }
+        kputs("EC: present\n");
+        kputs("  cmd  port = 0x"); kput_hex(ec_cmd_port());  kputs("\n");
+        kputs("  data port = 0x"); kput_hex(ec_data_port()); kputs("\n");
+        kputs("  reads     = "); kput_dec(ec_ops_read());    kputs("\n");
+        kputs("  writes    = "); kput_dec(ec_ops_write());   kputs("\n");
+        kputs("  timeouts  = "); kput_dec(ec_ops_timeout()); kputs("\n");
+        return;
+    }
+
+    if (sub[0] == 'r' && sub[1] == 'e' && sub[2] == 'a' && sub[3] == 'd' && !sub[4]) {
+        if (!ec_present()) { kputs("EC: not present\n"); return; }
+        uint8_t off;
+        if (!ec_parse_byte(p, &off)) { kputs("usage: ec read <offset>\n"); return; }
+        uint8_t v = 0;
+        if (ec_read(off, &v) != 0) {
+            kputs("ec read: timeout / error\n");
+            return;
+        }
+        kputs("ec[0x"); kput_hex(off); kputs("] = 0x"); kput_hex(v); kputs("\n");
+        return;
+    }
+
+    if (sub[0] == 'w' && sub[1] == 'r' && sub[2] == 'i' && sub[3] == 't' && sub[4] == 'e' && !sub[5]) {
+        if (!ec_present()) { kputs("EC: not present\n"); return; }
+        char a1[8], a2[8];
+        const char *q = ec_skip_word(p, a1, sizeof(a1));
+        ec_skip_word(q, a2, sizeof(a2));
+        uint8_t off, val;
+        if (!a1[0] || !a2[0] || !ec_parse_byte(a1, &off) || !ec_parse_byte(a2, &val)) {
+            kputs("usage: ec write <offset> <byte>\n");
+            return;
+        }
+        /* Honest gate: writing arbitrary EC bytes can change fan, charge,
+         * thermal, or wake behavior on real laptops. The shell accepts
+         * the write (this command is VIS_DEREZ-gated already), but logs
+         * the action in plain view. */
+        kputs("[ec] WRITE 0x"); kput_hex(off);
+        kputs(" <- 0x"); kput_hex(val); kputs("\n");
+        if (ec_write(off, val) != 0) {
+            kputs("ec write: timeout / error\n");
+            return;
+        }
+        kputs("ec write: ok\n");
+        return;
+    }
+
+    kputs("usage: ec | ec read <off> | ec write <off> <byte>\n");
 }
 
 /* ── AML eval (debug/introspection) ───────────────────────────────

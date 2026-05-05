@@ -987,6 +987,25 @@ static int field_read(int field_sym, uint64_t *out)
          * _ADR yet. Honest: report failure. */
         return -1;
     }
+    case REGION_EMBEDDED_CTRL: {
+        /* EC fields are byte-addressable. access_bytes is normally 1,
+         * but some DSDTs declare wider AccessType — we only honor 1
+         * here; >1 falls back to byte loop. */
+        uint64_t v = 0;
+        if (access_bytes == 1) {
+            uint64_t bv = 0;
+            if (aml_ec_region_read(base, byte_off, 1, &bv) != 0) return -1;
+            raw = bv;
+        } else {
+            for (int i = 0; i < (int)access_bytes; i++) {
+                uint64_t bv = 0;
+                if (aml_ec_region_read(base, byte_off + i, 1, &bv) != 0) return -1;
+                v |= (bv & 0xFF) << (i * 8);
+            }
+            raw = v;
+        }
+        break;
+    }
     default:
         return -1;
     }
@@ -1047,6 +1066,29 @@ static int field_write(int field_sym, uint64_t val)
         } else {
             volatile uint64_t *p = (uint64_t *)(uintptr_t)phys;
             *p = (*p & ~merge_mask) | shifted;
+        }
+        return 0;
+    }
+    case REGION_EMBEDDED_CTRL: {
+        /* Read-modify-write through the EC interface, byte at a time. */
+        if (access_bytes == 1) {
+            uint64_t cur = 0;
+            if (aml_ec_region_read(base, byte_off, 1, &cur) != 0) return -1;
+            uint64_t merged = (cur & ~merge_mask) | shifted;
+            if (aml_ec_region_write(base, byte_off, 1, merged & 0xFF) != 0) return -1;
+            return 0;
+        }
+        /* Wider access: read all bytes, modify, write back. */
+        uint64_t cur = 0;
+        for (int i = 0; i < (int)access_bytes; i++) {
+            uint64_t bv = 0;
+            if (aml_ec_region_read(base, byte_off + i, 1, &bv) != 0) return -1;
+            cur |= (bv & 0xFF) << (i * 8);
+        }
+        uint64_t merged = (cur & ~merge_mask) | shifted;
+        for (int i = 0; i < (int)access_bytes; i++) {
+            if (aml_ec_region_write(base, byte_off + i, 1, (merged >> (i * 8)) & 0xFF) != 0)
+                return -1;
         }
         return 0;
     }
@@ -1708,6 +1750,27 @@ int aml_init(void)
 }
 
 int aml_symbol_count(void) { return g_sym_count; }
+
+int aml_sym_total(void) { return g_sym_count; }
+
+int aml_sym_info(int idx, aml_sym_kind_t *kind, char *path_buf, int path_buf_len)
+{
+    if (idx < 0 || idx >= g_sym_count) return -1;
+    if (kind) {
+        switch (g_syms[idx].kind) {
+        case SYM_NAME:       *kind = AML_SYM_NAME; break;
+        case SYM_METHOD:     *kind = AML_SYM_METHOD; break;
+        case SYM_OP_REGION:  *kind = AML_SYM_OP_REGION; break;
+        case SYM_FIELD_UNIT: *kind = AML_SYM_FIELD_UNIT; break;
+        case SYM_DEVICE:     *kind = AML_SYM_DEVICE; break;
+        default:             *kind = AML_SYM_NAME; break;
+        }
+    }
+    if (path_buf && path_buf_len > 0) {
+        a_strcpy_max(path_buf, g_syms[idx].path, path_buf_len);
+    }
+    return 0;
+}
 
 int aml_evaluate(const char *path, const aml_object_t *args, int nargs,
                  aml_object_t *result)
