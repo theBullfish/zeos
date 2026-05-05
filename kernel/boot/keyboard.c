@@ -196,6 +196,8 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int undo_handle_key(int, int);
         extern int image_viewer_active(void);
         extern int image_viewer_key(int);
+        extern int calculator_active(void);
+        extern int calculator_key(int);
 
         uint8_t mods_now = keybinds_get_modifiers();
         int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
@@ -203,9 +205,19 @@ static void process_scancode(uint8_t scancode, int extended)
         /* Esc (scancode 0x01) closes overlays before anything else. */
         if (scancode == 0x01) {
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
+            if (calculator_active())   { calculator_key(27);   return; }
             if (image_viewer_active()) { image_viewer_key(27); return; }
             if (quick_look_active())   { quick_look_key(27);   return; }
             if (context_menu_active()) { context_menu_key(27); return; }
+        }
+
+        /* Calculator: Ctrl+1/2/3 mode switch (uses the same scancodes for
+         * '1'/'2'/'3': 0x02/0x03/0x04). We translate to 0x11/0x12/0x13
+         * which the calculator's key handler interprets as mode commands. */
+        if (calculator_active() && (mods_now & MOD_CTRL)) {
+            if (scancode == 0x02) { calculator_key(0x11); return; }
+            if (scancode == 0x03) { calculator_key(0x12); return; }
+            if (scancode == 0x04) { calculator_key(0x13); return; }
         }
 
         /* Space (0x39) — close if already open, otherwise open Quick
@@ -231,12 +243,20 @@ static void process_scancode(uint8_t scancode, int extended)
 
         /* Generic key dispatch into modal / quick look / context menu
          * for printable characters (Enter / S / D shortcuts). */
-        if (dirty_modal_active() || image_viewer_active() ||
+        if (dirty_modal_active() || calculator_active() ||
+            image_viewer_active() ||
             quick_look_active() || context_menu_active()) {
             char ch = sh ? scancode_to_ascii_shift[scancode]
                          : scancode_to_ascii[scancode];
+            /* Backspace / Enter come through scancodes 0x0E / 0x1C with
+             * ASCII 0x08 / 0x0D in the table; route them too. */
+            if (!ch) {
+                if (scancode == 0x0E) ch = 8;       /* backspace */
+                else if (scancode == 0x1C) ch = 13; /* enter */
+            }
             if (ch) {
                 if (dirty_modal_active())  { dirty_modal_key(ch);  return; }
+                if (calculator_active())   { calculator_key(ch);   return; }
                 if (image_viewer_active()) { image_viewer_key(ch); return; }
                 if (quick_look_active())   { quick_look_key(ch);   return; }
                 if (context_menu_active()) { context_menu_key(ch); return; }
@@ -249,6 +269,14 @@ static void process_scancode(uint8_t scancode, int extended)
     if (extended && !(scancode & 0x80)) {
         extern int image_viewer_active(void);
         extern int image_viewer_key_arrow(int dir);
+        extern int calculator_active(void);
+        extern int calculator_key_arrow(int dir);
+        if (calculator_active()) {
+            if (scancode == 0x4B) { calculator_key_arrow(0); return; }
+            if (scancode == 0x4D) { calculator_key_arrow(1); return; }
+            if (scancode == 0x48) { calculator_key_arrow(2); return; }
+            if (scancode == 0x50) { calculator_key_arrow(3); return; }
+        }
         if (image_viewer_active()) {
             if (scancode == 0x4B) { image_viewer_key_arrow(0); return; } /* left */
             if (scancode == 0x4D) { image_viewer_key_arrow(1); return; } /* right */

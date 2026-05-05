@@ -48,6 +48,11 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
     if (workspaces_overview_active() &&
         workspaces_overview_mouse_down(x, y, button)) return 1;
     if (dirty_modal_active() && dirty_modal_mouse_down(x, y, button)) return 1;
+    {
+        extern int calculator_active(void);
+        extern int calculator_mouse_down(int, int, int);
+        if (calculator_active() && calculator_mouse_down(x, y, button)) return 1;
+    }
     if (image_viewer_active() && image_viewer_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
     if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
@@ -80,6 +85,11 @@ static void mouse_ui_dispatch_move(int x, int y) {
         return;
     }
     if (dirty_modal_active())  { dirty_modal_mouse_move(x, y); return; }
+    {
+        extern int calculator_active(void);
+        extern int calculator_mouse_move(int, int);
+        if (calculator_active()) { calculator_mouse_move(x, y); /* fall through to hover_dispatch */ }
+    }
     if (image_viewer_active()) { image_viewer_mouse_move(x, y); return; }
     if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }
     hover_dispatch(x, y);

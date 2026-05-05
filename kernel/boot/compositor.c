@@ -224,6 +224,11 @@ void compositor_frame(void) {
         context_menu_draw();
         quick_look_draw();
         image_viewer_draw();
+        {
+            extern int  calculator_active(void);
+            extern void calculator_draw(void);
+            if (calculator_active()) calculator_draw();
+        }
         dirty_modal_draw();
     }
 

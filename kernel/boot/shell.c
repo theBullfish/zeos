@@ -680,6 +680,7 @@ static void cmd_fat_mount(const char *args);
 static void cmd_fat_ls(const char *args);
 static void cmd_fat_cat(const char *args);
 static void cmd_view(const char *args);
+static void cmd_calc(const char *args);
 
 /* FAT32 write-side commands */
 static void cmd_touch(const char *args);
@@ -806,6 +807,7 @@ static const struct shell_cmd commands[] = {
     {"fat-ls",  "list FAT32 directory (fat-ls <path>)", cmd_fat_ls, VIS_ALWAYS},
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
     {"view",    "open image viewer (view <path>; PNG only for now)", cmd_view, VIS_ALWAYS},
+    {"calc",    "calculator (calc | calc <expr>); modes: standard/scientific/programmer", cmd_calc, VIS_ALWAYS},
     {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
     {"rm",      "delete (moves to /.zeos-trash; rm -f to bypass)", cmd_rm,    VIS_ALWAYS},
     {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
@@ -4539,6 +4541,22 @@ vault_done:
         passes++;
     }
 
+    /* Calculator — three modes, recursive-descent parser. */
+    {
+        extern uint32_t calculator_total_opens(void);
+        extern uint32_t calculator_total_evals_ok(void);
+        extern uint32_t calculator_total_evals_fail(void);
+        kputs("  Calculator ............ ready (modes: standard / scientific / programmer)");
+        kputs(" (opens=");
+        kput_dec((uint64_t)calculator_total_opens());
+        kputs(" ok=");
+        kput_dec((uint64_t)calculator_total_evals_ok());
+        kputs(" fail=");
+        kput_dec((uint64_t)calculator_total_evals_fail());
+        kputs(")\n");
+        passes++;
+    }
+
     /* Window snap — half / quadrant snapping via Super+arrow + drag-to-edge.
      * Always passes once wm has initialized; reports the active tunables. */
     kputs("  Window snap ........... half/quadrant + Super+arrow + drag-to-edge");
@@ -5665,6 +5683,48 @@ static void cmd_view(const char *args)
     } else {
         kputs("  view: opened with error (see overlay for details)\n");
     }
+}
+
+/* Calculator — open the window, or evaluate an expression and print result. */
+static void cmd_calc(const char *args)
+{
+    while (*args == ' ') args++;
+    if (!*args) {
+        extern void calculator_open(void);
+        calculator_open();
+        kputs("  calc: opened (Esc to close, Ctrl+1/2/3 to switch modes)\n");
+        return;
+    }
+    /* One-shot eval. */
+    extern int calculator_eval(const char *expr, int mode,
+                               double *out, char *err, int err_max);
+    double v = 0;
+    char err[64];
+    err[0] = '\0';
+    if (!calculator_eval(args, 0 /* CALC_STANDARD */, &v, err, sizeof(err))) {
+        kputs("  calc: error: "); kputs(err); kputs("\n");
+        return;
+    }
+    /* Print as integer if integral and small, else as scaled decimal
+     * (avoid pulling double formatting into shell). */
+    int neg = 0;
+    if (v < 0) { neg = 1; v = -v; }
+    double f = v - (double)(uint64_t)v;
+    if (neg) kputs("  = -");
+    else     kputs("  = ");
+    kput_dec((uint64_t)v);
+    if (f > 0) {
+        kputs(".");
+        for (int i = 0; i < 10 && f > 0; i++) {
+            f *= 10.0;
+            int d = (int)f;
+            if (d < 0) d = 0;
+            if (d > 9) d = 9;
+            kputc('0' + d);
+            f -= d;
+        }
+    }
+    kputs("\n");
 }
 
 /* ── FAT32 write-side shell commands ─────────────────────────── */
