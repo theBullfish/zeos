@@ -10,11 +10,15 @@ lands; don't add. End is the end.
 - `✓` done
 
 ## In flight right now
-- ~ Per-driver SMP audit + flip AP_RESOLVES_CHAINS (#97)
+(none)
+
+## Recently completed
+- ✓ Per-driver SMP audit (#97 → 7c25027). Honest scope: per-driver locks live; every chain currently affinity-pinned to BSP because transitive paths (DHCP UDP, ACPI battery, etc.) aren't yet swept. AP partition runs but no chain qualifies. Real unlock = per-chain transitive sweep.
 
 ## The list
 
 1. · TLB shootdown — paging changes propagate across cores via IPI
+1b. · Per-chain transitive-path sweep — lift chains off BSP affinity one at a time (net_tx, net_rx, block, mde, audio first)
 2. · NVIDIA Stage 2 — locate GSP firmware, embed, load, register Ampere compute backend (#95)
 3. · AML EC region — laptop EC battery values via OperationRegion(EC)
 4. · Window snap — half/quadrant snapping at the WM layer
