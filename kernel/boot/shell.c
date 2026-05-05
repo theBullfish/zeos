@@ -695,6 +695,7 @@ static void cmd_fat_ls(const char *args);
 static void cmd_fat_cat(const char *args);
 static void cmd_view(const char *args);
 static void cmd_calc(const char *args);
+static void cmd_zkv(const char *args);
 static void cmd_edit(const char *args);
 static void cmd_fm(const char *args);
 static void cmd_fs_undo(const char *args);
@@ -838,6 +839,7 @@ static const struct shell_cmd commands[] = {
     {"fat-cat", "show FAT32 file (fat-cat <path>)",  cmd_fat_cat, VIS_ALWAYS},
     {"view",    "open image viewer (view <path>; PNG only for now)", cmd_view, VIS_ALWAYS},
     {"calc",    "calculator (calc | calc <expr>); modes: standard/scientific/programmer", cmd_calc, VIS_ALWAYS},
+    {"zkv",     "kv-zeos REPL window (Redis-cli killer)", cmd_zkv, VIS_ALWAYS},
     {"edit",    "open text editor (edit | edit <path>); chain over text_edit signals", cmd_edit, VIS_ALWAYS},
     {"fm",      "open file manager (fm [path]); stream renderer over CHAIN_FS_EVENT", cmd_fm, VIS_ALWAYS},
     {"fs-undo", "reverse the most recent FS op (universal undo)", cmd_fs_undo, VIS_ALWAYS},
@@ -6415,6 +6417,13 @@ static void cmd_view(const char *args)
     } else {
         kputs("  view: opened with error (see overlay for details)\n");
     }
+}
+
+/* zkv — open the kv-zeos REPL window (Redis-cli killer). */
+static void cmd_zkv(const char *args)
+{
+    extern void kv_polish_cmd(const char *args);
+    kv_polish_cmd(args);
 }
 
 /* Calculator — open the window, or evaluate an expression and print result. */

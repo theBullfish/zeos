@@ -128,6 +128,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/file_mgr.c \
            boot/notes_zeos.c \
            boot/chat_zeos.c \
+           boot/kv_polish.c \
            boot/activity.c \
            boot/tests.c
 
