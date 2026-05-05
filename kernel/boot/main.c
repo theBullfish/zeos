@@ -602,6 +602,17 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
          * feed (keyboard_inject_scancode, mouse_inject). */
         usb_hid_init();
 
+        /* USB UVC video class — webcams. Walks every enumerated
+         * device, attaches class 0x0E (Video), parses VC + VS
+         * descriptors, runs Probe/Commit for MJPEG 640x480@30, and
+         * picks the iso-IN alt setting. Streaming is not started
+         * automatically; `camera preview <n>` or
+         * `camera capture <n> <path>` arms it. */
+        {
+            extern int usb_uvc_init(void);
+            usb_uvc_init();
+        }
+
         /* USB CDC ACM class driver — Arduino, ESP32, Pi Pico, etc.
          * Walks every enumerated xHCI device and binds CDC-ACM serial
          * endpoints. Safe even with zero serial devices present. */
@@ -822,6 +833,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         extern void firewall_print_selftest_line(void);
         firewall_print_selftest_line();
+    }
+
+    /* USB UVC cameras selftest: count + formats, or "not present". */
+    {
+        extern void usb_uvc_print_selftest_line(void);
+        usb_uvc_print_selftest_line();
     }
 
     /* Cold-boot login gate. After splash dismiss + chain registry +

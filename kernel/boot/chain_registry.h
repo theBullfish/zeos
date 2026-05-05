@@ -59,6 +59,8 @@ extern int CHAIN_BRIGHTNESS;
 extern int CHAIN_WIFI;
 extern int CHAIN_BLUETOOTH;
 extern int CHAIN_BT_L2CAP;
+extern int CHAIN_VIDEO_IN;
+extern int CHAIN_VIDEO_PREVIEW;
 
 /* Lifetime count of bytes the serial chain has decoded into kb_buf.
  * cmd_selftest samples this across a 100ms window to compute drain

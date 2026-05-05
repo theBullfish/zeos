@@ -854,6 +854,16 @@ int chain_registry_init(void)
         }
     }
 
+    /* USB UVC: CHAIN_VIDEO_IN + per-camera CHAIN_CAMERA_<n> +
+     * CHAIN_VIDEO_PREVIEW. Cameras have already been enumerated and
+     * negotiated by usb_uvc_init() at boot time; the chain layer just
+     * publishes them. Streaming is dormant until `camera preview` /
+     * `camera capture` flips a stream on. */
+    {
+        extern void usb_uvc_register_chains(void);
+        usb_uvc_register_chains();
+    }
+
     /* Firewall: stateful packet-inspection chain. Must register BEFORE
      * net_chain_register so the firewall_check_tx/_rx hook nodes inside
      * CHAIN_NET_TX/RX have a live CHAIN_FIREWALL to resolve into.

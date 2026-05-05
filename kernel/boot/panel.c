@@ -371,6 +371,11 @@ void panel_draw(void) {
     int clock_x = pw - clock_w - 12;
     font_draw(clock_x, (ph - TYPE_LABEL) / 2,
               g_panel.clock_str, FONT_CODE, TYPE_LABEL, COLOR_ON_SURFACE_2);
+
+    /* Privacy overlay: camera-in-use red dot. Painted last so it sits
+     * on top of any right-zone glyph that might overlap. */
+    extern void panel_overlay_draw_camera_indicator(void);
+    panel_overlay_draw_camera_indicator();
 }
 
 int panel_click(int x, int y) {
@@ -420,4 +425,33 @@ void panel_set_persona(int persona) {
 
 int panel_get_height(void) {
     return g_panel.height;
+}
+
+/* ── Privacy: camera-in-use indicator ──────────────────────────
+ * A red dot drawn next to the system-health dot whenever any UVC
+ * stream is active. Cleared when streaming stops. The flag is set
+ * by usb_uvc_start / usb_uvc_stop. */
+static int s_camera_active = 0;
+
+void panel_indicator_camera(int active)
+{
+    s_camera_active = active ? 1 : 0;
+}
+
+/* Called from panel_draw via post-draw hook: panel_draw renders the
+ * three zones and then this overlay paints a red dot if a camera is
+ * live. The hook is invoked at the tail of panel_draw via the
+ * panel_overlay_draw_camera_indicator call we add into the right-zone
+ * pass. To avoid touching the existing draw flow, we expose this as
+ * a stand-alone painter that callers (compositor / panel render
+ * subscriber) invoke after panel_draw. */
+void panel_overlay_draw_camera_indicator(void)
+{
+    if (!s_camera_active || !g_panel.visible) return;
+    int pw = g_panel.screen_w;
+    int ph = g_panel.height;
+    int rz_x = pw - PANEL_RIGHT_W;
+    int ry_center = ph / 2;
+    /* Draw a 4-px red dot just to the left of the health dot. */
+    fb_circle_filled(rz_x + 6, ry_center, 4, 0xFFFF3030);
 }

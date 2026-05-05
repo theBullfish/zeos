@@ -117,6 +117,42 @@ int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len)
 int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len)
 { DISPATCH(dev, interrupt_transfer, dev, buf, len); }
 
+/* Isochronous IN — xHCI only. UVC + USB-audio capture won't work over
+ * the legacy EHCI path; that's an honest constraint, not a stub. */
+int xhci_iso_setup(struct xhci_device *dev, uint8_t ep_addr,
+                   uint16_t mps, uint8_t pkts_per_frame, uint8_t interval,
+                   xhci_iso_cb_t cb, void *user)
+{
+    extern int xhci_real_iso_setup(struct xhci_device *, uint8_t,
+                                   uint16_t, uint8_t, uint8_t,
+                                   xhci_iso_cb_t, void *);
+    if (!dev) return -1;
+    if (dev->hc_kind == HC_KIND_EHCI) return -1;
+    return xhci_real_iso_setup(dev, ep_addr, mps, pkts_per_frame,
+                               interval, cb, user);
+}
+
+int xhci_iso_start(struct xhci_device *dev)
+{
+    extern int xhci_real_iso_start(struct xhci_device *);
+    if (!dev || dev->hc_kind == HC_KIND_EHCI) return -1;
+    return xhci_real_iso_start(dev);
+}
+
+int xhci_iso_stop(struct xhci_device *dev)
+{
+    extern int xhci_real_iso_stop(struct xhci_device *);
+    if (!dev || dev->hc_kind == HC_KIND_EHCI) return -1;
+    return xhci_real_iso_stop(dev);
+}
+
+int xhci_iso_pump(struct xhci_device *dev)
+{
+    extern int xhci_real_iso_pump(struct xhci_device *);
+    if (!dev || dev->hc_kind == HC_KIND_EHCI) return -1;
+    return xhci_real_iso_pump(dev);
+}
+
 /* Hub support — only the xHCI driver implements these. */
 struct xhci_device *xhci_address_hub_device(struct xhci_device *parent,
                                             int parent_port, int speed)

@@ -261,6 +261,9 @@ static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
 
+/* USB UVC webcams */
+static void cmd_camera(const char *args);
+
 /* USB CDC ACM (Arduino/ESP32/Pico serial) */
 static void cmd_usb_serial(const char *args);
 static void cmd_cdc_send(const char *args);
@@ -758,6 +761,9 @@ static const struct shell_cmd commands[] = {
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
 
+    /* USB UVC webcams */
+    {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
+
     /* USB CDC ACM (Arduino, ESP32, Pi Pico, generic USB serial) */
     {"usb-serial","list detected USB serial devices",   cmd_usb_serial, VIS_ALWAYS},
     {"cdc-send","send text to USB serial (cdc-send <idx> <text>)", cmd_cdc_send, VIS_ALWAYS},
@@ -1181,6 +1187,101 @@ static const char *bat_state_label(battery_state_t s)
     case BAT_CRITICAL:    return "CRITICAL";
     default:              return "unknown";
     }
+}
+
+/* ── USB UVC webcam shell ───────────────────────────────────── */
+extern int  usb_uvc_count(void);
+extern int  usb_uvc_describe(int idx, char *out, int max);
+extern int  usb_uvc_start(int idx);
+extern int  usb_uvc_stop(int idx);
+extern int  usb_uvc_streaming(int idx);
+extern int  usb_uvc_capture_jpeg(int idx, const char *path);
+
+static int cam_atoi(const char *s)
+{
+    int v = 0; int neg = 0;
+    if (!s) return 0;
+    while (*s == ' ' || *s == '\t') s++;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
+    return neg ? -v : v;
+}
+
+static const char *cam_skip_ws(const char *s)
+{
+    while (s && (*s == ' ' || *s == '\t')) s++;
+    return s;
+}
+
+static void cmd_camera(const char *args)
+{
+    args = cam_skip_ws(args);
+    if (!args || !*args) { args = "list"; }
+
+    if (args[0] == 'l') {
+        int n = usb_uvc_count();
+        kputs("Cameras: ");
+        kput_dec(n);
+        kputs("\n");
+        for (int i = 0; i < n; i++) {
+            char line[96];
+            usb_uvc_describe(i, line, sizeof(line));
+            kputs("  [");
+            kput_dec(i);
+            kputs("] ");
+            kputs(line);
+            kputs(usb_uvc_streaming(i) ? "  (streaming)\n" : "\n");
+        }
+        return;
+    }
+    if (args[0] == 'p') {
+        const char *p = args; while (*p && *p != ' ') p++;
+        p = cam_skip_ws(p);
+        int idx = (*p) ? cam_atoi(p) : 0;
+        if (idx < 0 || idx >= usb_uvc_count()) {
+            kputs("camera: no such device\n");
+            return;
+        }
+        if (usb_uvc_streaming(idx)) {
+            usb_uvc_stop(idx);
+            kputs("camera: preview stopped\n");
+        } else if (usb_uvc_start(idx) == 0) {
+            kputs("camera: preview started (red dot on panel)\n");
+        } else {
+            kputs("camera: failed to start preview\n");
+        }
+        return;
+    }
+    if (args[0] == 'c') {
+        const char *p = args; while (*p && *p != ' ') p++;
+        p = cam_skip_ws(p);
+        int idx = 0;
+        if (*p >= '0' && *p <= '9') {
+            idx = cam_atoi(p);
+            while (*p && *p != ' ') p++;
+            p = cam_skip_ws(p);
+        }
+        if (!*p) {
+            kputs("usage: camera capture [N] <path>\n");
+            return;
+        }
+        if (idx < 0 || idx >= usb_uvc_count()) {
+            kputs("camera: no such device\n");
+            return;
+        }
+        int n = usb_uvc_capture_jpeg(idx, p);
+        if (n < 0) {
+            kputs("camera: capture failed (no frame or fat32 write error)\n");
+        } else {
+            kputs("camera: wrote ");
+            kput_dec(n);
+            kputs(" bytes to ");
+            kputs(p);
+            kputs("\n");
+        }
+        return;
+    }
+    kputs("usage: camera list | camera preview [N] | camera capture [N] <path>\n");
 }
 
 static void cmd_battery(const char *args)

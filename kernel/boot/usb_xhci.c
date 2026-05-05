@@ -1129,6 +1129,223 @@ int xhci_real_interrupt_transfer(struct xhci_device *dev, void *buf, int len)
     return -1;
 }
 
+/* ── Isochronous-IN endpoint support ─────────────────────────────
+ * xHCI 1.2 §4.10.3.1: Isoch transfers use TRB type 5 (Isoch).
+ * EP Type for Isoch IN is 5; Mult field is in dword0[9:8] (HS/SS hi-bw),
+ * SIA (Start Iso ASAP) bit is dword3[31].
+ *
+ * Driver pattern:
+ *   - Allocate a ring of N TRBs and N receive buffers.
+ *   - Arm every TRB with TRB_ISOCH | IOC | SIA, ring doorbell.
+ *   - On each completion event, invoke the callback with the residual
+ *     length and re-arm the same TRB slot.
+ * The xfer ring already has a Link TRB at slot 255 with TC bit; iso
+ * shares that ring discipline. We only use the first XHCI_ISO_RING_TRBS
+ * slots so the link TRB is never touched.
+ */
+
+#define TRB_ISOCH               5
+#define TRB_SIA                 (1U << 31)
+#define TRB_TYPE_STOP_ENDPOINT  15
+
+static uint64_t iso_ring_enqueue(struct xhci_device *dev, int slot_idx,
+                                 uint32_t p_lo, uint32_t p_hi,
+                                 uint32_t status, uint32_t control)
+{
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    xhci_trb_t *ring = (xhci_trb_t *)ie->ring;
+    xhci_trb_t *slot = &ring[slot_idx];
+    slot->param_lo = p_lo;
+    slot->param_hi = p_hi;
+    slot->status = status;
+    __asm__ volatile("" ::: "memory");
+    /* All slots use the initial cycle (1) for the first lap. We never
+     * re-write a slot during a single lap because re-arm uses the same
+     * slot index after a completion; the cycle bit is then flipped on
+     * each subsequent lap. */
+    slot->control = (control & ~TRB_C) | (ie->cycle ? TRB_C : 0);
+    __asm__ volatile("" ::: "memory");
+    uint64_t phys = ie->ring_phys + (uint64_t)slot_idx * sizeof(xhci_trb_t);
+    ie->trb_phys[slot_idx] = phys;
+    ie->trb_armed[slot_idx] = 1;
+    return phys;
+}
+
+static int iso_arm_one(struct xhci_device *dev, int slot_idx)
+{
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    void *buf = ie->trb_buf[slot_idx];
+    if (!buf) return -1;
+    uint64_t bp = (uint64_t)(uintptr_t)buf;
+    uint32_t armed = (uint32_t)ie->max_packet * ie->pkts_per_frame;
+    /* TBC=0 (1 burst); TLBPC=0; SIA=1 (Start Iso ASAP). */
+    uint32_t ctrl = TRB_TYPE(TRB_ISOCH) | TRB_IOC | TRB_SIA;
+    iso_ring_enqueue(dev, slot_idx,
+                     (uint32_t)(bp & 0xFFFFFFFFU),
+                     (uint32_t)(bp >> 32),
+                     armed, ctrl);
+    return 0;
+}
+
+int xhci_real_iso_setup(struct xhci_device *dev, uint8_t ep_addr,
+                        uint16_t mps, uint8_t pkts_per_frame,
+                        uint8_t interval, xhci_iso_cb_t cb, void *user)
+{
+    if (!dev || dev->slot_id == 0) return -1;
+    if (!(ep_addr & 0x80)) return -1;
+    if (!cb || mps == 0) return -1;
+    if (pkts_per_frame == 0) pkts_per_frame = 1;
+    if (pkts_per_frame > XHCI_ISO_MAX_PKTS_PER_FRAME)
+        pkts_per_frame = XHCI_ISO_MAX_PKTS_PER_FRAME;
+
+    int epnum = ep_addr & 0x0F;
+    int dci = epnum * 2 + 1;
+    if (dci >= 32) return -1;
+
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    if (ie->configured) return -1;
+
+    uint64_t ring_phys;
+    void *ring = xfer_ring_init(&ring_phys);
+    if (!ring) return -1;
+    ie->ring = ring;
+    ie->ring_phys = ring_phys;
+    ie->enqueue = 0;
+    ie->cycle = 1;
+    ie->ep_addr = ep_addr;
+    ie->dci = (uint8_t)dci;
+    ie->max_packet = mps;
+    ie->pkts_per_frame = pkts_per_frame;
+    ie->interval = interval;
+    ie->cb = cb;
+    ie->cb_user = user;
+
+    /* Buffer pool: per-slot capacity = mps * pkts_per_frame, capped. */
+    uint32_t per = (uint32_t)mps * pkts_per_frame;
+    if (per > XHCI_ISO_MAX_PKT) per = XHCI_ISO_MAX_PKT;
+    uint32_t total = per * XHCI_ISO_RING_TRBS;
+    uint32_t pages = (total + 4095) / 4096;
+    if (pages == 0) pages = 1;
+    ie->bufpool = alloc_pages(pages);
+    if (!ie->bufpool) return -1;
+    memset(ie->bufpool, 0, pages * 4096);
+    for (int i = 0; i < XHCI_ISO_RING_TRBS; i++) {
+        ie->trb_buf[i] = (uint8_t *)ie->bufpool + (uint64_t)i * per;
+        ie->trb_armed[i] = 0;
+        ie->trb_phys[i] = 0;
+    }
+
+    /* Configure Endpoint. */
+    int max_dci = dci;
+    if (dev->int_in.configured && dev->int_in.dci > max_dci) max_dci = dev->int_in.dci;
+    for (int i = 0; i < XHCI_MAX_BULK_EPS; i++) {
+        if (dev->bulk[i].configured && dev->bulk[i].dci > max_dci)
+            max_dci = dev->bulk[i].dci;
+    }
+
+    xhci_input_ctrl_ctx_t *icc = input_ctrl_of(dev->input_ctx);
+    icc->drop_flags = 0;
+    icc->add_flags = (1U << 0) | (1U << dci);
+
+    xhci_slot_ctx_t *slot = input_slot_of(dev->input_ctx);
+    slot->dword0 = ((uint32_t)dev->speed << 20) | ((uint32_t)max_dci << 27);
+    slot->dword1 = ((uint32_t)dev->port << 16);
+    slot->dword2 = 0;
+    slot->dword3 = 0;
+
+    int ep_index = dci - 1;
+    xhci_ep_ctx_t *ep = input_ep_of(dev->input_ctx, ep_index);
+    memset(ep, 0, sizeof(*ep));
+    /* Isoch IN: EP Type = 5. Mult = pkts_per_frame - 1 (HS/SS hi-bw). */
+    uint32_t mult = (pkts_per_frame > 0) ? (uint32_t)(pkts_per_frame - 1) : 0;
+    ep->dword0 = ((uint32_t)interval << 16) | (mult << 8);
+    /* CErr = 0 for iso (spec). */
+    ep->dword1 = (5U << 3) | ((uint32_t)mps << 16);
+    ep->dword2 = (uint32_t)(ring_phys & 0xFFFFFFF0U) | 1U;
+    ep->dword3 = (uint32_t)(ring_phys >> 32);
+    uint32_t esit = (uint32_t)mps * pkts_per_frame;
+    ep->dword4 = ((esit & 0xFFFF) << 16) | (uint32_t)mps;
+
+    uint64_t in_phys = (uint64_t)(uintptr_t)dev->input_ctx;
+    uint32_t cctrl = TRB_TYPE(TRB_CONFIGURE_ENDPOINT) |
+                     ((uint32_t)dev->slot_id << 24);
+    uint64_t cmd_phys = cmd_issue((uint32_t)(in_phys & 0xFFFFFFFFU),
+                                  (uint32_t)(in_phys >> 32),
+                                  0, cctrl);
+    int code = cmd_wait(cmd_phys, 0);
+    if (code != 1) {
+        kputs("[xhci] iso ConfigureEndpoint failed code=");
+        kput_hex(code);
+        kputs("\n");
+        return -1;
+    }
+    ie->configured = 1;
+    return 0;
+}
+
+int xhci_real_iso_start(struct xhci_device *dev)
+{
+    if (!dev) return -1;
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    if (!ie->configured || ie->running) return -1;
+    for (int i = 0; i < XHCI_ISO_RING_TRBS; i++) {
+        if (iso_arm_one(dev, i) != 0) return -1;
+    }
+    ie->running = 1;
+    db_ring(dev->slot_id, ie->dci);
+    return 0;
+}
+
+int xhci_real_iso_stop(struct xhci_device *dev)
+{
+    if (!dev) return -1;
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    if (!ie->configured || !ie->running) return 0;
+    uint32_t cctrl = TRB_TYPE(TRB_TYPE_STOP_ENDPOINT) |
+                     ((uint32_t)ie->dci << 16) |
+                     ((uint32_t)dev->slot_id << 24);
+    uint64_t cmd_phys = cmd_issue(0, 0, 0, cctrl);
+    (void)cmd_wait(cmd_phys, 0);
+    ie->running = 0;
+    return 0;
+}
+
+int xhci_real_iso_pump(struct xhci_device *dev)
+{
+    if (!dev) return -1;
+    struct xhci_iso_ep *ie = &dev->iso_in;
+    if (!ie->configured || !ie->running) return 0;
+
+    int delivered = 0;
+    for (int n = 0; n < XHCI_ISO_RING_TRBS * 2; n++) {
+        xhci_trb_t *e = event_pop();
+        if (!e) break;
+        if (TRB_TYPE_OF(e->control) != TRB_TRANSFER_EVENT) continue;
+        uint64_t evt_ptr = ((uint64_t)e->param_hi << 32) | e->param_lo;
+        int hit = -1;
+        for (int i = 0; i < XHCI_ISO_RING_TRBS; i++) {
+            if (ie->trb_phys[i] == evt_ptr) { hit = i; break; }
+        }
+        if (hit < 0) continue;
+        int code = (e->status >> 24) & 0xFF;
+        int residual = (int)(e->status & 0xFFFFFF);
+        int armed = (int)ie->max_packet * ie->pkts_per_frame;
+        int got = armed - residual;
+        if (got < 0) got = 0;
+        if (got > armed) got = armed;
+        if ((code == 1 || code == 13) && got > 0 && ie->cb) {
+            ie->cb(ie->cb_user, ie->trb_buf[hit], got);
+            delivered++;
+        }
+        ie->trb_armed[hit] = 0;
+        /* Flip cycle when we wrap past the highest slot we own. */
+        if (hit == XHCI_ISO_RING_TRBS - 1) ie->cycle ^= 1;
+        iso_arm_one(dev, hit);
+        db_ring(dev->slot_id, ie->dci);
+    }
+    return delivered;
+}
+
 /* ── Address Device flow ─────────────────────────────────────── */
 static int address_device(struct xhci_device *dev)
 {

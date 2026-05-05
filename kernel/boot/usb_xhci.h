@@ -59,6 +59,41 @@ struct xhci_bulk_ep {
 
 #define XHCI_MAX_BULK_EPS 4
 
+/* Per-device isochronous-IN endpoint state (UVC, audio capture, etc.).
+ * One ring of N TRBs; the driver keeps every TRB armed and rotates
+ * through them as transfer events complete. The ISR-style callback
+ * fires once per microframe payload arrival from inside the polling
+ * pump (xhci_iso_pump). */
+#define XHCI_ISO_RING_TRBS  32
+#define XHCI_ISO_MAX_PKT    3072       /* MJPEG @ 640x480 fits well under */
+#define XHCI_ISO_MAX_PKTS_PER_FRAME 3   /* per-microframe budget */
+
+typedef void (*xhci_iso_cb_t)(void *user, const void *buf, int len);
+
+struct xhci_iso_ep {
+    int        configured;
+    int        running;
+    uint8_t    ep_addr;
+    uint8_t    dci;
+    uint16_t   max_packet;
+    uint8_t    interval;            /* xHCI Interval field */
+    uint8_t    pkts_per_frame;      /* 1..3, from SS Companion or HS hi-bw */
+    void      *ring;
+    uint64_t   ring_phys;
+    uint32_t   enqueue;
+    uint32_t   cycle;
+    /* Per-TRB shadow tracking — phys addr of each TRB, plus the buffer
+     * we associated with it. Each buffer is XHCI_ISO_MAX_PKT bytes. */
+    uint64_t   trb_phys[XHCI_ISO_RING_TRBS];
+    void      *trb_buf [XHCI_ISO_RING_TRBS];
+    int        trb_armed[XHCI_ISO_RING_TRBS];
+    /* Pool of receive buffers (one per TRB slot). */
+    void      *bufpool;
+    /* Completion callback. */
+    xhci_iso_cb_t cb;
+    void      *cb_user;
+};
+
 struct xhci_device {
     int      hc_kind;            /* HC_KIND_XHCI or HC_KIND_EHCI */
     void    *hc_priv;            /* HC-specific per-device state (EHCI) */
@@ -84,6 +119,7 @@ struct xhci_device {
     uint32_t ep0_cycle;
     struct xhci_int_ep int_in;
     struct xhci_bulk_ep bulk[XHCI_MAX_BULK_EPS];
+    struct xhci_iso_ep  iso_in;
 };
 
 int xhci_init(void);
@@ -108,6 +144,27 @@ int xhci_setup_interrupt_in(struct xhci_device *dev,
                             uint8_t interval);
 int xhci_interrupt_poll(struct xhci_device *dev, void *buf, int len);
 int xhci_interrupt_transfer(struct xhci_device *dev, void *buf, int len);
+
+/* Isochronous-IN endpoint API.
+ *
+ * xhci_iso_setup: program an Isoch-IN endpoint context, allocate the
+ * TRB ring and per-slot buffer pool, register the completion callback.
+ * mps is the maximum packet size from the endpoint descriptor; the
+ * driver uses pkts_per_frame to size the per-microframe budget. The
+ * callback fires once per completed isoch TRB with the data the device
+ * actually delivered (zero-length packets are skipped).
+ *
+ * xhci_iso_start arms every TRB in the ring and rings the doorbell.
+ * xhci_iso_stop stops the endpoint (Stop Endpoint command) and parks it.
+ * xhci_iso_pump drains the event ring and invokes pending callbacks +
+ * re-arms the consumed TRBs. Class drivers call xhci_iso_pump from their
+ * per-tick poll. */
+int  xhci_iso_setup(struct xhci_device *dev, uint8_t ep_addr,
+                    uint16_t mps, uint8_t pkts_per_frame, uint8_t interval,
+                    xhci_iso_cb_t cb, void *user);
+int  xhci_iso_start(struct xhci_device *dev);
+int  xhci_iso_stop (struct xhci_device *dev);
+int  xhci_iso_pump (struct xhci_device *dev);
 
 int xhci_device_count(void);
 struct xhci_device *xhci_get_device(int index);

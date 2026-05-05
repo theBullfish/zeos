@@ -88,4 +88,8 @@ int  panel_get_height(void);
 /* Right-click on the panel — opens Settings / About Zeos menu. */
 int  panel_right_click(int x, int y);
 
+/* Privacy indicator — set non-zero when a camera is actively
+ * streaming. Painted as a red dot in the panel right zone. */
+void panel_indicator_camera(int active);
+
 #endif /* ZEOS_PANEL_H */
