@@ -17,4 +17,8 @@ path = "src/bin/zplus_lex.rs"
 name = "zplus-parse"
 path = "src/bin/zplus_parse.rs"
 
+[[bin]]
+name = "zplus-check"
+path = "src/bin/zplus_check.rs"
+
 [dev-dependencies]

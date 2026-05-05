@@ -508,6 +508,23 @@ fn is_duration_unit(u: &UnitTag) -> bool {
     matches!(u, UnitTag::Simple(s) if matches!(s.as_str(), "ms" | "s" | "m" | "h" | "d"))
 }
 
+/// Like `infer_chain` but peers through `UnaryCmp` / `BinExpr` predicate
+/// wrappers to find the underlying value type. Used by `check_calls`
+/// when type-checking named-arg values: `on_silence(within: > 5m)` has
+/// a UnaryCmp(Gt, Duration) value, but the type slot expects Duration,
+/// not Bool.
+fn infer_arg_value(c: &Chain<'_>, env: &TypeEnv) -> Type {
+    match c {
+        Chain::UnaryCmp { rhs, .. } => infer_arg_value(rhs, env),
+        // For BinExpr we look at the rhs by convention — the lhs is
+        // typically the implicit subject (the value being compared
+        // against), the rhs is the "limit." Either picks a side; rhs
+        // gets the literal in `value > 5x` style.
+        Chain::BinExpr { rhs, .. } => infer_arg_value(rhs, env),
+        other => infer_chain(other, env),
+    }
+}
+
 /// Check named arg types in every Call against the env's `named_args`
 /// table. For each Call whose callee has a registered named-arg
 /// signature, verify each named arg's value type is compatible with the
@@ -536,16 +553,14 @@ fn walk_calls<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
                     for arg in &call.args {
                         if let Arg::Named { name, value, span } = arg {
                             if let Some(expected_ty) = expected.get(name.text) {
-                                let actual = infer_chain(value, env);
-                                // Defer when the actual is opaque to v1
-                                // inference. Bool means "wrapped in
-                                // comparison/predicate" — the value
-                                // underneath might still be the right
-                                // type, but the inference doesn't peer
-                                // through.
-                                if matches!(actual, Type::Unknown(_) | Type::Any(_))
-                                    || matches!(actual, Type::Prim(Prim::Bool))
-                                {
+                                // Peer through UnaryCmp / BinExpr predicate
+                                // wrappers to find the underlying value
+                                // type. `on_silence(within: > 5m)` has a
+                                // UnaryCmp(Gt, Duration) value — the
+                                // semantically interesting type is the
+                                // Duration, not the predicate's Bool.
+                                let actual = infer_arg_value(value, env);
+                                if matches!(actual, Type::Unknown(_) | Type::Any(_)) {
                                     continue;
                                 }
                                 if !types_compatible(&actual, expected_ty) {
@@ -1186,6 +1201,65 @@ mod tests {
         };
         let errors = check_calls(&module, &env);
         assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    /// Peer-through canary. `on_silence(within: > 5m)` — value is
+    /// UnaryCmp(Gt, Duration). The named-arg checker should peer
+    /// through the predicate to find the Duration and accept it.
+    #[test]
+    fn peer_through_unary_cmp_finds_underlying_value() {
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        // on_silence(within: > 5m) — within: UnaryCmp(Gt, Duration{5,m})
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path::one("on_silence", span),
+                args: vec![Arg::Named {
+                    name: Ident { text: "within", span },
+                    value: Chain::UnaryCmp {
+                        op: BinOp::Gt,
+                        rhs: Box::new(Chain::Atom(Atom::Literal(Literal::Duration {
+                            value: 5.0,
+                            unit: DurationUnit::M,
+                            span,
+                        }))),
+                        span,
+                    },
+                    span,
+                }],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert!(errors.is_empty(), "expected peer-through to accept Duration: {:?}", errors);
+    }
+
+    /// Negative peer-through: `on_silence(within: > "5s")` — peer through
+    /// finds a String, which doesn't match Duration. Should fire.
+    #[test]
+    fn peer_through_catches_wrapped_wrong_type() {
+        let env = TypeEnv::default_with_builtins();
+        let span = dummy();
+        let module = Module {
+            stmts: vec![Stmt::Connect(Chain::Call(Call {
+                callee: Path::one("on_silence", span),
+                args: vec![Arg::Named {
+                    name: Ident { text: "within", span },
+                    value: Chain::UnaryCmp {
+                        op: BinOp::Gt,
+                        rhs: Box::new(Chain::Atom(Atom::Literal(Literal::String("\"5s\"", span)))),
+                        span,
+                    },
+                    span,
+                }],
+                span,
+            }))],
+            span,
+        };
+        let errors = check_calls(&module, &env);
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].message.contains("expects duration"));
     }
 
     #[test]

@@ -15,7 +15,22 @@ chord-rule canary test. `SEMANTIC_CONTRACTS.md` enumerates each of the
 28 synthetic `__op__` callees the parser emits with a type signature
 and runtime contract.
 
-**Type checker, IR, codegen, runtime: not started.** 83 tests green.
+**Type checker landed.** Three independent ratchets all at zero across
+the full corpus: merge arity (chord rule), Flow connectivity
+(`output(a) ↔ input(b)`), named-arg type checking. Peer-through into
+predicate wrappers so `on_silence(within: > 5m)` checks against the
+underlying Duration. **126 tests green**.
+
+**`zplus check` CLI** renders type errors with file:line:col header,
+the source line, and a carat under the span:
+
+```
+/tmp/bad.zp:1:22: error: named arg `per` of `rate` expects duration, got Sig<String>
+  | errors : raw -> rate(per: "1 minute") -> alerts
+  |                      ^^^^^^^^^^^^^^^
+```
+
+**IR, codegen, runtime: not started.**
 
 ## Layout
 
@@ -32,7 +47,8 @@ tools/zplus/
 │   ├── ast.rs                 # typed AST — chord rule documented at top
 │   ├── ty.rs                  # the type-shape enum (no checker yet)
 │   ├── bin/zplus_lex.rs       # CLI: dumps token stream
-│   └── bin/zplus_parse.rs     # CLI: parses + prints stmt count
+│   ├── bin/zplus_parse.rs     # CLI: parses + prints stmt count
+│   └── bin/zplus_check.rs     # CLI: parse + 3 checker passes + source-context errors
 └── tests/
     ├── log_monitor.rs         # lexer fixture: programs/02_log_monitor.zp
     ├── http_server.rs         # lexer fixture: programs/03_http_server.zp
