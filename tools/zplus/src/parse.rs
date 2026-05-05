@@ -135,12 +135,26 @@ impl<'src> Parser<'src> {
             let w = self.parse_wire_decl()?;
             Ok(Stmt::Wire(w))
         } else {
-            let chain = self.parse_chain()?;
+            let mut chain = self.parse_chain()?;
+            // Stmt-level postfix Bind: `<chain> : <expr>` and `<chain> : { fork }`.
+            // Common pattern from chains like `fused -> rank : weighted(...)`
+            // and `-> input : { movement, aim, actions }`. Only fold at stmt
+            // level so fork branch labels (which are inside `{}`) aren't
+            // captured here.
+            if self.peek_kind() == Some(TokenKind::Colon) {
+                self.advance();
+                self.skip_newlines();
+                let rhs = self.parse_chain()?;
+                let span = Span::new(self.span_of(&chain).start, self.span_of(&rhs).end);
+                chain = Chain::Bind(Box::new(chain), Box::new(rhs), span);
+            }
             Ok(Stmt::Connect(chain))
         }
     }
 
-    /// Lookahead: `IDENT (DOT IDENT)* COLON`.
+    /// Lookahead: `IDENT (DOT IDENT)* (LPAREN ... RPAREN)? COLON`.
+    /// The optional balanced-paren chunk allows call-as-wire-decl-LHS forms
+    /// like `topic("orders") :` or `channel("foo") :`.
     fn looks_like_wire_decl(&self) -> bool {
         let mut p = self.pos;
         if self.kind_at(p) != Some(TokenKind::Ident) {
@@ -152,16 +166,34 @@ impl<'src> Parser<'src> {
         {
             p += 2;
         }
+        // Optional call args.
+        if self.kind_at(p) == Some(TokenKind::LParen) {
+            p += 1;
+            let mut depth = 1;
+            while depth > 0 && p < self.tokens.len() {
+                match self.kind_at(p) {
+                    Some(TokenKind::LParen) => depth += 1,
+                    Some(TokenKind::RParen) => depth -= 1,
+                    _ => {}
+                }
+                p += 1;
+            }
+        }
         self.kind_at(p) == Some(TokenKind::Colon)
     }
 
     fn parse_wire_decl(&mut self) -> Result<WireDecl<'src>, ParseError> {
         let start = self.cur_pos();
         let name = self.parse_path()?;
+        let args = if self.peek_kind() == Some(TokenKind::LParen) {
+            Some(self.parse_args()?)
+        } else {
+            None
+        };
         self.expect(TokenKind::Colon)?;
         let chain = self.parse_chain()?;
         let end = self.cur_pos();
-        Ok(WireDecl { name, chain, span: Span::new(start, end) })
+        Ok(WireDecl { name, args, chain, span: Span::new(start, end) })
     }
 
     fn parse_path(&mut self) -> Result<Path<'src>, ParseError> {
@@ -179,27 +211,73 @@ impl<'src> Parser<'src> {
         Ok(Path { segments, span: Span::new(start, end) })
     }
 
-    /// Chain := Term (FlowOp Term)*
-    /// FlowOp := -> | ~> | -x>
+    /// Chain := Term (ChainOp Term)*
+    /// ChainOp := -> | ~> | -x> | <-
+    ///
+    /// Multi-line chains are supported: if the next non-newline token is a
+    /// chain op, newlines between the prior term and the op are skipped.
+    /// (`server : net.listen(...)\n    -> log_request\n    -> rate_limit`).
     fn parse_chain(&mut self) -> Result<Chain<'src>, ParseError> {
         let mut left = self.parse_chain_term()?;
         loop {
-            let op = match self.peek_kind() {
+            // Look past newlines: if the next non-newline token is a chain
+            // op, fold the newlines and continue. Otherwise stop here.
+            let mut probe = self.pos;
+            while self.kind_at(probe) == Some(TokenKind::Newline) {
+                probe += 1;
+            }
+            let op = match self.kind_at(probe) {
                 Some(TokenKind::Flow) => Some(TokenKind::Flow),
                 Some(TokenKind::Tap) => Some(TokenKind::Tap),
                 Some(TokenKind::Sever) => Some(TokenKind::Sever),
+                Some(TokenKind::BindLeft) => Some(TokenKind::BindLeft),
+                // `then` keyword acts as a Flow with temporal-sequencing
+                // semantics (`a then b` = a happens, then b). For v1 we
+                // alias it to Flow; the runtime carries the "then" intent
+                // via stmt position.
+                Some(TokenKind::Ident) if self.tokens.get(probe).map(|t| t.text) == Some("then") => Some(TokenKind::Flow),
                 _ => None,
             };
             let Some(op_kind) = op else { break };
+            // Consume the skipped newlines now that we know we're chaining.
+            self.pos = probe;
             self.advance();
             // Allow newline after a chain operator for multi-line chains.
             self.skip_newlines();
             let right = self.parse_chain_term()?;
+            // For `<-` only, the RHS is an actuator type/option-set spec.
+            // Allowed continuations: `| IDENT` (e.g. `<- on | off`) or
+            // `, IDENT` (e.g. `<- brightness, color_temp`). Both forms eat
+            // alternates and wrap them under a synthetic `__union__` call.
+            let right = if matches!(op_kind, TokenKind::BindLeft) {
+                let mut r = right;
+                loop {
+                    let kind = self.peek_kind();
+                    let sep = matches!(kind, Some(TokenKind::Pipe) | Some(TokenKind::Comma));
+                    if !sep || self.kind_at(self.pos + 1) != Some(TokenKind::Ident) {
+                        break;
+                    }
+                    self.advance(); // sep
+                    let extra = self.advance(); // ident — discarded
+                    let new_end = extra.end;
+                    let start = self.span_of(&r).start;
+                    r = Chain::Call(Call {
+                        callee: Path::one("__union__", Span::new(start, new_end)),
+                        args: vec![Arg::Positional(r)],
+                        span: Span::new(start, new_end),
+                    });
+                }
+                // Also allow postfix `@ unit` on the RHS — `<- target_temp @ F`.
+                self.maybe_unit_annotate(r)?
+            } else {
+                right
+            };
             let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
             left = match op_kind {
                 TokenKind::Flow => Chain::Flow(Box::new(left), Box::new(right), span),
                 TokenKind::Tap => Chain::Tap(Box::new(left), Box::new(right), span),
                 TokenKind::Sever => Chain::Sever(Box::new(left), Box::new(right), span),
+                TokenKind::BindLeft => Chain::Bind(Box::new(left), Box::new(right), span),
                 _ => unreachable!(),
             };
         }
@@ -207,25 +285,70 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_chain_term(&mut self) -> Result<Chain<'src>, ParseError> {
+        // Unary `+` / `-` prefix on a chain term — used for negative literals
+        // like `gate(< -2σ)` and `gate(< -2C/s)`. The unary form falls
+        // through to a fresh parse_chain_term recursion and wraps in a
+        // synthetic `__neg__` / `__pos__` call.
+        if matches!(self.peek_kind(), Some(TokenKind::Minus | TokenKind::Plus)) {
+            let prefix_tok = self.advance();
+            let inner = self.parse_chain_term()?;
+            let span = Span::new(prefix_tok.start, self.span_of(&inner).end);
+            let callee = if prefix_tok.kind == TokenKind::Minus { "__neg__" } else { "__pos__" };
+            let term = Chain::Call(Call {
+                callee: Path::one(callee, span),
+                args: vec![Arg::Positional(inner)],
+                span,
+            });
+            return self.maybe_unit_annotate(term);
+        }
         let cur = self.cur();
-        match cur.kind {
+        let term = match cur.kind {
             TokenKind::Ident => {
                 let path = self.parse_path()?;
-                if self.peek_kind() == Some(TokenKind::LParen) {
+                let mut term = if self.peek_kind() == Some(TokenKind::LParen) {
                     let args = self.parse_args()?;
                     let end = self.prev_end();
-                    Ok(Chain::Call(Call { callee: path.clone(), args, span: Span::new(path.span.start, end) }))
+                    Chain::Call(Call { callee: path.clone(), args, span: Span::new(path.span.start, end) })
+                } else if self.peek_kind() == Some(TokenKind::LBrace) {
+                    // `IDENT { fork_body }` — fork passed as the sole arg of
+                    // the call. e.g. `transcode { resolution: 1080p, ... }`.
+                    let fork = self.parse_fork()?;
+                    let end = self.span_of(&fork).end;
+                    Chain::Call(Call {
+                        callee: path.clone(),
+                        args: vec![Arg::Positional(fork)],
+                        span: Span::new(path.span.start, end),
+                    })
                 } else {
-                    Ok(Chain::Atom(Atom::Path(path)))
+                    Chain::Atom(Atom::Path(path))
+                };
+                // `Call.field` — chained field access after a call.
+                while self.peek_kind() == Some(TokenKind::Dot)
+                    && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                {
+                    self.advance(); // dot
+                    let seg = self.expect(TokenKind::Ident)?;
+                    // Encode field access as a synthetic `__field__` call so
+                    // we don't need a dedicated AST variant.
+                    let span = Span::new(self.span_of(&term).start, seg.end);
+                    term = Chain::Call(Call {
+                        callee: Path::one("__field__", span),
+                        args: vec![
+                            Arg::Positional(term),
+                            Arg::Positional(Chain::Atom(Atom::Path(Path::one(seg.text, Span::new(seg.start, seg.end))))),
+                        ],
+                        span,
+                    });
                 }
+                term
             }
             TokenKind::String => {
                 self.advance();
-                Ok(Chain::Atom(Atom::Literal(Literal::String(cur.text, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::String(cur.text, Span::new(cur.start, cur.end))))
             }
             TokenKind::TemplateString => {
                 self.advance();
-                Ok(Chain::Atom(Atom::Literal(Literal::TemplateString(cur.text, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::TemplateString(cur.text, Span::new(cur.start, cur.end))))
             }
             TokenKind::Int => {
                 self.advance();
@@ -233,7 +356,7 @@ impl<'src> Parser<'src> {
                     message: format!("invalid integer literal '{}': {}", cur.text, e),
                     span: Span::new(cur.start, cur.end),
                 })?;
-                Ok(Chain::Atom(Atom::Literal(Literal::Int(value, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::Int(value, Span::new(cur.start, cur.end))))
             }
             TokenKind::Float => {
                 self.advance();
@@ -241,7 +364,7 @@ impl<'src> Parser<'src> {
                     message: format!("invalid float literal '{}': {}", cur.text, e),
                     span: Span::new(cur.start, cur.end),
                 })?;
-                Ok(Chain::Atom(Atom::Literal(Literal::Float(value, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::Float(value, Span::new(cur.start, cur.end))))
             }
             TokenKind::Duration => {
                 self.advance();
@@ -250,35 +373,66 @@ impl<'src> Parser<'src> {
                         message: format!("invalid duration literal '{}'", cur.text),
                         span: Span::new(cur.start, cur.end),
                     })?;
-                Ok(Chain::Atom(Atom::Literal(Literal::Duration {
+                Chain::Atom(Atom::Literal(Literal::Duration {
                     value: val, unit, span: Span::new(cur.start, cur.end),
-                })))
+                }))
             }
             TokenKind::Ratio => {
                 self.advance();
                 let val: f64 = cur.text.trim_end_matches('x').parse().unwrap_or(0.0);
-                Ok(Chain::Atom(Atom::Literal(Literal::Ratio(val, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::Ratio(val, Span::new(cur.start, cur.end))))
             }
             TokenKind::PercentLit => {
                 self.advance();
                 let val: f64 = cur.text.trim_end_matches('%').parse().unwrap_or(0.0);
-                Ok(Chain::Atom(Atom::Literal(Literal::Percent(val, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::Percent(val, Span::new(cur.start, cur.end))))
             }
             TokenKind::Sigma => {
                 self.advance();
                 let val: f64 = cur.text.trim_end_matches('σ').parse().unwrap_or(0.0);
-                Ok(Chain::Atom(Atom::Literal(Literal::Sigma(val, Span::new(cur.start, cur.end)))))
+                Chain::Atom(Atom::Literal(Literal::Sigma(val, Span::new(cur.start, cur.end))))
+            }
+            TokenKind::Hex => {
+                self.advance();
+                let val = u64::from_str_radix(cur.text.trim_start_matches("0x"), 16).unwrap_or(0);
+                Chain::Atom(Atom::Literal(Literal::Hex(val, Span::new(cur.start, cur.end))))
+            }
+            TokenKind::HexColor => {
+                self.advance();
+                Chain::Atom(Atom::Literal(Literal::HexColor(cur.text, Span::new(cur.start, cur.end))))
+            }
+            TokenKind::Dimension => {
+                self.advance();
+                let parts: Vec<&str> = cur.text.split('x').collect();
+                let w: u64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let h: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                Chain::Atom(Atom::Literal(Literal::Dimension { w, h, span: Span::new(cur.start, cur.end) }))
+            }
+            TokenKind::ByteSize => {
+                self.advance();
+                // 200KB / 2MB / 1GB / 4TB
+                let (num_str, mult): (&str, u64) =
+                    if let Some(s) = cur.text.strip_suffix("KB") { (s, 1024) }
+                    else if let Some(s) = cur.text.strip_suffix("MB") { (s, 1024 * 1024) }
+                    else if let Some(s) = cur.text.strip_suffix("GB") { (s, 1024u64.pow(3)) }
+                    else if let Some(s) = cur.text.strip_suffix("TB") { (s, 1024u64.pow(4)) }
+                    else { (cur.text, 1) };
+                let n: u64 = num_str.parse().unwrap_or(0);
+                Chain::Atom(Atom::Literal(Literal::ByteSize {
+                    bytes: n * mult, span: Span::new(cur.start, cur.end),
+                }))
             }
             TokenKind::DevNull => {
                 self.advance();
-                Ok(Chain::Atom(Atom::DevNull(Span::new(cur.start, cur.end))))
+                Chain::Atom(Atom::DevNull(Span::new(cur.start, cur.end)))
             }
             TokenKind::TimePast => {
                 self.advance();
-                // text is "t-1", "t-2", etc.
                 let steps: u32 = cur.text[2..].parse().unwrap_or(0);
-                Ok(Chain::Atom(Atom::TimePast { steps, span: Span::new(cur.start, cur.end) }))
+                Chain::Atom(Atom::TimePast { steps, span: Span::new(cur.start, cur.end) })
             }
+            TokenKind::LBrace => self.parse_fork()?,
+            TokenKind::LBracket => self.parse_list()?,
             TokenKind::Pipe => {
                 // `|` standalone — start of a merge fragment with no inputs yet.
                 // Forms accepted:
@@ -292,18 +446,221 @@ impl<'src> Parser<'src> {
                     self.expect(TokenKind::Pipe)?;
                 }
                 let downstream = self.try_parse_merge_downstream()?;
-                Ok(Chain::Merge(Merge {
+                Chain::Merge(Merge {
                     inputs: Vec::new(),
                     policy: policy.unwrap_or(MergePolicy::All),
                     downstream: downstream.map(Box::new),
                     span: Span::new(cur.start, self.prev_end()),
-                }))
+                })
             }
-            _ => Err(ParseError {
+            _ => return Err(ParseError {
                 message: format!("unexpected token in chain term: {:?}", cur.kind),
                 span: Span::new(cur.start, cur.end),
             }),
+        };
+
+        // Postfix annotations on a chain term:
+        //   `<term> @ ident`           — unit annotation (separated form)
+        //   `<numeric> Ident` (tight)  — unit annotation (no-space form, e.g. `60Hz`)
+        Ok(self.maybe_unit_annotate(term)?)
+    }
+
+    /// Apply postfix annotations to a parsed term:
+    ///   - `<term> @ unit`           — unit annotation
+    ///   - `<numeric_literal>Ident`  — tight unit annotation (`60Hz`)
+    ///   - `<term> : { fork_body }`  — record-shape binding (game_server,
+    ///     chat_system, etc. use `name : { fields }` to declare structure)
+    fn maybe_unit_annotate(&mut self, mut term: Chain<'src>) -> Result<Chain<'src>, ParseError> {
+        loop {
+            // `@ Ident (/ Ident)*` form. Allows compound units like
+            // `@ m/s` or `@ kg/m^3` (only the slash variant is in the corpus
+            // for now). All segments are absorbed into the unit path text.
+            if self.peek_kind() == Some(TokenKind::At) {
+                self.advance();
+                let mut unit_path = self.parse_path()?;
+                while self.peek_kind() == Some(TokenKind::Slash)
+                    && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                {
+                    self.advance(); // /
+                    let seg = self.expect(TokenKind::Ident)?;
+                    let new_end = seg.end;
+                    unit_path.segments.push(Ident { text: seg.text, span: Span::new(seg.start, seg.end) });
+                    unit_path.span.end = new_end;
+                }
+                let span = Span::new(self.span_of(&term).start, unit_path.span.end);
+                term = Chain::Call(Call {
+                    callee: Path::one("__unit__", Span::new(span.start, span.end)),
+                    args: vec![
+                        Arg::Positional(term),
+                        Arg::Positional(Chain::Atom(Atom::Path(unit_path))),
+                    ],
+                    span,
+                });
+                continue;
+            }
+            // `↑` / `↓` postfix amplifier on a path/call.
+            if matches!(self.peek_kind(), Some(TokenKind::HeatUp) | Some(TokenKind::HeatDown)) {
+                let op_tok = self.advance();
+                let callee = if op_tok.kind == TokenKind::HeatUp { "__heat_up__" } else { "__heat_down__" };
+                let span = Span::new(self.span_of(&term).start, op_tok.end);
+                term = Chain::Call(Call {
+                    callee: Path::one(callee, span),
+                    args: vec![Arg::Positional(term)],
+                    span,
+                });
+                continue;
+            }
+            // `: { ... }` shape-binding form. We only fold this in if the
+            // colon is immediately followed by an LBrace — bare `name :`
+            // signals a wire-decl elsewhere and we must not consume it here.
+            if self.peek_kind() == Some(TokenKind::Colon)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::LBrace)
+            {
+                self.advance(); // colon
+                let fork = self.parse_fork()?;
+                let span = Span::new(self.span_of(&term).start, self.span_of(&fork).end);
+                term = Chain::Bind(Box::new(term), Box::new(fork), span);
+                continue;
+            }
+            // Tight numeric+Ident form: `60Hz`.
+            if self.peek_kind() == Some(TokenKind::Ident) {
+                let term_end = self.span_of(&term).end;
+                let next = self.cur();
+                if next.start == term_end && is_numeric_literal(&term) {
+                    self.advance();
+                    let unit = Path::one(next.text, Span::new(next.start, next.end));
+                    let span = Span::new(self.span_of(&term).start, next.end);
+                    term = Chain::Call(Call {
+                        callee: Path::one("__unit__", span),
+                        args: vec![
+                            Arg::Positional(term),
+                            Arg::Positional(Chain::Atom(Atom::Path(unit))),
+                        ],
+                        span,
+                    });
+                    continue;
+                }
+            }
+            // Tight rate literal: `100/m` — numeric followed (no whitespace)
+            // by `/IDENT`. Synthesizes a `__rate__` call.
+            if self.peek_kind() == Some(TokenKind::Slash) && is_numeric_literal(&term) {
+                let term_end = self.span_of(&term).end;
+                let slash = self.cur();
+                if slash.start == term_end
+                    && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                {
+                    let next = self.tokens[self.pos + 1];
+                    if next.start == slash.end {
+                        self.advance(); // /
+                        self.advance(); // ident
+                        let unit = Path::one(next.text, Span::new(next.start, next.end));
+                        let span = Span::new(self.span_of(&term).start, next.end);
+                        term = Chain::Call(Call {
+                            callee: Path::one("__rate__", span),
+                            args: vec![
+                                Arg::Positional(term),
+                                Arg::Positional(Chain::Atom(Atom::Path(unit))),
+                            ],
+                            span,
+                        });
+                        continue;
+                    }
+                }
+            }
+            break;
         }
+        Ok(term)
+    }
+
+    /// `{ branch (, branch)* }` — fork. Each branch is a chain expression,
+    /// optionally labeled with `<label>: <body>`.
+    fn parse_fork(&mut self) -> Result<Chain<'src>, ParseError> {
+        let start = self.cur_pos();
+        self.expect(TokenKind::LBrace)?;
+        let mut branches = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek_kind() == Some(TokenKind::RBrace) {
+                break;
+            }
+            branches.push(self.parse_fork_branch()?);
+            self.skip_newlines();
+            if self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.expect(TokenKind::RBrace)?;
+        Ok(Chain::Fork(branches, Span::new(start, self.prev_end())))
+    }
+
+    fn parse_fork_branch(&mut self) -> Result<ForkBranch<'src>, ParseError> {
+        let start = self.cur_pos();
+        let first = self.parse_arg_expr()?;
+        // Labeled branch: `label : body`. Heuristic — a Colon at fork-branch
+        // depth (we're inside `{...}`, so the parser hasn't consumed it yet)
+        // means the parsed expression was a label, and a body follows.
+        if self.peek_kind() == Some(TokenKind::Colon) {
+            self.advance();
+            let mut body = self.parse_arg_expr()?;
+            // Type-union branch body: `label : a | b | c` — eat trailing
+            // `| IDENT` segments same as named args.
+            while self.peek_kind() == Some(TokenKind::Pipe)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+            {
+                self.advance();
+                let extra = self.advance();
+                let new_end = extra.end;
+                let bstart = self.span_of(&body).start;
+                body = Chain::Call(Call {
+                    callee: Path::one("__union__", Span::new(bstart, new_end)),
+                    args: vec![Arg::Positional(body)],
+                    span: Span::new(bstart, new_end),
+                });
+            }
+            let span = Span::new(start, self.span_of(&body).end);
+            Ok(ForkBranch { label: Some(first), body, span })
+        } else {
+            // Bare branch — no label.
+            let span = Span::new(start, self.span_of(&first).end);
+            Ok(ForkBranch { label: None, body: first, span })
+        }
+    }
+
+    /// `[ a, b, c ]` — list literal. Comma-separated chain expressions.
+    fn parse_list(&mut self) -> Result<Chain<'src>, ParseError> {
+        let start = self.cur_pos();
+        self.expect(TokenKind::LBracket)?;
+        let mut items = Vec::new();
+        loop {
+            self.skip_newlines();
+            if self.peek_kind() == Some(TokenKind::RBracket) {
+                break;
+            }
+            items.push(self.parse_arg_expr()?);
+            self.skip_newlines();
+            if self.peek_kind() == Some(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.expect(TokenKind::RBracket)?;
+        let span = Span::new(start, self.prev_end());
+        // Encode lists as Fork with no-label branches for v1 — semantic layer
+        // can specialize later. The shape (branches, span) is identical.
+        let branches = items.into_iter().map(|c| {
+            let s = self.span_of_owned(&c);
+            ForkBranch { label: None, body: c, span: s }
+        }).collect();
+        Ok(Chain::Fork(branches, span))
+    }
+
+    fn span_of_owned(&self, c: &Chain<'src>) -> Span {
+        self.span_of(c)
     }
 
     /// After a `|`, if the very next token is `->`, parse the downstream chain.
@@ -353,21 +710,43 @@ impl<'src> Parser<'src> {
                         self.expect(TokenKind::RParen)?;
                         Ok(Some(MergePolicy::Within(Box::new(inner))))
                     }
-                    "merge" => {
+                    "merge" | "sort" => {
+                        // `merge` / `sort` can appear standalone (treated as
+                        // a no-op = MergePolicy::All) or with arguments. The
+                        // arguments are flexible — `by:`, `method:`,
+                        // `sort:` etc. — so we accept any arg list and
+                        // keep only the first `by:` value as the sort key.
                         self.advance();
-                        self.expect(TokenKind::LParen)?;
-                        // expect `by: <path>`
-                        let by_tok = self.expect(TokenKind::Ident)?;
-                        if by_tok.text != "by" {
-                            return Err(ParseError {
-                                message: format!("expected 'by', got '{}'", by_tok.text),
-                                span: Span::new(by_tok.start, by_tok.end),
-                            });
+                        if self.peek_kind() != Some(TokenKind::LParen) {
+                            return Ok(Some(MergePolicy::All));
                         }
-                        self.expect(TokenKind::Colon)?;
-                        let path = self.parse_path()?;
+                        self.advance(); // (
+                        let mut by_path: Option<Path<'src>> = None;
+                        loop {
+                            self.skip_newlines();
+                            if self.peek_kind() == Some(TokenKind::RParen) { break; }
+                            // Try to capture `by: <path>` if present.
+                            if self.peek_kind() == Some(TokenKind::Ident)
+                                && self.cur().text == "by"
+                                && self.kind_at(self.pos + 1) == Some(TokenKind::Colon)
+                            {
+                                self.advance(); // by
+                                self.advance(); // :
+                                by_path = Some(self.parse_path()?);
+                            } else {
+                                // Discard any other arg.
+                                let _ = self.parse_arg()?;
+                            }
+                            self.skip_newlines();
+                            if self.peek_kind() == Some(TokenKind::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.skip_newlines();
                         self.expect(TokenKind::RParen)?;
-                        Ok(Some(MergePolicy::By(path)))
+                        Ok(Some(by_path.map(MergePolicy::By).unwrap_or(MergePolicy::All)))
                     }
                     _ => Ok(None),
                 }
@@ -428,24 +807,78 @@ impl<'src> Parser<'src> {
             }));
         }
 
-        // Named arg lookahead: IDENT COLON.
-        if self.peek_kind() == Some(TokenKind::Ident)
-            && self.kind_at(self.pos + 1) == Some(TokenKind::Colon)
+        // Bang-prefix at start of arg: `gate(!recording)`.
+        if self.peek_kind() == Some(TokenKind::Bang) {
+            let start = self.cur_pos();
+            self.advance();
+            let rhs = self.parse_arg_expr()?;
+            let span = Span::new(start, self.span_of(&rhs).end);
+            // Encode as Call to a synthetic `__not__` for v1 — semantic
+            // layer can specialize. Keeps AST surface minimal.
+            return Ok(Arg::Positional(Chain::Call(Call {
+                callee: Path::one("__not__", span),
+                args: vec![Arg::Positional(rhs)],
+                span,
+            })));
+        }
+
+        // `N of M` quorum in arg position: `resonance(2 of 5, within: 5m)`.
+        if self.peek_kind() == Some(TokenKind::Int)
+            && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+            && self.tokens.get(self.pos + 1).map(|t| t.text) == Some("of")
+            && self.kind_at(self.pos + 2) == Some(TokenKind::Int)
         {
             let start = self.cur_pos();
-            let tok = self.advance();
-            let name = Ident { text: tok.text, span: Span::new(tok.start, tok.end) };
-            self.expect(TokenKind::Colon)?;
+            let n_tok = self.advance();
+            self.advance(); // `of`
+            let m_tok = self.advance();
+            let n: u32 = n_tok.text.parse().unwrap_or(0);
+            let m: u32 = m_tok.text.parse().unwrap_or(0);
+            let span = Span::new(start, m_tok.end);
+            // Encode as a synthetic Call so it lands in the AST without a
+            // dedicated variant. The semantic layer can recognize the
+            // `__quorum__` callee.
+            return Ok(Arg::Positional(Chain::Call(Call {
+                callee: Path::one("__quorum__", span),
+                args: vec![
+                    Arg::Positional(Chain::Atom(Atom::Literal(Literal::Int(n as i64, Span::new(n_tok.start, n_tok.end))))),
+                    Arg::Positional(Chain::Atom(Atom::Literal(Literal::Int(m as i64, Span::new(m_tok.start, m_tok.end))))),
+                ],
+                span,
+            })));
+        }
+
+        // Named arg lookahead: IDENT (DOT IDENT)* COLON.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.peek_named_arg_colon_offset().is_some()
+        {
+            let start = self.cur_pos();
+            let path = self.parse_path()?;
+            // Squash dotted paths into a single Ident text (preserving the
+            // original spelling) for the Arg::Named name. The semantic layer
+            // can split on `.` if it cares about path structure.
+            let name = Ident { text: path.segments.last().unwrap().text, span: path.span };
+            let _ = start;
+            let start = path.span.start;
+            // Accept either `:` or `=` as the named-arg separator.
+            // `for = 5` and `for: 5` are both seen in the corpus.
+            if self.peek_kind() == Some(TokenKind::Eq) {
+                self.advance();
+            } else {
+                self.expect(TokenKind::Colon)?;
+            }
             // Unary cmp value: `sustained: > 5m`? Not seen in corpus, but
             // handle anyway by routing through parse_arg_expr.
             let value = self.parse_arg_expr()?;
-            // Type-union value form: `level : error | warn | info | debug`
-            // — eat additional `| IDENT` segments and discard for now.
+            // Type-union / option-set value: `level : error | warn`,
+            // `command: "set" | "del"`, `gate(0 ~ 4 | 6 ~ 9)`. Eat
+            // `| <atom-ish>` segments — anything that can start a chain
+            // term and ISN'T a `|` continuation marker like a merge policy.
             while self.peek_kind() == Some(TokenKind::Pipe)
-                && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                && self.peek_can_start_chain_term(self.pos + 1)
             {
                 self.advance(); // pipe
-                self.advance(); // ident — discarded for v1
+                let _ = self.parse_chain_term()?; // discard alternate
             }
             let end = self.prev_end();
             Ok(Arg::Named { name, value, span: Span::new(start, end) })
@@ -456,13 +889,37 @@ impl<'src> Parser<'src> {
 
     /// An expression usable as an arg value / arg subject. Differs from
     /// `parse_chain` in that it accepts binary comparison / fuzzy-match
-    /// operators (`~`, `>`, `<`, `<=`, `>=`, `==`, `!=`) — these are NOT
-    /// chain operators, so the chain parser proper won't fold them.
+    /// operators (`~`, `>`, `<`, `<=`, `>=`, `==`, `!=`) and arithmetic
+    /// (`+`, `-`) — none are chain operators.
     fn parse_arg_expr(&mut self) -> Result<Chain<'src>, ParseError> {
+        // `not <expr>` keyword-prefix form — `gate(branch: not "main")`.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.cur().text == "not"
+            && !matches!(
+                self.kind_at(self.pos + 1),
+                None | Some(TokenKind::Comma | TokenKind::RParen | TokenKind::Newline)
+            )
+        {
+            let start_tok = self.advance();
+            let inner = self.parse_arg_expr()?;
+            let span = Span::new(start_tok.start, self.span_of(&inner).end);
+            return Ok(Chain::Call(Call {
+                callee: Path::one("__not__", span),
+                args: vec![Arg::Positional(inner)],
+                span,
+            }));
+        }
+        // Unary comparison at start of an inner arg-expr too:
+        // `after_silence: > 6h` — value side begins with `>`.
+        if let Some(op) = self.peek_unary_cmp_op() {
+            let start = self.cur_pos();
+            self.advance();
+            let rhs = self.parse_arg_expr()?;
+            let span = Span::new(start, self.span_of(&rhs).end);
+            return Ok(Chain::UnaryCmp { op, rhs: Box::new(rhs), span });
+        }
         let mut left = self.parse_chain()?;
-        // After a chain term, check for a single comparison/match operator.
-        // We handle the simple form `a OP b` only — no precedence chains
-        // like `a OP b OP c`. Corpus doesn't use those.
+        // Comparison / fuzzy-match (single op).
         if let Some(op) = self.peek_bin_op() {
             self.advance();
             let right = self.parse_chain()?;
@@ -473,8 +930,80 @@ impl<'src> Parser<'src> {
                 rhs: Box::new(right),
                 span,
             };
+            return Ok(left);
+        }
+        // Arithmetic chain — left-associative `a + b - c`. Encoded as nested
+        // synthetic Calls so v1 doesn't need a dedicated AST variant.
+        loop {
+            let callee = match self.peek_kind() {
+                Some(TokenKind::Plus) => "__add__",
+                Some(TokenKind::Minus) => "__sub__",
+                Some(TokenKind::Star) => "__mul__",
+                Some(TokenKind::Slash) => "__div__",
+                Some(TokenKind::Percent) => "__mod__",
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_chain()?;
+            let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
+            left = Chain::Call(Call {
+                callee: Path::one(callee, span),
+                args: vec![Arg::Positional(left), Arg::Positional(right)],
+                span,
+            });
         }
         Ok(left)
+    }
+
+    /// Returns the offset (from `self.pos`) of a Colon or Eq that turns the
+    /// current token sequence into a named-arg form
+    /// `IDENT (DOT IDENT)* (COLON | EQ)`. Some corpus files use `=` instead
+    /// of `:` (e.g. `sustained(for = 5)` in 30_chain_native.zp:13).
+    fn peek_named_arg_colon_offset(&self) -> Option<usize> {
+        let mut p = self.pos;
+        if self.kind_at(p) != Some(TokenKind::Ident) {
+            return None;
+        }
+        p += 1;
+        while self.kind_at(p) == Some(TokenKind::Dot)
+            && self.kind_at(p + 1) == Some(TokenKind::Ident)
+        {
+            p += 2;
+        }
+        if matches!(self.kind_at(p), Some(TokenKind::Colon) | Some(TokenKind::Eq)) {
+            Some(p - self.pos)
+        } else {
+            None
+        }
+    }
+
+    /// Whether the token at `i` can start a chain term — used to decide
+    /// whether `| <something>` is a type-union continuation.
+    fn peek_can_start_chain_term(&self, i: usize) -> bool {
+        matches!(
+            self.kind_at(i),
+            Some(
+                TokenKind::Ident
+                | TokenKind::String
+                | TokenKind::TemplateString
+                | TokenKind::Int
+                | TokenKind::Float
+                | TokenKind::Duration
+                | TokenKind::Ratio
+                | TokenKind::Sigma
+                | TokenKind::PercentLit
+                | TokenKind::Hex
+                | TokenKind::HexColor
+                | TokenKind::Dimension
+                | TokenKind::ByteSize
+                | TokenKind::DevNull
+                | TokenKind::TimePast
+                | TokenKind::LBrace
+                | TokenKind::LBracket
+                | TokenKind::Minus
+                | TokenKind::Plus
+            )
+        )
     }
 
     fn peek_bin_op(&self) -> Option<BinOp> {
@@ -570,7 +1099,8 @@ impl<'src> Parser<'src> {
             Chain::Call(c) => c.span,
             Chain::Flow(_, _, s)
             | Chain::Tap(_, _, s)
-            | Chain::Sever(_, _, s) => *s,
+            | Chain::Sever(_, _, s)
+            | Chain::Bind(_, _, s) => *s,
             Chain::Fork(_, s) => *s,
             Chain::Merge(m) => m.span,
             Chain::BinExpr { span, .. } | Chain::UnaryCmp { span, .. } => *span,
@@ -593,6 +1123,23 @@ fn literal_span(l: &Literal<'_>) -> Span {
         | Literal::ByteSize { span, .. }
         | Literal::Dimension { span, .. } => *span,
     }
+}
+
+fn is_numeric_literal(c: &Chain<'_>) -> bool {
+    matches!(
+        c,
+        Chain::Atom(Atom::Literal(
+            Literal::Int(_, _)
+            | Literal::Float(_, _)
+            | Literal::Duration { .. }
+            | Literal::Ratio(_, _)
+            | Literal::Sigma(_, _)
+            | Literal::Percent(_, _)
+            | Literal::Hex(_, _)
+            | Literal::ByteSize { .. }
+            | Literal::Dimension { .. }
+        ))
+    )
 }
 
 fn parse_duration(text: &str) -> Option<(f64, DurationUnit)> {

@@ -55,6 +55,7 @@ fn fixture() -> Module<'static> {
     // syslog : fs("\"/var/log/syslog\"") -> lines
     let syslog_decl = Stmt::Wire(WireDecl {
         name: path("syslog"),
+        args: None,
         chain: flow(fs_call("\"/var/log/syslog\""), atom_path("lines")),
         span: Span::dummy(),
     });
@@ -62,6 +63,7 @@ fn fixture() -> Module<'static> {
     // app_log : fs("\"/var/log/app/*.log\"") -> lines
     let app_log_decl = Stmt::Wire(WireDecl {
         name: path("app_log"),
+        args: None,
         chain: flow(fs_call("\"/var/log/app/*.log\""), atom_path("lines")),
         span: Span::dummy(),
     });
@@ -69,6 +71,7 @@ fn fixture() -> Module<'static> {
     // kern_log : fs("\"/var/log/kern.log\"") -> lines
     let kern_log_decl = Stmt::Wire(WireDecl {
         name: path("kern_log"),
+        args: None,
         chain: flow(fs_call("\"/var/log/kern.log\""), atom_path("lines")),
         span: Span::dummy(),
     });

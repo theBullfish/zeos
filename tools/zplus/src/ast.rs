@@ -82,6 +82,10 @@ pub enum Stmt<'src> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireDecl<'src> {
     pub name: Path<'src>,
+    /// `Some` when the wire-decl name carries call args, e.g.
+    /// `topic("orders") : ...` or `channel("alpha") : ...`. The args
+    /// participate in the runtime "named scope" semantics.
+    pub args: Option<Vec<Arg<'src>>>,
     pub chain: Chain<'src>,
     pub span: Span,
 }
@@ -99,8 +103,13 @@ pub enum Chain<'src> {
     Tap(Box<Chain<'src>>, Box<Chain<'src>>, Span),
     /// `a -x> b` — sever / unfollow / disconnect.
     Sever(Box<Chain<'src>>, Box<Chain<'src>>, Span),
+    /// `a <- b` — actuator binding. Used in declarations:
+    /// `valve : actuator("inlet") <- position @ percent`. The LHS is the
+    /// device handle, RHS is the input type/option-set the device accepts.
+    Bind(Box<Chain<'src>>, Box<Chain<'src>>, Span),
     /// `{ a, b, c }` — fork: same upstream sent to multiple destinations.
-    Fork(Vec<Chain<'src>>, Span),
+    /// Each branch may be labeled (`mode(chronological): sort(...)`).
+    Fork(Vec<ForkBranch<'src>>, Span),
     /// `|` merge — see chord rule at top of file.
     Merge(Merge<'src>),
     /// `lhs OP rhs` — comparison or fuzzy match. Produces a predicate, not
@@ -156,6 +165,15 @@ pub struct Call<'src> {
 pub enum Arg<'src> {
     Positional(Chain<'src>),
     Named { name: Ident<'src>, value: Chain<'src>, span: Span },
+}
+
+/// One arm of a fork. `label` is `None` for plain `{ a, b }` forks; `Some` for
+/// labeled forks like `mode(chronological): sort(...)` (chirp.zp:137-140).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ForkBranch<'src> {
+    pub label: Option<Chain<'src>>,
+    pub body: Chain<'src>,
+    pub span: Span,
 }
 
 /// Multiple inputs converging through one merge point. **One node per merge,
