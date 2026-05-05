@@ -1,0 +1,75 @@
+// notes-zeos.zp — Networked notes (Notion / Obsidian replacement) in Z+.
+// First-principles: text files + a subscriber that watches text changes
+// and maintains an inverted index of [[link]] references.
+//
+// editor.c emits text_edit signals (commit 90b32b4).
+// file_mgr.c emits fs_event signals (commit 7128836).
+// notes_zeos subscribes to BOTH and maintains the backlink + search
+// indices in real-time. No app coupling. No rebuild. No polling.
+//
+// The kernel module (notes_zeos.c) provides the live subscriber:
+// fs_event listener -> only_md -> regex_extract_wikilinks ->
+// btree.insert(backlinks) + btree.insert(search_tokens).
+//
+// This .zp file is the chain shape declaration. The shell verb
+// `notes` queries the indices.
+//
+// Codex Labs LLC — 2026
+
+import std.regex as re
+import std.btree as bt
+import std.fs    as fs
+
+// ── Indices ────────────────────────────────────────────────────────
+// Three btrees, owned by the kernel notes_zeos module.
+//   backlinks_idx : key=hash(target_path)   value=hash(source_path)
+//   search_idx    : key=hash(token)         value=doc_id
+//   docs_idx      : key=doc_id              value=hash(path)
+
+backlinks_idx : bt.new
+search_idx    : bt.new
+docs_idx      : bt.new
+
+// ── Subscriber: text_edit -> backlinks ─────────────────────────────
+// MDE auto-wires this chain because input_type=text_edit matches the
+// editor's CHAIN_TEXT_EDIT output_type. Every keystroke in a .md file
+// re-resolves wikilinks for that buffer.
+chain notes_index {
+    edit       : input -> only_md_files          // filter ".md$"
+               -> extract_wikilinks               // re.find \[\[
+               -> update_backlinks                // bt.insert per [[link]]
+    ~> tap.log
+}
+
+// ── Subscriber: fs_event -> sync_index ─────────────────────────────
+// Create / delete / rename of .md files. MDE auto-routes by
+// input_type=fs_event.
+chain notes_fs {
+    ev   : input -> only_md_files
+         -> sync_index                            // add or remove from idx
+}
+
+// ── Subscriber: text_edit -> search ────────────────────────────────
+// Incremental full-text. Tokenize on whitespace, insert each token
+// into the search btree keyed by hash(token), value=doc_id.
+chain notes_search {
+    txt  : input -> only_md_files
+         -> tokenize                              // split on \s+
+         -> update_search                         // bt.insert per token
+}
+
+// ── Query verbs ────────────────────────────────────────────────────
+// Reached from the `notes` shell command, which calls into the
+// kernel module's query API. The chain shape is documented here so
+// the dependency is explicit and the query is the same path whether
+// invoked from shell, IPC, or another chain.
+chain notes_query {
+    backlinks : input -> bt.range(backlinks_idx, ., .)
+    search    : input -> tokenize -> bt.range(search_idx, ., .)
+    stats     : input -> bt.range(docs_idx, 0, 0x7fffffff)
+}
+
+// notes-zeos.zp: 70 lines of Z+
+// Notion: closed-source, ~unknown LOC
+// Obsidian: closed-source, ~estimated 200k+ LOC
+// The Zeos shape: subscribers on text_edit + fs_event, no rebuild, no app coupling.

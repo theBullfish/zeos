@@ -126,6 +126,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/ui_states.c \
            boot/fs_event.c \
            boot/file_mgr.c \
+           boot/notes_zeos.c \
            boot/activity.c \
            boot/tests.c
 

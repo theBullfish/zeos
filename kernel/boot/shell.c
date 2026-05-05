@@ -31,6 +31,7 @@
 #include "print.h"
 #include "identity.h"
 #include "calendar.h"
+#include "notes_zeos.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -261,6 +262,7 @@ static void cmd_portscan(const char *args);
 static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
+static void cmd_notes(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -761,6 +763,7 @@ static const struct shell_cmd commands[] = {
     {"sweep",   "ping-sweep a /24 subnet to find live hosts", cmd_sweep,    VIS_DEREZ},
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
+    {"notes",   "notes-zeos: backlinks <path> | search <q> | index-stats", cmd_notes, VIS_ALWAYS},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -2597,6 +2600,51 @@ static void cmd_wc(const char *args)
     kput_dec((unsigned)sz);    kputs(" bytes");
     if (sz > read_len) kputs(" (line count from first 16 KB only)");
     kputs("\n");
+}
+
+static void cmd_notes(const char *args)
+{
+    const char *p = args;
+    while (*p == ' ') p++;
+    /* Parse subcommand. */
+    char sub[24];
+    int si = 0;
+    while (*p && *p != ' ' && si < 23) sub[si++] = *p++;
+    sub[si] = 0;
+    while (*p == ' ') p++;
+    const char *rest = p;
+
+    if (sub[0] == 0) {
+        kputs("  Usage:\n");
+        kputs("    notes backlinks <path-or-name>\n");
+        kputs("    notes search <query>\n");
+        kputs("    notes index-stats\n");
+        kputs("    notes reindex <path>   (force re-resolve)\n");
+        return;
+    }
+    if (sub[0] == 'b' && sub[1] == 'a') {
+        notes_zeos_print_backlinks(rest);
+        return;
+    }
+    if (sub[0] == 's' && sub[1] == 'e') {
+        notes_zeos_print_search(rest);
+        return;
+    }
+    if (sub[0] == 'i' && sub[1] == 'n') {
+        notes_zeos_print_stats();
+        return;
+    }
+    if (sub[0] == 'r' && sub[1] == 'e') {
+        if (!*rest) { kputs("  Usage: notes reindex <path>\n"); return; }
+        int n = notes_zeos_index_file(rest, 1);
+        kputs("  reindexed ");
+        kputs(rest);
+        kputs(" — ");
+        kput_dec((unsigned)n);
+        kputs(" wikilink(s)\n");
+        return;
+    }
+    kputs("  notes: unknown subcommand '"); kputs(sub); kputs("'\n");
 }
 
 static void cmd_cp(const char *args)
