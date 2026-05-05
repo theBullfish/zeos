@@ -39,6 +39,18 @@ typedef struct {
     uint64_t  preempt_kills;     /* timer-driven preempts (BSP only today) */
     uint64_t  heartbeat_tsc;     /* TSC at last loop iteration */
 
+    /* TLB shootdown plumbing — see tlb.c (folded into smp.c). The BSP
+     * writes a pending range into this CPU's slot, sends IPI 0xF0, and
+     * spins on tlb_ack. The AP's ISR reads the range, INVLPGs (or
+     * reloads CR3 for a full flush), bumps tlb_shootdowns_received,
+     * then bumps tlb_ack to match tlb_req. Idle when req==ack. */
+    volatile uint64_t tlb_req;             /* BSP-incremented request seq */
+    volatile uint64_t tlb_ack;             /* AP-incremented ack seq */
+    volatile uint64_t tlb_pending_va;      /* range start, 0 = full flush */
+    volatile uint32_t tlb_pending_pages;   /* page count (0 ⇒ full flush) */
+    uint64_t  tlb_shootdowns_received;     /* this CPU handled this many */
+    uint64_t  tlb_shootdowns_failed;       /* ack timeouts seen by BSP for this AP */
+
     /* gdt/idt/preempt_jmpbuf live as offsets into per-CPU page; kept
      * out of this header to avoid pulling gdt/idt internals everywhere. */
     void     *per_cpu_page;
@@ -62,12 +74,28 @@ uint32_t smp_this_cpu(void);
 smp_cpu_t *smp_cpu_by_lapic(uint8_t lapic_id);
 smp_cpu_t *smp_cpu_by_index(int idx);
 
-/* TLB shootdown: send a flush IPI to every other core. Vector 0xFD.
- * No-op if SMP didn't bring up any APs. */
+/* TLB shootdown: send a flush IPI to every other core. Vector 0xF0.
+ * Synchronous from the BSP's POV — broadcasts a per-CPU range slot,
+ * IPIs each AP, then spin-waits ≤1ms per AP for ack. No-op if SMP
+ * didn't bring up any APs. Safe to call from BSP path only.
+ *
+ * Range form: invalidate `pages` 4 KiB pages starting at `va`. If
+ * `pages == 0` the call degenerates to a full flush (CR3 reload on
+ * each AP). `tlb_shootdown_one` targets a specific cpu index. */
 void     smp_tlb_shootdown(void);
-
-/* Same thing under the requested API name (called from VMM). */
 void     tlb_shootdown_all(void);
+void     tlb_shootdown_range(uint64_t va, uint64_t pages);
+void     tlb_shootdown_one(int cpu_idx);
+
+/* Print the TLB shootdown selftest line ("wired (...)") to kprint. */
+void     tlb_print_selftest_line(void);
+
+/* The IPI ISR registered at vector 0xF0 — APs land here and INVLPG
+ * the pending range. Exposed so idt.c can register it. */
+void     tlb_shootdown_isr(uint64_t vector, uint64_t error_code);
+
+/* Total shootdowns received by `cpu_idx` (BSP entry returns 0). */
+uint64_t tlb_shootdowns_received(int cpu_idx);
 
 /* Partition helpers — chain_id % cpus_online maps to owning CPU index. */
 int      smp_chain_owner(int chain_id);

@@ -823,6 +823,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         smp_refresh_tps_sample_pub();
         timer_wait_ms(250);
         smp_print_selftest_line();
+
+        /* TLB shootdown selftest line — ISR registered in idt_init,
+         * BSP-side broadcast wired into vmm_map_range / vmm_unmap. */
+        extern void tlb_print_selftest_line(void);
+        tlb_print_selftest_line();
     }
 
     /* Enter shell — initializes shell state then hands off to

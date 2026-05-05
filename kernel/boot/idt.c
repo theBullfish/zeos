@@ -220,6 +220,12 @@ ISR_STUB_NOERR(0x2f)
  * runaway chain_resolve() calls via setjmp/longjmp. */
 ISR_STUB_NOERR(0xef)
 
+/* TLB shootdown IPI — 0xF0. BSP issues lapic_send_ipi(0xF0) after
+ * modifying kernel page tables; APs INVLPG the pending range and ack.
+ * ISR body lives in smp.c (tlb_shootdown_isr); registered via
+ * idt_register at boot. */
+ISR_STUB_NOERR(0xf0)
+
 /* MSI-X stubs (vectors 0x40-0x7F, 64 vectors) */
 ISR_STUB_NOERR(0x40) ISR_STUB_NOERR(0x41) ISR_STUB_NOERR(0x42) ISR_STUB_NOERR(0x43)
 ISR_STUB_NOERR(0x44) ISR_STUB_NOERR(0x45) ISR_STUB_NOERR(0x46) ISR_STUB_NOERR(0x47)
@@ -385,6 +391,16 @@ void idt_init(void)
      * can arm a one-shot timer and longjmp out of a hung chain_resolve. */
     idt_set_gate(0xEF, (uint64_t)isr_stub_0xef, IDT_GATE_INTERRUPT);
     idt[0xEF].selector = cs;
+
+    /* TLB shootdown IPI vector at 0xF0 — handler body in smp.c. The
+     * generic isr_dispatch will invoke handlers[0xF0] = tlb_shootdown_isr,
+     * which performs the local INVLPG/CR3 reload and writes LAPIC EOI. */
+    idt_set_gate(0xF0, (uint64_t)isr_stub_0xf0, IDT_GATE_INTERRUPT);
+    idt[0xF0].selector = cs;
+    {
+        extern void tlb_shootdown_isr(uint64_t vector, uint64_t error_code);
+        idt_register(0xF0, tlb_shootdown_isr);
+    }
 
     /* Initialize MSI-X subsystem (clear vector pool). */
     msix_init();

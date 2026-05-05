@@ -25,6 +25,9 @@
 #include "brightness.h"
 #include "lockscreen.h"
 #include "persistence.h"
+#include "smp.h"
+#include "vmm.h"
+#include "pmm.h"
 
 /* ── Registry ─────────────────────────────────────────────────────── */
 
@@ -862,6 +865,61 @@ static int test_persistence_snapshot_defense(char *reason, uint32_t rsize)
     return TEST_PASS;
 }
 
+/* TLB shootdown — BSP modifies the kernel page table, broadcasts via
+ * IPI 0xF0, and every AP's tlb_shootdowns_received counter advances
+ * by at least one. On a single-core boot this is a SKIP because no
+ * APs are online to receive the IPI. */
+static int test_tlb_shootdown(char *reason, uint32_t rsize)
+{
+    int online = smp_cpus_online();
+    int total  = smp_cpu_count();
+    if (online <= 1 || total <= 1) {
+        t_strcopy(reason, "single-core boot, no APs", rsize);
+        return TEST_SKIP;
+    }
+
+    /* Snapshot every AP's received counter. */
+    uint64_t before[SMP_MAX_CPUS] = {0};
+    for (int i = 1; i < total; i++) before[i] = tlb_shootdowns_received(i);
+
+    /* Allocate a fresh page and map it at a distinct kernel virtual
+     * address. The map call performs a shootdown range broadcast. */
+    uint64_t phys = pmm_alloc();
+    if (!phys) {
+        t_strcopy(reason, "pmm_alloc failed", rsize);
+        return TEST_FAIL;
+    }
+    /* Pick a high VA that's clearly outside the identity-mapped 4GB
+     * window and the higher-half kernel mirror. */
+    uint64_t test_va = 0xFFFFC00012340000ULL;
+
+    vmm_map_range(test_va, phys, 1, PTE_WRITABLE);
+
+    /* In addition, do an explicit full-flush broadcast to make sure
+     * every AP definitely receives at least one shootdown regardless
+     * of map_range internals on follow-on boots. */
+    tlb_shootdown_all();
+
+    /* Walk every AP. Each one should have observed ≥1 new shootdown. */
+    int missed = 0;
+    for (int i = 1; i < total; i++) {
+        smp_cpu_t *c = smp_cpu_by_index(i);
+        if (!c || !c->alive) continue;
+        uint64_t got = tlb_shootdowns_received(i) - before[i];
+        if (got == 0) missed++;
+    }
+
+    /* Cleanup: unmap and free. */
+    vmm_unmap(test_va);
+    pmm_free(phys);
+
+    if (missed > 0) {
+        t_strcopy(reason, "AP did not bump tlb_shootdowns_received", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
 /* ── Registration ─────────────────────────────────────────────────── */
 
 int test_register(const char *name, test_fn_t fn, int chain_id)
@@ -898,6 +956,7 @@ void tests_register_all(void)
     test_register("chain.brightness",       test_chain_brightness,       CHAIN_BRIGHTNESS);
     test_register("cfa.lockscreen",         test_lockscreen_cfa,         -1);
     test_register("persistence.snapshot.defense", test_persistence_snapshot_defense, -1);
+    test_register("smp.tlb.shootdown",      test_tlb_shootdown,          -1);
 }
 
 /* ── Runners ──────────────────────────────────────────────────────── */

@@ -426,6 +426,12 @@ int smp_init(void)
     s_cpus[0].chains_resolved = 0;
     s_cpus[0].preempt_kills = 0;
     s_cpus[0].heartbeat_tsc = 0;
+    s_cpus[0].tlb_req = 0;
+    s_cpus[0].tlb_ack = 0;
+    s_cpus[0].tlb_pending_va = 0;
+    s_cpus[0].tlb_pending_pages = 0;
+    s_cpus[0].tlb_shootdowns_received = 0;
+    s_cpus[0].tlb_shootdowns_failed = 0;
     s_cpu_count = 1;
 
     for (int i = 0; i < m->lapic_count && s_cpu_count < SMP_MAX_CPUS; i++) {
@@ -443,6 +449,12 @@ int smp_init(void)
         c->chains_resolved = 0;
         c->preempt_kills = 0;
         c->heartbeat_tsc = 0;
+        c->tlb_req = 0;
+        c->tlb_ack = 0;
+        c->tlb_pending_va = 0;
+        c->tlb_pending_pages = 0;
+        c->tlb_shootdowns_received = 0;
+        c->tlb_shootdowns_failed = 0;
         s_cpu_count++;
     }
 
@@ -560,18 +572,171 @@ smp_cpu_t *smp_cpu_by_index(int idx)
     return &s_cpus[idx];
 }
 
-void smp_tlb_shootdown(void)
+/*
+ * ── TLB shootdown ───────────────────────────────────────────────────
+ *
+ * TLB shootdown via IPI vector 0xF0. BSP modifies kernel page tables,
+ * broadcasts shootdown intent to APs via per-CPU range slot + IPI.
+ * APs INVLPG the range or full-flush via CR3 reload, then ack.
+ * Synchronous from BSP's POV with 1ms ack timeout. Failed acks land
+ * in the kprint ring with cpu idx (the MasQ ring is the kprint ring
+ * in this build — see kprint.c).
+ *
+ * Slot layout per AP (in smp_cpu_t):
+ *   tlb_req         — BSP-incremented request seq number
+ *   tlb_ack         — AP-incremented ack seq; ack == req → idle
+ *   tlb_pending_va  — start virtual address of range
+ *   tlb_pending_pages — count of 4 KiB pages; 0 means full flush
+ *
+ * Cap on per-call range INVLPGs: if pages > TLB_RANGE_THRESHOLD the
+ * BSP promotes the request to a full flush. INVLPG is per-page; for
+ * very large ranges CR3 reload is cheaper.
+ */
+#define TLB_VECTOR              0xF0
+#define TLB_ACK_TIMEOUT_TSC_MS  1ULL
+#define TLB_RANGE_THRESHOLD     32
+
+static void tlb_local_full_flush(void)
 {
-    if (s_cpus_online <= 1) return;
-    uint32_t bsp = lapic_id();
-    for (int i = 0; i < s_cpu_count; i++) {
-        if (s_cpus[i].lapic_id == (uint8_t)bsp) continue;
-        if (!s_cpus[i].alive) continue;
-        lapic_send_ipi(s_cpus[i].lapic_id, 0xFD);
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}
+
+static void tlb_local_range_flush(uint64_t va, uint32_t pages)
+{
+    for (uint32_t i = 0; i < pages; i++) {
+        uint64_t addr = va + (uint64_t)i * 4096ULL;
+        __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
     }
 }
 
-void tlb_shootdown_all(void) { smp_tlb_shootdown(); }
+/* IPI ISR — runs on the AP. Reads its per-CPU pending slot, performs
+ * the flush, bumps the received counter, then bumps tlb_ack to match
+ * tlb_req so the BSP can return. */
+void tlb_shootdown_isr(uint64_t vector, uint64_t error_code)
+{
+    (void)vector; (void)error_code;
+
+    uint32_t my_lapic = lapic_id();
+    smp_cpu_t *me = 0;
+    for (int i = 0; i < s_cpu_count; i++) {
+        if (s_cpus[i].lapic_id == (uint8_t)my_lapic) { me = &s_cpus[i]; break; }
+    }
+
+    if (me) {
+        uint64_t req   = me->tlb_req;
+        uint64_t ack   = me->tlb_ack;
+        if (req != ack) {
+            uint64_t va    = me->tlb_pending_va;
+            uint32_t pages = me->tlb_pending_pages;
+            if (pages == 0) {
+                tlb_local_full_flush();
+            } else {
+                tlb_local_range_flush(va, pages);
+            }
+            me->tlb_shootdowns_received++;
+            __sync_synchronize();
+            me->tlb_ack = req;
+        }
+    }
+
+    lapic_eoi();
+}
+
+/* Issue a shootdown to a single AP entry. BSP itself flushes locally
+ * up the call stack — this routine handles the AP side only. */
+static void tlb_kick_ap(smp_cpu_t *c, uint64_t va, uint32_t pages)
+{
+    if (!c || !c->alive || c->is_bsp) return;
+    /* APs come up with IF=0 and only STI after partition activation.
+     * Pre-partition mapping changes can't be acked — every AP will be
+     * brought up with a clean CR3 from the BSP's PML4 anyway, so just
+     * skip silently here. */
+    if (!s_partition_active_flag) return;
+
+    /* Publish the range, bump req, IPI, spin on ack with ≤1ms budget. */
+    c->tlb_pending_va    = va;
+    c->tlb_pending_pages = pages;
+    __sync_synchronize();
+    uint64_t want = ++c->tlb_req;
+    __sync_synchronize();
+
+    lapic_send_ipi(c->lapic_id, TLB_VECTOR);
+
+    uint64_t freq = timer_tsc_freq();
+    uint64_t budget = freq ? (freq * TLB_ACK_TIMEOUT_TSC_MS) / 1000ULL
+                           : 1000000ULL;
+    uint64_t start = timer_read_tsc();
+    while (c->tlb_ack != want) {
+        if (timer_read_tsc() - start > budget) {
+            c->tlb_shootdowns_failed++;
+            kputs("[tlb] cpu ");
+            kput_dec((uint64_t)c->cpu_idx);
+            kputs(" failed to ack shootdown\n");
+            return;
+        }
+        __asm__ volatile("pause");
+    }
+}
+
+void smp_tlb_shootdown(void)        { tlb_shootdown_all(); }
+
+void tlb_shootdown_all(void)
+{
+    if (s_cpus_online <= 1) return;
+    /* BSP local: full reload covers everything cheaply. */
+    tlb_local_full_flush();
+    uint32_t bsp = lapic_id();
+    for (int i = 0; i < s_cpu_count; i++) {
+        if (s_cpus[i].lapic_id == (uint8_t)bsp) continue;
+        tlb_kick_ap(&s_cpus[i], 0, 0);
+    }
+}
+
+void tlb_shootdown_range(uint64_t va, uint64_t pages)
+{
+    if (pages == 0) return;
+    /* BSP local invalidate first (we always need it). */
+    if (pages > TLB_RANGE_THRESHOLD) {
+        tlb_local_full_flush();
+    } else {
+        tlb_local_range_flush(va & ~0xFFFULL, (uint32_t)pages);
+    }
+    if (s_cpus_online <= 1) return;
+
+    uint32_t bsp = lapic_id();
+    uint32_t broadcast_pages =
+        (pages > TLB_RANGE_THRESHOLD) ? 0u : (uint32_t)pages;
+    uint64_t broadcast_va = va & ~0xFFFULL;
+    for (int i = 0; i < s_cpu_count; i++) {
+        if (s_cpus[i].lapic_id == (uint8_t)bsp) continue;
+        tlb_kick_ap(&s_cpus[i], broadcast_va, broadcast_pages);
+    }
+}
+
+void tlb_shootdown_one(int cpu_idx)
+{
+    if (cpu_idx < 0 || cpu_idx >= s_cpu_count) return;
+    smp_cpu_t *c = &s_cpus[cpu_idx];
+    uint32_t bsp = lapic_id();
+    if (c->lapic_id == (uint8_t)bsp) {
+        tlb_local_full_flush();
+        return;
+    }
+    tlb_kick_ap(c, 0, 0);
+}
+
+uint64_t tlb_shootdowns_received(int cpu_idx)
+{
+    if (cpu_idx < 0 || cpu_idx >= s_cpu_count) return 0;
+    return s_cpus[cpu_idx].tlb_shootdowns_received;
+}
+
+void tlb_print_selftest_line(void)
+{
+    kputs("TLB shootdown ......... wired (BSP→APs broadcast, range+full)\n");
+}
 
 int smp_chain_owner(int chain_id)
 {
@@ -683,7 +848,7 @@ void smp_cmd_cores(void)
     smp_refresh_tps_sample();
 
     kputs("\n  Cores\n  ─────\n");
-    kputs("  idx  lapic  role  alive   ticks       resolved   preempt   tps     chain\n");
+    kputs("  idx  lapic  role  alive   ticks       resolved   preempt   tlb     tps     chain\n");
     for (int i = 0; i < s_cpu_count; i++) {
         smp_cpu_t *c = &s_cpus[i];
         kputs("  ");
@@ -701,6 +866,8 @@ void smp_cmd_cores(void)
         kputs("        ");
         kput_dec(c->preempt_kills);
         kputs("        ");
+        kput_dec(c->tlb_shootdowns_received);
+        kputs("       ");
         kput_dec((uint64_t)s_tps_per_cpu[i]);
         kputs("    ");
         if (c->current_chain_id < 0) kputs("(idle)");

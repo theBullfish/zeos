@@ -14,6 +14,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "fb.h"
+#include "smp.h"
 
 /* The PML4 table — root of our page hierarchy */
 static uint64_t *pml4;
@@ -93,8 +94,9 @@ void vmm_unmap(uint64_t virt)
 
     pt[pt_index(virt)] = 0;
 
-    /* Invalidate TLB for this address */
-    __asm__ volatile("invlpg (%0)" : : "r"(virt) : "memory");
+    /* Local INVLPG + IPI shootdown to every AP so a stale entry on
+     * another core doesn't keep the unmapped page reachable. */
+    tlb_shootdown_range(virt & ~0xFFFULL, 1);
 }
 
 uint64_t vmm_virt_to_phys(uint64_t virt)
@@ -120,6 +122,10 @@ void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t count, uint64_t flags)
     for (uint64_t i = 0; i < count; i++) {
         vmm_map(virt + i * PAGE_SIZE, phys + i * PAGE_SIZE, flags);
     }
+    /* Re-mapping an existing virtual range with new flags or a new
+     * physical backing requires every core to drop its stale PTE
+     * cache. INVLPG locally + IPI broadcast on the BSP. */
+    tlb_shootdown_range(virt & ~0xFFFULL, count);
 }
 
 void vmm_init(void)
