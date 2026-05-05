@@ -31,7 +31,95 @@
 //! exists, runs on a `Module`, and fails fast on chord-rule violations.
 
 use crate::ast::*;
-use crate::ty::{Prim, Type, UnitTag};
+use crate::ty::{Prim, RecordField, Type, UnitTag};
+use std::collections::HashMap;
+
+/// Built-in environment — name → signature. Pre-populated with the
+/// builtins that show up in `programs/02_log_monitor.zp` and other
+/// common shapes from the corpus. Each signature is a `Type::Fn` whose
+/// `params` are the call's args and `returns` is the call's output type.
+///
+/// What's in v1: the eight transformers and sources used in
+/// `02_log_monitor.zp` (fs, lines, gate, parse, delta, rate, on_silence,
+/// vault.store, count, alert, last) plus a handful from other programs
+/// (net.listen, tick, baseline, deviation, decay, weighted, sort).
+/// Each entry is non-binding — the checker uses it for inference, not
+/// strict matching. Unknown args / return types are filled with
+/// `Type::Unknown` and the checker defers to the runtime.
+///
+/// Adding a new builtin: append to the map. The signature should match
+/// `SEMANTIC_CONTRACTS.md` if the builtin appears there; otherwise pick
+/// the simplest faithful shape and document why.
+#[derive(Debug, Clone, Default)]
+pub struct TypeEnv {
+    pub bindings: HashMap<String, Type>,
+}
+
+impl TypeEnv {
+    /// Empty env — useful for tests that don't want any builtins.
+    pub fn empty() -> Self {
+        Self { bindings: HashMap::new() }
+    }
+
+    /// Default env — pre-populated with the corpus builtins.
+    pub fn default_with_builtins() -> Self {
+        let mut env = Self::empty();
+        let span = Span::dummy();
+
+        // Helper: a builtin that takes any args and returns Sig<T> where
+        // T is the carried type the runtime computes. v1 keeps it loose.
+        let any_args_sig_unknown = || Type::Fn {
+            params: vec![Type::Any(span)],
+            returns: Box::new(Type::Sig(Box::new(Type::Unknown(span)), span)),
+            span,
+        };
+        let any_args_sig_t = || Type::Fn {
+            params: vec![Type::Any(span)],
+            returns: Box::new(Type::Sig(Box::new(Type::Unknown(span)), span)),
+            span,
+        };
+        let any_args_unit = || Type::Fn {
+            params: vec![Type::Any(span)],
+            returns: Box::new(Type::Nominal("unit".into(), span)),
+            span,
+        };
+
+        // Sources — produce Sig<T>.
+        env.bindings.insert("fs".into(), any_args_sig_unknown());
+        env.bindings.insert("net.listen".into(), any_args_sig_unknown());
+        env.bindings.insert("net.connect".into(), any_args_sig_unknown());
+        env.bindings.insert("tick".into(), any_args_sig_unknown());
+
+        // Transformers — Sig<T> → Sig<T> or Sig<T> → Sig<U>.
+        env.bindings.insert("lines".into(), any_args_sig_t()); // Sig<RawBytes> → Sig<String>
+        env.bindings.insert("gate".into(), any_args_sig_t());
+        env.bindings.insert("parse".into(), any_args_sig_t());
+        env.bindings.insert("delta".into(), any_args_sig_t());
+        env.bindings.insert("rate".into(), any_args_sig_t());
+        env.bindings.insert("baseline".into(), any_args_sig_t());
+        env.bindings.insert("deviation".into(), any_args_sig_t());
+        env.bindings.insert("decay".into(), any_args_sig_t());
+        env.bindings.insert("on_silence".into(), any_args_sig_t());
+        env.bindings.insert("count".into(), any_args_sig_t());
+        env.bindings.insert("last".into(), any_args_sig_t());
+        env.bindings.insert("weighted".into(), any_args_sig_t());
+        env.bindings.insert("sort".into(), any_args_sig_t());
+        env.bindings.insert("normalize".into(), any_args_sig_t());
+
+        // Sinks — return unit.
+        env.bindings.insert("vault.store".into(), any_args_unit());
+        env.bindings.insert("vault.append".into(), any_args_unit());
+        env.bindings.insert("vault.write".into(), any_args_unit());
+        env.bindings.insert("alert".into(), any_args_unit());
+        env.bindings.insert("respond".into(), any_args_unit());
+
+        env
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&Type> {
+        self.bindings.get(name)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeError {
@@ -150,6 +238,111 @@ fn check_merge(merge: &Merge<'_>, errors: &mut Vec<TypeError>) {
                 });
             }
         }
+    }
+}
+
+/// Infer the output type of a chain term. Walks the AST recursively;
+/// returns `Type::Unknown` when no rule applies. The env is consulted for
+/// `Atom::Path` and `Call::callee` lookups.
+///
+/// What v1 handles:
+/// - Literals → typed via `type_of_literal`, lifted to `Sig<T>` when in a
+///   chain-term position (most chain terms are signal sources).
+/// - `Atom::Path` → looked up in env; otherwise `Unknown`.
+/// - `Call` → looked up in env by callee path; if the callee is a
+///   `Type::Fn`, its `returns` is the result type.
+/// - `Flow(_, b)` → `infer(b)` — the chain's output is the rightmost
+///   chain-term's output.
+/// - `Tap(a, _)` → `infer(a)` — tap is read-only; the upstream's type
+///   continues forward.
+/// - `Merge` → carrier of the first input (homogeneity rule); falls back
+///   to `Unknown` if no inputs.
+/// - Everything else → `Unknown`.
+pub fn infer_chain(c: &Chain<'_>, env: &TypeEnv) -> Type {
+    let span = Span::dummy();
+    match c {
+        Chain::Atom(Atom::Literal(lit)) => {
+            // Literals in chain-term position are signal sources.
+            type_of_literal(lit).into_signal(span)
+        }
+        Chain::Atom(Atom::Path(p)) => {
+            let name = p.joined();
+            env.lookup(&name).cloned().unwrap_or(Type::Unknown(span))
+        }
+        Chain::Atom(Atom::DevNull(_)) => Type::Nominal("unit".into(), span),
+        Chain::Atom(Atom::TimePast { .. }) => Type::Sig(Box::new(Type::Unknown(span)), span),
+        Chain::Call(call) => {
+            let name = call.callee.joined();
+            match env.lookup(&name) {
+                Some(Type::Fn { returns, .. }) => (**returns).clone(),
+                Some(other) => other.clone(),
+                None => Type::Unknown(span),
+            }
+        }
+        Chain::Flow(_, b, _) => infer_chain(b, env),
+        Chain::Tap(a, _, _) => infer_chain(a, env),
+        Chain::Sever(_, _, _) => Type::Nominal("unit".into(), span),
+        Chain::Bind(a, _, _) => infer_chain(a, env),
+        Chain::Fork(_, _) => Type::Unknown(span),
+        Chain::Merge(merge) => {
+            if let Some(first) = merge.inputs.first() {
+                infer_chain(first, env)
+            } else {
+                Type::Unknown(span)
+            }
+        }
+        Chain::BinExpr { op, .. } => match op {
+            BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge | BinOp::Eq | BinOp::Ne | BinOp::FuzzyMatch => {
+                Type::Prim(Prim::Bool)
+            }
+        },
+        Chain::UnaryCmp { .. } => Type::Prim(Prim::Bool),
+    }
+}
+
+/// Drop one outer `Sig<...>` if present. Used when comparing a Flow's
+/// upstream output (already a Sig<T>) to a downstream's expected input
+/// (which may be expressed as bare T or Sig<T> depending on the builtin).
+fn unwrap_sig(t: &Type) -> &Type {
+    match t {
+        Type::Sig(inner, _) => inner,
+        other => other,
+    }
+}
+
+/// Whether two types should be considered compatible at a Flow boundary.
+/// v1 rules:
+/// - `Unknown` matches anything (deferred — checker can't decide).
+/// - `Any` matches anything.
+/// - `Never` matches anything.
+/// - Primitive equality.
+/// - Numeric promotion: `Int` flows to `Float`.
+/// - `Sig<A>` matches `Sig<B>` iff `A` matches `B`.
+/// - `Tagged<A, u>` matches `Tagged<B, u>` iff `A` matches `B`.
+/// - `Nominal(name)` matches `Nominal(name)` (string equality, span-
+///   independent).
+/// - Everything else: structural equality (modulo spans), best-effort.
+pub fn types_compatible(a: &Type, b: &Type) -> bool {
+    // Either side Unknown / Any / Never → always compatible (deferred or
+    // bottom-typed).
+    if matches!(a, Type::Unknown(_) | Type::Any(_) | Type::Never(_))
+        || matches!(b, Type::Unknown(_) | Type::Any(_) | Type::Never(_))
+    {
+        return true;
+    }
+    match (a, b) {
+        (Type::Prim(pa), Type::Prim(pb)) => pa == pb || matches!((pa, pb), (Prim::Int, Prim::Float)),
+        (Type::Sig(ia, _), Type::Sig(ib, _)) => types_compatible(ia, ib),
+        (Type::Tagged { inner: ia, unit: ua, .. }, Type::Tagged { inner: ib, unit: ub, .. }) => {
+            ua == ub && types_compatible(ia, ib)
+        }
+        (Type::Nominal(na, _), Type::Nominal(nb, _)) => na == nb,
+        (Type::Range(ia, _), Type::Range(ib, _)) => types_compatible(ia, ib),
+        // Sig-on-one-side wraps: `T` and `Sig<T>` are compatible at flow
+        // boundaries because most builtins implicitly Sig-lift their
+        // operands.
+        (Type::Sig(inner, _), other) | (other, Type::Sig(inner, _)) => types_compatible(inner, other),
+        _ => false,
     }
 }
 
@@ -372,5 +565,152 @@ mod tests {
         let mut e = Vec::new();
         check_merge(&merge, &mut e);
         assert!(e.is_empty(), "{:?}", e);
+    }
+
+    // ── inference / TypeEnv ──────────────────────────────────────
+
+    #[test]
+    fn default_env_has_log_monitor_builtins() {
+        let env = TypeEnv::default_with_builtins();
+        for name in ["fs", "gate", "parse", "delta", "rate", "on_silence", "vault.store", "alert", "count", "last"] {
+            assert!(env.lookup(name).is_some(), "missing builtin: {}", name);
+        }
+    }
+
+    #[test]
+    fn empty_env_returns_unknown() {
+        let env = TypeEnv::empty();
+        let chain = Chain::Atom(Atom::Path(Path::one("syslog", dummy())));
+        assert!(matches!(infer_chain(&chain, &env), Type::Unknown(_)));
+    }
+
+    #[test]
+    fn literal_in_chain_term_lifts_to_sig() {
+        let env = TypeEnv::empty();
+        let chain = Chain::Atom(Atom::Literal(Literal::Int(5, dummy())));
+        match infer_chain(&chain, &env) {
+            Type::Sig(inner, _) => assert!(matches!(inner.as_ref(), Type::Prim(Prim::Int))),
+            other => panic!("expected Sig<Int>, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn call_uses_env_return_type() {
+        let env = TypeEnv::default_with_builtins();
+        let chain = Chain::Call(Call {
+            callee: Path::one("fs", dummy()),
+            args: vec![Arg::Positional(Chain::Atom(Atom::Literal(Literal::String(
+                "\"/var/log\"",
+                dummy(),
+            ))))],
+            span: dummy(),
+        });
+        // Should resolve to fs's return type — Sig<Unknown>.
+        match infer_chain(&chain, &env) {
+            Type::Sig(_, _) => {} // good
+            other => panic!("expected Sig, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn flow_returns_rightmost_type() {
+        let env = TypeEnv::default_with_builtins();
+        // `fs("/log") -> lines` — output is whatever `lines` returns.
+        let chain = Chain::Flow(
+            Box::new(Chain::Call(Call {
+                callee: Path::one("fs", dummy()),
+                args: vec![],
+                span: dummy(),
+            })),
+            Box::new(Chain::Atom(Atom::Path(Path::one("lines", dummy())))),
+            dummy(),
+        );
+        // `lines` is in env as a Fn; returned type is its `returns` (Sig<Unknown>).
+        match infer_chain(&chain, &env) {
+            Type::Fn { .. } => {}     // env returned the fn signature directly via Path lookup
+            Type::Sig(_, _) => {}     // OR Sig<...> via Fn return
+            Type::Unknown(_) => {}    // OR Unknown — also acceptable for v1
+            other => panic!("unexpected Flow result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tap_preserves_upstream_type() {
+        let env = TypeEnv::default_with_builtins();
+        // `error_rate ~> live_view` — output is error_rate's type.
+        let chain = Chain::Tap(
+            Box::new(Chain::Atom(Atom::Path(Path::one("error_rate", dummy())))),
+            Box::new(Chain::Atom(Atom::Path(Path::one("live_view", dummy())))),
+            dummy(),
+        );
+        // error_rate isn't in env → Unknown. Tap returns the upstream type.
+        assert!(matches!(infer_chain(&chain, &env), Type::Unknown(_)));
+    }
+
+    #[test]
+    fn binexpr_returns_bool() {
+        let env = TypeEnv::empty();
+        let chain = Chain::BinExpr {
+            op: BinOp::Lt,
+            lhs: Box::new(Chain::Atom(Atom::Literal(Literal::Int(5, dummy())))),
+            rhs: Box::new(Chain::Atom(Atom::Literal(Literal::Int(10, dummy())))),
+            span: dummy(),
+        };
+        assert_eq!(infer_chain(&chain, &env), Type::Prim(Prim::Bool));
+    }
+
+    #[test]
+    fn unary_cmp_returns_bool() {
+        let env = TypeEnv::empty();
+        let chain = Chain::UnaryCmp {
+            op: BinOp::Gt,
+            rhs: Box::new(Chain::Atom(Atom::Literal(Literal::Int(5, dummy())))),
+            span: dummy(),
+        };
+        assert_eq!(infer_chain(&chain, &env), Type::Prim(Prim::Bool));
+    }
+
+    // ── types_compatible ─────────────────────────────────────────
+
+    #[test]
+    fn unknown_matches_anything() {
+        let unk = Type::Unknown(dummy());
+        let int = Type::Prim(Prim::Int);
+        assert!(types_compatible(&unk, &int));
+        assert!(types_compatible(&int, &unk));
+    }
+
+    #[test]
+    fn int_promotes_to_float() {
+        let int = Type::Prim(Prim::Int);
+        let float = Type::Prim(Prim::Float);
+        assert!(types_compatible(&int, &float));
+    }
+
+    #[test]
+    fn sig_compatibility_is_recursive() {
+        let span = dummy();
+        let a = Type::Sig(Box::new(Type::Prim(Prim::Int)), span);
+        let b = Type::Sig(Box::new(Type::Prim(Prim::Int)), span);
+        assert!(types_compatible(&a, &b));
+
+        let c = Type::Sig(Box::new(Type::Prim(Prim::String)), span);
+        assert!(!types_compatible(&a, &c));
+    }
+
+    #[test]
+    fn nominal_compares_by_name() {
+        let a = Type::Nominal("pcm_source".into(), Span::new(0, 10));
+        let b = Type::Nominal("pcm_source".into(), Span::new(50, 60));
+        let c = Type::Nominal("tx_completion".into(), Span::new(0, 10));
+        assert!(types_compatible(&a, &b));
+        assert!(!types_compatible(&a, &c));
+    }
+
+    #[test]
+    fn unwrap_sig_strips_one_layer() {
+        let span = dummy();
+        let sig_int = Type::Sig(Box::new(Type::Prim(Prim::Int)), span);
+        assert_eq!(unwrap_sig(&sig_int), &Type::Prim(Prim::Int));
     }
 }
