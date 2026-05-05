@@ -48,6 +48,38 @@
 #define ZP_MAX_CHAINS    16
 #define ZP_MAX_CHAIN_NODES 16
 
+/* ── Pass 1: strings + structs ─────────────────
+ *
+ * Z+ values are now a tagged union. The wire still carries int32 for
+ * speed, but the int32 either IS the literal int (kind=ZP_VAL_INT) OR
+ * it's a handle into the string/struct/array pool maintained in zplus.c
+ * (kind=ZP_VAL_STR, ZP_VAL_STRUCT, ZP_VAL_ARRAY). A node's declared
+ * output_kind tells the next node how to read the int32.
+ *
+ * The pools are heap-allocated through kmalloc with a small ref-count.
+ * Cyclic struct references currently leak; a sweep collector will land
+ * in pass 2.  Max string length = 64 KiB.
+ */
+#define ZP_MAX_STRING_BYTES   65536
+#define ZP_STRING_POOL_SLOTS  256
+#define ZP_STRUCT_TYPE_SLOTS  16
+#define ZP_STRUCT_INST_SLOTS  64
+#define ZP_ARRAY_POOL_SLOTS   64
+#define ZP_MAX_STRUCT_FIELDS  8
+
+enum zp_val_kind {
+    ZP_VAL_INT    = 0,   /* wire == raw int32 (default — preserves legacy) */
+    ZP_VAL_STR    = 1,   /* wire == handle into string pool */
+    ZP_VAL_STRUCT = 2,   /* wire == handle into struct instance pool */
+    ZP_VAL_ARRAY  = 3,   /* wire == handle into array pool */
+};
+
+/* Tagged value used at chain edges where the type tag matters. */
+struct zp_value {
+    int32_t kind;        /* enum zp_val_kind */
+    int32_t handle;      /* int payload, or pool handle */
+};
+
 /* Node types the interpreter can create */
 enum zp_node_type {
     ZP_EMIT,        /* Produces a constant value */
@@ -74,6 +106,42 @@ enum zp_node_type {
     ZP_VAULT_GET,   /* vault.get   -> vault_load_config */
     ZP_TAP_LOG,     /* tap.log     -> kprint side-channel observation */
     ZP_COMPUTE_RUN, /* compute.run(node) -> CHAIN_MDE submit, kernel_fn = node's resolve */
+
+    /* ── Pass 1: string verbs ───────────────── */
+    ZP_STR_LEN,         /* str.len(s) -> int */
+    ZP_STR_FIND,        /* str.find(haystack, needle) -> int */
+    ZP_STR_SPLIT,       /* str.split(s, sep) -> array */
+    ZP_STR_REPLACE,     /* str.replace(s, old, new) -> str */
+    ZP_STR_CONCAT,      /* str.concat(a, b) -> str */
+    ZP_STR_UPPER,       /* str.upper(s) -> str */
+    ZP_STR_LOWER,       /* str.lower(s) -> str */
+    ZP_STR_TRIM,        /* str.trim(s) -> str */
+    ZP_STR_STARTS_WITH, /* str.starts_with(s, prefix) -> int (0|1) */
+    ZP_STR_ENDS_WITH,   /* str.ends_with(s, suffix) -> int (0|1) */
+    ZP_STR_FROM_INT,    /* str.from_int(n) -> str */
+    ZP_STR_TO_INT,      /* str.to_int(s) -> int */
+    ZP_STR_LEN_OF_ARRAY,/* str.len_of_array(arr) -> int (count of strings) */
+
+    /* ── Pass 1: struct verbs ───────────────── */
+    ZP_STRUCT_LITERAL,  /* point { x = 1, y = 2 } — emits a struct instance */
+    ZP_FIELD_ACCESS,    /* p.kind — extracts a field from a struct */
+    ZP_GATE_FIELD_EQ,   /* gate(.field == "literal") — string-eq gate on struct field */
+    ZP_SUM,             /* sum — running accumulator (int) */
+};
+
+/* Per-field descriptor for a struct type. */
+struct zp_struct_field {
+    char    name[ZP_MAX_NAME];
+    int     kind;         /* ZP_VAL_INT | ZP_VAL_STR | ZP_VAL_STRUCT */
+    int     offset;       /* slot index within the instance (0..N-1) */
+};
+
+/* Compiled struct type definition. */
+struct zp_struct_type {
+    char    name[ZP_MAX_NAME];
+    int     field_count;
+    struct zp_struct_field fields[ZP_MAX_STRUCT_FIELDS];
+    int     in_use;
 };
 
 /* A parsed node declaration */
@@ -83,9 +151,13 @@ struct zp_node_decl {
     int32_t         int_val;        /* Constant for emit/multiply/add/threshold */
     int32_t         int_val2;       /* Second constant (knee high, sustained count, fs lba/count) */
     int32_t         int_val3;       /* Third constant (fs count) */
-    char            fmt[ZP_MAX_STRING]; /* Format string for print, or vault key */
+    char            fmt[ZP_MAX_STRING]; /* Format string for print, or vault key, or string literal */
+    char            fmt2[ZP_MAX_STRING];/* Pass-1 second-string slot (gate field name, replace target, etc.) */
     int             sig_idx;        /* Index in the signal chain (-1 = unassigned) */
     int             chain_bind_id;  /* >=0 if this node bridges to a kernel chain */
+    int             out_kind;       /* enum zp_val_kind — what the wire carries on output */
+    int             struct_type;    /* For STRUCT_LITERAL / FIELD_ACCESS: index in struct table */
+    int32_t         emit_handle;    /* For string/struct emit nodes: pool handle */
 };
 
 /* A parsed edge (wiring) */
@@ -155,5 +227,50 @@ void zp_list_chains(void);
  * Prints detailed info via chain_dump().
  */
 void zp_inspect_chain(int chain_id);
+
+/* ── Pass 1 public surface ────────────────────────────────────────── */
+
+/* Initialize the string/struct/array pools. Idempotent. */
+void zp_pools_init(void);
+
+/* Intern a NUL-terminated string. Returns a non-negative handle, or -1 on
+ * out-of-pool. Strings are ref-counted; identical literals dedupe. The
+ * returned handle has its ref-count bumped — the caller owns it. */
+int  zp_str_intern(const char *s, int len);
+
+/* Resolve a handle to its byte buffer; returns NULL for invalid handle.
+ * Length out via *out_len when non-NULL. */
+const char *zp_str_get(int handle, int *out_len);
+
+/* Ref-count nudges. Internal nodes use these to stage handles between
+ * resolve calls without leaks. */
+void zp_str_addref(int handle);
+void zp_str_release(int handle);
+
+/* Number of string verbs registered (for selftest line). */
+int  zp_string_verb_count(void);
+
+/* Number of user-defined struct types currently registered. */
+int  zp_struct_type_count(void);
+
+/* Look up a struct type by name. Returns table index or -1. */
+int  zp_struct_find(const char *name);
+
+/* Register a struct type definition (used by parser). */
+int  zp_struct_register(const struct zp_struct_type *def);
+
+/* Allocate a fresh struct instance of given type. Returns handle or -1. */
+int  zp_struct_alloc(int type_idx);
+
+/* Read/write fields by name. Returns 0 on success, -1 on miss. */
+int  zp_struct_set_int(int handle, const char *field, int32_t v);
+int  zp_struct_set_str(int handle, const char *field, int str_handle);
+int  zp_struct_get(int handle, const char *field, struct zp_value *out);
+
+/* Array helpers (used by str.split). */
+int  zp_array_alloc(void);
+int  zp_array_push_str(int arr_handle, int str_handle);
+int  zp_array_len(int arr_handle);
+int  zp_array_get_str(int arr_handle, int idx);
 
 #endif /* ZEOS_ZPLUS_H */

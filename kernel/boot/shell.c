@@ -2112,6 +2112,30 @@ static const char zp_runtime_chain[] =
     "  pulse : emit(1) -> sustained(> 0, for = 3) -> tap.log\n"
     "}\n";
 
+/* 50_strings_demo — pass 1 strings: literal, split, len_of_array. */
+static const char zp_strings_demo[] =
+    "// First-class strings: split a string and count the words.\n"
+    "src   : emit(\"hello world hello\")\n"
+    "words : input -> str.split(\" \")\n"
+    "count : input -> str.len_of_array\n"
+    "log   : input -> tap.log\n"
+    "src -> words -> count -> log\n"
+    "chain wordcount { src words count log }\n";
+
+/* 51_struct_demo — pass 1 structs: typed records + field equality. */
+static const char zp_struct_demo[] =
+    "// Typed structs: emit, field-eq gate, sum.\n"
+    "struct event {\n"
+    "  kind: str\n"
+    "  value: int\n"
+    "}\n"
+    "src  : emit(event { kind = \"click\", value = 1 })\n"
+    "filt : input -> gate(.kind == \"click\")\n"
+    "acc  : input -> sum\n"
+    "log  : input -> tap.log\n"
+    "src -> filt -> acc -> log\n"
+    "chain count_clicks { src filt acc log }\n";
+
 struct zp_builtin {
     const char *name;
     const char *desc;
@@ -2128,6 +2152,8 @@ static const struct zp_builtin builtins[] = {
     {"chain_native", "Z+ -> live kernel chains (audio + tap.log)",  zp_chain_native},
     {"compute_via_mde", "Z+ submits compute through CHAIN_MDE",     zp_compute_via_mde},
     {"40_runtime_chain", "Z+ registers a chain into the live kernel registry", zp_runtime_chain},
+    {"50_strings_demo", "Pass 1 — first-class strings (split + len_of_array)",  zp_strings_demo},
+    {"51_struct_demo",  "Pass 1 — typed structs (gate(.field == \"lit\") + sum)", zp_struct_demo},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -4412,6 +4438,24 @@ vault_done:
         kputs("  Z+ runtime ........... PASS — ");
         kput_dec((uint64_t)rt_n);
         kputs(" user chain(s) live\n");
+        passes++;
+    }
+
+    /* Z+ strings: report the pass-1 string verbs and any user-defined
+     * struct types currently registered.  String verbs are static
+     * (parser-known); struct types accumulate as programs run. */
+    {
+        extern void zp_pools_init(void);
+        extern int  zp_string_verb_count(void);
+        extern int  zp_struct_type_count(void);
+        zp_pools_init();
+        int sv = zp_string_verb_count();
+        int st = zp_struct_type_count();
+        kputs("  Z+ strings ........... ready (");
+        kput_dec((uint64_t)sv);
+        kputs(" string ops, ");
+        kput_dec((uint64_t)st);
+        kputs(" struct types defined)\n");
         passes++;
     }
 

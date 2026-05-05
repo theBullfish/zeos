@@ -291,6 +291,33 @@ void zp_kernel_resolve_thunk(chain_node_t *self, void *input, void *output)
          * In runtime chains it falls back to passthrough. */
         out_val = in_val;
         break;
+
+    /* Pass-1: in the runtime chain, string/struct verbs are best-effort.
+     * The in-process interpreter (zp_proc_*) is the canonical path; here
+     * we honor what the runtime can without re-implementing pools state. */
+    case ZP_STR_LEN: {
+        int len = 0;
+        const char *s = zp_str_get(in_val, &len);
+        out_val = s ? len : 0;
+        break;
+    }
+    case ZP_STR_LEN_OF_ARRAY:
+        out_val = zp_array_len(in_val);
+        break;
+    case ZP_STR_UPPER: case ZP_STR_LOWER: case ZP_STR_TRIM:
+    case ZP_STR_FROM_INT: case ZP_STR_TO_INT:
+    case ZP_STR_FIND: case ZP_STR_SPLIT: case ZP_STR_REPLACE:
+    case ZP_STR_CONCAT: case ZP_STR_STARTS_WITH: case ZP_STR_ENDS_WITH:
+    case ZP_STRUCT_LITERAL: case ZP_FIELD_ACCESS:
+    case ZP_GATE_FIELD_EQ:
+        /* Runtime path is passthrough — interpreter owns the heavy lift. */
+        out_val = (n->type == ZP_STR_TO_INT) ? 0 :
+                  (n->emit_handle >= 0 ? n->emit_handle : in_val);
+        break;
+    case ZP_SUM:
+        n->sum_acc += in_val;
+        out_val = n->sum_acc;
+        break;
     }
 
     rt_write_i32(output, out_val);
@@ -370,6 +397,7 @@ int zp_runtime_register_chain(const char *name,
         slot->nodes[i].sustain_count = 0;
         slot->nodes[i].delta_prev = 0;
         slot->nodes[i].has_delta_prev = 0;
+        slot->nodes[i].sum_acc = 0;
     }
 
     /* Create the live chain. CHAIN_CPU as parent so it sits under the

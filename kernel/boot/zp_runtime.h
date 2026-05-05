@@ -32,11 +32,18 @@ struct zp_runtime_node {
     int32_t         int_val2;
     int32_t         int_val3;
     char            fmt[ZP_MAX_STRING];
+    char            fmt2[ZP_MAX_STRING];
 
-    /* Mutable state for stateful verbs (sustained, delta). */
+    /* Pass-1 fields for typed wires. */
+    int             out_kind;       /* enum zp_val_kind */
+    int             struct_type;
+    int32_t         emit_handle;    /* string/struct/array literal handle */
+
+    /* Mutable state for stateful verbs (sustained, delta, sum). */
     int32_t         sustain_count;
     int32_t         delta_prev;
     uint8_t         has_delta_prev;
+    int32_t         sum_acc;
 };
 
 /* Initialize the runtime registry (called once, idempotent). */

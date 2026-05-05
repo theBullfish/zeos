@@ -1,0 +1,19 @@
+// 50_strings_demo.zp
+// Pass 1 — first-class strings.
+//
+// Take an input string, split on spaces, count the resulting words,
+// and tap.log the count.  Demonstrates:
+//   - string literal in emit("...")
+//   - str.split(separator) producing an array
+//   - str.len_of_array consuming the array
+//
+// Expected tap.log: 3  ("hello world hello" splits into three words)
+
+src   : emit("hello world hello")
+words : input -> str.split(" ")
+count : input -> str.len_of_array
+log   : input -> tap.log
+
+src -> words -> count -> log
+
+chain wordcount { src words count log }

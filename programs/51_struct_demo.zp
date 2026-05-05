@@ -1,0 +1,26 @@
+// 51_struct_demo.zp
+// Pass 1 — typed structs.
+//
+// Define a struct, emit an instance, gate on a struct field equality
+// against a string literal, and accumulate into a running sum.
+// Demonstrates:
+//   - struct event { kind: str, value: int } definition
+//   - emit(event { kind = "click", value = 1 }) struct literal
+//   - gate(.kind == "click") field-equality test on a struct
+//   - sum verb pulling .value out of a struct input
+//
+// Expected tap.log: 1  (one click event passes the gate, sum accumulates)
+
+struct event {
+  kind: str
+  value: int
+}
+
+src  : emit(event { kind = "click", value = 1 })
+filt : input -> gate(.kind == "click")
+acc  : input -> sum
+log  : input -> tap.log
+
+src -> filt -> acc -> log
+
+chain count_clicks { src filt acc log }

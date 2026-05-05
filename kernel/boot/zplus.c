@@ -28,6 +28,7 @@
 #include "mde_chain.h"
 #include "vault.h"
 #include "kprint.h"
+#include "heap.h"
 
 /* The audio chain consumes a staged pcm_request from hda.c. It's declared
  * static there; we use the module-level shim hda_play_pcm() to stage and
@@ -69,6 +70,283 @@ static int zp_isalnum(char c) { return zp_isalpha(c) || zp_isdigit(c); }
 /* Identifier extension: allow '.' so verbs like audio.play / net.send /
  * vault.get / tap.log lex as a single TOK_IDENT. */
 static int zp_isident(char c) { return zp_isalnum(c) || c == '.'; }
+
+/* ── Pass 1: string / struct / array pools ────────────────────
+ *
+ * Three reference-counted pools live behind a single zp_pools_init().
+ * Strings dedupe on intern. Structs and arrays do not.  Cyclic struct
+ * references will leak — the next pass adds a sweep collector.
+ */
+
+struct zp_str_slot {
+    char    *bytes;     /* heap-allocated, NUL-terminated */
+    int      len;
+    int      refcount;  /* 0 == free slot */
+};
+static struct zp_str_slot     g_str_pool[ZP_STRING_POOL_SLOTS];
+
+struct zp_struct_inst {
+    int      type_idx;
+    int      in_use;
+    int      refcount;
+    /* Per-field storage. ints stored in handle, strings stored as handle. */
+    int      kinds [ZP_MAX_STRUCT_FIELDS];
+    int32_t  values[ZP_MAX_STRUCT_FIELDS];
+};
+static struct zp_struct_type  g_struct_types[ZP_STRUCT_TYPE_SLOTS];
+static struct zp_struct_inst  g_struct_pool[ZP_STRUCT_INST_SLOTS];
+
+struct zp_array_slot {
+    int     in_use;
+    int     refcount;
+    int     count;
+    int     elems[16];      /* string-handle elements */
+};
+static struct zp_array_slot   g_array_pool[ZP_ARRAY_POOL_SLOTS];
+
+static int g_pools_initialized = 0;
+static int g_string_verb_count = 0;
+
+void zp_pools_init(void)
+{
+    if (g_pools_initialized) return;
+    for (int i = 0; i < ZP_STRING_POOL_SLOTS; i++) {
+        g_str_pool[i].bytes = 0;
+        g_str_pool[i].len = 0;
+        g_str_pool[i].refcount = 0;
+    }
+    for (int i = 0; i < ZP_STRUCT_TYPE_SLOTS; i++) g_struct_types[i].in_use = 0;
+    for (int i = 0; i < ZP_STRUCT_INST_SLOTS; i++) g_struct_pool[i].in_use = 0;
+    for (int i = 0; i < ZP_ARRAY_POOL_SLOTS;  i++) g_array_pool[i].in_use = 0;
+    g_pools_initialized = 1;
+    /* Count of pass-1 string verbs advertised — kept in sync with the
+     * ZP_STR_* enum block.  13 verbs. */
+    g_string_verb_count = 13;
+}
+
+static int zp_pool_strlen(const char *s)
+{
+    int n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static int zp_pool_streq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+int zp_str_intern(const char *s, int len)
+{
+    if (!g_pools_initialized) zp_pools_init();
+    if (!s) return -1;
+    if (len < 0) len = zp_pool_strlen(s);
+    if (len > ZP_MAX_STRING_BYTES) return -1;
+
+    /* Dedupe: scan live slots for an exact match. */
+    for (int i = 0; i < ZP_STRING_POOL_SLOTS; i++) {
+        if (g_str_pool[i].refcount <= 0) continue;
+        if (g_str_pool[i].len != len) continue;
+        int eq = 1;
+        for (int j = 0; j < len; j++) {
+            if (g_str_pool[i].bytes[j] != s[j]) { eq = 0; break; }
+        }
+        if (eq) {
+            g_str_pool[i].refcount++;
+            return i;
+        }
+    }
+    /* Allocate a new slot. */
+    for (int i = 0; i < ZP_STRING_POOL_SLOTS; i++) {
+        if (g_str_pool[i].refcount > 0) continue;
+        char *buf = (char *)kmalloc((uint64_t)(len + 1));
+        if (!buf) return -1;
+        for (int j = 0; j < len; j++) buf[j] = s[j];
+        buf[len] = '\0';
+        g_str_pool[i].bytes = buf;
+        g_str_pool[i].len = len;
+        g_str_pool[i].refcount = 1;
+        return i;
+    }
+    return -1;
+}
+
+const char *zp_str_get(int handle, int *out_len)
+{
+    if (handle < 0 || handle >= ZP_STRING_POOL_SLOTS) return 0;
+    if (g_str_pool[handle].refcount <= 0) return 0;
+    if (out_len) *out_len = g_str_pool[handle].len;
+    return g_str_pool[handle].bytes;
+}
+
+void zp_str_addref(int handle)
+{
+    if (handle < 0 || handle >= ZP_STRING_POOL_SLOTS) return;
+    if (g_str_pool[handle].refcount <= 0) return;
+    g_str_pool[handle].refcount++;
+}
+
+void zp_str_release(int handle)
+{
+    if (handle < 0 || handle >= ZP_STRING_POOL_SLOTS) return;
+    if (g_str_pool[handle].refcount <= 0) return;
+    g_str_pool[handle].refcount--;
+    if (g_str_pool[handle].refcount == 0) {
+        if (g_str_pool[handle].bytes) {
+            kfree(g_str_pool[handle].bytes);
+            g_str_pool[handle].bytes = 0;
+        }
+        g_str_pool[handle].len = 0;
+    }
+}
+
+int zp_string_verb_count(void)
+{
+    if (!g_pools_initialized) zp_pools_init();
+    return g_string_verb_count;
+}
+
+int zp_struct_type_count(void)
+{
+    if (!g_pools_initialized) return 0;
+    int n = 0;
+    for (int i = 0; i < ZP_STRUCT_TYPE_SLOTS; i++)
+        if (g_struct_types[i].in_use) n++;
+    return n;
+}
+
+int zp_struct_find(const char *name)
+{
+    if (!g_pools_initialized) return -1;
+    for (int i = 0; i < ZP_STRUCT_TYPE_SLOTS; i++) {
+        if (!g_struct_types[i].in_use) continue;
+        if (zp_pool_streq(g_struct_types[i].name, name)) return i;
+    }
+    return -1;
+}
+
+int zp_struct_register(const struct zp_struct_type *def)
+{
+    if (!g_pools_initialized) zp_pools_init();
+    if (!def || !def->name[0]) return -1;
+    /* Replace if exists. */
+    int slot = zp_struct_find(def->name);
+    if (slot < 0) {
+        for (int i = 0; i < ZP_STRUCT_TYPE_SLOTS; i++) {
+            if (!g_struct_types[i].in_use) { slot = i; break; }
+        }
+    }
+    if (slot < 0) return -1;
+    g_struct_types[slot] = *def;
+    g_struct_types[slot].in_use = 1;
+    return slot;
+}
+
+int zp_struct_alloc(int type_idx)
+{
+    if (!g_pools_initialized) zp_pools_init();
+    if (type_idx < 0 || type_idx >= ZP_STRUCT_TYPE_SLOTS) return -1;
+    if (!g_struct_types[type_idx].in_use) return -1;
+    for (int i = 0; i < ZP_STRUCT_INST_SLOTS; i++) {
+        if (g_struct_pool[i].in_use) continue;
+        g_struct_pool[i].in_use = 1;
+        g_struct_pool[i].refcount = 1;
+        g_struct_pool[i].type_idx = type_idx;
+        for (int f = 0; f < ZP_MAX_STRUCT_FIELDS; f++) {
+            g_struct_pool[i].kinds[f]  = ZP_VAL_INT;
+            g_struct_pool[i].values[f] = 0;
+        }
+        return i;
+    }
+    return -1;
+}
+
+static int struct_field_idx(int type_idx, const char *field)
+{
+    if (type_idx < 0 || type_idx >= ZP_STRUCT_TYPE_SLOTS) return -1;
+    struct zp_struct_type *t = &g_struct_types[type_idx];
+    for (int i = 0; i < t->field_count; i++) {
+        if (zp_pool_streq(t->fields[i].name, field)) return i;
+    }
+    return -1;
+}
+
+int zp_struct_set_int(int handle, const char *field, int32_t v)
+{
+    if (handle < 0 || handle >= ZP_STRUCT_INST_SLOTS) return -1;
+    if (!g_struct_pool[handle].in_use) return -1;
+    int fi = struct_field_idx(g_struct_pool[handle].type_idx, field);
+    if (fi < 0) return -1;
+    g_struct_pool[handle].kinds[fi]  = ZP_VAL_INT;
+    g_struct_pool[handle].values[fi] = v;
+    return 0;
+}
+
+int zp_struct_set_str(int handle, const char *field, int str_handle)
+{
+    if (handle < 0 || handle >= ZP_STRUCT_INST_SLOTS) return -1;
+    if (!g_struct_pool[handle].in_use) return -1;
+    int fi = struct_field_idx(g_struct_pool[handle].type_idx, field);
+    if (fi < 0) return -1;
+    g_struct_pool[handle].kinds[fi]  = ZP_VAL_STR;
+    g_struct_pool[handle].values[fi] = str_handle;
+    zp_str_addref(str_handle);
+    return 0;
+}
+
+int zp_struct_get(int handle, const char *field, struct zp_value *out)
+{
+    if (!out) return -1;
+    if (handle < 0 || handle >= ZP_STRUCT_INST_SLOTS) return -1;
+    if (!g_struct_pool[handle].in_use) return -1;
+    int fi = struct_field_idx(g_struct_pool[handle].type_idx, field);
+    if (fi < 0) return -1;
+    out->kind   = g_struct_pool[handle].kinds[fi];
+    out->handle = g_struct_pool[handle].values[fi];
+    return 0;
+}
+
+int zp_array_alloc(void)
+{
+    if (!g_pools_initialized) zp_pools_init();
+    for (int i = 0; i < ZP_ARRAY_POOL_SLOTS; i++) {
+        if (g_array_pool[i].in_use) continue;
+        g_array_pool[i].in_use = 1;
+        g_array_pool[i].refcount = 1;
+        g_array_pool[i].count = 0;
+        return i;
+    }
+    return -1;
+}
+
+int zp_array_push_str(int arr_handle, int str_handle)
+{
+    if (arr_handle < 0 || arr_handle >= ZP_ARRAY_POOL_SLOTS) return -1;
+    if (!g_array_pool[arr_handle].in_use) return -1;
+    if (g_array_pool[arr_handle].count >= 16) return -1;
+    g_array_pool[arr_handle].elems[g_array_pool[arr_handle].count++] = str_handle;
+    zp_str_addref(str_handle);
+    return 0;
+}
+
+int zp_array_len(int arr_handle)
+{
+    if (arr_handle < 0 || arr_handle >= ZP_ARRAY_POOL_SLOTS) return 0;
+    if (!g_array_pool[arr_handle].in_use) return 0;
+    return g_array_pool[arr_handle].count;
+}
+
+int zp_array_get_str(int arr_handle, int idx)
+{
+    if (arr_handle < 0 || arr_handle >= ZP_ARRAY_POOL_SLOTS) return -1;
+    if (!g_array_pool[arr_handle].in_use) return -1;
+    if (idx < 0 || idx >= g_array_pool[arr_handle].count) return -1;
+    return g_array_pool[arr_handle].elems[idx];
+}
 
 /* ── Tokenizer ────────────────────────────────── */
 
@@ -250,6 +528,21 @@ static int lexer_token(struct zp_lexer *lex, struct zp_token *tok)
         return 0;
     }
 
+    /* Leading dot identifier: `.field` is lexed as a single TOK_IDENT
+     * with a leading dot.  Used for struct field access in gate(). */
+    if (c == '.' && lex->pos + 1 < lex->len && zp_isalpha(lex->src[lex->pos + 1])) {
+        int i = 0;
+        char d = lexer_next(lex);  /* '.' */
+        if (i < ZP_MAX_NAME - 1) tok->text[i++] = d;
+        while (lex->pos < lex->len && zp_isident(lexer_peek(lex))) {
+            d = lexer_next(lex);
+            if (i < ZP_MAX_NAME - 1) tok->text[i++] = d;
+        }
+        tok->text[i] = '\0';
+        tok->type = TOK_IDENT;
+        return 0;
+    }
+
     /* Identifier (may contain '.') */
     if (zp_isalpha(c)) {
         int i = 0;
@@ -263,12 +556,41 @@ static int lexer_token(struct zp_lexer *lex, struct zp_token *tok)
         return 0;
     }
 
-    /* String literal */
+    /* String literal — supports \n \t \r \\ \" \0 \xNN escapes. */
     if (c == '"') {
         lexer_next(lex);  /* skip opening quote */
         int i = 0;
         while (lex->pos < lex->len && lexer_peek(lex) != '"') {
             char d = lexer_next(lex);
+            if (d == '\\' && lex->pos < lex->len) {
+                char e = lexer_next(lex);
+                switch (e) {
+                case 'n':  d = '\n'; break;
+                case 't':  d = '\t'; break;
+                case 'r':  d = '\r'; break;
+                case '\\': d = '\\'; break;
+                case '"':  d = '"';  break;
+                case '0':  d = '\0'; break;
+                case 'x': {
+                    int hi = 0, lo = 0;
+                    if (lex->pos < lex->len) {
+                        char ch = lexer_next(lex);
+                        if (ch >= '0' && ch <= '9') hi = ch - '0';
+                        else if (ch >= 'a' && ch <= 'f') hi = 10 + (ch - 'a');
+                        else if (ch >= 'A' && ch <= 'F') hi = 10 + (ch - 'A');
+                    }
+                    if (lex->pos < lex->len) {
+                        char ch = lexer_next(lex);
+                        if (ch >= '0' && ch <= '9') lo = ch - '0';
+                        else if (ch >= 'a' && ch <= 'f') lo = 10 + (ch - 'a');
+                        else if (ch >= 'A' && ch <= 'F') lo = 10 + (ch - 'A');
+                    }
+                    d = (char)((hi << 4) | lo);
+                    break;
+                }
+                default: d = e; break;
+                }
+            }
             if (i < ZP_MAX_NAME - 1)
                 tok->text[i++] = d;
         }
@@ -309,6 +631,10 @@ static int add_node(struct zp_program *prog, const char *name, enum zp_node_type
     prog->nodes[idx].int_val3 = 0;
     prog->nodes[idx].sig_idx = -1;
     prog->nodes[idx].chain_bind_id = -1;
+    prog->nodes[idx].out_kind = ZP_VAL_INT;
+    prog->nodes[idx].struct_type = -1;
+    prog->nodes[idx].emit_handle = -1;
+    prog->nodes[idx].fmt2[0] = '\0';
     if (fmt)
         zp_strcpy(prog->nodes[idx].fmt, fmt, ZP_MAX_STRING);
     else
@@ -341,6 +667,20 @@ static int verb_to_type(const char *t, enum zp_node_type *out)
     if (zp_streq(t, "vault.get"))   { *out = ZP_VAULT_GET;  return 1; }
     if (zp_streq(t, "tap.log"))     { *out = ZP_TAP_LOG;    return 1; }
     if (zp_streq(t, "compute.run")) { *out = ZP_COMPUTE_RUN; return 1; }
+    if (zp_streq(t, "str.len"))         { *out = ZP_STR_LEN;         return 1; }
+    if (zp_streq(t, "str.find"))        { *out = ZP_STR_FIND;        return 1; }
+    if (zp_streq(t, "str.split"))       { *out = ZP_STR_SPLIT;       return 1; }
+    if (zp_streq(t, "str.replace"))     { *out = ZP_STR_REPLACE;     return 1; }
+    if (zp_streq(t, "str.concat"))      { *out = ZP_STR_CONCAT;      return 1; }
+    if (zp_streq(t, "str.upper"))       { *out = ZP_STR_UPPER;       return 1; }
+    if (zp_streq(t, "str.lower"))       { *out = ZP_STR_LOWER;       return 1; }
+    if (zp_streq(t, "str.trim"))        { *out = ZP_STR_TRIM;        return 1; }
+    if (zp_streq(t, "str.starts_with")) { *out = ZP_STR_STARTS_WITH; return 1; }
+    if (zp_streq(t, "str.ends_with"))   { *out = ZP_STR_ENDS_WITH;   return 1; }
+    if (zp_streq(t, "str.from_int"))    { *out = ZP_STR_FROM_INT;    return 1; }
+    if (zp_streq(t, "str.to_int"))      { *out = ZP_STR_TO_INT;      return 1; }
+    if (zp_streq(t, "str.len_of_array")){ *out = ZP_STR_LEN_OF_ARRAY;return 1; }
+    if (zp_streq(t, "sum"))             { *out = ZP_SUM;             return 1; }
     return 0;
 }
 
@@ -405,16 +745,47 @@ static void parse_sustained_args(struct zp_lexer *lex,
 
 /*
  * Parse a gate() expression: gate(> N), gate(< N), gate(== N), etc.
+ *
+ * Pass-1 extension:
+ *   gate(.field == "literal")  — struct field equality test.
+ *
+ * In the field-equality form, *out_val is unused; field name is written
+ * into *field_buf (NULL ok, ignored), literal into *lit_buf (NULL ok),
+ * and the returned type is ZP_GATE_FIELD_EQ.
+ *
  * Returns the gate type, stores threshold in *out_val.
  */
-static enum zp_node_type parse_gate_expr(struct zp_lexer *lex, int32_t *out_val)
+static enum zp_node_type parse_gate_expr_full(struct zp_lexer *lex,
+                                              int32_t *out_val,
+                                              char *field_buf,
+                                              char *lit_buf)
 {
     struct zp_token t;
     lexer_token(lex, &t);  /* ( */
-    lexer_token(lex, &t);  /* comparison operator */
+    lexer_token(lex, &t);  /* may be MINUS('.' was eaten as TOK_MINUS? no — '.' is part of TOK_IDENT) */
+
+    /* Check for field-eq form: a leading '.' starts the field name. The
+     * lexer treats '.' as part of an identifier. So the field comes through
+     * as TOK_IDENT with text starting with '.'. */
+    if (t.type == TOK_IDENT && t.text[0] == '.') {
+        if (field_buf) {
+            int j = 0;
+            for (int i = 1; t.text[i] && j < ZP_MAX_NAME - 1; i++)
+                field_buf[j++] = t.text[i];
+            field_buf[j] = '\0';
+        }
+        lexer_token(lex, &t);  /* expect == */
+        lexer_token(lex, &t);  /* literal */
+        if (t.type == TOK_STRING && lit_buf)
+            zp_strcpy(lit_buf, t.text, ZP_MAX_STRING);
+        else if (t.type == TOK_NUMBER) {
+            *out_val = t.num_val;
+        }
+        lexer_token(lex, &t);  /* ) */
+        return ZP_GATE_FIELD_EQ;
+    }
 
     enum zp_node_type gate_type = ZP_GATE_GT;
-
     if (t.type == TOK_GT)       gate_type = ZP_GATE_GT;
     else if (t.type == TOK_LT)  gate_type = ZP_GATE_LT;
     else if (t.type == TOK_EQ)  gate_type = ZP_GATE_EQ;
@@ -426,6 +797,12 @@ static enum zp_node_type parse_gate_expr(struct zp_lexer *lex, int32_t *out_val)
 
     lexer_token(lex, &t);  /* ) */
     return gate_type;
+}
+
+static enum zp_node_type parse_gate_expr(struct zp_lexer *lex, int32_t *out_val) __attribute__((unused));
+static enum zp_node_type parse_gate_expr(struct zp_lexer *lex, int32_t *out_val)
+{
+    return parse_gate_expr_full(lex, out_val, 0, 0);
 }
 
 /*
@@ -455,6 +832,60 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
     /* Must start with identifier */
     if (tok.type != TOK_IDENT)
         return 0;  /* Skip lines we can't parse */
+
+    /* ── Struct definition: struct name { field: type ... } ── */
+    if (zp_streq(tok.text, "struct")) {
+        struct zp_token t;
+        lexer_token(lex, &t);
+        if (t.type != TOK_IDENT) return -1;
+
+        struct zp_struct_type def;
+        for (int i = 0; i < ZP_MAX_NAME; i++) def.name[i] = 0;
+        zp_strcpy(def.name, t.text, ZP_MAX_NAME);
+        def.field_count = 0;
+        def.in_use = 1;
+
+        lexer_token(lex, &t); /* { */
+        if (t.type != TOK_LBRACE) return -1;
+
+        /* Read field decls until }. Field syntax:  field_name : type
+         * type is one of: int, str, or another struct name (treated as struct). */
+        lexer_token(lex, &t);
+        while (t.type != TOK_RBRACE && t.type != TOK_EOF) {
+            if (t.type == TOK_NEWLINE || t.type == TOK_COMMA) {
+                lexer_token(lex, &t);
+                continue;
+            }
+            if (t.type != TOK_IDENT) {
+                lexer_token(lex, &t);
+                continue;
+            }
+            if (def.field_count >= ZP_MAX_STRUCT_FIELDS) {
+                /* Skip to } */
+                while (t.type != TOK_RBRACE && t.type != TOK_EOF)
+                    lexer_token(lex, &t);
+                break;
+            }
+            struct zp_struct_field *f = &def.fields[def.field_count];
+            zp_strcpy(f->name, t.text, ZP_MAX_NAME);
+            f->offset = def.field_count;
+            f->kind = ZP_VAL_INT;
+            lexer_token(lex, &t); /* expect : */
+            if (t.type == TOK_COLON) {
+                lexer_token(lex, &t); /* type */
+                if (t.type == TOK_IDENT) {
+                    if (zp_streq(t.text, "int")) f->kind = ZP_VAL_INT;
+                    else if (zp_streq(t.text, "str")) f->kind = ZP_VAL_STR;
+                    else f->kind = ZP_VAL_STRUCT;
+                }
+            }
+            def.field_count++;
+            lexer_token(lex, &t);
+        }
+
+        zp_struct_register(&def);
+        return 0;
+    }
 
     /* ── Chain definition: chain name { step1 -> step2 -> ... } ──
      *
@@ -564,8 +995,9 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                 captured = 1;
                             } else if (op.type == TOK_IDENT &&
                                        zp_streq(op.text, "gate")) {
-                                int32_t th;
-                                enum zp_node_type gt = parse_gate_expr(lex, &th);
+                                int32_t th = 0;
+                                enum zp_node_type gt = parse_gate_expr_full(
+                                    lex, &th, d->fmt2, d->fmt);
                                 d->type = gt;
                                 d->int_val = th;
                                 captured = 1;
@@ -599,11 +1031,24 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                     /* consume verb args if present */
                                     if (lexer_peek(lex) == '(') {
                                         struct zp_token p;
-                                        do { lexer_token(lex, &p); }
+                                        lexer_token(lex, &p); /* ( */
+                                        /* String-arg verbs: capture first
+                                         * string literal as fmt, second as fmt2. */
+                                        int got_first = 0;
                                         while (p.type != TOK_RPAREN &&
                                                p.type != TOK_NEWLINE &&
                                                p.type != TOK_EOF &&
-                                               p.type != TOK_RBRACE);
+                                               p.type != TOK_RBRACE) {
+                                            lexer_token(lex, &p);
+                                            if (p.type == TOK_STRING) {
+                                                if (!got_first) {
+                                                    zp_strcpy(d->fmt, p.text, ZP_MAX_STRING);
+                                                    got_first = 1;
+                                                } else {
+                                                    zp_strcpy(d->fmt2, p.text, ZP_MAX_STRING);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -614,15 +1059,56 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                             continue;
                         }
 
-                        /* Bare verb / `emit(N)` form. */
+                        /* Bare verb / `emit(N | "str" | structname{...})` form. */
                         if (zp_streq(r.text, "emit")) {
                             struct zp_token p;
                             lexer_token(lex, &p);  /* ( */
-                            lexer_token(lex, &p);  /* number */
+                            lexer_token(lex, &p);  /* number | string | typename */
                             d->type = ZP_EMIT;
-                            d->int_val = p.num_val;
                             captured = 1;
-                            lexer_token(lex, &p);  /* ) */
+                            if (p.type == TOK_NUMBER) {
+                                d->int_val = p.num_val;
+                                lexer_token(lex, &p);  /* ) */
+                            } else if (p.type == TOK_STRING) {
+                                int h = zp_str_intern(p.text, -1);
+                                d->out_kind = ZP_VAL_STR;
+                                d->emit_handle = h;
+                                lexer_token(lex, &p);  /* ) */
+                            } else if (p.type == TOK_IDENT) {
+                                int stype = zp_struct_find(p.text);
+                                lexer_token(lex, &p);  /* { */
+                                if (stype >= 0 && p.type == TOK_LBRACE) {
+                                    int sh = zp_struct_alloc(stype);
+                                    struct zp_token f;
+                                    lexer_token(lex, &f);
+                                    while (f.type != TOK_RBRACE && f.type != TOK_EOF) {
+                                        if (f.type == TOK_IDENT) {
+                                            char fname[ZP_MAX_NAME];
+                                            zp_strcpy(fname, f.text, ZP_MAX_NAME);
+                                            lexer_token(lex, &f);
+                                            if (f.type == TOK_NUMBER) {
+                                                zp_struct_set_int(sh, fname, f.num_val);
+                                            } else if (f.type == TOK_STRING) {
+                                                int sv = zp_str_intern(f.text, -1);
+                                                zp_struct_set_str(sh, fname, sv);
+                                                zp_str_release(sv);
+                                            }
+                                        }
+                                        lexer_token(lex, &f);
+                                        if (f.type == TOK_COMMA) lexer_token(lex, &f);
+                                    }
+                                    d->out_kind = ZP_VAL_STRUCT;
+                                    d->struct_type = stype;
+                                    d->emit_handle = sh;
+                                    lexer_token(lex, &p);  /* ) */
+                                } else {
+                                    while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE &&
+                                           p.type != TOK_EOF) lexer_token(lex, &p);
+                                }
+                            } else {
+                                while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE &&
+                                       p.type != TOK_EOF) lexer_token(lex, &p);
+                            }
                         } else if (zp_streq(r.text, "delta")) {
                             d->type = ZP_DELTA;
                             captured = 1;
@@ -643,8 +1129,9 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                             d->int_val3 = (int32_t)gt;
                             captured = 1;
                         } else if (zp_streq(r.text, "gate")) {
-                            int32_t th;
-                            enum zp_node_type gt = parse_gate_expr(lex, &th);
+                            int32_t th = 0;
+                            enum zp_node_type gt = parse_gate_expr_full(
+                                lex, &th, d->fmt2, d->fmt);
                             d->type = gt;
                             d->int_val = th;
                             captured = 1;
@@ -655,11 +1142,22 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                 captured = 1;
                                 if (lexer_peek(lex) == '(') {
                                     struct zp_token p;
-                                    do { lexer_token(lex, &p); }
+                                    lexer_token(lex, &p); /* ( */
+                                    int got_first = 0;
                                     while (p.type != TOK_RPAREN &&
                                            p.type != TOK_NEWLINE &&
                                            p.type != TOK_EOF &&
-                                           p.type != TOK_RBRACE);
+                                           p.type != TOK_RBRACE) {
+                                        lexer_token(lex, &p);
+                                        if (p.type == TOK_STRING) {
+                                            if (!got_first) {
+                                                zp_strcpy(d->fmt, p.text, ZP_MAX_STRING);
+                                                got_first = 1;
+                                            } else {
+                                                zp_strcpy(d->fmt2, p.text, ZP_MAX_STRING);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -751,13 +1249,63 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
         lexer_token(lex, &t);
 
         if (t.type == TOK_IDENT && zp_streq(t.text, "emit")) {
-            /* emit(N) */
+            /* emit(N | "str" | structname { ... }) */
             lexer_token(lex, &t);  /* ( */
-            lexer_token(lex, &t);  /* number */
-            int32_t val = t.num_val;
-            lexer_token(lex, &t);  /* ) */
-
-            add_node(prog, first_name, ZP_EMIT, val, 0);
+            lexer_token(lex, &t);  /* number | string | ident(struct name) */
+            if (t.type == TOK_NUMBER) {
+                int32_t val = t.num_val;
+                add_node(prog, first_name, ZP_EMIT, val, 0);
+                lexer_token(lex, &t);  /* ) */
+            } else if (t.type == TOK_STRING) {
+                int h = zp_str_intern(t.text, -1);
+                add_node(prog, first_name, ZP_EMIT, 0, 0);
+                int idx = prog->node_count - 1;
+                prog->nodes[idx].out_kind    = ZP_VAL_STR;
+                prog->nodes[idx].emit_handle = h;
+                lexer_token(lex, &t);  /* ) */
+            } else if (t.type == TOK_IDENT) {
+                /* struct literal: typename { field = expr, ... } */
+                int stype = zp_struct_find(t.text);
+                lexer_token(lex, &t); /* { */
+                if (stype >= 0 && t.type == TOK_LBRACE) {
+                    int sh = zp_struct_alloc(stype);
+                    /* parse field bindings */
+                    struct zp_token f;
+                    lexer_token(lex, &f);
+                    while (f.type != TOK_RBRACE && f.type != TOK_EOF) {
+                        if (f.type == TOK_IDENT) {
+                            char fname[ZP_MAX_NAME];
+                            zp_strcpy(fname, f.text, ZP_MAX_NAME);
+                            /* skip '=' (lexer doesn't tokenize bare '=') */
+                            lexer_token(lex, &f);
+                            if (f.type == TOK_NUMBER) {
+                                zp_struct_set_int(sh, fname, f.num_val);
+                            } else if (f.type == TOK_STRING) {
+                                int sv = zp_str_intern(f.text, -1);
+                                zp_struct_set_str(sh, fname, sv);
+                                zp_str_release(sv);
+                            }
+                        }
+                        lexer_token(lex, &f);
+                        if (f.type == TOK_COMMA) lexer_token(lex, &f);
+                    }
+                    add_node(prog, first_name, ZP_EMIT, 0, 0);
+                    int idx = prog->node_count - 1;
+                    prog->nodes[idx].out_kind    = ZP_VAL_STRUCT;
+                    prog->nodes[idx].struct_type = stype;
+                    prog->nodes[idx].emit_handle = sh;
+                    /* consume closing ) */
+                    lexer_token(lex, &t);
+                } else {
+                    /* Bail: skip to ) */
+                    while (t.type != TOK_RPAREN && t.type != TOK_NEWLINE &&
+                           t.type != TOK_EOF) lexer_token(lex, &t);
+                }
+            } else {
+                /* Unknown form: skip to ) */
+                while (t.type != TOK_RPAREN && t.type != TOK_NEWLINE &&
+                       t.type != TOK_EOF) lexer_token(lex, &t);
+            }
 
         } else if (t.type == TOK_IDENT && zp_streq(t.text, "input")) {
             /* input -> OP ... */
@@ -801,10 +1349,18 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                 add_node(prog, first_name, ZP_PRINT, 0, fmt);
 
             } else if (t.type == TOK_IDENT && zp_streq(t.text, "gate")) {
-                /* gate(> N) -> output */
-                int32_t threshold;
-                enum zp_node_type gate_type = parse_gate_expr(lex, &threshold);
+                /* gate(> N) | gate(.field == "lit") -> output */
+                int32_t threshold = 0;
+                char field_buf[ZP_MAX_NAME] = {0};
+                char lit_buf[ZP_MAX_STRING] = {0};
+                enum zp_node_type gate_type = parse_gate_expr_full(
+                    lex, &threshold, field_buf, lit_buf);
                 add_node(prog, first_name, gate_type, threshold, 0);
+                if (gate_type == ZP_GATE_FIELD_EQ) {
+                    int idx = prog->node_count - 1;
+                    zp_strcpy(prog->nodes[idx].fmt2, field_buf, ZP_MAX_STRING);
+                    zp_strcpy(prog->nodes[idx].fmt,  lit_buf,   ZP_MAX_STRING);
+                }
                 lexer_token(lex, &t);  /* -> */
                 lexer_token(lex, &t);  /* output */
 
@@ -873,6 +1429,25 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                     prog->nodes[prog->node_count - 1].int_val = 1;
                                 }
                             }
+                        } else if (vt == ZP_STR_SPLIT || vt == ZP_STR_FIND ||
+                                   vt == ZP_STR_REPLACE || vt == ZP_STR_CONCAT ||
+                                   vt == ZP_STR_STARTS_WITH || vt == ZP_STR_ENDS_WITH) {
+                            /* First string arg into fmt[]. Optional second
+                             * string arg into fmt2[] (for replace). */
+                            lexer_token(lex, &p);
+                            if (p.type == TOK_STRING)
+                                zp_strcpy(prog->nodes[prog->node_count - 1].fmt,
+                                          p.text, ZP_MAX_STRING);
+                            lexer_token(lex, &p); /* , or ) */
+                            if (p.type == TOK_COMMA) {
+                                lexer_token(lex, &p);
+                                if (p.type == TOK_STRING)
+                                    zp_strcpy(prog->nodes[prog->node_count - 1].fmt2,
+                                              p.text, ZP_MAX_STRING);
+                            }
+                            while (p.type != TOK_RPAREN && p.type != TOK_NEWLINE
+                                   && p.type != TOK_EOF)
+                                lexer_token(lex, &p);
                         } else if (vt == ZP_FS_READ || vt == ZP_FS_WRITE) {
                             int32_t a = 0, b = 0, c = 0;
                             lexer_token(lex, &p);
@@ -1457,6 +2032,393 @@ static int zp_proc_tap_log(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
+/* ── Pass 1: per-node side state for string/struct verbs ────────── */
+
+static int32_t zp_emit_handle[ZP_MAX_NODES];   /* string/struct emit handle */
+static int32_t zp_emit_kind[ZP_MAX_NODES];     /* ZP_VAL_* for the emit */
+static int32_t zp_split_sep[ZP_MAX_NODES];     /* str.split sep handle */
+static int32_t zp_field_lit[ZP_MAX_NODES];     /* gate(.f=="lit") lit handle */
+static int32_t zp_struct_type_idx[ZP_MAX_NODES];
+static int32_t zp_sum_acc[ZP_MAX_NODES];
+
+/* Pass-1 emit override: when out_kind != ZP_VAL_INT, output the pool
+ * handle stored at zp_emit_handle[id]. */
+static int zp_proc_emit_pass1(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    (void)in;
+    int idx = node->id;
+    int32_t v = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_emit_handle[idx] : 0;
+    sig_data_write_i32(out, v);
+    return 0;
+}
+
+/* str.len(s) — input handle -> int length */
+static int zp_proc_str_len(struct sig_node *node, struct sig_data *in,
+                            struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    int len = 0;
+    const char *s = zp_str_get(h, &len);
+    sig_data_write_i32(out, s ? len : 0);
+    return 0;
+}
+
+/* str.upper / str.lower / str.trim / str.from_int / str.to_int */
+static int zp_proc_str_upper(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    int len = 0;
+    const char *s = zp_str_get(h, &len);
+    if (!s) { sig_data_write_i32(out, -1); return 0; }
+    char *buf = (char *)kmalloc((uint64_t)(len + 1));
+    if (!buf) { sig_data_write_i32(out, -1); return 0; }
+    for (int i = 0; i < len; i++) {
+        char c = s[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        buf[i] = c;
+    }
+    buf[len] = 0;
+    int nh = zp_str_intern(buf, len);
+    kfree(buf);
+    sig_data_write_i32(out, nh);
+    return 0;
+}
+
+static int zp_proc_str_lower(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    int len = 0;
+    const char *s = zp_str_get(h, &len);
+    if (!s) { sig_data_write_i32(out, -1); return 0; }
+    char *buf = (char *)kmalloc((uint64_t)(len + 1));
+    if (!buf) { sig_data_write_i32(out, -1); return 0; }
+    for (int i = 0; i < len; i++) {
+        char c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        buf[i] = c;
+    }
+    buf[len] = 0;
+    int nh = zp_str_intern(buf, len);
+    kfree(buf);
+    sig_data_write_i32(out, nh);
+    return 0;
+}
+
+static int zp_proc_str_trim(struct sig_node *node, struct sig_data *in,
+                             struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    int len = 0;
+    const char *s = zp_str_get(h, &len);
+    if (!s) { sig_data_write_i32(out, -1); return 0; }
+    int a = 0, b = len;
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) a++;
+    while (b > a && (s[b-1] == ' ' || s[b-1] == '\t' || s[b-1] == '\n' || s[b-1] == '\r')) b--;
+    int nh = zp_str_intern(s + a, b - a);
+    sig_data_write_i32(out, nh);
+    return 0;
+}
+
+static int zp_proc_str_from_int(struct sig_node *node, struct sig_data *in,
+                                 struct sig_data *out)
+{
+    (void)node;
+    int32_t v = sig_data_read_i32(in);
+    char buf[16];
+    int neg = 0;
+    int32_t u = v;
+    if (v < 0) { neg = 1; u = -v; }
+    int n = 0;
+    if (u == 0) buf[n++] = '0';
+    while (u > 0 && n < 15) { buf[n++] = (char)('0' + (u % 10)); u /= 10; }
+    if (neg && n < 15) buf[n++] = '-';
+    /* reverse */
+    char rev[16];
+    for (int i = 0; i < n; i++) rev[i] = buf[n - 1 - i];
+    rev[n] = 0;
+    int nh = zp_str_intern(rev, n);
+    sig_data_write_i32(out, nh);
+    return 0;
+}
+
+static int zp_proc_str_to_int(struct sig_node *node, struct sig_data *in,
+                               struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    int len = 0;
+    const char *s = zp_str_get(h, &len);
+    int32_t v = 0;
+    int neg = 0, i = 0;
+    if (s && len > 0) {
+        if (s[0] == '-') { neg = 1; i = 1; }
+        for (; i < len; i++) {
+            if (s[i] < '0' || s[i] > '9') break;
+            v = v * 10 + (s[i] - '0');
+        }
+        if (neg) v = -v;
+    }
+    sig_data_write_i32(out, v);
+    return 0;
+}
+
+/* str.split(sep) — input string handle -> array handle.
+ * Separator is stored in zp_split_sep[id] as a string handle. */
+static int zp_proc_str_split(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    int idx = node->id;
+    int h = sig_data_read_i32(in);
+    int slen = 0;
+    const char *s = zp_str_get(h, &slen);
+    if (!s) { sig_data_write_i32(out, -1); return 0; }
+    int sep_h = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int seplen = 0;
+    const char *sep = zp_str_get(sep_h, &seplen);
+    if (!sep || seplen == 0) { sig_data_write_i32(out, -1); return 0; }
+
+    int arr = zp_array_alloc();
+    if (arr < 0) { sig_data_write_i32(out, -1); return 0; }
+
+    int start = 0;
+    for (int i = 0; i + seplen <= slen; ) {
+        int match = 1;
+        for (int j = 0; j < seplen; j++) {
+            if (s[i + j] != sep[j]) { match = 0; break; }
+        }
+        if (match) {
+            int sh = zp_str_intern(s + start, i - start);
+            zp_array_push_str(arr, sh);
+            zp_str_release(sh);
+            i += seplen;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    /* tail */
+    int sh = zp_str_intern(s + start, slen - start);
+    zp_array_push_str(arr, sh);
+    zp_str_release(sh);
+    sig_data_write_i32(out, arr);
+    return 0;
+}
+
+/* str.len_of_array — input array handle -> int count of strings */
+static int zp_proc_str_len_of_array(struct sig_node *node, struct sig_data *in,
+                                     struct sig_data *out)
+{
+    (void)node;
+    int h = sig_data_read_i32(in);
+    sig_data_write_i32(out, zp_array_len(h));
+    return 0;
+}
+
+/* str.find(haystack, needle) — needle stored in fmt at compile time -> handle */
+static int zp_proc_str_find(struct sig_node *node, struct sig_data *in,
+                             struct sig_data *out)
+{
+    int idx = node->id;
+    int h = sig_data_read_i32(in);
+    int hlen = 0;
+    const char *hay = zp_str_get(h, &hlen);
+    int neeh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int nlen = 0;
+    const char *nee = zp_str_get(neeh, &nlen);
+    if (!hay || !nee || nlen == 0) { sig_data_write_i32(out, -1); return 0; }
+    for (int i = 0; i + nlen <= hlen; i++) {
+        int match = 1;
+        for (int j = 0; j < nlen; j++)
+            if (hay[i + j] != nee[j]) { match = 0; break; }
+        if (match) { sig_data_write_i32(out, i); return 0; }
+    }
+    sig_data_write_i32(out, -1);
+    return 0;
+}
+
+/* str.concat(a, b) — two-arg: input is `a` handle, b is in fmt at compile */
+static int zp_proc_str_concat(struct sig_node *node, struct sig_data *in,
+                               struct sig_data *out)
+{
+    int idx = node->id;
+    int ah = sig_data_read_i32(in);
+    int bh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int alen = 0, blen = 0;
+    const char *a = zp_str_get(ah, &alen);
+    const char *b = zp_str_get(bh, &blen);
+    if (!a) { a = ""; alen = 0; }
+    if (!b) { b = ""; blen = 0; }
+    char *buf = (char *)kmalloc((uint64_t)(alen + blen + 1));
+    if (!buf) { sig_data_write_i32(out, -1); return 0; }
+    for (int i = 0; i < alen; i++) buf[i] = a[i];
+    for (int i = 0; i < blen; i++) buf[alen + i] = b[i];
+    buf[alen + blen] = 0;
+    int nh = zp_str_intern(buf, alen + blen);
+    kfree(buf);
+    sig_data_write_i32(out, nh);
+    return 0;
+}
+
+/* str.starts_with / str.ends_with — prefix/suffix in fmt -> 0/1 */
+static int zp_proc_str_starts_with(struct sig_node *node, struct sig_data *in,
+                                    struct sig_data *out)
+{
+    int idx = node->id;
+    int h = sig_data_read_i32(in);
+    int slen = 0;
+    const char *s = zp_str_get(h, &slen);
+    int ph = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int plen = 0;
+    const char *p = zp_str_get(ph, &plen);
+    if (!s || !p || slen < plen) { sig_data_write_i32(out, 0); return 0; }
+    for (int i = 0; i < plen; i++) if (s[i] != p[i]) { sig_data_write_i32(out, 0); return 0; }
+    sig_data_write_i32(out, 1);
+    return 0;
+}
+
+static int zp_proc_str_ends_with(struct sig_node *node, struct sig_data *in,
+                                  struct sig_data *out)
+{
+    int idx = node->id;
+    int h = sig_data_read_i32(in);
+    int slen = 0;
+    const char *s = zp_str_get(h, &slen);
+    int ph = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int plen = 0;
+    const char *p = zp_str_get(ph, &plen);
+    if (!s || !p || slen < plen) { sig_data_write_i32(out, 0); return 0; }
+    int off = slen - plen;
+    for (int i = 0; i < plen; i++) if (s[off + i] != p[i]) { sig_data_write_i32(out, 0); return 0; }
+    sig_data_write_i32(out, 1);
+    return 0;
+}
+
+/* str.replace(old, new) — old in fmt, new in fmt2; both as string handles
+ * stored at compile time (zp_split_sep + a second slot). For brevity we
+ * stash new-handle in zp_field_lit (free on this verb). */
+static int zp_proc_str_replace(struct sig_node *node, struct sig_data *in,
+                                struct sig_data *out)
+{
+    int idx = node->id;
+    int sh = sig_data_read_i32(in);
+    int slen = 0;
+    const char *s = zp_str_get(sh, &slen);
+    int oh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int olen = 0;
+    const char *oldstr = zp_str_get(oh, &olen);
+    int nh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_field_lit[idx] : -1;
+    int nlen = 0;
+    const char *newstr = zp_str_get(nh, &nlen);
+    if (!s || !oldstr || olen == 0) { sig_data_write_i32(out, sh); return 0; }
+    if (!newstr) { newstr = ""; nlen = 0; }
+
+    /* Allocate a generous buffer (cap at 16x growth or 64KiB). */
+    int cap = slen + 64; if (cap < 256) cap = 256;
+    char *buf = (char *)kmalloc((uint64_t)cap);
+    if (!buf) { sig_data_write_i32(out, sh); return 0; }
+    int wp = 0;
+    for (int i = 0; i < slen; ) {
+        int match = (i + olen <= slen);
+        if (match) {
+            for (int j = 0; j < olen; j++)
+                if (s[i + j] != oldstr[j]) { match = 0; break; }
+        }
+        if (match) {
+            if (wp + nlen >= cap) {
+                int ncap = cap * 2;
+                if (ncap > ZP_MAX_STRING_BYTES) ncap = ZP_MAX_STRING_BYTES;
+                char *nbuf = (char *)kmalloc((uint64_t)ncap);
+                if (!nbuf) break;
+                for (int k = 0; k < wp; k++) nbuf[k] = buf[k];
+                kfree(buf);
+                buf = nbuf;
+                cap = ncap;
+            }
+            for (int j = 0; j < nlen; j++) buf[wp++] = newstr[j];
+            i += olen;
+        } else {
+            if (wp + 1 >= cap) {
+                int ncap = cap * 2;
+                if (ncap > ZP_MAX_STRING_BYTES) ncap = ZP_MAX_STRING_BYTES;
+                char *nbuf = (char *)kmalloc((uint64_t)ncap);
+                if (!nbuf) break;
+                for (int k = 0; k < wp; k++) nbuf[k] = buf[k];
+                kfree(buf);
+                buf = nbuf;
+                cap = ncap;
+            }
+            buf[wp++] = s[i++];
+        }
+    }
+    int rh = zp_str_intern(buf, wp);
+    kfree(buf);
+    sig_data_write_i32(out, rh);
+    return 0;
+}
+
+/* gate(.field == "lit") — input struct handle -> handle if eq, else block */
+static int zp_proc_gate_field_eq(struct sig_node *node, struct sig_data *in,
+                                  struct sig_data *out)
+{
+    int idx = node->id;
+    int sh = sig_data_read_i32(in);
+    /* fmt2 = field name, fmt = literal — stored on the node decl; we copy
+     * them onto the side state at compile time as user_data. */
+    const char *field = (const char *)node->user_data;
+    int litlen = 0;
+    int lith = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_field_lit[idx] : -1;
+    const char *lit = zp_str_get(lith, &litlen);
+    if (!field || !lit) { out->size = 0; return 1; }
+    struct zp_value v;
+    if (zp_struct_get(sh, field, &v) < 0) { out->size = 0; return 1; }
+    if (v.kind == ZP_VAL_STR) {
+        int got = 0;
+        const char *fs = zp_str_get(v.handle, &got);
+        if (!fs || got != litlen) { out->size = 0; return 1; }
+        for (int i = 0; i < got; i++)
+            if (fs[i] != lit[i]) { out->size = 0; return 1; }
+        /* match — pass the struct handle through */
+        sig_data_write_i32(out, sh);
+        return 0;
+    }
+    out->size = 0;
+    return 1;
+}
+
+/* sum — running accumulator. For struct inputs, pulls .value field. */
+static int zp_proc_sum(struct sig_node *node, struct sig_data *in,
+                        struct sig_data *out)
+{
+    int idx = node->id;
+    int32_t v = sig_data_read_i32(in);
+    /* If the upstream is a struct, treat v as struct handle and read .value */
+    struct zp_value sv;
+    if (zp_struct_get(v, "value", &sv) == 0 && sv.kind == ZP_VAL_INT) {
+        v = sv.handle;
+    }
+    if (idx >= 0 && idx < ZP_MAX_NODES) {
+        zp_sum_acc[idx] += v;
+        sig_data_write_i32(out, zp_sum_acc[idx]);
+    } else {
+        sig_data_write_i32(out, v);
+    }
+    return 0;
+}
+
+/* tap.log: pretty-print typed values when out_kind hint is set on the
+ * upstream emit. We don't track types per-edge; so we do a best-effort:
+ * if the int decodes to a valid string handle, print the string;
+ * if it decodes to a valid struct handle, print "<struct typename>";
+ * otherwise the bare integer. The original tap.log in zp_proc_tap_log
+ * remains unchanged for legacy programs (it always prints int). */
+
 /* Print: display the value with format string */
 static int zp_proc_print(struct sig_node *node, struct sig_data *in,
                           struct sig_data *out)
@@ -1516,9 +2478,14 @@ static int zp_compile_chains(struct zp_program *prog)
             rnode->int_val2 = 0;
             rnode->int_val3 = 0;
             rnode->fmt[0] = '\0';
+            rnode->fmt2[0] = '\0';
+            rnode->out_kind = ZP_VAL_INT;
+            rnode->struct_type = -1;
+            rnode->emit_handle = -1;
             rnode->sustain_count = 0;
             rnode->delta_prev = 0;
             rnode->has_delta_prev = 0;
+            rnode->sum_acc = 0;
             zp_strcpy(rnode->name, def->node_names[n], ZP_MAX_NAME);
             if (def->have_decl[n]) {
                 struct zp_node_decl *d = &def->decls[n];
@@ -1526,7 +2493,11 @@ static int zp_compile_chains(struct zp_program *prog)
                 rnode->int_val  = d->int_val;
                 rnode->int_val2 = d->int_val2;
                 rnode->int_val3 = d->int_val3;
+                rnode->out_kind = d->out_kind;
+                rnode->struct_type = d->struct_type;
+                rnode->emit_handle = d->emit_handle;
                 zp_strcpy(rnode->fmt, d->fmt, ZP_MAX_STRING);
+                zp_strcpy(rnode->fmt2, d->fmt2, ZP_MAX_STRING);
             } else {
                 /* Try to find a top-level node decl with this name and use
                  * its type. If not found, passthrough. */
@@ -1537,7 +2508,11 @@ static int zp_compile_chains(struct zp_program *prog)
                     rnode->int_val  = d->int_val;
                     rnode->int_val2 = d->int_val2;
                     rnode->int_val3 = d->int_val3;
+                    rnode->out_kind = d->out_kind;
+                    rnode->struct_type = d->struct_type;
+                    rnode->emit_handle = d->emit_handle;
                     zp_strcpy(rnode->fmt, d->fmt, ZP_MAX_STRING);
+                    zp_strcpy(rnode->fmt2, d->fmt2, ZP_MAX_STRING);
                 } else {
                     rnode->type = ZP_PASSTHROUGH;
                 }
@@ -1570,6 +2545,7 @@ static int zp_compile_chains(struct zp_program *prog)
 
 int zp_parse(const char *source, struct zp_program *prog)
 {
+    zp_pools_init();
     prog->node_count = 0;
     prog->edge_count = 0;
     prog->chain_id = -1;
@@ -1603,8 +2579,13 @@ int zp_compile(struct zp_program *prog)
 
         switch (decl->type) {
         case ZP_EMIT:
-            proc = zp_proc_emit;
-            user_data = (void *)(long)decl->int_val;
+            if (decl->out_kind != ZP_VAL_INT) {
+                proc = zp_proc_emit_pass1;
+                user_data = 0;
+            } else {
+                proc = zp_proc_emit;
+                user_data = (void *)(long)decl->int_val;
+            }
             break;
         case ZP_MULTIPLY:
             proc = zp_proc_multiply;
@@ -1706,6 +2687,26 @@ int zp_compile(struct zp_program *prog)
             user_data = 0;
             decl->chain_bind_id = CHAIN_MDE;
             break;
+        case ZP_STR_LEN:         proc = zp_proc_str_len;          break;
+        case ZP_STR_FIND:        proc = zp_proc_str_find;         break;
+        case ZP_STR_SPLIT:       proc = zp_proc_str_split;        break;
+        case ZP_STR_REPLACE:     proc = zp_proc_str_replace;      break;
+        case ZP_STR_CONCAT:      proc = zp_proc_str_concat;       break;
+        case ZP_STR_UPPER:       proc = zp_proc_str_upper;        break;
+        case ZP_STR_LOWER:       proc = zp_proc_str_lower;        break;
+        case ZP_STR_TRIM:        proc = zp_proc_str_trim;         break;
+        case ZP_STR_STARTS_WITH: proc = zp_proc_str_starts_with;  break;
+        case ZP_STR_ENDS_WITH:   proc = zp_proc_str_ends_with;    break;
+        case ZP_STR_FROM_INT:    proc = zp_proc_str_from_int;     break;
+        case ZP_STR_TO_INT:      proc = zp_proc_str_to_int;       break;
+        case ZP_STR_LEN_OF_ARRAY:proc = zp_proc_str_len_of_array; break;
+        case ZP_STRUCT_LITERAL:  proc = zp_proc_emit_pass1;       break;
+        case ZP_FIELD_ACCESS:    proc = zp_proc_passthrough;      break;
+        case ZP_GATE_FIELD_EQ:
+            proc = zp_proc_gate_field_eq;
+            user_data = (void *)decl->fmt2;  /* field name */
+            break;
+        case ZP_SUM:             proc = zp_proc_sum;              break;
         }
 
         int idx = sig_node_add(chain, decl->name, proc, user_data);
@@ -1743,6 +2744,35 @@ int zp_compile(struct zp_program *prog)
                 zp_compute_input_val[idx]    = 0;
                 zp_compute_output_val[idx]   = 0;
                 zp_compute_prefer_gpu[idx]   = decl->int_val ? 1 : 0;
+            }
+            /* Pass-1: emit handles, split sep, gate-field literal, sum acc. */
+            if (decl->type == ZP_EMIT) {
+                zp_emit_handle[idx] = decl->emit_handle;
+                zp_emit_kind[idx]   = decl->out_kind;
+            }
+            if (decl->type == ZP_STR_SPLIT || decl->type == ZP_STR_FIND ||
+                decl->type == ZP_STR_CONCAT ||
+                decl->type == ZP_STR_STARTS_WITH || decl->type == ZP_STR_ENDS_WITH ||
+                decl->type == ZP_STR_REPLACE) {
+                zp_split_sep[idx] = (decl->fmt[0])
+                    ? zp_str_intern(decl->fmt, -1) : -1;
+                if (decl->type == ZP_STR_REPLACE) {
+                    zp_field_lit[idx] = (decl->fmt2[0])
+                        ? zp_str_intern(decl->fmt2, -1) : -1;
+                }
+            }
+            if (decl->type == ZP_GATE_FIELD_EQ) {
+                /* fmt = literal, fmt2 = field name */
+                zp_field_lit[idx] = (decl->fmt[0])
+                    ? zp_str_intern(decl->fmt, -1) : -1;
+            }
+            if (decl->type == ZP_SUM) {
+                zp_sum_acc[idx] = 0;
+            }
+            if (decl->type == ZP_STRUCT_LITERAL) {
+                zp_emit_handle[idx] = decl->emit_handle;
+                zp_emit_kind[idx]   = ZP_VAL_STRUCT;
+                zp_struct_type_idx[idx] = decl->struct_type;
             }
         }
     }
