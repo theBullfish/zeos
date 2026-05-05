@@ -131,6 +131,26 @@ impl<'src> Parser<'src> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt<'src>, ParseError> {
+        // `node IDENT { ... }` — declaration form WITHOUT a colon. Parse
+        // the body as a fork and synthesize a wire decl with that as the
+        // chain. Same handling for `chain IDENT { ... }`.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && matches!(self.cur().text, "node" | "chain")
+            && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+            && self.kind_at(self.pos + 2) == Some(TokenKind::LBrace)
+        {
+            let start = self.cur_pos();
+            self.advance(); // node|chain
+            let name = self.parse_path()?;
+            let fork = self.parse_fork()?;
+            let span = Span::new(start, self.span_of(&fork).end);
+            return Ok(Stmt::Wire(WireDecl {
+                name,
+                args: None,
+                chain: fork,
+                span,
+            }));
+        }
         if self.looks_like_wire_decl() {
             let w = self.parse_wire_decl()?;
             Ok(Stmt::Wire(w))
@@ -152,11 +172,19 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Lookahead: `IDENT (DOT IDENT)* (LPAREN ... RPAREN)? COLON`.
-    /// The optional balanced-paren chunk allows call-as-wire-decl-LHS forms
-    /// like `topic("orders") :` or `channel("foo") :`.
+    /// Lookahead: `[node]? IDENT (DOT IDENT)* (LPAREN ... RPAREN)? COLON`.
+    /// Optional `node` prefix (goya_fleet.zp uses `node fleet : ...`).
+    /// Call-as-wire-decl-LHS forms like `topic("orders") :` are accepted via
+    /// the optional balanced-paren chunk.
     fn looks_like_wire_decl(&self) -> bool {
         let mut p = self.pos;
+        // Allow `node` keyword prefix.
+        if self.kind_at(p) == Some(TokenKind::Ident)
+            && self.tokens.get(p).map(|t| t.text) == Some("node")
+            && self.kind_at(p + 1) == Some(TokenKind::Ident)
+        {
+            p += 1;
+        }
         if self.kind_at(p) != Some(TokenKind::Ident) {
             return false;
         }
@@ -184,6 +212,13 @@ impl<'src> Parser<'src> {
 
     fn parse_wire_decl(&mut self) -> Result<WireDecl<'src>, ParseError> {
         let start = self.cur_pos();
+        // Skip optional `node` keyword prefix.
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.cur().text == "node"
+            && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+        {
+            self.advance();
+        }
         let name = self.parse_path()?;
         let args = if self.peek_kind() == Some(TokenKind::LParen) {
             Some(self.parse_args()?)
@@ -191,7 +226,17 @@ impl<'src> Parser<'src> {
             None
         };
         self.expect(TokenKind::Colon)?;
-        let chain = self.parse_chain()?;
+        let mut chain = self.parse_chain()?;
+        // Stmt-level Bind postfix also applies to wire decls: the chain RHS
+        // may end with `: <expr>` to attach a shape/binding. Same handling
+        // as parse_stmt's Connect path.
+        if self.peek_kind() == Some(TokenKind::Colon) {
+            self.advance();
+            self.skip_newlines();
+            let rhs = self.parse_chain()?;
+            let span = Span::new(self.span_of(&chain).start, self.span_of(&rhs).end);
+            chain = Chain::Bind(Box::new(chain), Box::new(rhs), span);
+        }
         let end = self.cur_pos();
         Ok(WireDecl { name, args, chain, span: Span::new(start, end) })
     }
@@ -241,6 +286,20 @@ impl<'src> Parser<'src> {
                     args: vec![Arg::Positional(left), Arg::Positional(right)],
                     span,
                 });
+                continue;
+            }
+            // Chain-level comparison: `air_time < coyote_time`. Encoded as
+            // BinExpr so it lands in the same shape as arg-level comparisons.
+            if let Some(op) = self.peek_bin_op() {
+                self.advance();
+                let right = self.parse_chain_term()?;
+                let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
+                left = Chain::BinExpr {
+                    op,
+                    lhs: Box::new(left),
+                    rhs: Box::new(right),
+                    span,
+                };
                 continue;
             }
             // Look past newlines: if the next non-newline token is a chain
@@ -310,19 +369,84 @@ impl<'src> Parser<'src> {
                 _ => unreachable!(),
             };
         }
+        // Chain-level ternary: `cond ? then : else`. Used at top level too
+        // (`vision_radius : role == "imposter" ? imposter_vision : crew_vision`).
+        if self.peek_kind() == Some(TokenKind::Question) {
+            self.advance();
+            let then_branch = self.parse_chain()?;
+            self.expect(TokenKind::Colon)?;
+            let else_branch = self.parse_chain()?;
+            let span = Span::new(
+                self.span_of(&left).start,
+                self.span_of(&else_branch).end,
+            );
+            left = Chain::Call(Call {
+                callee: Path::one("__ternary__", span),
+                args: vec![
+                    Arg::Positional(left),
+                    Arg::Positional(then_branch),
+                    Arg::Positional(else_branch),
+                ],
+                span,
+            });
+        }
         Ok(left)
     }
 
     fn parse_chain_term(&mut self) -> Result<Chain<'src>, ParseError> {
-        // Unary `+` / `-` prefix on a chain term — used for negative literals
-        // like `gate(< -2σ)` and `gate(< -2C/s)`. The unary form falls
-        // through to a fresh parse_chain_term recursion and wraps in a
-        // synthetic `__neg__` / `__pos__` call.
-        if matches!(self.peek_kind(), Some(TokenKind::Minus | TokenKind::Plus)) {
+        // Bare operator as a value: `reduce(+)`, `reduce(*)`, `fold(/)`.
+        // When `+ - * /` is followed immediately by `)` or `,`, treat as a
+        // function reference encoded as Path with the operator's name.
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Plus | TokenKind::Minus | TokenKind::Star | TokenKind::Slash | TokenKind::Percent)
+        ) && matches!(
+            self.kind_at(self.pos + 1),
+            Some(TokenKind::RParen | TokenKind::Comma | TokenKind::RBracket | TokenKind::RBrace)
+        ) {
+            let tok = self.advance();
+            let name = match tok.kind {
+                TokenKind::Plus => "+",
+                TokenKind::Minus => "-",
+                TokenKind::Star => "*",
+                TokenKind::Slash => "/",
+                TokenKind::Percent => "%",
+                _ => unreachable!(),
+            };
+            return Ok(Chain::Atom(Atom::Path(Path::one(name, Span::new(tok.start, tok.end)))));
+        }
+        // Implicit-self field reference: `.field` at the start of a chain
+        // term means "the current value's <field>" (used inside fork bodies).
+        if self.peek_kind() == Some(TokenKind::Dot)
+            && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+        {
+            let dot = self.advance();
+            let seg = self.expect(TokenKind::Ident)?;
+            let span = Span::new(dot.start, seg.end);
+            let term = Chain::Call(Call {
+                callee: Path::one("__field_self__", span),
+                args: vec![Arg::Positional(Chain::Atom(Atom::Path(Path::one(seg.text, Span::new(seg.start, seg.end)))))],
+                span,
+            });
+            return self.maybe_unit_annotate(term);
+        }
+        // Unary `+` / `-` / `*` / `/` prefix on a chain term.
+        // `* 2`, `/ count` are "lift" forms used in fold-style chains:
+        // `range -> reduce(+) -> / count` means "divide by count".
+        if matches!(
+            self.peek_kind(),
+            Some(TokenKind::Minus | TokenKind::Plus | TokenKind::Star | TokenKind::Slash)
+        ) {
             let prefix_tok = self.advance();
             let inner = self.parse_chain_term()?;
             let span = Span::new(prefix_tok.start, self.span_of(&inner).end);
-            let callee = if prefix_tok.kind == TokenKind::Minus { "__neg__" } else { "__pos__" };
+            let callee = match prefix_tok.kind {
+                TokenKind::Minus => "__neg__",
+                TokenKind::Plus => "__pos__",
+                TokenKind::Star => "__mul_lift__",
+                TokenKind::Slash => "__div_lift__",
+                _ => unreachable!(),
+            };
             let term = Chain::Call(Call {
                 callee: Path::one(callee, span),
                 args: vec![Arg::Positional(inner)],
@@ -334,6 +458,27 @@ impl<'src> Parser<'src> {
         let term = match cur.kind {
             TokenKind::Ident => {
                 let path = self.parse_path()?;
+                // Generic suffix `< ... >` — `list<waypoint @ m, speed @ m/s>`.
+                // Disambiguates from comparison via lookahead: `<` followed by
+                // Ident followed by one of `, > @ <` is a generic; otherwise
+                // we leave the `<` alone for chain-level / arg-level handling.
+                if self.peek_kind() == Some(TokenKind::Lt)
+                    && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+                    && matches!(
+                        self.kind_at(self.pos + 2),
+                        Some(TokenKind::Comma | TokenKind::Gt | TokenKind::At | TokenKind::Lt)
+                    )
+                {
+                    self.advance(); // <
+                    let mut depth = 1usize;
+                    while depth > 0 && !self.at_eof() {
+                        match self.peek_kind() {
+                            Some(TokenKind::Lt) => { depth += 1; self.advance(); }
+                            Some(TokenKind::Gt) => { depth -= 1; self.advance(); }
+                            _ => { self.advance(); }
+                        }
+                    }
+                }
                 let mut term = if self.peek_kind() == Some(TokenKind::LParen) {
                     let args = self.parse_args()?;
                     let end = self.prev_end();
@@ -463,20 +608,38 @@ impl<'src> Parser<'src> {
             TokenKind::LBrace => self.parse_fork()?,
             TokenKind::LBracket => self.parse_list()?,
             TokenKind::LParen => {
-                // Parenthesized chain expression: `(a + b) * c`. v1 absorbs
-                // it as a `__paren__` Call so precedence info is preserved
-                // in the AST.
+                // Parenthesized chain expression `(a + b) * c` or tuple/
+                // param-list `(condition, true_val, false_val)`. If a Comma
+                // follows the first expression, we have a tuple — encode as
+                // `__tuple__`. Otherwise it's a `__paren__` precedence wrap.
                 let start = cur.start;
                 self.advance();
                 self.skip_newlines();
-                let inner = self.parse_arg_expr()?;
+                let first = self.parse_arg_expr()?;
                 self.skip_newlines();
-                self.expect(TokenKind::RParen)?;
-                Chain::Call(Call {
-                    callee: Path::one("__paren__", Span::new(start, self.prev_end())),
-                    args: vec![Arg::Positional(inner)],
-                    span: Span::new(start, self.prev_end()),
-                })
+                if self.peek_kind() == Some(TokenKind::Comma) {
+                    let mut items = vec![Arg::Positional(first)];
+                    while self.peek_kind() == Some(TokenKind::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                        if self.peek_kind() == Some(TokenKind::RParen) { break; }
+                        items.push(Arg::Positional(self.parse_arg_expr()?));
+                        self.skip_newlines();
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    Chain::Call(Call {
+                        callee: Path::one("__tuple__", Span::new(start, self.prev_end())),
+                        args: items,
+                        span: Span::new(start, self.prev_end()),
+                    })
+                } else {
+                    self.expect(TokenKind::RParen)?;
+                    Chain::Call(Call {
+                        callee: Path::one("__paren__", Span::new(start, self.prev_end())),
+                        args: vec![Arg::Positional(first)],
+                        span: Span::new(start, self.prev_end()),
+                    })
+                }
             }
             TokenKind::Pipe => {
                 // `|` standalone — start of a merge fragment with no inputs yet.
@@ -486,7 +649,19 @@ impl<'src> Parser<'src> {
                 //   `| policy | -> downstream`   — explicit policy + downstream
                 //   `| policy |`                 — explicit policy, no downstream
                 self.advance();
+                // Try to parse a policy. If a policy parses but no closing
+                // `|` follows, the policy-position content was actually the
+                // merge's downstream — rewind and treat it that way.
+                let policy_start = self.pos;
                 let policy = self.try_parse_merge_policy()?;
+                let policy = if policy.is_some() && self.peek_kind() != Some(TokenKind::Pipe) {
+                    // No closing pipe — the parsed "policy" is really the
+                    // downstream chain. Rewind.
+                    self.pos = policy_start;
+                    None
+                } else {
+                    policy
+                };
                 if policy.is_some() {
                     self.expect(TokenKind::Pipe)?;
                 }
@@ -517,6 +692,38 @@ impl<'src> Parser<'src> {
     ///     chat_system, etc. use `name : { fields }` to declare structure)
     fn maybe_unit_annotate(&mut self, mut term: Chain<'src>) -> Result<Chain<'src>, ParseError> {
         loop {
+            // `.field` postfix on any chain term (not just Ident paths).
+            // `arr[i].field`, `call().field`, `(a + b).field`. Encoded as
+            // synthetic `__field__` Call.
+            if self.peek_kind() == Some(TokenKind::Dot)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
+            {
+                self.advance(); // dot
+                let seg = self.expect(TokenKind::Ident)?;
+                let span = Span::new(self.span_of(&term).start, seg.end);
+                term = Chain::Call(Call {
+                    callee: Path::one("__field__", span),
+                    args: vec![
+                        Arg::Positional(term),
+                        Arg::Positional(Chain::Atom(Atom::Path(Path::one(seg.text, Span::new(seg.start, seg.end))))),
+                    ],
+                    span,
+                });
+                continue;
+            }
+            // Postfix call: `<term>(args)` — function-call invocation on a
+            // computed receiver (e.g., closures, table-of-callables).
+            if self.peek_kind() == Some(TokenKind::LParen) {
+                let args = self.parse_args()?;
+                let end = self.prev_end();
+                let span = Span::new(self.span_of(&term).start, end);
+                term = Chain::Call(Call {
+                    callee: Path::one("__apply__", span),
+                    args: std::iter::once(Arg::Positional(term)).chain(args).collect(),
+                    span,
+                });
+                continue;
+            }
             // `@ <unit>` form. Unit can be a path (`@ percent`), a compound
             // path (`@ m/s`), or a call (`@ mde("payload.zdx")`,
             // `@ goya(0)` for hardware-pinning forms).
@@ -552,6 +759,79 @@ impl<'src> Parser<'src> {
                 });
                 continue;
             }
+            // Postfix `[ index (, index)* ]` array access — `palette[0]`,
+            // `screen[0,0]` (2D), `kick_pattern[step]`. Encoded as
+            // `__index__(<term>, idx1, idx2, ...)`.
+            if self.peek_kind() == Some(TokenKind::LBracket) {
+                self.advance();
+                let mut idx_args: Vec<Arg<'src>> = vec![Arg::Positional(term.clone())];
+                loop {
+                    self.skip_newlines();
+                    if self.peek_kind() == Some(TokenKind::RBracket) { break; }
+                    idx_args.push(Arg::Positional(self.parse_arg_expr()?));
+                    self.skip_newlines();
+                    if self.peek_kind() == Some(TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.skip_newlines();
+                self.expect(TokenKind::RBracket)?;
+                let span = Span::new(self.span_of(&term).start, self.prev_end());
+                term = Chain::Call(Call {
+                    callee: Path::one("__index__", span),
+                    args: idx_args,
+                    span,
+                });
+                continue;
+            }
+            // `...` postfix spread — `(cells...)` means "spread cells as
+            // args". Three Dots in a row, no intervening whitespace.
+            if self.peek_kind() == Some(TokenKind::Dot)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::Dot)
+                && self.kind_at(self.pos + 2) == Some(TokenKind::Dot)
+            {
+                let d1 = self.cur();
+                let d2 = self.tokens[self.pos + 1];
+                let d3 = self.tokens[self.pos + 2];
+                if d1.start == self.span_of(&term).end
+                    && d2.start == d1.end
+                    && d3.start == d2.end
+                {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    let span = Span::new(self.span_of(&term).start, d3.end);
+                    term = Chain::Call(Call {
+                        callee: Path::one("__spread__", span),
+                        args: vec![Arg::Positional(term)],
+                        span,
+                    });
+                    continue;
+                }
+            }
+            // `..` range operator — `0..10`, `"1".."9"`, `"a".."z"`. Two
+            // Dot tokens with no intervening whitespace form a range.
+            if self.peek_kind() == Some(TokenKind::Dot)
+                && self.kind_at(self.pos + 1) == Some(TokenKind::Dot)
+                && (is_numeric_literal(&term) || is_string_literal(&term))
+            {
+                let dot1 = self.cur();
+                let dot2 = self.tokens[self.pos + 1];
+                if dot1.start == self.span_of(&term).end && dot2.start == dot1.end {
+                    self.advance();
+                    self.advance();
+                    let hi = self.parse_chain_term()?;
+                    let span = Span::new(self.span_of(&term).start, self.span_of(&hi).end);
+                    term = Chain::Call(Call {
+                        callee: Path::one("__range__", span),
+                        args: vec![Arg::Positional(term), Arg::Positional(hi)],
+                        span,
+                    });
+                    continue;
+                }
+            }
             // `↑` / `↓` postfix amplifier on a path/call.
             if matches!(self.peek_kind(), Some(TokenKind::HeatUp) | Some(TokenKind::HeatDown)) {
                 let op_tok = self.advance();
@@ -564,13 +844,24 @@ impl<'src> Parser<'src> {
                 });
                 continue;
             }
-            // `: { ... }` shape-binding form. We only fold this in if the
-            // colon is immediately followed by an LBrace — bare `name :`
-            // signals a wire-decl elsewhere and we must not consume it here.
+            // `: { ... }` shape-binding form.
             if self.peek_kind() == Some(TokenKind::Colon)
                 && self.kind_at(self.pos + 1) == Some(TokenKind::LBrace)
             {
                 self.advance(); // colon
+                let fork = self.parse_fork()?;
+                let span = Span::new(self.span_of(&term).start, self.span_of(&fork).end);
+                term = Chain::Bind(Box::new(term), Box::new(fork), span);
+                continue;
+            }
+            // `Call { fork }` — postfix fork after a Call (or any term),
+            // equivalent to passing the fork as the final positional arg.
+            // `app("Quill Present") { content }`, `state_machine { ... }`.
+            // Only kick in when we don't have `:` immediately after term —
+            // that's the `: { fork }` case above.
+            if self.peek_kind() == Some(TokenKind::LBrace)
+                && matches!(term, Chain::Call(_))
+            {
                 let fork = self.parse_fork()?;
                 let span = Span::new(self.span_of(&term).start, self.span_of(&fork).end);
                 term = Chain::Bind(Box::new(term), Box::new(fork), span);
@@ -627,7 +918,9 @@ impl<'src> Parser<'src> {
     }
 
     /// `{ branch (, branch)* }` — fork. Each branch is a chain expression,
-    /// optionally labeled with `<label>: <body>`.
+    /// optionally labeled with `<label>: <body>`. Branches may be comma-
+    /// or whitespace-separated. The `chain X { pulse beat ring log }`
+    /// declaration form (30/31/32) uses whitespace separation.
     fn parse_fork(&mut self) -> Result<Chain<'src>, ParseError> {
         let start = self.cur_pos();
         self.expect(TokenKind::LBrace)?;
@@ -641,9 +934,18 @@ impl<'src> Parser<'src> {
             self.skip_newlines();
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.advance();
-            } else {
+                continue;
+            }
+            // Whitespace-separated branch continuation (chain X {a b c}).
+            if self.peek_kind() == Some(TokenKind::RBrace) {
                 break;
             }
+            if self.peek_can_start_chain_term(self.pos)
+                || self.peek_kind() == Some(TokenKind::Flow) // implicit-flow
+            {
+                continue;
+            }
+            break;
         }
         self.skip_newlines();
         self.expect(TokenKind::RBrace)?;
@@ -652,10 +954,7 @@ impl<'src> Parser<'src> {
 
     fn parse_fork_branch(&mut self) -> Result<ForkBranch<'src>, ParseError> {
         let start = self.cur_pos();
-        // Implicit-flow leading `->` branch: `{ -> encode(...) -> store, -> ... }`
-        // means each branch implicitly receives the upstream of the fork.
-        // For v1 we model this as a Call to a synthetic `__from_upstream__`
-        // followed by the rest of the chain.
+        // Implicit-flow leading `->` branch.
         if self.peek_kind() == Some(TokenKind::Flow) {
             self.advance();
             let rest = self.parse_arg_expr()?;
@@ -668,14 +967,28 @@ impl<'src> Parser<'src> {
             return Ok(ForkBranch { label: None, body, span });
         }
         let first = self.parse_arg_expr()?;
-        // Labeled branch: `label : body`. Heuristic — a Colon at fork-branch
-        // depth (we're inside `{...}`, so the parser hasn't consumed it yet)
-        // means the parsed expression was a label, and a body follows.
-        if self.peek_kind() == Some(TokenKind::Colon) {
+        // Labeled / assigned branch — accept either `label : body` or
+        // `lhs = rhs` forms. The latter handles in-fork "assignment-style"
+        // mutations like `target.state = dead`.
+        if matches!(self.peek_kind(), Some(TokenKind::Colon | TokenKind::Eq)) {
             self.advance();
-            let mut body = self.parse_arg_expr()?;
-            // Type-union branch body: `label : a | b | c` — eat trailing
-            // `| IDENT` segments same as named args.
+            // Body may begin on the next line — `resolve:\n   tier_prime: ...`.
+            self.skip_newlines();
+            // Implicit-flow body: `"NOW": -> timestamp` (quill.zp:230).
+            let mut body = if self.peek_kind() == Some(TokenKind::Flow) {
+                let flow_start = self.cur_pos();
+                self.advance();
+                let rest = self.parse_arg_expr()?;
+                let span = Span::new(flow_start, self.span_of(&rest).end);
+                Chain::Flow(
+                    Box::new(Chain::Atom(Atom::Path(Path::one("__from_upstream__", Span::new(flow_start, flow_start))))),
+                    Box::new(rest),
+                    span,
+                )
+            } else {
+                self.parse_arg_expr()?
+            };
+            // Type-union branch body: `label : a | b | c`.
             while self.peek_kind() == Some(TokenKind::Pipe)
                 && self.kind_at(self.pos + 1) == Some(TokenKind::Ident)
             {
@@ -688,6 +1001,15 @@ impl<'src> Parser<'src> {
                     args: vec![Arg::Positional(body)],
                     span: Span::new(bstart, new_end),
                 });
+            }
+            // Bind-postfix on body: `out: health : list<card_health>`.
+            // The trailing `: <expr>` attaches a shape spec to the body.
+            if self.peek_kind() == Some(TokenKind::Colon) {
+                self.advance();
+                let rhs = self.parse_arg_expr()?;
+                let bstart = self.span_of(&body).start;
+                let bend = self.span_of(&rhs).end;
+                body = Chain::Bind(Box::new(body), Box::new(rhs), Span::new(bstart, bend));
             }
             let span = Span::new(start, self.span_of(&body).end);
             Ok(ForkBranch { label: Some(first), body, span })
@@ -732,18 +1054,24 @@ impl<'src> Parser<'src> {
         self.span_of(c)
     }
 
-    /// After a `|`, if the very next token is `->`, parse the downstream chain.
-    /// Otherwise the merge has no downstream (yet — coalescing may attach one).
+    /// After a `|`, parse a downstream chain if one's there. The downstream
+    /// can be introduced explicitly by `->` (`| -> name`) or implicitly when
+    /// the next token starts a chain term (`| alert(critical: "...")`).
     fn try_parse_merge_downstream(&mut self) -> Result<Option<Chain<'src>>, ParseError> {
         if self.peek_kind() == Some(TokenKind::Flow) {
             self.advance();
             self.skip_newlines();
-            // The downstream is itself a chain — it may chain further with
-            // `-> next -> next` etc.
-            Ok(Some(self.parse_chain()?))
-        } else {
-            Ok(None)
+            return Ok(Some(self.parse_chain()?));
         }
+        // Implicit downstream — only when the next token is something that
+        // can start a chain term AND isn't another `|` (which would belong
+        // to a separate merge fragment).
+        if self.peek_can_start_chain_term(self.pos)
+            && self.peek_kind() != Some(TokenKind::Pipe)
+        {
+            return Ok(Some(self.parse_chain()?));
+        }
+        Ok(None)
     }
 
     /// Parses the policy specifier between `|` markers, if present.
@@ -809,15 +1137,32 @@ impl<'src> Parser<'src> {
                             self.skip_newlines();
                             if self.peek_kind() == Some(TokenKind::Comma) {
                                 self.advance();
-                            } else {
-                                break;
+                                continue;
                             }
+                            // Whitespace-separated continuation (mirrors parse_args).
+                            if self.peek_can_start_chain_term(self.pos)
+                                || matches!(self.peek_kind(), Some(TokenKind::Bang | TokenKind::Lt | TokenKind::Gt | TokenKind::Le | TokenKind::Ge | TokenKind::EqEq | TokenKind::Ne))
+                            {
+                                continue;
+                            }
+                            break;
                         }
                         self.skip_newlines();
                         self.expect(TokenKind::RParen)?;
                         Ok(Some(by_path.map(MergePolicy::By).unwrap_or(MergePolicy::All)))
                     }
-                    _ => Ok(None),
+                    _ => {
+                        // Arbitrary Call as merge policy: `| gate(mismatch) |`.
+                        // Encoded via MergePolicy::By with the call name —
+                        // a custom predicate the runtime can dispatch on.
+                        if self.kind_at(start_pos + 1) == Some(TokenKind::LParen) {
+                            let path = self.parse_path()?;
+                            // consume the call args (discarded for v1)
+                            let _ = self.parse_args()?;
+                            return Ok(Some(MergePolicy::By(path)));
+                        }
+                        Ok(None)
+                    }
                 }
             }
             Some(TokenKind::Int) => {
@@ -839,8 +1184,13 @@ impl<'src> Parser<'src> {
         }
     }
 
-    /// Args := LPAREN (Arg (COMMA Arg)*)? RPAREN
+    /// Args := LPAREN (Arg ((COMMA | <whitespace>) Arg)*)? RPAREN
     /// Arg  := IDENT COLON Chain  |  Chain
+    ///
+    /// Whitespace separation between args is allowed for forms like
+    /// `merge(sort: price descending)` and `gate(entropy 0.4)`. After
+    /// each arg, if the next token can start a fresh arg, we treat it
+    /// as the next arg even without an intervening comma.
     fn parse_args(&mut self) -> Result<Vec<Arg<'src>>, ParseError> {
         self.expect(TokenKind::LParen)?;
         let mut args = Vec::new();
@@ -853,9 +1203,16 @@ impl<'src> Parser<'src> {
             self.skip_newlines();
             if self.peek_kind() == Some(TokenKind::Comma) {
                 self.advance();
-            } else {
-                break;
+                continue;
             }
+            // No comma — but if the next token can still start an arg,
+            // treat it as the next positional arg (whitespace separation).
+            if self.peek_can_start_chain_term(self.pos)
+                || matches!(self.peek_kind(), Some(TokenKind::Bang) | Some(TokenKind::Lt | TokenKind::Gt | TokenKind::Le | TokenKind::Ge | TokenKind::EqEq | TokenKind::Ne))
+            {
+                continue;
+            }
+            break;
         }
         self.skip_newlines();
         self.expect(TokenKind::RParen)?;
@@ -999,27 +1356,96 @@ impl<'src> Parser<'src> {
                 rhs: Box::new(right),
                 span,
             };
-            return Ok(left);
         }
-        // Arithmetic chain — left-associative `a + b - c`. Encoded as nested
-        // synthetic Calls so v1 doesn't need a dedicated AST variant.
-        loop {
-            let callee = match self.peek_kind() {
-                Some(TokenKind::Plus) => "__add__",
-                Some(TokenKind::Minus) => "__sub__",
-                Some(TokenKind::Star) => "__mul__",
-                Some(TokenKind::Slash) => "__div__",
-                Some(TokenKind::Percent) => "__mod__",
-                _ => break,
-            };
+        // Pipe as logical OR in arg-expr context.
+        while self.peek_kind() == Some(TokenKind::Pipe)
+            && self.peek_can_start_chain_term(self.pos + 1)
+        {
             self.advance();
-            let right = self.parse_chain()?;
+            self.skip_newlines();
+            let mut right = self.parse_arg_expr_no_pipe()?;
+            // Named-arg-style alt tail: `... | timer_done: config.discuss_time`.
+            // The colon here belongs to the disjunct, not to a ternary's
+            // else-branch (we're in pipe-OR context, ternary handling is
+            // disabled inside the no-pipe variant).
+            if self.peek_kind() == Some(TokenKind::Colon) {
+                self.advance();
+                let value = self.parse_arg_expr_no_pipe()?;
+                let r_start = self.span_of(&right).start;
+                let r_end = self.span_of(&value).end;
+                right = Chain::Call(Call {
+                    callee: Path::one("__named__", Span::new(r_start, r_end)),
+                    args: vec![Arg::Positional(right), Arg::Positional(value)],
+                    span: Span::new(r_start, r_end),
+                });
+            }
             let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
             left = Chain::Call(Call {
-                callee: Path::one(callee, span),
+                callee: Path::one("__or__", span),
                 args: vec![Arg::Positional(left), Arg::Positional(right)],
                 span,
             });
+        }
+        // Ternary: `cond ? then : else`. Encoded as `__ternary__(c, t, e)`.
+        if self.peek_kind() == Some(TokenKind::Question) {
+            self.advance();
+            let then_branch = self.parse_arg_expr_no_pipe()?;
+            self.expect(TokenKind::Colon)?;
+            let else_branch = self.parse_arg_expr_no_pipe()?;
+            let span = Span::new(
+                self.span_of(&left).start,
+                self.span_of(&else_branch).end,
+            );
+            left = Chain::Call(Call {
+                callee: Path::one("__ternary__", span),
+                args: vec![
+                    Arg::Positional(left),
+                    Arg::Positional(then_branch),
+                    Arg::Positional(else_branch),
+                ],
+                span,
+            });
+        }
+        Ok(left)
+    }
+
+    /// Same as parse_arg_expr but without the pipe-OR fold-step. Used for
+    /// the right-hand side of a `|` so we don't infinite-recurse.
+    fn parse_arg_expr_no_pipe(&mut self) -> Result<Chain<'src>, ParseError> {
+        if self.peek_kind() == Some(TokenKind::Ident)
+            && self.cur().text == "not"
+            && !matches!(
+                self.kind_at(self.pos + 1),
+                None | Some(TokenKind::Comma | TokenKind::RParen | TokenKind::Newline)
+            )
+        {
+            let start_tok = self.advance();
+            let inner = self.parse_arg_expr_no_pipe()?;
+            let span = Span::new(start_tok.start, self.span_of(&inner).end);
+            return Ok(Chain::Call(Call {
+                callee: Path::one("__not__", span),
+                args: vec![Arg::Positional(inner)],
+                span,
+            }));
+        }
+        if let Some(op) = self.peek_unary_cmp_op() {
+            let start = self.cur_pos();
+            self.advance();
+            let rhs = self.parse_arg_expr_no_pipe()?;
+            let span = Span::new(start, self.span_of(&rhs).end);
+            return Ok(Chain::UnaryCmp { op, rhs: Box::new(rhs), span });
+        }
+        let mut left = self.parse_chain()?;
+        if let Some(op) = self.peek_bin_op() {
+            self.advance();
+            let right = self.parse_chain()?;
+            let span = Span::new(self.span_of(&left).start, self.span_of(&right).end);
+            left = Chain::BinExpr {
+                op,
+                lhs: Box::new(left),
+                rhs: Box::new(right),
+                span,
+            };
         }
         Ok(left)
     }
@@ -1069,8 +1495,11 @@ impl<'src> Parser<'src> {
                 | TokenKind::TimePast
                 | TokenKind::LBrace
                 | TokenKind::LBracket
+                | TokenKind::LParen
                 | TokenKind::Minus
                 | TokenKind::Plus
+                | TokenKind::Pipe
+                | TokenKind::Dot
             )
         )
     }
@@ -1192,6 +1621,13 @@ fn literal_span(l: &Literal<'_>) -> Span {
         | Literal::ByteSize { span, .. }
         | Literal::Dimension { span, .. } => *span,
     }
+}
+
+fn is_string_literal(c: &Chain<'_>) -> bool {
+    matches!(
+        c,
+        Chain::Atom(Atom::Literal(Literal::String(_, _) | Literal::TemplateString(_, _)))
+    )
 }
 
 fn is_numeric_literal(c: &Chain<'_>) -> bool {

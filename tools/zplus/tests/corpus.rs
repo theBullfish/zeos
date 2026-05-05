@@ -88,13 +88,12 @@ fn every_program_round_trips() {
     );
 }
 
-/// Parser corpus-coverage tracker. Asserts a minimum number of files
-/// parse cleanly. Bumping this assertion upward is a deliberate ratchet:
-/// add parser features → coverage rises → bump the lower bound. New
-/// regressions that would push coverage back down fail this test fast.
+/// Parser corpus-coverage tracker. As of this commit, ALL 68 .zp files
+/// in the corpus parse without error. Any regression that drops coverage
+/// below 68 fails this test immediately.
 #[test]
 fn parser_minimum_corpus_coverage() {
-    const MINIMUM_CLEAN: usize = 25;
+    const MINIMUM_CLEAN: usize = 68;
 
     let root = programs_dir();
     let mut files = Vec::new();
