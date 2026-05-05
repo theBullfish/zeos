@@ -787,6 +787,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         settings_print_selftest_line();
     }
 
+    /* Calendar / clock app selftest: alarms armed, events, world clocks. */
+    {
+        extern void cal_print_selftest_line(void);
+        cal_print_selftest_line();
+    }
+
     /* Cold-boot login gate. After splash dismiss + chain registry +
      * persistence replay, but before the scheduler starts. Shows the
      * same PIN overlay used by idle-lock; on first ever boot

@@ -26,6 +26,7 @@
 #include "hotplug.h"
 #include "timeofday.h"
 #include "notify.h"
+#include "calendar.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -769,6 +770,12 @@ static const struct shell_cmd commands[] = {
     {"notify-history","show recent notifications (notify-history [N|clear])", notify_cmd_history, VIS_ALWAYS},
     {"dnd",     "Do Not Disturb (dnd | on|off|schedule [HH-HH] | mute|unmute <src>)", notify_cmd_dnd, VIS_ALWAYS},
     {"uptime",  "time since boot",                tod_cmd_uptime, VIS_ALWAYS},
+    {"cal",     "open calendar (month grid)",     cal_cmd_cal,       VIS_ALWAYS},
+    {"clock",   "open clock (analog + world)",    cal_cmd_clock,     VIS_ALWAYS},
+    {"alarm",   "add an alarm (alarm HH:MM <label>)", cal_cmd_alarm, VIS_ALWAYS},
+    {"alarms",  "list saved alarms",              cal_cmd_alarms,    VIS_ALWAYS},
+    {"timer",   "start a countdown (timer <seconds>)", cal_cmd_timer, VIS_ALWAYS},
+    {"stopwatch","stopwatch (stopwatch start|stop|lap|reset)", cal_cmd_stopwatch, VIS_ALWAYS},
     {"epoch",   "current Unix epoch seconds",     tod_cmd_epoch,  VIS_DEREZ},
     {"tickrate","show scheduler tps + avg tick (tickrate [watch])", cmd_tickrate, VIS_DEREZ},
     {"chain-backoff","tune B3 backoff: chain-backoff <id> <threshold> <every>", cmd_chain_backoff, VIS_DEREZ},

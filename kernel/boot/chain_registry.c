@@ -43,6 +43,7 @@
 #include "settings_registry.h"
 #include "brightness.h"
 #include "power_buttons.h"
+#include "calendar.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -1162,6 +1163,14 @@ int chain_registry_init(void)
     CHAIN_BRIGHTNESS = brightness_chain_register(CHAIN_CPU);
     if (CHAIN_BRIGHTNESS < 0) {
         kputs("[chain_registry] WARN: brightness chain registration failed\n");
+    }
+
+    /* CHAIN_CLOCK: calendar/clock app pipeline.
+     *   tick_request -> time_advance -> alarm_check -> timer_check -> emit_events
+     * resolve_interval_ticks=120 (~1Hz). Fires alarms via notify_send. */
+    cal_init();
+    if (cal_chain_register(CHAIN_CPU) < 0) {
+        kputs("[chain_registry] WARN: clock chain registration failed\n");
     }
 
     /* ── Step 5: Auto-route by type matching ────────────────────── */

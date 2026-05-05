@@ -88,6 +88,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/installer.c \
            boot/hotcorners.c \
            boot/notify.c \
+           boot/calendar.c \
            boot/theme_runtime.c \
            boot/icon_render.c \
            boot/updater.c \
