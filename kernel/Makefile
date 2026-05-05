@@ -129,9 +129,28 @@ FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
 FW_RTL8188EU       = lib/firmware/rtl8188eufw.bin
 FW_GOYA_BOOT_FIT   = lib/firmware/habanalabs/goya/goya-boot-fit.itb
 FW_GOYA_LINUX_FIT  = lib/firmware/habanalabs/goya/goya-fit.itb
+
+# NVIDIA GSP firmware (Turing TU102 family, Ampere GA10x family).
+# Sourced from /lib/firmware/nvidia/<chip>/gsp/ (linux-firmware 535.113.01),
+# zstd-decompressed at build time. Each chip family has 4 blobs:
+#   bootloader.bin, booter_load.bin, booter_unload.bin, gsp.bin
+# objcopy emits _binary_<file>_bin_{start,end,size} per blob.
+FW_NV_TU102_DIR     = lib/firmware/nvidia/tu102/gsp
+FW_NV_GA102_DIR     = lib/firmware/nvidia/ga102/gsp
+FW_NV_TU102_OBJS    = $(FW_NV_TU102_DIR)/tu102_bootloader.o \
+                      $(FW_NV_TU102_DIR)/tu102_booter_load.o \
+                      $(FW_NV_TU102_DIR)/tu102_booter_unload.o \
+                      $(FW_NV_TU102_DIR)/tu102_gsp.o
+FW_NV_GA102_OBJS    = $(FW_NV_GA102_DIR)/ga102_bootloader.o \
+                      $(FW_NV_GA102_DIR)/ga102_booter_load.o \
+                      $(FW_NV_GA102_DIR)/ga102_booter_unload.o \
+                      $(FW_NV_GA102_DIR)/ga102_gsp.o
+
 FW_OBJS      = lib/firmware/rtl8188eufw.o \
                lib/firmware/habanalabs/goya/goya-boot-fit.o \
-               lib/firmware/habanalabs/goya/goya-fit.o
+               lib/firmware/habanalabs/goya/goya-fit.o \
+               $(FW_NV_TU102_OBJS) \
+               $(FW_NV_GA102_OBJS)
 
 # AP bring-up trampoline (assembled flat binary embedded as ELF object).
 SMP_OBJS    = boot/smp_trampoline.o
@@ -206,6 +225,56 @@ lib/firmware/habanalabs/goya/goya-fit.o: $(FW_GOYA_LINUX_FIT)
 			--redefine-sym _binary__empty2_bin_size=_binary_goya_fit_itb_size \
 			_empty2.bin goya-fit.o ; \
 	fi
+
+# NVIDIA GSP firmware blobs. Each blob is renamed with a chip prefix
+# before objcopy so the emitted _binary_<name>_bin_{start,end,size}
+# symbols are unique across chip families. Missing blobs collapse to
+# an empty stub (start==end) so gpu_nvidia.c can report "absent"
+# honestly without breaking the link, mirroring the Goya pattern.
+# If a local blob is missing, try to source it from the host's
+# linux-firmware install (zstd-decompressed). This keeps the kernel
+# repo free of NVIDIA-signed binaries while letting any developer
+# with linux-firmware-nvidia installed build a fully-armed Stage 2.
+define NV_FW_RULE
+$(1)/$(3).bin:
+	@mkdir -p $(1)
+	@if [ ! -s $(1)/$(3).bin ] && [ -s /lib/firmware/nvidia/$(2)/gsp/$(3)-535.113.01.bin.zst ]; then \
+		echo "[fw] sourcing nvidia/$(2)/gsp/$(3).bin from host linux-firmware"; \
+		zstd -dc /lib/firmware/nvidia/$(2)/gsp/$(3)-535.113.01.bin.zst > $(1)/$(3).bin 2>/dev/null || rm -f $(1)/$(3).bin; \
+	fi
+	@touch $(1)/$(3).bin
+
+$(1)/$(2)_$(3).o: $(1)/$(3).bin
+	@mkdir -p $(1)
+	@if [ -s $(1)/$(3).bin ]; then \
+		cp $(1)/$(3).bin $(1)/$(2)_$(3).bin ; \
+		cd $(1) && $$(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			$(2)_$(3).bin $(2)_$(3).o ; \
+	else \
+		echo "[fw] nvidia/$(2)/gsp/$(3).bin absent -- emitting empty stub"; \
+		printf '' > $(1)/_empty_$(2)_$(3).bin ; \
+		cd $(1) && $$(OBJCOPY) \
+			--input-target=binary \
+			--output-target=elf64-x86-64 \
+			--binary-architecture=i386:x86-64 \
+			--redefine-sym _binary__empty_$(2)_$(3)_bin_start=_binary_$(2)_$(3)_bin_start \
+			--redefine-sym _binary__empty_$(2)_$(3)_bin_end=_binary_$(2)_$(3)_bin_end \
+			--redefine-sym _binary__empty_$(2)_$(3)_bin_size=_binary_$(2)_$(3)_bin_size \
+			_empty_$(2)_$(3).bin $(2)_$(3).o ; \
+	fi
+endef
+
+$(eval $(call NV_FW_RULE,$(FW_NV_TU102_DIR),tu102,bootloader))
+$(eval $(call NV_FW_RULE,$(FW_NV_TU102_DIR),tu102,booter_load))
+$(eval $(call NV_FW_RULE,$(FW_NV_TU102_DIR),tu102,booter_unload))
+$(eval $(call NV_FW_RULE,$(FW_NV_TU102_DIR),tu102,gsp))
+$(eval $(call NV_FW_RULE,$(FW_NV_GA102_DIR),ga102,bootloader))
+$(eval $(call NV_FW_RULE,$(FW_NV_GA102_DIR),ga102,booter_load))
+$(eval $(call NV_FW_RULE,$(FW_NV_GA102_DIR),ga102,booter_unload))
+$(eval $(call NV_FW_RULE,$(FW_NV_GA102_DIR),ga102,gsp))
 
 # AP bring-up trampoline. NASM assembles the 16->32->64 trampoline
 # to a flat 4 KiB binary; objcopy embeds it as an ELF section so the
