@@ -1,0 +1,10 @@
+// threshold.zp — `gate(> N)` actually filters now.
+//
+// Demonstrates real predicate evaluation: the upstream value is the
+// implicit subject of UnaryCmp args. `gate(> 3)` reads as "pass when
+// upstream > 3."
+//
+// Run:   zplus-run programs/demos/threshold.zp 5
+// Expect: only ticks 4 and 5 reach print.
+
+ramp : tick(rate: 1) -> gate(> 3) -> print

@@ -467,20 +467,42 @@ impl<'src> Runtime<'src> {
             }
             // ── transformers ───────────────────
             "gate" => {
-                // gate(predicate) — emit upstream iff predicate is true.
-                // For v1 we evaluate the first arg as the predicate;
-                // empty/nil means pass-through (since most gate args
-                // are complex predicates beyond v1's eval).
-                let pred = call.args.iter().find_map(|a| match a {
-                    Arg::Positional(c) => self.eval_chain(c, upstream.clone()).ok().flatten(),
-                    _ => None,
-                });
-                let pass = match pred {
-                    Some(Value::Bool(b)) => b,
-                    None => true, // no predicate → pass-through
-                    _ => true,
-                };
-                if pass { Ok(upstream) } else { Ok(None) }
+                // gate(predicates...) — propagate upstream iff every
+                // positional predicate evaluates to true. Predicates
+                // that don't reduce to Bool (e.g. complex match forms
+                // we don't yet eval) are treated as passing — better
+                // to under-filter than to silently swallow signals.
+                //
+                // Forms handled:
+                //   gate(> 5)         UnaryCmp against upstream
+                //   gate(< 100, > 0)  multiple positionals AND'd
+                //   gate(true)        literal Bool
+                //   gate(message ~ "pat")  BinExpr — already returns Bool
+                //   gate(level: error)     named arg — for v1 ignored
+                //                           (would need field projection)
+                //
+                // No predicates → pass-through.
+                let mut all_pass = true;
+                let mut had_predicate = false;
+                for arg in &call.args {
+                    if let Arg::Positional(c) = arg {
+                        had_predicate = true;
+                        match self.eval_chain(c, upstream.clone())? {
+                            Some(Value::Bool(false)) => {
+                                all_pass = false;
+                                break;
+                            }
+                            Some(Value::Bool(true)) => {}
+                            // Non-Bool result means the predicate didn't
+                            // reduce — treat as pass for v1 (ignore) so
+                            // unsupported forms don't silently kill the
+                            // signal.
+                            _ => {}
+                        }
+                    }
+                }
+                let _ = had_predicate;
+                if all_pass { Ok(upstream) } else { Ok(None) }
             }
             "delta" | "rate" | "baseline" | "deviation" | "decay" | "normalize" | "lines" => {
                 self.dispatch_builtin(&name, &call.args, upstream, call.span)
@@ -676,15 +698,16 @@ fn eval_binop(op: BinOp, a: Option<Value>, b: Option<Value>) -> Option<Value> {
         (Some(a), Some(b)) => (a, b),
         _ => return None,
     };
-    let cmp = match (&a, &b) {
-        (Value::Int(x), Value::Int(y)) => Some((*x as f64).partial_cmp(&(*y as f64))),
-        (Value::Float(x), Value::Float(y)) => Some(x.partial_cmp(y)),
-        (Value::Int(x), Value::Float(y)) => Some((*x as f64).partial_cmp(y)),
-        (Value::Float(x), Value::Int(y)) => Some(x.partial_cmp(&(*y as f64))),
-        (Value::Str(x), Value::Str(y)) => Some(x.partial_cmp(y)),
-        _ => None,
-    }
-    .flatten();
+    // Try numeric comparison first (covers Int / Float / Tick / Duration
+    // via value_as_f64). Fall through to String comparison if both sides
+    // are strings.
+    let cmp = match (value_as_f64(&a), value_as_f64(&b)) {
+        (Some(x), Some(y)) => x.partial_cmp(&y),
+        _ => match (&a, &b) {
+            (Value::Str(x), Value::Str(y)) => x.partial_cmp(y),
+            _ => None,
+        },
+    };
     let result = match op {
         BinOp::Lt => cmp.map(|o| o.is_lt()),
         BinOp::Gt => cmp.map(|o| o.is_gt()),
@@ -922,6 +945,48 @@ mod tests {
         let mut rt = Runtime::new(module);
         let _ = rt.run(4).expect("run");
         // Each delta has its own state. Test passes if the run completes.
+    }
+
+    // ── gate semantics ───────────────────────────────────────────
+
+    #[test]
+    fn gate_unary_cmp_filters_upstream() {
+        // tick(rate: 1) emits Tick(1)..Tick(5).
+        // gate(> 3) should pass only Tick(4), Tick(5).
+        let src = "ramp : tick(rate: 1) -> gate(> 3) -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(5).expect("run");
+        let ticks: Vec<u64> = emissions.iter().map(|e| e.tick).collect();
+        assert_eq!(ticks, vec![4, 5]);
+    }
+
+    #[test]
+    fn gate_multiple_positionals_anded() {
+        // gate(> 1, < 4) — pass Tick(2), Tick(3) only.
+        let src = "ramp : tick(rate: 1) -> gate(> 1, < 4) -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(5).expect("run");
+        let ticks: Vec<u64> = emissions.iter().map(|e| e.tick).collect();
+        assert_eq!(ticks, vec![2, 3]);
+    }
+
+    #[test]
+    fn gate_no_predicate_passes_through() {
+        // gate() with no args — pass everything.
+        let src = "x : tick(rate: 1) -> gate() -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(3).expect("run");
+        assert_eq!(emissions.len(), 3);
+    }
+
+    #[test]
+    fn binop_compares_tick_values() {
+        // Tick(N) should be comparable to Int(N) via numeric coercion.
+        let r = eval_binop(BinOp::Gt, Some(Value::Tick(5)), Some(Value::Int(3)));
+        assert_eq!(r, Some(Value::Bool(true)));
     }
 
     #[test]

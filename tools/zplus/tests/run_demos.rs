@@ -41,6 +41,13 @@ fn fanout_emits_three_per_tick() {
 }
 
 #[test]
+fn threshold_gate_filters_below_3() {
+    let emissions = run_file("programs/demos/threshold.zp", 5);
+    let ticks: Vec<u64> = emissions.iter().map(|e| e.tick).collect();
+    assert_eq!(ticks, vec![4, 5]);
+}
+
+#[test]
 fn ramp_delta_emits_zero_then_ones() {
     let emissions = run_file("programs/demos/ramp.zp", 5);
     assert_eq!(emissions.len(), 5);
