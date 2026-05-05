@@ -69,6 +69,15 @@ Caught and corrected before further launches:
 - #9 Calendar/clock: CHAIN_CLOCK pipeline correct, alarm fires through notify (chain → chain), VAULT persisted. No drift.
 - Next batch (#7 #8 #10) already reshaped pre-launch in Zeos-back 1. Briefs OK.
 
+### Zeos-back 3 (after items 7 editor, 8 file manager, 10 activity monitor)
+- #7 Editor (90b32b4): 5 chains (CHAIN_TEXT_EDIT emitter + 4 subscribers), MDE auto-routed by `text_edit` type, UI renderer only. Zeos-shaped.
+- #8 File manager (7128836): CHAIN_FS_EVENT + 4 subscribers (TRASH_REACT/INDEX/UNDO/NOTIFY). Every fat32 mutation flows through. Zeos-shaped.
+- #10 Activity Monitor (9df1f00): CHAIN_SYSTEM_STATE emitter + CHAIN_ACTIVITY_ANOMALY subscriber. UI is a system_state listener. Zeos-shaped.
+- Three for three, no drift. Pre-launch reshape pattern (Zeos-back 1) is doing its job.
+
+### Next batch upcoming (#11 firewall, #12 disk encryption, #13 CFA contexts)
+All three already reshaped in Zeos-back 1. Briefs OK.
+
 ## End state
 
 When this list closes, Zeos is:
