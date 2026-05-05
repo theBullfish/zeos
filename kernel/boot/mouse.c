@@ -63,6 +63,11 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
         extern int file_mgr_mouse_down(int, int, int);
         if (file_mgr_active() && file_mgr_mouse_down(x, y, button)) return 1;
     }
+    {
+        extern int activity_active(void);
+        extern int activity_mouse_down(int, int, int);
+        if (activity_active() && activity_mouse_down(x, y, button)) return 1;
+    }
     if (image_viewer_active() && image_viewer_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
     if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
@@ -109,6 +114,11 @@ static void mouse_ui_dispatch_move(int x, int y) {
         extern int file_mgr_active(void);
         extern int file_mgr_mouse_move(int, int);
         if (file_mgr_active()) { file_mgr_mouse_move(x, y); }
+    }
+    {
+        extern int activity_active(void);
+        extern int activity_mouse_move(int, int);
+        if (activity_active()) { activity_mouse_move(x, y); }
     }
     if (image_viewer_active()) { image_viewer_mouse_move(x, y); return; }
     if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }

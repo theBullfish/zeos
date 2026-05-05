@@ -810,6 +810,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         file_mgr_print_selftest_line();
     }
 
+    /* Activity Monitor selftest: CHAIN_SYSTEM_STATE + anomaly subscriber. */
+    {
+        extern void activity_print_selftest_line(void);
+        extern void activity_persist_restore(void);
+        activity_persist_restore();
+        activity_print_selftest_line();
+    }
+
     /* Cold-boot login gate. After splash dismiss + chain registry +
      * persistence replay, but before the scheduler starts. Shows the
      * same PIN overlay used by idle-lock; on first ever boot

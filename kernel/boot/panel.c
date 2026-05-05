@@ -27,15 +27,21 @@ static int      s_panel_token_count = 0;
 
 static void rc_settings(void *ctx) { (void)ctx; kputs("PANEL: open settings\n"); }
 static void rc_about(void *ctx)    { (void)ctx; kputs("PANEL: about Zeos\n"); }
+static void rc_activity(void *ctx) {
+    (void)ctx;
+    extern int activity_open(void);
+    (void)activity_open();
+}
 
 int panel_right_click(int x, int y) {
     extern int panel_get_height(void);
     if (y < 0 || y >= panel_get_height()) return 0;
-    static const ctx_menu_item_t items[2] = {
-        { "Settings",    rc_settings, 0, 1 },
-        { "About Zeos",  rc_about,    0, 1 },
+    static const ctx_menu_item_t items[3] = {
+        { "Activity Monitor", rc_activity, 0, 1 },
+        { "Settings",         rc_settings, 0, 1 },
+        { "About Zeos",       rc_about,    0, 1 },
     };
-    context_menu_open(x, y, items, 2);
+    context_menu_open(x, y, items, 3);
     return 1;
 }
 

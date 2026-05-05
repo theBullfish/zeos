@@ -28,7 +28,7 @@ lands; don't add. End is the end.
 7. ✓ Text editor — Zeos-shaped: typed-text chain emitting `text_edit` signals. Spellcheck, autocomplete, autosave, version history are all subscriber chains. UI is a renderer over the chain.
 8. ✓ File manager — Zeos-shaped: CHAIN_FS_EVENT emitter + 4 subscribers (trash_react, index, undo, notify). Every fat32_* mutation emits an fs_event; UI is a stream renderer with a non-chain listener for repaint. `fm` shell command opens it; `fs-undo` reverses the last op.
 9. · Calendar/clock app — uses tod, alarm, world clocks. CHAIN_CLOCK at ~1Hz.
-10. · Activity Monitor — Zeos-shaped: a chain that subscribes to all chains via MDE wildcard route. Free integration with notifications + B3 anomaly detection.
+10. ✓ Activity Monitor — Zeos-shaped: CHAIN_SYSTEM_STATE samples chain registry / SMP table / pmm / counters at ~1Hz and emits a typed `system_state` snapshot. CHAIN_ACTIVITY_ANOMALY subscribes via MDE auto-route and fires notify_send on B3>0.7, scheduler tps drop >50%, free<5%, AP heartbeat >5s (60s per-kind throttle). UI is a stream renderer with Chains/Cores/Memory/Network/Storage/Graph tabs over the most-recent snapshot + 600-sample (10 min) history persisted to VAULT every 60s. `top` opens it; `top --json` prints the snapshot. Right-click on dock or panel adds Activity Monitor.
 11. · Firewall — CHAIN_FIREWALL gating CHAIN_NET_TX/RX with rule table.
 12. · Disk encryption — CFA-native: keys are CFA SOVEREIGN handles, blocks are CFA-addressed, MasQ records every encrypted-region access. LUKS is the wrong primitive.
 13. · CFA identity contexts (formerly "multi-user accounts") — each context is a CFA root with its own MasQ tier + chain visibility set. Login transitions the active root. Same end-user feel, Zeos primitive.

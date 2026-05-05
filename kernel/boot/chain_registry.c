@@ -1204,6 +1204,21 @@ int chain_registry_init(void)
         }
     }
 
+    /* CHAIN_SYSTEM_STATE + CHAIN_ACTIVITY_ANOMALY for the Activity Monitor.
+     *   Emitter: tick_request -> sample_chains -> sample_cpus -> sample_mem
+     *            -> emit_state  (output: system_state, ~1Hz)
+     *   Subscriber (input_type=system_state):
+     *     CHAIN_ACTIVITY_ANOMALY -> check -> fire_notify
+     * MDE auto-routes the fan-out. Anomaly checks: B3 ratio, scheduler
+     * tps drop, low memory, AP heartbeat stall. notify_send throttled
+     * 60s per anomaly kind. */
+    {
+        extern int activity_chain_register(int parent_chain_id);
+        if (activity_chain_register(CHAIN_CPU) < 0) {
+            kputs("[chain_registry] WARN: activity chain registration failed\n");
+        }
+    }
+
     /* ── Step 5: Auto-route by type matching ────────────────────── */
     /*
      * MDE scans all chains, finds output_type == input_type matches,

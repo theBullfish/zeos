@@ -410,6 +410,11 @@ static void rc_pin(void *ctx) {
         dock_unpin(s_rc_idx);
     }
 }
+static void rc_activity_monitor(void *ctx) {
+    (void)ctx;
+    extern int activity_open(void);
+    (void)activity_open();
+}
 
 int dock_right_click(int x, int y) {
     if (!g_dock.visible) return 0;
@@ -425,12 +430,13 @@ int dock_right_click(int x, int y) {
     for (int i = 0; i < g_dock.pinned_count; i++) {
         if (x >= item_x && x < item_x + DOCK_ITEM_SIZE) {
             s_rc_kind = 0; s_rc_idx = i;
-            static const ctx_menu_item_t items[3] = {
-                { "Quit",  rc_quit,  0, 0 },
-                { "Hide",  rc_hide,  0, 0 },
-                { "Unpin", rc_pin,   0, 1 },
+            static const ctx_menu_item_t items[4] = {
+                { "Quit",             rc_quit,             0, 0 },
+                { "Hide",             rc_hide,             0, 0 },
+                { "Unpin",            rc_pin,              0, 1 },
+                { "Activity Monitor", rc_activity_monitor, 0, 1 },
             };
-            context_menu_open(x, y, items, 3);
+            context_menu_open(x, y, items, 4);
             return 1;
         }
         item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
@@ -440,17 +446,27 @@ int dock_right_click(int x, int y) {
     for (int i = 0; i < g_dock.running_count; i++) {
         if (x >= item_x && x < item_x + DOCK_ITEM_SIZE) {
             s_rc_kind = 1; s_rc_idx = i;
-            static const ctx_menu_item_t items[3] = {
-                { "Quit", rc_quit, 0, 1 },
-                { "Hide", rc_hide, 0, 1 },
-                { "Pin",  rc_pin,  0, 1 },
+            static const ctx_menu_item_t items[4] = {
+                { "Quit",             rc_quit,             0, 1 },
+                { "Hide",             rc_hide,             0, 1 },
+                { "Pin",              rc_pin,              0, 1 },
+                { "Activity Monitor", rc_activity_monitor, 0, 1 },
             };
-            context_menu_open(x, y, items, 3);
+            context_menu_open(x, y, items, 4);
             return 1;
         }
         item_x += DOCK_ITEM_SIZE + DOCK_ITEM_PAD;
     }
-    return 0;
+    /* Empty dock area — single-item context menu so right-click anywhere
+     * on the dock surface still surfaces "Activity Monitor". */
+    {
+        s_rc_kind = -1; s_rc_idx = -1;
+        static const ctx_menu_item_t items[1] = {
+            { "Activity Monitor", rc_activity_monitor, 0, 1 },
+        };
+        context_menu_open(x, y, items, 1);
+        return 1;
+    }
 }
 
 int dock_get_height(void) {

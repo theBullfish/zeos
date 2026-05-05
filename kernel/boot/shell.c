@@ -685,6 +685,7 @@ static void cmd_calc(const char *args);
 static void cmd_edit(const char *args);
 static void cmd_fm(const char *args);
 static void cmd_fs_undo(const char *args);
+static void cmd_top(const char *args);
 
 /* FAT32 write-side commands */
 static void cmd_touch(const char *args);
@@ -821,6 +822,7 @@ static const struct shell_cmd commands[] = {
     {"edit",    "open text editor (edit | edit <path>); chain over text_edit signals", cmd_edit, VIS_ALWAYS},
     {"fm",      "open file manager (fm [path]); stream renderer over CHAIN_FS_EVENT", cmd_fm, VIS_ALWAYS},
     {"fs-undo", "reverse the most recent FS op (universal undo)", cmd_fs_undo, VIS_ALWAYS},
+    {"top",     "open Activity Monitor (top | top --json); CHAIN_SYSTEM_STATE renderer", cmd_top, VIS_ALWAYS},
     {"touch",   "create empty file (FAT32: touch <path>)", cmd_touch, VIS_ALWAYS},
     {"rm",      "delete (moves to /.zeos-trash; rm -f to bypass)", cmd_rm,    VIS_ALWAYS},
     {"trash",   "list/restore/empty trash (trash, trash restore <id>, trash empty)", cmd_trash, VIS_ALWAYS},
@@ -5785,6 +5787,13 @@ static void cmd_fm(const char *args)
 {
     extern void file_mgr_cmd(const char *args);
     file_mgr_cmd(args);
+}
+
+/* Activity Monitor — chain-shaped, CHAIN_SYSTEM_STATE + anomaly subscriber. */
+static void cmd_top(const char *args)
+{
+    extern void activity_cmd_top(const char *args);
+    activity_cmd_top(args);
 }
 
 /* Universal FS undo — reverse last op recorded by CHAIN_FS_UNDO. */
