@@ -94,8 +94,23 @@ session. Three sections, that's it.
   returns concrete types where possible (Unknown otherwise);
   `types_compatible` is the flow-boundary compatibility predicate
   (Unknown matches anything, primitive equality, Int → Float
-  promotion, Sig<A> ↔ Sig<B> recursive, Nominal by name). 13 new
-  unit tests. **109 tests green**.
+  promotion, Sig<A> ↔ Sig<B> recursive, Nominal by name).
+
+- Type checker third cut: Flow connectivity (commit `5b66da6`).
+  `check_flow_connectivity(module, env)` walks every Flow / Tap
+  in a module, calls `infer_chain` on both sides, runs
+  `types_compatible`. Unknown either side defers. Reports
+  TypeErrors with `format_type`-rendered messages
+  ("Sig<Float>" not Debug-noise). Bug fix: bare Path in chain
+  position now returns the Fn's `returns` (implicit apply).
+
+  Corpus baseline: **2 flow mismatches**, both in `quill.zp:326-327`
+  where `opacity(0 -> 1, ...)` and `scale(0.8 -> 1, ...)` overload
+  `->` for value-range semantics. Ratchet at 2. Real-by-the-rules
+  mismatches; the fix is a syntactic spec decision (use `..`
+  instead of `->` for ranges).
+
+  **116 tests green**.
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -160,20 +175,19 @@ session. Three sections, that's it.
 
 **Type checker.** Type-shape is in. Next session writes the actual checker:
 
-- **Type checker — third cut: Flow connectivity.** Inference exists.
-  The remaining structural rule from CHAIN_CONTRACT.md is "for every
-  `Flow(a, b)`, `output(a)` must be compatible with `input(b)`."
-  Smallest cut: walk the Module's chains, for each Flow node call
-  `infer_chain` on both sides, run `types_compatible` on the
-  results. Report mismatches as TypeErrors. Skip when either side
-  is Unknown (deferred). Run on `02_log_monitor.zp` and the corpus
-  — establish a baseline mismatch count.
-
 - **Real builtin signatures.** Current env has `params: [Any]` for
   every builtin — the inference picks up return types but not arg
   types. To do real arg-type checking, pre-bake actual signatures.
   Use `SEMANTIC_CONTRACTS.md` patterns where they exist; ground in
   CHAIN_CONTRACT.md for hardware-class types.
+
+- **Resolve the `->` overload in `quill.zp:326-327`.** Two of the
+  remaining flow mismatches are real semantic ambiguity:
+  `opacity(0 -> 1, ...)` overloads `->` to mean "value range"
+  rather than signal flow. Spec call needed: rewrite to use `..`
+  for ranges (`opacity(0..1)`), or formally introduce a value-range
+  meaning for `->` inside arg-expr context. Either decision drops
+  the ratchet to 0.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
