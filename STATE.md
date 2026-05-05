@@ -88,6 +88,23 @@ session. Three sections, that's it.
   RHS. The full corpus now passes the chord-rule arity check with
   zero exceptions. Ratchet locked at 0.
 
+- Type checker second cut (commit `0cbb1f9`). `TypeEnv` with 19
+  builtins from the corpus (fs, gate, parse, delta, rate, on_silence,
+  vault.*, alert, count, last, …); `infer_chain` walks the AST and
+  returns concrete types where possible (Unknown otherwise);
+  `types_compatible` is the flow-boundary compatibility predicate
+  (Unknown matches anything, primitive equality, Int → Float
+  promotion, Sig<A> ↔ Sig<B> recursive, Nominal by name). 13 new
+  unit tests. **109 tests green**.
+
+- Measurement spec open questions resolved (commit `f4ad27b`).
+  Per-window aggregation default (5min) with per-event for chord-
+  rule fallbacks and security violations; ride-along measurement
+  via Layer 0 circular buffers; global opt-in toggle in v1, per-
+  category in v2; 30-day local / 90-day raw / indefinite aggregate
+  retention; annual key rotation; device_id + firmware_signature
+  fingerprint format.
+
 - New feature spec: `specs/OPT_IN_TEST_REPORTING.md` (commit
   `7d8c95b`). Zeos ships with a deep self-test suite that runs across
   every TRISAVERSE_STACK layer and, with explicit user opt-in, sends
@@ -143,15 +160,20 @@ session. Three sections, that's it.
 
 **Type checker.** Type-shape is in. Next session writes the actual checker:
 
-- **Type checker — second cut.** v1 covers literals + Merge arity.
-  Next: type inference for non-literal terms, Flow connectivity, and
-  a built-in environment for `gate` / `parse` / `delta` / `rate` /
-  `vault.*` / etc. Pre-bake the built-in signatures into a `TypeEnv`
-  so the checker knows e.g. `gate: Sig<T>, Predicate<T> -> Sig<T>`,
-  `delta: Sig<T> -> Sig<Δ T>`. Smallest cut: drive the count of
-  17 known empty-merge corpus violations to zero by fixing the
-  parser to coalesce fork-body merges (the underlying bug, not
-  hiding the symptom).
+- **Type checker — third cut: Flow connectivity.** Inference exists.
+  The remaining structural rule from CHAIN_CONTRACT.md is "for every
+  `Flow(a, b)`, `output(a)` must be compatible with `input(b)`."
+  Smallest cut: walk the Module's chains, for each Flow node call
+  `infer_chain` on both sides, run `types_compatible` on the
+  results. Report mismatches as TypeErrors. Skip when either side
+  is Unknown (deferred). Run on `02_log_monitor.zp` and the corpus
+  — establish a baseline mismatch count.
+
+- **Real builtin signatures.** Current env has `params: [Any]` for
+  every builtin — the inference picks up return types but not arg
+  types. To do real arg-type checking, pre-bake actual signatures.
+  Use `SEMANTIC_CONTRACTS.md` patterns where they exist; ground in
+  CHAIN_CONTRACT.md for hardware-class types.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
