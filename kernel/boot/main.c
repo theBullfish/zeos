@@ -844,7 +844,15 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     /* Replacement-polish selftest lines (kv/web/build/notes/chat). */
     {
         extern void kv_polish_print_selftest_line(void);
+        extern void web_polish_print_selftest_line(void);
+        extern void build_polish_print_selftest_line(void);
+        extern void notes_polish_print_selftest_line(void);
+        extern void chat_polish_print_selftest_line(void);
         kv_polish_print_selftest_line();
+        web_polish_print_selftest_line();
+        build_polish_print_selftest_line();
+        notes_polish_print_selftest_line();
+        chat_polish_print_selftest_line();
     }
 
     /* Cold-boot login gate. After splash dismiss + chain registry +

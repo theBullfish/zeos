@@ -543,3 +543,53 @@ uint32_t chat_zeos_total_members(void)  {
         if (g_rooms[i].used) n += (uint32_t)g_rooms[i].member_count;
     return n;
 }
+
+int chat_zeos_walk_rooms(const char *ctx,
+                         void (*cb)(const char *id, const char *name,
+                                    int visibility, int member_count,
+                                    int msg_count, void *user),
+                         void *user) {
+    if (!cb) return 0;
+    int n = 0;
+    for (int i = 0; i < CHAT_MAX_ROOMS; i++) {
+        if (!g_rooms[i].used) continue;
+        if (ctx && !chat_zeos_room_visible_to(g_rooms[i].id, ctx)) continue;
+        /* msg_count for this room */
+        int mc = 0;
+        for (int j = 0; j < CHAT_MAX_MESSAGES; j++)
+            if (g_msgs[j].used && g_msgs[j].room_idx == i) mc++;
+        cb(g_rooms[i].id, g_rooms[i].name,
+           g_rooms[i].visibility, g_rooms[i].member_count, mc, user);
+        n++;
+    }
+    return n;
+}
+
+int chat_zeos_walk_tail(const char *room_id, const char *ctx, int n,
+                        void (*cb)(uint64_t ts, const char *author,
+                                   const char *body, void *user),
+                        void *user) {
+    if (!cb || !room_id) return 0;
+    if (ctx && !chat_zeos_room_visible_to(room_id, ctx)) return 0;
+    int idx = cz_room_find(room_id);
+    if (idx < 0) return 0;
+    /* gather seq order; descending */
+    int counted = 0;
+    /* find max seq */
+    uint32_t max_seq = 0;
+    for (int j = 0; j < CHAT_MAX_MESSAGES; j++)
+        if (g_msgs[j].used && g_msgs[j].room_idx == idx)
+            if (g_msgs[j].seq > max_seq) max_seq = g_msgs[j].seq;
+    /* walk descending */
+    if (n <= 0) n = 100000;
+    for (int64_t s = (int64_t)max_seq; s >= 0 && counted < n; s--) {
+        for (int j = 0; j < CHAT_MAX_MESSAGES; j++) {
+            if (!g_msgs[j].used || g_msgs[j].room_idx != idx) continue;
+            if ((int64_t)g_msgs[j].seq != s) continue;
+            cb(g_msgs[j].ts, g_msgs[j].author, g_msgs[j].body, user);
+            counted++;
+            break;
+        }
+    }
+    return counted;
+}

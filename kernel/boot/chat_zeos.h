@@ -71,4 +71,18 @@ uint32_t chat_zeos_total_rooms(void);
 uint32_t chat_zeos_total_messages(void);
 uint32_t chat_zeos_total_members(void);
 
+/* Walk every room visible to ctx (or all rooms if ctx == NULL).
+ * Callback receives id, name, visibility, member_count, msg_count. */
+int chat_zeos_walk_rooms(const char *ctx,
+                         void (*cb)(const char *id, const char *name,
+                                    int visibility, int member_count,
+                                    int msg_count, void *user),
+                         void *user);
+
+/* Walk last N messages in a room (most-recent-first). */
+int chat_zeos_walk_tail(const char *room_id, const char *ctx, int n,
+                        void (*cb)(uint64_t ts, const char *author,
+                                   const char *body, void *user),
+                        void *user);
+
 #endif /* ZEOS_CHAT_ZEOS_H */

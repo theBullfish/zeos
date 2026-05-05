@@ -130,6 +130,9 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/chat_zeos.c \
            boot/kv_polish.c \
            boot/web_polish.c \
+           boot/build_polish.c \
+           boot/notes_polish.c \
+           boot/chat_polish.c \
            boot/activity.c \
            boot/tests.c
 
