@@ -842,6 +842,29 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
     }
 
+    /* CFA-native disk encryption. After the PIN gate succeeds (or
+     * enrollment completed), derive the master AES-XTS-256 key from
+     * the PIN, wrap it in a SOVEREIGN CFA handle, and arm the
+     * crypto_transform node in CHAIN_BLOCK. From here, accesses to
+     * registered encrypted regions are transparently encrypted. */
+    {
+        extern void lockscreen_init(void);
+        extern int  lockscreen_pin_copy(char *out, int max);
+        extern void crypto_disk_init(const char *pin, int pin_len);
+        extern void crypto_disk_print_selftest_line(void);
+        char pin_buf[24];
+        int n = lockscreen_pin_copy(pin_buf, sizeof(pin_buf));
+        if (n > 0) {
+            crypto_disk_init(pin_buf, n);
+        } else {
+            kputs("[main] crypto_disk: no PIN, encryption inactive\n");
+        }
+        /* Wipe PIN bytes from stack ASAP. */
+        for (uint32_t _i = 0; _i < sizeof(pin_buf); _i++)
+            ((volatile char *)pin_buf)[_i] = 0;
+        crypto_disk_print_selftest_line();
+    }
+
     /* Scheduler: chain resolution as the kernel main loop. Must
      * follow chain_registry_init + mde_auto_route (done inside) so
      * the topo order is ready before the first tick. */

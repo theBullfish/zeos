@@ -28,6 +28,7 @@
 
 /* ── Crypto primitives ── */
 #define MBEDTLS_AES_C
+#define MBEDTLS_CIPHER_MODE_XTS        /* AES-XTS for CFA-native disk encryption */
 #define MBEDTLS_GCM_C                  /* AES-GCM (TLS 1.3 cipher) */
 #define MBEDTLS_CCM_C
 #define MBEDTLS_SHA1_C                 /* WPA2 4-way handshake (HMAC-SHA1) */

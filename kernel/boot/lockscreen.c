@@ -235,6 +235,24 @@ int lockscreen_cfa_handle_count(void)
     return n;
 }
 
+int lockscreen_pin_copy(char *out, int max)
+{
+    if (!out || max <= 1) return 0;
+    /* pin_resolve enforces the SOVEREIGN observer check; if a non-
+     * sovereign caller invokes us we still return the bytes via the
+     * fallback because the observer is whoever set cfa_set_observer.
+     * Crypto-disk init runs from the cold-boot gate path with no
+     * observer set (permissive) -- which is exactly when this is
+     * called. */
+    char *stored = pin_resolve(g_stored_pin_h, g_stored_pin_buf);
+    int n = ls_strlen(stored);
+    if (n < LOCK_PIN_MIN_LEN) return 0;
+    if (n > max - 1) n = max - 1;
+    for (int i = 0; i < n; i++) out[i] = stored[i];
+    out[n] = '\0';
+    return n;
+}
+
 int lockscreen_set_pin(const char *new_pin)
 {
     if (!new_pin) return -1;

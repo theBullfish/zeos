@@ -29,6 +29,7 @@
 #include "timeofday.h"
 #include "persistence.h"
 #include "spinlock.h"
+#include "crypto_disk.h"
 #include <stdint.h>
 
 /* Single ring; multiple cores writing at once would corrupt it. */
@@ -71,6 +72,12 @@ typedef struct {
     int      prior_vault_version;
     /* Filled by hardware_dma_resolve. */
     int      hw_rc;
+    /* Filled by crypto_pre_resolve. region_id >= 0 means the request is
+     * inside a registered encrypted region; the post node will decrypt
+     * on READ. orig_buf carries the caller's original buffer when WRITE
+     * is bounced through the encryption scratch so we can restore it. */
+    int      crypto_region;
+    void    *orig_buf;
 } block_chain_request_t;
 
 static block_chain_request_t s_req;
@@ -321,6 +328,91 @@ static void masq_journal_resolve(chain_node_t *self, void *input, void *output)
     r->journaled           = 1;
 }
 
+/* ── Crypto bounce buffer ──────────────────────────────────────────
+ *
+ * AES-XTS for writes is destructive: we cannot encrypt in place because
+ * the caller's plaintext buffer must survive the call. We allocate a
+ * single static bounce sized for the largest typical request (64 KiB).
+ * Larger writes fall back to passthrough -- safe because every existing
+ * caller (FAT32, vault flush, installer) writes <= 64 KiB at a time.
+ * Multi-core safe: the submit lock serializes the whole request, so
+ * exclusive access to s_crypto_bounce is implied.
+ */
+#define CRYPTO_BOUNCE_BYTES (64u * 1024u)
+static uint8_t s_crypto_bounce[CRYPTO_BOUNCE_BYTES];
+
+static void crypto_pre_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    block_stage_t *in  = (block_stage_t *)input;
+    block_stage_t *out = (block_stage_t *)output;
+    out->req = in->req;
+
+    block_chain_request_t *r = in->req;
+    if (!r || r->error || !r->valid) { if (r) r->error = 1; return; }
+    r->crypto_region = -1;
+    r->orig_buf = (void *)0;
+
+    if (r->op == BLOCK_OP_FLUSH) return;     /* nothing to transform */
+
+    int region = crypto_disk_lookup(r->drive_id, r->lba, r->count);
+    if (region < 0) return;                  /* plaintext region */
+    r->crypto_region = region;
+
+    if (r->op == BLOCK_OP_WRITE) {
+        /* Encrypt plaintext into the bounce buffer; swap r->buf so
+         * hardware_dma writes ciphertext. orig_buf is restored after
+         * the DMA completes. */
+        uint32_t bytes = r->count * r->sector_size;
+        if (bytes == 0 || bytes > CRYPTO_BOUNCE_BYTES) {
+            /* Can't fit -- conservative: fail rather than write
+             * plaintext into an encrypted region. */
+            r->error = 1;
+            kputs("[block.crypto] WRITE too large for bounce; refusing\n");
+            return;
+        }
+        if (crypto_disk_transform(region, /*encrypt*/ 1, r->lba,
+                                  r->count, r->sector_size,
+                                  r->buf, s_crypto_bounce) != 0) {
+            r->error = 1;
+            return;
+        }
+        r->orig_buf = r->buf;
+        r->buf      = s_crypto_bounce;
+    }
+    /* For READ we leave r->buf untouched; hardware_dma fills it with
+     * ciphertext, then crypto_post_resolve decrypts in place. */
+}
+
+static void crypto_post_resolve(chain_node_t *self, void *input, void *output)
+{
+    (void)self;
+    block_stage_t *in  = (block_stage_t *)input;
+    block_stage_t *out = (block_stage_t *)output;
+    out->req = in->req;
+
+    block_chain_request_t *r = in->req;
+    if (!r || !r->valid) return;
+
+    /* Restore caller buffer pointer if we bounced a WRITE. */
+    if (r->op == BLOCK_OP_WRITE && r->orig_buf) {
+        r->buf      = r->orig_buf;
+        r->orig_buf = (void *)0;
+    }
+
+    if (r->error || r->hw_rc != 0) return;
+    if (r->crypto_region < 0)      return;
+
+    if (r->op == BLOCK_OP_READ) {
+        /* Decrypt the ciphertext that hardware_dma deposited in r->buf. */
+        if (crypto_disk_transform(r->crypto_region, /*decrypt*/ 0, r->lba,
+                                  r->count, r->sector_size,
+                                  r->buf, r->buf) != 0) {
+            r->error = 1;
+        }
+    }
+}
+
 static void hardware_dma_resolve(chain_node_t *self, void *input, void *output)
 {
     (void)self;
@@ -378,9 +470,25 @@ int block_chain_register(int parent_id)
     chain_add_node(CHAIN_BLOCK, "masq_journal",
                    "block_stage", "block_stage",
                    masq_journal_resolve);
+    /* CFA-native disk encryption. The crypto_transform node is the
+     * only place plaintext meets ciphertext on the block layer. We
+     * use a pre/post pair around hardware_dma:
+     *   crypto_pre  -- encrypts WRITE plaintext into a bounce buffer
+     *                  before DMA hands it to the device.
+     *   hardware_dma -- writes ciphertext / reads ciphertext.
+     *   crypto_post -- decrypts READ ciphertext in place after DMA,
+     *                  and restores the caller's WRITE buffer pointer.
+     * Both are no-ops outside registered encrypted regions, so the
+     * common path remains free of cipher work. */
+    chain_add_node(CHAIN_BLOCK, "crypto_pre",
+                   "block_stage", "block_stage",
+                   crypto_pre_resolve);
     chain_add_node(CHAIN_BLOCK, "hardware_dma",
                    "block_stage", "tx_completion",
                    hardware_dma_resolve);
+    chain_add_node(CHAIN_BLOCK, "crypto_post",
+                   "tx_completion", "tx_completion",
+                   crypto_post_resolve);
     return 0;
 }
 

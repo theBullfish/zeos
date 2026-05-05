@@ -53,6 +53,13 @@ uint32_t lockscreen_unlock_count(void);
  * wrap actually happened. */
 int      lockscreen_cfa_handle_count(void);
 
+/* Copy the stored PIN bytes into `out` (NUL-terminated, max bytes
+ * including the terminator). Returns the digit count (>= LOCK_PIN_MIN_LEN
+ * on success), or 0 if no PIN is configured / output buffer too small.
+ * Used by crypto_disk to derive the SOVEREIGN AES-XTS key at boot. The
+ * caller MUST cd_memzero the buffer immediately after KDF. */
+int      lockscreen_pin_copy(char *out, int max);
+
 /* ── Cold-boot login ─────────────────────────────────────────────
  *
  * The same PIN overlay runs as a login gate at boot when

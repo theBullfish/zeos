@@ -776,6 +776,12 @@ void settings_register_all(void)
         extern void firewall_settings_register(void);
         firewall_settings_register();
     }
+
+    /* Disk encryption: crypto.enabled + crypto.cipher. */
+    {
+        extern void crypto_disk_settings_register(void);
+        crypto_disk_settings_register();
+    }
 }
 
 void settings_print_selftest_line(void)
