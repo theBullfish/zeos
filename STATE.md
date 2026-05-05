@@ -99,18 +99,28 @@ session. Three sections, that's it.
 - Type checker third cut: Flow connectivity (commit `5b66da6`).
   `check_flow_connectivity(module, env)` walks every Flow / Tap
   in a module, calls `infer_chain` on both sides, runs
-  `types_compatible`. Unknown either side defers. Reports
-  TypeErrors with `format_type`-rendered messages
-  ("Sig<Float>" not Debug-noise). Bug fix: bare Path in chain
-  position now returns the Fn's `returns` (implicit apply).
+  `types_compatible`. Unknown either side defers. Bug fix: bare
+  Path in chain position now returns the Fn's `returns` (implicit
+  apply).
 
-  Corpus baseline: **2 flow mismatches**, both in `quill.zp:326-327`
-  where `opacity(0 -> 1, ...)` and `scale(0.8 -> 1, ...)` overload
-  `->` for value-range semantics. Ratchet at 2. Real-by-the-rules
-  mismatches; the fix is a syntactic spec decision (use `..`
-  instead of `->` for ranges).
+- Quill `->` value-range overload resolved (commit `a8aa8b9`).
+  Rewrote 4 lines of `programs/quill.zp` to use `..` instead of
+  `->` for animation value ranges. Spec call: `->` is signal flow
+  only; `..` is value range. Ratchet at 0.
 
-  **116 tests green**.
+- Type checker fourth cut: named-arg type checking (commit `cd0b5f0`).
+  `TypeEnv.named_args` side-table maps callee → (named-arg →
+  expected-type) for 10 builtins (vault.store/append ttl, tick rate,
+  rate per, baseline window, decay half_life, on_silence within,
+  count within, rewind by, net.listen port). New `check_calls(m, env)`
+  walks every Call and verifies named-arg types. Two new
+  `types_compatible` rules: cross-unit duration matching
+  (`30d` ↔ `5m`) and `Nominal("duration")` sentinel for "any
+  duration unit." Defers on Bool (UnaryCmp/BinExpr-wrapped) and
+  Unknown values; skips synthetic `__op__` callees.
+
+  Three ratchets all at zero now: merge arity (chord rule), Flow
+  connectivity, named-arg types. **124 tests green**.
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -175,19 +185,21 @@ session. Three sections, that's it.
 
 **Type checker.** Type-shape is in. Next session writes the actual checker:
 
-- **Real builtin signatures.** Current env has `params: [Any]` for
-  every builtin — the inference picks up return types but not arg
-  types. To do real arg-type checking, pre-bake actual signatures.
-  Use `SEMANTIC_CONTRACTS.md` patterns where they exist; ground in
-  CHAIN_CONTRACT.md for hardware-class types.
+- **Tighten remaining builtins.** 10 builtins have named-arg specs;
+  many more (gate, parse, delta, weighted, sort, normalize, alert,
+  respond, fs, lines, last, …) still have `Any` for everything.
+  Add positional-arg specs and remaining named-args. Each addition
+  is one map insert; corpus ratchet catches regressions.
 
-- **Resolve the `->` overload in `quill.zp:326-327`.** Two of the
-  remaining flow mismatches are real semantic ambiguity:
-  `opacity(0 -> 1, ...)` overloads `->` to mean "value range"
-  rather than signal flow. Spec call needed: rewrite to use `..`
-  for ranges (`opacity(0..1)`), or formally introduce a value-range
-  meaning for `->` inside arg-expr context. Either decision drops
-  the ratchet to 0.
+- **Positional-arg type checking.** `check_calls` only handles named
+  args today. Add a `positional: Vec<Type>` to the side-table and
+  walk Positional args by index.
+
+- **Peer through UnaryCmp / BinExpr in arg values.** Currently the
+  checker defers when a named-arg value is wrapped in a comparison
+  (e.g. `on_silence(within: > 5m)`). The Duration is in there; the
+  checker just doesn't look. Add an "unwrap predicates to find the
+  underlying value" step before type-checking the arg.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no
