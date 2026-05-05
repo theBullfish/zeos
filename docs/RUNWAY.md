@@ -84,6 +84,21 @@ All three already reshaped in Zeos-back 1. Briefs OK.
 - #13 Identity contexts (78002aa): CFA root per context, perceive-gate cross-context tier scoping, per-context salt+key+namespace. Replaces UNIX users. Zeos-shaped.
 - Three for three, no drift. Final two items (#14 UVC, #15 print) already reshaped in Zeos-back 1.
 
+### Zeos-back 5 (after items 14 UVC, 15 print)
+- #14 UVC (435497c): xHCI iso transfers + UVC descriptor + Probe/Commit + payload reassembly + CHAIN_VIDEO_IN + per-camera chains + preview subscriber + panel privacy dot. Honest gap: preview placeholder (no JPEG decoder yet). Zeos-shaped.
+- #15 CHAIN_PRINT (e3da805): 4-node + CHAIN_PRINT_QUEUE subscriber. USB/IPP/FILE_PDF transports. PDF/text/PNG/JPEG formats. mDNS discovery. Not a daemon. Zeos-shaped.
+- Two for two. **Runway closed.**
+
+## Runway closed — final state
+
+All 15 items either landed or partial-honest. Held items remain:
+- AP_RESOLVES_CHAINS unblock (#100, transitive sweep wedge — 3 of 4 chains gated)
+- NVIDIA Stage 2 RM channel completion (compute backend honest stub)
+- Real S3 wake trampoline (needs hardware)
+- AMD GPU driver (#96, no hardware)
+- Intel iGPU (#61, no hardware)
+- JPEG decoder (preview placeholder is honest)
+
 ## End state
 
 When this list closes, Zeos is:
