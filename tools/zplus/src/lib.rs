@@ -14,6 +14,7 @@ pub mod ast;
 pub mod check;
 pub mod lex;
 pub mod parse;
+pub mod report;
 pub mod runtime;
 pub mod ty;
 
