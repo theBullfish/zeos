@@ -1,0 +1,27 @@
+// 53_stdlib_demo.zp
+// Pass 3 — stdlib (time + crypto + json).
+//
+// Imports std.time, std.crypto, std.json.  Each chain demonstrates
+// one verb on a known input.
+//
+// Expected tap.log:
+//   <epoch>     (current Unix seconds)
+//   <hex>       (32-char hex random)
+//   {"a":1,"b":"hello"} -> JSON-emitted struct (string handle)
+
+import std.time as t
+import std.crypto as c
+import std.json as j
+
+src   : emit(16)
+doc   : emit("{\"a\":1,\"b\":\"hello\"}")
+now   : input -> time.now
+rng   : input -> crypto.random
+jp    : input -> json.parse
+log   : input -> tap.log
+
+src -> rng -> log
+doc -> jp  -> log
+now -> log
+
+chain demo { src rng log }

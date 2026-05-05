@@ -318,6 +318,23 @@ void zp_kernel_resolve_thunk(chain_node_t *self, void *input, void *output)
         n->sum_acc += in_val;
         out_val = n->sum_acc;
         break;
+
+    /* Pass 3: stdlib verbs in runtime path are passthrough.  The
+     * canonical execution path is the in-process interpreter
+     * (zp_proc_*).  Runtime chains that need stdlib verbs go through
+     * a shim chain that re-enters zp_run.  Documented gap. */
+    case ZP_TIME_NOW: case ZP_TIME_NOW_MS: case ZP_TIME_SLEEP:
+    case ZP_TIME_FORMAT: case ZP_CRYPTO_HMAC: case ZP_CRYPTO_AES_ENC:
+    case ZP_CRYPTO_AES_DEC: case ZP_CRYPTO_RANDOM: case ZP_JSON_PARSE:
+    case ZP_JSON_EMIT: case ZP_REGEX_MATCH: case ZP_REGEX_FIND:
+    case ZP_REGEX_REPLACE: case ZP_CMD_RUN: case ZP_CMD_CAPTURE:
+    case ZP_HTTP_LISTEN: case ZP_HTTP_RESPOND: case ZP_HTTP_ROUTE:
+    case ZP_BTREE_NEW: case ZP_BTREE_INSERT: case ZP_BTREE_GET:
+    case ZP_BTREE_DELETE: case ZP_BTREE_RANGE: case ZP_FS_LIST:
+    case ZP_FS_EXISTS: case ZP_FS_SIZE: case ZP_FS_READ_STRING:
+    case ZP_FS_WRITE_STRING:
+        out_val = in_val;
+        break;
     }
 
     rt_write_i32(output, out_val);

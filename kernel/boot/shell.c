@@ -2148,6 +2148,26 @@ static const char zp_module_demo[] =
     "  bn : emit(3) -> math.triple -> tap.log\n"
     "}\n";
 
+/* Pass 3 stdlib demo — exercises std.time, std.crypto, std.json. */
+static const char zp_stdlib_demo[] =
+    "// Pass 3 — stdlib demo\n"
+    "import std.time as t\n"
+    "import std.crypto as c\n"
+    "import std.json as j\n"
+    "\n"
+    "src   : emit(16)\n"
+    "doc   : emit(\"{\\\"a\\\":1,\\\"b\\\":\\\"hello\\\"}\")\n"
+    "now   : input -> time.now\n"
+    "rng   : input -> crypto.random\n"
+    "jp    : input -> json.parse\n"
+    "log   : input -> tap.log\n"
+    "\n"
+    "src -> rng -> log\n"
+    "doc -> jp  -> log\n"
+    "now -> log\n"
+    "\n"
+    "chain demo { src rng log }\n";
+
 /* Negative test — references a private chain. Must fail at parse. */
 static const char zp_module_private_neg[] =
     "// Pass 2 negative test — math.hidden is private. Parse fails.\n"
@@ -2174,6 +2194,7 @@ static const struct zp_builtin builtins[] = {
     {"51_struct_demo",  "Pass 1 — typed structs (gate(.field == \"lit\") + sum)", zp_struct_demo},
     {"52_module_demo",  "Pass 2 — modules + import (math.double / math.triple)", zp_module_demo},
     {"52_module_neg",   "Pass 2 negative — references private chain (must fail)", zp_module_private_neg},
+    {"53_stdlib_demo",  "Pass 3 — stdlib (time/crypto/json)",                      zp_stdlib_demo},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -4493,6 +4514,19 @@ vault_done:
         kputs(" modules loaded, ");
         kput_dec((uint64_t)ir);
         kputs(" imports resolved\n");
+        passes++;
+    }
+
+    /* Z+ stdlib (Pass 3): register kernel-shipped std.* modules and
+     * report the count for `import std.X` to resolve. */
+    {
+        extern void zp_stdlib_init(void);
+        extern int  zp_stdlib_module_count(void);
+        zp_stdlib_init();
+        int sc = zp_stdlib_module_count();
+        kputs("  Z+ stdlib ............ ");
+        kput_dec((uint64_t)sc);
+        kputs(" modules registered (http/json/regex/cmd/time/crypto/btree/fs)\n");
         passes++;
     }
 

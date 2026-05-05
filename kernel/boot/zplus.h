@@ -127,7 +127,46 @@ enum zp_node_type {
     ZP_FIELD_ACCESS,    /* p.kind — extracts a field from a struct */
     ZP_GATE_FIELD_EQ,   /* gate(.field == "literal") — string-eq gate on struct field */
     ZP_SUM,             /* sum — running accumulator (int) */
+
+    /* ── Pass 3: stdlib verbs ───────────────── */
+    ZP_TIME_NOW,        /* time.now()       -> int (Unix epoch seconds) */
+    ZP_TIME_NOW_MS,     /* time.now_ms()    -> int (ms since epoch, low 32 bits) */
+    ZP_TIME_SLEEP,      /* time.sleep(ms)   -> int (ms slept) */
+    ZP_TIME_FORMAT,     /* time.format(epoch, fmt) -> str */
+    ZP_CRYPTO_HMAC,     /* crypto.hmac_sha256(key, data) -> str */
+    ZP_CRYPTO_AES_ENC,  /* crypto.aes_encrypt(key, plaintext) -> str */
+    ZP_CRYPTO_AES_DEC,  /* crypto.aes_decrypt(key, ciphertext) -> str */
+    ZP_CRYPTO_RANDOM,   /* crypto.random(n) -> str (n bytes hex-encoded) */
+    ZP_JSON_PARSE,      /* json.parse(s)    -> any */
+    ZP_JSON_EMIT,       /* json.emit(v)     -> str */
+    ZP_REGEX_MATCH,     /* regex.match(s, p) -> int (0|1) */
+    ZP_REGEX_FIND,      /* regex.find(s, p)  -> int (offset, -1 miss) */
+    ZP_REGEX_REPLACE,   /* regex.replace(s, p, repl) -> str */
+    ZP_CMD_RUN,         /* cmd.run(s)        -> int exit code */
+    ZP_CMD_CAPTURE,     /* cmd.capture(s)    -> str */
+    ZP_HTTP_LISTEN,     /* http.listen(port, chain_id) -> int */
+    ZP_HTTP_RESPOND,    /* http.respond(req_handle, status, body, ctype) -> int */
+    ZP_HTTP_ROUTE,      /* http.route(method, path, chain_id)           -> int */
+    ZP_BTREE_NEW,       /* btree.new() -> handle */
+    ZP_BTREE_INSERT,    /* btree.insert(h, key, value) -> int */
+    ZP_BTREE_GET,       /* btree.get(h, key) -> value */
+    ZP_BTREE_DELETE,    /* btree.delete(h, key) -> int */
+    ZP_BTREE_RANGE,     /* btree.range(h, low, high) -> int (count) */
+    ZP_FS_LIST,         /* fs.list(path) -> array<str> */
+    ZP_FS_EXISTS,       /* fs.exists(path) -> int (0|1) */
+    ZP_FS_SIZE,         /* fs.size(path) -> int */
+    ZP_FS_READ_STRING,  /* fs.read_string(path) -> str */
+    ZP_FS_WRITE_STRING, /* fs.write_string(path, s) -> int */
 };
+
+/* ── Pass 3 public surface ────────────────────────────────────────── */
+
+/* Returns count of std.* modules registered as kernel builtins. */
+int  zp_stdlib_module_count(void);
+
+/* Initialize stdlib: registers std.time, std.crypto, std.json, std.regex,
+ * std.cmd, std.http, std.btree, std.fs builtin modules. Idempotent. */
+void zp_stdlib_init(void);
 
 /* Per-field descriptor for a struct type. */
 struct zp_struct_field {
