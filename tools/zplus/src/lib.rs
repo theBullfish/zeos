@@ -14,6 +14,7 @@ pub mod ast;
 pub mod check;
 pub mod lex;
 pub mod parse;
+pub mod runtime;
 pub mod ty;
 
 pub use check::{
@@ -22,3 +23,4 @@ pub use check::{
 };
 pub use lex::{lex, Lexer, Token, TokenKind};
 pub use parse::{parse, ParseError};
+pub use runtime::{Emission, Runtime, RuntimeError, Value};

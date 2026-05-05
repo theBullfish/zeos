@@ -1,0 +1,9 @@
+// two_speeds.zp — two clocks at different rates, both flowing to alert.
+//
+// Demonstrates: distinct sources, distinct sinks, runtime tick model.
+//
+// Run:   zplus-run two_speeds.zp 6
+// Expect: fast fires every step, slow every other step.
+
+fast : tick(rate: 1) -> alert(info: "fast")
+slow : tick(rate: 2) -> alert(info: "slow")

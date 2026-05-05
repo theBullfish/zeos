@@ -30,7 +30,31 @@ the source line, and a carat under the span:
   |                      ^^^^^^^^^^^^^^^
 ```
 
-**IR, codegen, runtime: not started.**
+**Runtime v1 landed.** Tree-walking interpreter executes Z+ programs
+end-to-end. Smallest demo:
+
+```
+heartbeat : tick(rate: 1) -> print
+```
+
+```
+$ zplus-run heartbeat.zp 5
+[t=1] print: tick(1)
+[t=2] print: tick(2)
+[t=3] print: tick(3)
+[t=4] print: tick(4)
+[t=5] print: tick(5)
+```
+
+The runtime resolves Merge per its policy (chord rule on a single
+thread), Tap is read-only, sinks (`print`, `alert`, `vault.store`)
+emit captured records. Synthetic ops (`__add__`, `__neg__`, `__paren__`)
+evaluate per parser contract. Unknown calls act as identity. **No
+hardware, no MDE, no LLVM** — just proves the semantics in software.
+
+**IR, codegen: not started.** The runtime is sufficient to demo and
+test; an IR comes in when we want to compile to native or ship `.zpc`
+bytecode.
 
 ## Layout
 
@@ -48,7 +72,8 @@ tools/zplus/
 │   ├── ty.rs                  # the type-shape enum (no checker yet)
 │   ├── bin/zplus_lex.rs       # CLI: dumps token stream
 │   ├── bin/zplus_parse.rs     # CLI: parses + prints stmt count
-│   └── bin/zplus_check.rs     # CLI: parse + 3 checker passes + source-context errors
+│   ├── bin/zplus_check.rs     # CLI: parse + 3 checker passes + source-context errors
+│   └── bin/zplus_run.rs       # CLI: parse → AST → Runtime → emit values
 └── tests/
     ├── log_monitor.rs         # lexer fixture: programs/02_log_monitor.zp
     ├── http_server.rs         # lexer fixture: programs/03_http_server.zp

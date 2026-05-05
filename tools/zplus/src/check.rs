@@ -130,7 +130,10 @@ impl TypeEnv {
         };
         nm("vault.store", &[("ttl", duration.clone())]);
         nm("vault.append", &[("ttl", duration.clone())]);
-        nm("tick", &[("rate", duration.clone())]);
+        // `tick(rate: ...)` accepts either a duration (`60Hz`, `1ms`,
+        // `5m`) or an Int meaning "every N ticks." v1 runtime treats
+        // both as "every N steps" without wall-clock timing.
+        nm("tick", &[("rate", Type::Any(span))]);
         nm("rate", &[("per", duration.clone())]);
         nm("baseline", &[("window", duration.clone())]);
         nm("decay", &[("half_life", duration.clone())]);

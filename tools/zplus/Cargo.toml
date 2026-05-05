@@ -21,4 +21,8 @@ path = "src/bin/zplus_parse.rs"
 name = "zplus-check"
 path = "src/bin/zplus_check.rs"
 
+[[bin]]
+name = "zplus-run"
+path = "src/bin/zplus_run.rs"
+
 [dev-dependencies]
