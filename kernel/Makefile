@@ -58,7 +58,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/mbedtls_platform.c boot/font.c boot/wm.c boot/compositor.c \
            boot/b3.c boot/hw_discover.c boot/chain.c boot/mouse.c boot/firstboot.c \
            boot/mde.c boot/keybinds.c boot/palette.c boot/inspector.c \
-           boot/dock.c boot/access.c boot/desktop.c \
+           boot/dock.c boot/access.c boot/desktop.c boot/workspaces.c \
            boot/panel.c boot/settings.c boot/persona_filter.c boot/persona_anim.c \
            boot/chain_registry.c \
            boot/cfa_handle.c \

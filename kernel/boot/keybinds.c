@@ -21,6 +21,7 @@
 
 #include "keybinds.h"
 #include "wm.h"
+#include "workspaces.h"
 #include "compositor.h"
 #include "io.h"
 
@@ -51,6 +52,10 @@
 #define SC_I          0x17
 #define SC_T          0x14
 #define SC_W          0x11
+#define SC_5          0x06
+#define SC_6          0x07
+#define SC_7          0x08
+#define SC_8          0x09
 #define SC_F1         0x3B
 #define SC_F2         0x3C
 #define SC_ESC        0x01
@@ -119,10 +124,30 @@ void keybinds_init(void)
     /* Workspaces */
     bind(SC_F1, MOD_SUPER, 0, ACTION_WORKSPACE_1);
     bind(SC_F2, MOD_SUPER, 0, ACTION_WORKSPACE_2);
-    /* Workspace prev/next moved to Super+Ctrl+arrow to free Super+Shift+arrow
-     * for the spec'd quadrant + move-to-display snaps. */
+    /* Workspace prev/next on Super+Ctrl+arrow; up = overview. */
     bind(SC_EXT_RIGHT_ARROW, MOD_SUPER | MOD_CTRL, 1, ACTION_WORKSPACE_NEXT);
     bind(SC_EXT_LEFT_ARROW,  MOD_SUPER | MOD_CTRL, 1, ACTION_WORKSPACE_PREV);
+    bind(SC_EXT_UP_ARROW,    MOD_SUPER | MOD_CTRL, 1, ACTION_WORKSPACE_OVERVIEW);
+
+    /* Super+Ctrl+1..8 — switch directly to workspace N */
+    bind(SC_1, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_1);
+    bind(SC_2, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_2);
+    bind(SC_3, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_3);
+    bind(SC_4, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_4);
+    bind(SC_5, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_5);
+    bind(SC_6, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_6);
+    bind(SC_7, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_7);
+    bind(SC_8, MOD_SUPER | MOD_CTRL, 0, ACTION_WORKSPACE_8);
+
+    /* Super+Ctrl+Shift+1..8 — move focused window then switch */
+    bind(SC_1, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_1);
+    bind(SC_2, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_2);
+    bind(SC_3, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_3);
+    bind(SC_4, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_4);
+    bind(SC_5, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_5);
+    bind(SC_6, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_6);
+    bind(SC_7, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_7);
+    bind(SC_8, MOD_SUPER | MOD_CTRL | MOD_SHIFT, 0, ACTION_MOVE_WINDOW_WS_8);
 
     /* System */
     bind(SC_ENTER, MOD_SUPER, 0, ACTION_OPEN_TERMINAL);
@@ -271,6 +296,8 @@ void keybinds_execute(action_id_t action)
         break;
 
     case ACTION_CANCEL_DRAG:
+        /* Esc also exits workspace overview */
+        if (workspaces_overview_handle_escape()) break;
         (void)wm_cancel_drag();
         break;
 
@@ -362,29 +389,45 @@ void keybinds_execute(action_id_t action)
         break;
 
     /* ── Workspaces ── */
-    case ACTION_WORKSPACE_1:
-        wm_switch_workspace(0);
-        break;
-
-    case ACTION_WORKSPACE_2:
-        wm_switch_workspace(1);
-        break;
+    case ACTION_WORKSPACE_1: workspace_switch(0); break;
+    case ACTION_WORKSPACE_2: workspace_switch(1); break;
+    case ACTION_WORKSPACE_3: workspace_switch(2); break;
+    case ACTION_WORKSPACE_4: workspace_switch(3); break;
+    case ACTION_WORKSPACE_5: workspace_switch(4); break;
+    case ACTION_WORKSPACE_6: workspace_switch(5); break;
+    case ACTION_WORKSPACE_7: workspace_switch(6); break;
+    case ACTION_WORKSPACE_8: workspace_switch(7); break;
 
     case ACTION_WORKSPACE_NEXT:
         {
-            int ws = wm_get_workspace();
-            if (ws < WM_MAX_WORKSPACES - 1)
-                wm_switch_workspace(ws + 1);
+            int ws = workspace_active();
+            int n = workspaces_get_count();
+            if (ws < n - 1) workspace_switch(ws + 1);
         }
         break;
 
     case ACTION_WORKSPACE_PREV:
         {
-            int ws = wm_get_workspace();
-            if (ws > 0)
-                wm_switch_workspace(ws - 1);
+            int ws = workspace_active();
+            if (ws > 0) workspace_switch(ws - 1);
         }
         break;
+
+    case ACTION_WORKSPACE_OVERVIEW:
+        if (workspaces_overview_active())
+            workspaces_overview_exit();
+        else
+            workspaces_overview_enter();
+        break;
+
+    case ACTION_MOVE_WINDOW_WS_1: workspace_move_focused_and_switch(0); break;
+    case ACTION_MOVE_WINDOW_WS_2: workspace_move_focused_and_switch(1); break;
+    case ACTION_MOVE_WINDOW_WS_3: workspace_move_focused_and_switch(2); break;
+    case ACTION_MOVE_WINDOW_WS_4: workspace_move_focused_and_switch(3); break;
+    case ACTION_MOVE_WINDOW_WS_5: workspace_move_focused_and_switch(4); break;
+    case ACTION_MOVE_WINDOW_WS_6: workspace_move_focused_and_switch(5); break;
+    case ACTION_MOVE_WINDOW_WS_7: workspace_move_focused_and_switch(6); break;
+    case ACTION_MOVE_WINDOW_WS_8: workspace_move_focused_and_switch(7); break;
 
     /* ── System ── */
     case ACTION_OPEN_TERMINAL:

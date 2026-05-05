@@ -20,6 +20,7 @@
 #include "gpu_compute.h"
 #include "mde_chain.h"
 #include "wm.h"
+#include "workspaces.h"
 
 #include <stdint.h>
 
@@ -625,6 +626,28 @@ static int s_wm_snap_anim(const char *v) {
     return 0;
 }
 
+/* wm.workspace_count — number of virtual desktops (1..8, default 4). */
+static int g_wm_ws_count(char *out, int n) {
+    return sr_itoa(workspaces_get_count(), out, n);
+}
+static int s_wm_ws_count(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 1 || x > 8) return -1;
+    workspaces_set_count(x);
+    return 0;
+}
+
+/* wm.workspace_animation_ms — slide animation total time (default 200). */
+static int g_wm_ws_anim(char *out, int n) {
+    return sr_itoa(workspaces_get_animation_ms(), out, n);
+}
+static int s_wm_ws_anim(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 30 || x > 2000) return -1;
+    workspaces_set_animation_ms(x);
+    return 0;
+}
+
 /* ── Static entry table. Pointers handed to settings_register. ── */
 
 static const settings_entry_t E_AUDIO_VOLUME = {
@@ -704,6 +727,16 @@ static const settings_entry_t E_WM_SNAP_ANIM = {
     g_wm_snap_anim, s_wm_snap_anim, 0,
     "snap commit spring animation total time (ms)"
 };
+static const settings_entry_t E_WM_WS_COUNT = {
+    "wm.workspace_count", SK_INT, 0,
+    g_wm_ws_count, s_wm_ws_count, 0,
+    "number of virtual desktops (1..8, default 4)"
+};
+static const settings_entry_t E_WM_WS_ANIM = {
+    "wm.workspace_animation_ms", SK_INT, 0,
+    g_wm_ws_anim, s_wm_ws_anim, 0,
+    "workspace switch slide animation total time (ms)"
+};
 static const settings_entry_t E_MDE_SELECT_POLICY = {
     "mde.select_policy", SK_ENUM, 0,
     g_mde_policy, s_mde_policy,
@@ -735,6 +768,8 @@ void settings_register_all(void)
     settings_register(&E_MDE_SELECT_POLICY);
     settings_register(&E_WM_SNAP_DRAG);
     settings_register(&E_WM_SNAP_ANIM);
+    settings_register(&E_WM_WS_COUNT);
+    settings_register(&E_WM_WS_ANIM);
 
 }
 

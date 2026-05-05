@@ -21,6 +21,7 @@
 #include "chain_registry.h"
 #include "fb.h"
 #include "wm.h"
+#include "workspaces.h"
 #include "cursor.h"
 #include "anim.h"
 #include "timer.h"
@@ -132,6 +133,7 @@ int compositor_init(int screen_w, int screen_h) {
     /* Initialize subsystems */
     hotcorners_init(screen_w, screen_h);
     wm_init(screen_w, screen_h, g_comp.panel_h);
+    workspaces_init(screen_w, screen_h);
     panel_init(PERSONA_FULL, g_comp.panel_h);
 
     /* Wire all subsystems into the chain/MDE graph */
@@ -213,6 +215,10 @@ void compositor_frame(void) {
          * (so it sits above windows + toasts during drag) and BEFORE
          * context_menu so a right-click menu still wins z-order. */
         wm_draw_ghost();
+        /* Layer 4b.6: Workspaces Mission-Control overview. Tiles every
+         * workspace's windows onto one screen. Drawn over the WM/dock
+         * but under context menus so right-click still wins. */
+        workspaces_overview_draw();
         /* Layer 4c: UI overlays (context menu, quick look, dirty modal).
          * Drawn after notifications so a modal sits above a stale toast. */
         context_menu_draw();

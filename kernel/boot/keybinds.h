@@ -49,10 +49,25 @@ typedef enum {
     ACTION_SHOW_DOCK,           /* Super + Shift + D  */
 
     /* Workspaces */
-    ACTION_WORKSPACE_1,         /* Super + F1         */
-    ACTION_WORKSPACE_2,         /* Super + F2         */
-    ACTION_WORKSPACE_NEXT,      /* Super + Shift + Right */
-    ACTION_WORKSPACE_PREV,      /* Super + Shift + Left  */
+    ACTION_WORKSPACE_1,         /* Super + F1, Super+Ctrl+1 */
+    ACTION_WORKSPACE_2,         /* Super + F2, Super+Ctrl+2 */
+    ACTION_WORKSPACE_3,         /* Super + Ctrl + 3   */
+    ACTION_WORKSPACE_4,         /* Super + Ctrl + 4   */
+    ACTION_WORKSPACE_5,         /* Super + Ctrl + 5   */
+    ACTION_WORKSPACE_6,         /* Super + Ctrl + 6   */
+    ACTION_WORKSPACE_7,         /* Super + Ctrl + 7   */
+    ACTION_WORKSPACE_8,         /* Super + Ctrl + 8   */
+    ACTION_WORKSPACE_NEXT,      /* Super + Ctrl + Right */
+    ACTION_WORKSPACE_PREV,      /* Super + Ctrl + Left  */
+    ACTION_WORKSPACE_OVERVIEW,  /* Super + Ctrl + Up  */
+    ACTION_MOVE_WINDOW_WS_1,    /* Super + Ctrl + Shift + 1 */
+    ACTION_MOVE_WINDOW_WS_2,    /* Super + Ctrl + Shift + 2 */
+    ACTION_MOVE_WINDOW_WS_3,    /* Super + Ctrl + Shift + 3 */
+    ACTION_MOVE_WINDOW_WS_4,    /* Super + Ctrl + Shift + 4 */
+    ACTION_MOVE_WINDOW_WS_5,    /* Super + Ctrl + Shift + 5 */
+    ACTION_MOVE_WINDOW_WS_6,    /* Super + Ctrl + Shift + 6 */
+    ACTION_MOVE_WINDOW_WS_7,    /* Super + Ctrl + Shift + 7 */
+    ACTION_MOVE_WINDOW_WS_8,    /* Super + Ctrl + Shift + 8 */
 
     /* System */
     ACTION_OPEN_TERMINAL,       /* Super + Enter      */

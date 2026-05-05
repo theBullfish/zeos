@@ -134,13 +134,17 @@ void dock_unpin(int index) {
 }
 
 void dock_update(void) {
-    /* Clear running list and rebuild from WM surfaces */
+    /* Clear running list and rebuild from WM surfaces. Pinned items
+     * are global; running indicators are filtered to the active
+     * workspace so each workspace shows only its own apps. */
     g_dock.running_count = 0;
 
     int count = wm_surface_count();
+    int active_ws = wm_get_workspace();
     for (int i = 0; i < count && g_dock.running_count < DOCK_MAX_RUNNING; i++) {
         chain_surface_t *s = wm_get_surface_by_index(i);
         if (!s) continue;
+        if (s->workspace != active_ws) continue;
 
         dock_item_t *item = &g_dock.running[g_dock.running_count++];
         item->type = DOCK_ITEM_RUNNING;

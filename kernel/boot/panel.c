@@ -8,6 +8,7 @@
 #include "panel.h"
 #include "fb.h"
 #include "wm.h"
+#include "workspaces.h"
 #include "chain.h"
 #include "font.h"
 #include "theme.h"
@@ -40,6 +41,9 @@ int panel_right_click(int x, int y) {
 
 /* ── Static state ── */
 static panel_state_t g_panel;
+static int s_ws_indicator_x = 0;   /* set by panel_draw, used by panel_click */
+static int s_ws_indicator_y = 0;
+static int s_ws_indicator_w = 0;
 
 /* ── Helpers ── */
 
@@ -333,6 +337,12 @@ void panel_draw(void) {
 
     fb_circle_filled(rz_x + 16, ry_center, 4, health_color);
 
+    /* Workspace indicator dots — positioned just right of the health
+     * dot. Click switches workspaces. */
+    s_ws_indicator_x = rz_x + 28;
+    s_ws_indicator_y = ry_center;
+    s_ws_indicator_w = workspaces_draw_indicator(s_ws_indicator_x, ry_center);
+
     /* Notification count badge (if > 0) */
     if (g_panel.notification_count > 0) {
         char nbuf[4];
@@ -371,6 +381,13 @@ int panel_click(int x, int y) {
 
     /* Right zone — notifications (placeholder) */
     if (x >= pw - PANEL_RIGHT_W) {
+        /* Workspace indicator hit-test wins over generic right-zone. */
+        int ws_hit = workspaces_indicator_hit(x, y, s_ws_indicator_x,
+                                               s_ws_indicator_y);
+        if (ws_hit >= 0) {
+            workspace_switch(ws_hit);
+            return 4;
+        }
         return 3;
     }
 

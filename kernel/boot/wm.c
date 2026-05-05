@@ -10,6 +10,7 @@
  */
 
 #include "wm.h"
+#include "workspaces.h"
 #include "fb.h"
 #include "font.h"
 #include "anim.h"
@@ -256,6 +257,7 @@ int wm_create_surface(const char *title, int chain_id,
                                       surface_opacity_cb, s);
 
     wm_focus_surface(s->id);
+    workspaces_window_assigned(s->id, s->workspace);
 
     return s->id;
 }
@@ -358,6 +360,7 @@ void wm_focus_surface(int id) {
     s->focused = 1;
     s->z_index = next_z();
     g_wm.focused_id = id;
+    workspaces_window_focused(id);
 }
 
 int wm_get_focused(void) {
@@ -647,9 +650,9 @@ int wm_get_workspace(void) {
 }
 
 void wm_move_to_workspace(int id, int workspace) {
-    chain_surface_t *s = find_surface(id);
-    if (!s) return;
-    s->workspace = workspace;
+    /* Delegate to workspaces module so its window list and persistence
+     * stay in sync. */
+    workspace_move_window(id, workspace);
 }
 
 /* ── Input handling ── */
@@ -1006,14 +1009,20 @@ static void sort_by_z(int *indices, int count) {
 }
 
 void wm_draw_all(void) {
-    /* Collect visible surfaces on current workspace */
+    /* Collect visible surfaces on current workspace and (during a
+     * workspace slide) on the incoming workspace. */
     int visible[WM_MAX_SURFACES];
     int vis_count = 0;
+    int sliding = workspaces_is_sliding();
+    int incoming = workspaces_slide_incoming_id();
+    int active_off = workspaces_slide_offset_active();
+    int incoming_off = workspaces_slide_offset_incoming();
 
     for (int i = 0; i < g_wm.surface_count; i++) {
         chain_surface_t *s = &g_wm.surfaces[i];
-        /* Include closing surfaces so their animation renders */
-        if ((s->visible || s->closing) && s->workspace == g_wm.active_workspace)
+        if (!(s->visible || s->closing)) continue;
+        if (s->workspace == g_wm.active_workspace ||
+            (sliding && s->workspace == incoming))
             visible[vis_count++] = i;
     }
 
@@ -1055,6 +1064,15 @@ void wm_draw_all(void) {
             s->anim_y = (float)s->y;
             s->anim_w = (float)s->w;
             s->anim_h = (float)s->h;
+        }
+
+        /* Workspace slide offset — apply to whichever side this surface
+         * belongs to. */
+        if (sliding) {
+            if (s->workspace == g_wm.active_workspace)
+                rx += active_off;
+            else if (s->workspace == incoming)
+                rx += incoming_off;
         }
 
         /* Apply scale: shrink around center */

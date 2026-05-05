@@ -4549,6 +4549,18 @@ vault_done:
     kputs("ms)\n");
     passes++;
 
+    /* Workspaces — N virtual desktops, M total windows distributed. */
+    {
+        extern int  workspaces_get_count(void);
+        extern int  workspaces_total_windows(void);
+        kputs("  Workspaces ............ ");
+        kput_dec((uint64_t)workspaces_get_count());
+        kputs(" workspaces, ");
+        kput_dec((uint64_t)workspaces_total_windows());
+        kputs(" windows distributed\n");
+        passes++;
+    }
+
     /* Settings registry — count keys, count live (non-stub) */
     settings_print_selftest_line();
     if (settings_count() > 0) passes++;

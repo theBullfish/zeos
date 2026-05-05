@@ -43,6 +43,10 @@ extern int  palette_right_click(int x, int y);
 extern int  desktop_right_click(int x, int y);
 
 static int mouse_ui_dispatch_down(int x, int y, int button) {
+    extern int workspaces_overview_active(void);
+    extern int workspaces_overview_mouse_down(int x, int y, int button);
+    if (workspaces_overview_active() &&
+        workspaces_overview_mouse_down(x, y, button)) return 1;
     if (dirty_modal_active() && dirty_modal_mouse_down(x, y, button)) return 1;
     if (image_viewer_active() && image_viewer_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
@@ -69,6 +73,12 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
 }
 
 static void mouse_ui_dispatch_move(int x, int y) {
+    extern int workspaces_overview_active(void);
+    extern int workspaces_overview_mouse_move(int x, int y);
+    if (workspaces_overview_active()) {
+        workspaces_overview_mouse_move(x, y);
+        return;
+    }
     if (dirty_modal_active())  { dirty_modal_mouse_move(x, y); return; }
     if (image_viewer_active()) { image_viewer_mouse_move(x, y); return; }
     if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }
