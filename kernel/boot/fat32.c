@@ -34,6 +34,7 @@
 #include "heap.h"
 #include "kprint.h"
 #include "timeofday.h"
+#include "fs_event.h"
 
 /* ── Local string / mem helpers (no libc) ─────────────────────── */
 
@@ -1030,7 +1031,9 @@ static int create_entry(const char *path, uint8_t attr,
 int fat32_create(const char *path)
 {
     if (!V.mounted || !path) return -1;
-    return create_entry(path, FAT32_ATTR_AR, 0, 0);
+    int rc = create_entry(path, FAT32_ATTR_AR, 0, 0);
+    if (rc == 0) fs_event_emit(FS_EV_CREATE, path, 0, 0);
+    return rc;
 }
 
 int fat32_mkdir(const char *path)
@@ -1086,6 +1089,7 @@ int fat32_mkdir(const char *path)
         (void)fat_write_entry(dc, FAT32_FREE);
         return -1;
     }
+    fs_event_emit(FS_EV_MKDIR, path, 0, 0);
     return 0;
 }
 
@@ -1128,8 +1132,12 @@ empty_ok:
         if (free_chain(first) != 0) return -1;
     }
 
+    uint32_t old_size = e[28] | ((uint32_t)e[29] << 8)
+                      | ((uint32_t)e[30] << 16) | ((uint32_t)e[31] << 24);
+    int was_dir = (attr & FAT32_ATTR_DIR) != 0;
     e[0] = 0xE5;
     if (dir_write_entry(dc, doff, e) != 0) return -1;
+    fs_event_emit(was_dir ? FS_EV_RMDIR : FS_EV_UNLINK, path, old_size, 0);
     return 0;
 }
 
@@ -1191,7 +1199,9 @@ int fat32_truncate(const char *path, uint32_t new_size)
     e[30] = (uint8_t)((new_size >> 16) & 0xFF);
     e[31] = (uint8_t)((new_size >> 24) & 0xFF);
     fat_fill_times(e);
-    return dir_write_entry(dc, doff, e);
+    int rc = dir_write_entry(dc, doff, e);
+    if (rc == 0) fs_event_emit(FS_EV_TRUNCATE, path, new_size, 0);
+    return rc;
 }
 
 int fat32_write(const char *path, uint32_t offset,
@@ -1279,6 +1289,7 @@ int fat32_write(const char *path, uint32_t offset,
     e[31] = (uint8_t)((cur_size >> 24) & 0xFF);
     fat_fill_times(e);
     if (dir_write_entry(dc, doff, e) != 0) return -1;
+    fs_event_emit(FS_EV_WRITE, path, cur_size, 0);
     return (int)len;
 }
 
@@ -1670,9 +1681,10 @@ int fat32_trash(const char *path, const char *reason, char *out_id)
         for (int i = 0; i < FAT32_TRASH_ID_MAX + 1; i++) out_id[i] = id[i];
     }
 
-    /* Bump CHAIN_BLOCK vault_version so MasQ/journal records the
-     * trash event distinctly from the underlying writes. The actual
-     * sector writes are already journaled. */
+    /* Emit fs_event TRASH so subscribers (file manager UI, undo ring,
+     * trash_react logger) all see the soft-delete. The underlying
+     * sector writes are already in masq_journal at the block layer. */
+    fs_event_emit_trash(path, id, size);
     return 0;
 }
 
@@ -1757,6 +1769,7 @@ int fat32_trash_restore(const char *id)
     build_trash_path(metap, sizeof(metap), id, "meta.txt");
     (void)fat32_unlink(metap);
     (void)fat32_unlink(subdir);
+    fs_event_emit_restore(orig, id, sz);
     return 0;
 }
 

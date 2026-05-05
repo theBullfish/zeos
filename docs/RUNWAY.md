@@ -26,7 +26,7 @@ lands; don't add. End is the end.
 5. · Virtual desktops — workspace separation via existing chain hierarchy
 6. · Calculator app — programmer + scientific modes, standalone
 7. ✓ Text editor — Zeos-shaped: typed-text chain emitting `text_edit` signals. Spellcheck, autocomplete, autosave, version history are all subscriber chains. UI is a renderer over the chain.
-8. · File manager — Zeos-shaped: a chain over `fs_event` signals that masq_journal already records. Trash-GC, search index, sync, undo all subscribe. UI is a stream renderer. Not "an app with menus."
+8. ✓ File manager — Zeos-shaped: CHAIN_FS_EVENT emitter + 4 subscribers (trash_react, index, undo, notify). Every fat32_* mutation emits an fs_event; UI is a stream renderer with a non-chain listener for repaint. `fm` shell command opens it; `fs-undo` reverses the last op.
 9. · Calendar/clock app — uses tod, alarm, world clocks. CHAIN_CLOCK at ~1Hz.
 10. · Activity Monitor — Zeos-shaped: a chain that subscribes to all chains via MDE wildcard route. Free integration with notifications + B3 anomaly detection.
 11. · Firewall — CHAIN_FIREWALL gating CHAIN_NET_TX/RX with rule table.

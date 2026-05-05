@@ -802,6 +802,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         cal_print_selftest_line();
     }
 
+    /* File manager selftest: chains-over-fs_event count + events tracked. */
+    {
+        extern void file_mgr_print_selftest_line(void);
+        extern void file_mgr_persist_restore(void);
+        file_mgr_persist_restore();
+        file_mgr_print_selftest_line();
+    }
+
     /* Cold-boot login gate. After splash dismiss + chain registry +
      * persistence replay, but before the scheduler starts. Shows the
      * same PIN overlay used by idle-lock; on first ever boot

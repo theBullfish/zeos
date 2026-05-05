@@ -200,6 +200,8 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int calculator_key(int);
         extern int editor_active(void);
         extern int editor_key(int);
+        extern int file_mgr_active(void);
+        extern int file_mgr_key(int);
 
         uint8_t mods_now = keybinds_get_modifiers();
         int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
@@ -209,6 +211,7 @@ static void process_scancode(uint8_t scancode, int extended)
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
             if (calculator_active())   { calculator_key(27);   return; }
             if (editor_active())       { editor_key(27);       return; }
+            if (file_mgr_active())     { file_mgr_key(27);     return; }
             if (image_viewer_active()) { image_viewer_key(27); return; }
             if (quick_look_active())   { quick_look_key(27);   return; }
             if (context_menu_active()) { context_menu_key(27); return; }
@@ -260,6 +263,7 @@ static void process_scancode(uint8_t scancode, int extended)
          * for printable characters (Enter / S / D shortcuts). */
         if (dirty_modal_active() || calculator_active() ||
             editor_active() ||
+            file_mgr_active() ||
             image_viewer_active() ||
             quick_look_active() || context_menu_active()) {
             char ch = sh ? scancode_to_ascii_shift[scancode]
@@ -274,6 +278,7 @@ static void process_scancode(uint8_t scancode, int extended)
                 if (dirty_modal_active())  { dirty_modal_key(ch);  return; }
                 if (calculator_active())   { calculator_key(ch);   return; }
                 if (editor_active())       { editor_key(ch);       return; }
+                if (file_mgr_active())     { file_mgr_key(ch);     return; }
                 if (image_viewer_active()) { image_viewer_key(ch); return; }
                 if (quick_look_active())   { quick_look_key(ch);   return; }
                 if (context_menu_active()) { context_menu_key(ch); return; }
@@ -290,6 +295,8 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int calculator_key_arrow(int dir);
         extern int editor_active(void);
         extern int editor_key_arrow(int dir);
+        extern int file_mgr_active(void);
+        extern int file_mgr_key_arrow(int dir);
         if (calculator_active()) {
             if (scancode == 0x4B) { calculator_key_arrow(0); return; }
             if (scancode == 0x4D) { calculator_key_arrow(1); return; }
@@ -301,6 +308,12 @@ static void process_scancode(uint8_t scancode, int extended)
             if (scancode == 0x4D) { editor_key_arrow(1); return; }
             if (scancode == 0x48) { editor_key_arrow(2); return; }
             if (scancode == 0x50) { editor_key_arrow(3); return; }
+        }
+        if (file_mgr_active()) {
+            if (scancode == 0x4B) { file_mgr_key_arrow(0); return; }
+            if (scancode == 0x4D) { file_mgr_key_arrow(1); return; }
+            if (scancode == 0x48) { file_mgr_key_arrow(2); return; }
+            if (scancode == 0x50) { file_mgr_key_arrow(3); return; }
         }
         if (image_viewer_active()) {
             if (scancode == 0x4B) { image_viewer_key_arrow(0); return; } /* left */

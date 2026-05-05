@@ -236,6 +236,13 @@ void compositor_frame(void) {
             editor_tick();
             if (editor_active()) editor_draw();
         }
+        {
+            extern int  file_mgr_active(void);
+            extern void file_mgr_draw(void);
+            extern void file_mgr_tick(void);
+            file_mgr_tick();
+            if (file_mgr_active()) file_mgr_draw();
+        }
         dirty_modal_draw();
     }
 

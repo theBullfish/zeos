@@ -1187,6 +1187,23 @@ int chain_registry_init(void)
         kputs("[chain_registry] WARN: editor chain registration failed\n");
     }
 
+    /* CHAIN_FS_EVENT + 4 subscriber chains for the file manager.
+     *   Emitter: fs_request -> validate -> execute -> emit_event
+     *   Subscribers (input_type=fs_event):
+     *     CHAIN_FS_TRASH_REACT  -> match_delete -> log
+     *     CHAIN_FS_INDEX        -> bucket_path  -> update_count (stub)
+     *     CHAIN_FS_UNDO         -> derive_reverse -> push_ring
+     *     CHAIN_FS_NOTIFY       -> classify    -> notify_send
+     * Every fat32_* mutation emits through CHAIN_FS_EVENT regardless of
+     * who initiated it (editor autosave, shell rm, file manager UI,
+     * trash restore). The "manager" is one of many consumers. */
+    {
+        extern int fs_event_chain_register(int parent_chain_id);
+        if (fs_event_chain_register(CHAIN_CPU) < 0) {
+            kputs("[chain_registry] WARN: fs_event chain registration failed\n");
+        }
+    }
+
     /* ── Step 5: Auto-route by type matching ────────────────────── */
     /*
      * MDE scans all chains, finds output_type == input_type matches,
