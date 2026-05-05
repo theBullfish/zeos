@@ -145,8 +145,25 @@ session. Three sections, that's it.
   `gate(> N)` actually filters now. Predicates evaluate with
   upstream as the implicit subject (UnaryCmp / BinExpr). Multiple
   positionals AND'd. eval_binop generalized via value_as_f64 to
-  handle Tick / Duration / Int / Float consistently. New demo
-  `programs/demos/threshold.zp`.
+  handle Tick / Duration / Int / Float consistently.
+
+- **Operational kit (commits `85f8a58` → `ec7427a`).**
+  - Cleanup: clippy clean across all targets, stale-doc footers
+  - `zplus` umbrella binary — `zplus run/check/lex/parse/tune` dispatches
+  - User-facing README with cargo-install quickstart
+  - Runtime instrumentation: `Observer` trait + `RuntimeEvent`
+    stream (TickStart, MergeResolved, BuiltinCall, Emitted)
+  - `report` module — `Aggregator` consumes events and produces
+    a `Report` with per-window emission counts, per-sink histogram,
+    chord-pass-rate, and per-event chord-rule misses (matches
+    `MEASUREMENT_TARGETS.md` §Decisions)
+  - `tune` module — heuristic tuner consumes a `Report` and
+    suggests `RuntimeConfig` adjustments (chord-miss → faster
+    ticks; silent run → diagnostic; excessive emissions →
+    compress time)
+  - End-to-end loop wired: programs run → observer streams events
+    → aggregator builds reports → tuner suggests configs → re-run
+    with suggestions. ML drop-in slot ready when corpus is big.
 
 - **Runtime v1.5: two independent time knobs (commit `4a41139`).**
   `RuntimeConfig::ticks_per_real_second` (wall-clock pacing) and
@@ -160,7 +177,7 @@ session. Three sections, that's it.
   simulation. CLI: `zplus-run ... --ms-per-tick 60000`.
 
   All three corpus ratchets (merge arity, Flow connectivity,
-  named-arg types) stay at zero. **153 tests green** (123 unit +
+  named-arg types) stay at zero. **168 tests green** (138 unit +
   30 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
