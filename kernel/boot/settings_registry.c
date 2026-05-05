@@ -771,6 +771,11 @@ void settings_register_all(void)
     settings_register(&E_WM_WS_COUNT);
     settings_register(&E_WM_WS_ANIM);
 
+    /* Firewall: enabled + default_inbound + default_outbound. */
+    {
+        extern void firewall_settings_register(void);
+        firewall_settings_register();
+    }
 }
 
 void settings_print_selftest_line(void)

@@ -818,6 +818,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         activity_print_selftest_line();
     }
 
+    /* Firewall selftest: enabled, rule count, conntrack, drops/min. */
+    {
+        extern void firewall_print_selftest_line(void);
+        firewall_print_selftest_line();
+    }
+
     /* Cold-boot login gate. After splash dismiss + chain registry +
      * persistence replay, but before the scheduler starts. Shows the
      * same PIN overlay used by idle-lock; on first ever boot

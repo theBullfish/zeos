@@ -26,6 +26,7 @@
 #include "hotplug.h"
 #include "timeofday.h"
 #include "notify.h"
+#include "firewall.h"
 #include "calendar.h"
 #include "nvme.h"
 #include "ahci.h"
@@ -829,6 +830,7 @@ static const struct shell_cmd commands[] = {
     {"truncate","truncate file to size (truncate <path> <size>)", cmd_truncate, VIS_DEREZ},
     {"echo",    "write text to FAT32 file (echo <text> > <path>)", cmd_echo, VIS_ALWAYS},
     {"settings","unified settings (settings | settings <name> [value] | search/export/import)", cmd_settings, VIS_ALWAYS},
+    {"firewall","stateful packet firewall (firewall | add | del | flush | log | enable | disable)", firewall_cmd, VIS_DEREZ},
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -4499,6 +4501,10 @@ vault_done:
     /* Notify history + DND. Reports current state via the spec line. */
     kputs("  ");
     notify_print_selftest_line();
+    passes++;
+
+    /* Firewall: state, rule count, conntrack, drops/min. */
+    firewall_print_selftest_line();
     passes++;
 
     /* UI primitives — undo/redo, context menus, hover, dirty,

@@ -23,6 +23,7 @@
 #include "net.h"
 #include "chain.h"
 #include "chain_registry.h"
+#include "firewall.h"
 #include "kprint.h"
 #include "spinlock.h"
 #include <stdint.h>
@@ -358,6 +359,12 @@ int net_chain_register(int parent_id)
     chain_add_node(CHAIN_NET_TX, "frame_request",
                    "frame_request", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_tx_request_resolve);
+    /* CHAIN_FIREWALL hook: gate egress before L2 encap finalizes. On
+     * DROP/REJECT this stamps eth_frame.error so the rest of the
+     * pipeline truncates and hardware_dma emits a "dropped" tx_completion. */
+    chain_add_node(CHAIN_NET_TX, "firewall_check_tx",
+                   "ethernet_frame", "ethernet_frame",
+                   (void (*)(chain_node_t *, void *, void *))firewall_check_tx_resolve);
     chain_add_node(CHAIN_NET_TX, "l2_encap",
                    "ethernet_frame", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_tx_l2_encap_resolve);
@@ -382,6 +389,12 @@ int net_chain_register(int parent_id)
     chain_add_node(CHAIN_NET_RX, "l2_decap",
                    "ethernet_frame", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_rx_l2_decap_resolve);
+    /* CHAIN_FIREWALL hook: gate ingress before frame_delivery hands the
+     * payload to ARP/IP/UDP/TCP. On DROP/REJECT, frame_delivery sees
+     * error=1 and emits a "dropped" delivery_status. */
+    chain_add_node(CHAIN_NET_RX, "firewall_check_rx",
+                   "ethernet_frame", "ethernet_frame",
+                   (void (*)(chain_node_t *, void *, void *))firewall_check_rx_resolve);
     chain_add_node(CHAIN_NET_RX, "frame_delivery",
                    "ethernet_frame", "delivery_status",
                    (void (*)(chain_node_t *, void *, void *))net_rx_frame_delivery_resolve);

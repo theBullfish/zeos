@@ -45,6 +45,7 @@
 #include "power_buttons.h"
 #include "calendar.h"
 #include "editor.h"
+#include "firewall.h"
 
 /* Forward decls for resolves defined later in this file. */
 static void battery_acpi_poll_resolve(chain_node_t *self, void *input, void *output);
@@ -851,6 +852,15 @@ int chain_registry_init(void)
             if (n2 >= 0) c->nodes[n2].state = hda_pin_state();
             if (n3 >= 0) c->nodes[n3].state = hda_dma_state();
         }
+    }
+
+    /* Firewall: stateful packet-inspection chain. Must register BEFORE
+     * net_chain_register so the firewall_check_tx/_rx hook nodes inside
+     * CHAIN_NET_TX/RX have a live CHAIN_FIREWALL to resolve into.
+     * firewall_init loads rules from VAULT (or installs defaults). */
+    firewall_init();
+    if (firewall_chain_register(CHAIN_CPU) < 0) {
+        kputs("[chain_registry] WARN: firewall chain registration failed\n");
     }
 
     /* Networking: chain-native NIC pipeline. The active driver
