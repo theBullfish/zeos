@@ -13,6 +13,7 @@
 pub mod ast;
 pub mod lex;
 pub mod parse;
+pub mod ty;
 
 pub use lex::{lex, Lexer, Token, TokenKind};
 pub use parse::{parse, ParseError};

@@ -66,6 +66,15 @@ session. Three sections, that's it.
   `parser_minimum_corpus_coverage` is locked at 68 — any regression
   fails CI. None of the additions affect the chord rule.
 
+- Type system shape designed (next commit). `src/ty.rs` defines the
+  typed enum surface — `Type::{Prim, Tagged, Sig, Range, Rate, Tuple,
+  List, Grid, Map, Record, Union, Fn, Nominal, Quorum, Named, Unknown,
+  Any, Never}` plus `UnitTag::{Simple, Compound, HardwarePin}`. Same
+  pattern as ast.rs — design before checker code locks the shape.
+  `tools/zplus/SEMANTIC_CONTRACTS.md` enumerates each of the 28
+  synthetic `__op__` callees with input/output type, runtime contract,
+  and parser-emit site.
+
   `zplus-parse` CLI: `cd tools/zplus && cargo run --bin zplus-parse -- <file.zp>`.
 
   **73 tests green** (54 unit + 19 integration).
@@ -101,12 +110,14 @@ session. Three sections, that's it.
 
 ## Next up
 
-**Parser is corpus-complete.** Next architectural decisions:
+**Type checker.** Type-shape is in. Next session writes the actual checker:
 
-- **Type system / typed ports** (CHAIN_CONTRACT.md). Each chain-node
-  has a typed input and output; the type-checker ensures wires only
-  connect compatible types. Decide: nominal (named types) or
-  structural (compatible if shape matches)?
+- **Type checker.** Walk the AST, infer / check types per the
+  contracts in `tools/zplus/SEMANTIC_CONTRACTS.md`. Hardware-class
+  types are nominal (per CHAIN_CONTRACT.md); language-level types
+  are structural; numeric promotion (Int → Float) is the only
+  implicit conversion. Smallest cut: type-check
+  `programs/02_log_monitor.zp` against the 28 op-contracts.
 - **IR design.** LLVM IR via `inkwell` vs custom backend. Brad has
   flagged this as still open. The chord-rule shape suggests a custom
   backend that can lower `Merge` nodes natively — LLVM has no

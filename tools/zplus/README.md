@@ -4,22 +4,18 @@ Z+ language frontend — bootstrap compiler.
 
 ## Status
 
-**v2 lexer landed.** Token surface covers v1 + Hex (`0x68`), HexColor
-(`#29ADFF`), Dimension (`1920x1080`), ByteSize (`200KB`), TimePast
-(`t-1`), DevNull (`/dev/null`), TemplateString (`"…{name}…"`), and Bang
-(`!`). Corpus-wide round-trip clean across all 68 .zp files; only 3
-files still produce Error tokens (chirp's `↑`, forge_ide's string
-escapes, goya_fleet's `─...>` long-form arrow — see TOKEN_TAXONOMY.md
-§13.1).
+**Lexer + Parser corpus-complete.** All 68 .zp files in `programs/`
+tokenize cleanly AND parse without error. Ratchet test
+`parser_minimum_corpus_coverage` is locked at 68.
 
-**AST type landed (no parser yet).** `src/ast.rs` defines the typed
-enum surface. The chord rule from `docs/SIGNAL_LOGIC.md` §1 is
-structural: a `|` merge is **one** `Merge` node carrying its policy
-(All / Any / Quorum / Fastest / Within / By), never a DAG of
-independent edges. Hand-built fixture for the top section of
-`programs/02_log_monitor.zp` lives in `tests/ast_log_monitor.rs` with
-a chord-rule canary test that fails first on any future lowering
-mistake. 47 tests green.
+**AST + Type-shape designed.** `src/ast.rs` and `src/ty.rs` define the
+typed surface — chord rule structural, `Merge` is one node carrying
+its policy. Hand-built AST fixture for `02_log_monitor.zp` plus a
+chord-rule canary test. `SEMANTIC_CONTRACTS.md` enumerates each of the
+28 synthetic `__op__` callees the parser emits with a type signature
+and runtime contract.
+
+**Type checker, IR, codegen, runtime: not started.** 83 tests green.
 
 ## Layout
 
@@ -27,17 +23,22 @@ mistake. 47 tests green.
 tools/zplus/
 ├── Cargo.toml
 ├── README.md
-├── TOKEN_TAXONOMY.md       # the lexer spec (empirical, from 68 .zp programs)
+├── TOKEN_TAXONOMY.md          # the lexer spec (empirical, from 68 .zp programs)
+├── SEMANTIC_CONTRACTS.md      # 28 synthetic __op__ callees + type/runtime contracts
 ├── src/
-│   ├── lib.rs              # crate entry — re-exports lex + ast modules
-│   ├── lex.rs              # the lexer
-│   ├── ast.rs              # typed AST — chord rule documented at top
-│   └── bin/zplus_lex.rs    # CLI: dumps token stream for a file
+│   ├── lib.rs                 # crate entry — re-exports lex / parse / ast / ty
+│   ├── lex.rs                 # the lexer
+│   ├── parse.rs               # the parser (recursive descent, chord-rule coalescing)
+│   ├── ast.rs                 # typed AST — chord rule documented at top
+│   ├── ty.rs                  # the type-shape enum (no checker yet)
+│   ├── bin/zplus_lex.rs       # CLI: dumps token stream
+│   └── bin/zplus_parse.rs     # CLI: parses + prints stmt count
 └── tests/
-    ├── log_monitor.rs      # green-light: programs/02_log_monitor.zp tokens
-    ├── http_server.rs      # second fixture: programs/03_http_server.zp tokens
-    ├── corpus.rs           # corpus-wide smoke: round-trip + error-count allowlist
-    └── ast_log_monitor.rs  # hand-built AST for 02_log_monitor.zp top section
+    ├── log_monitor.rs         # lexer fixture: programs/02_log_monitor.zp
+    ├── http_server.rs         # lexer fixture: programs/03_http_server.zp
+    ├── corpus.rs              # corpus-wide: round-trip + lex/parse coverage
+    ├── ast_log_monitor.rs     # hand-built AST + chord-rule canary
+    └── parse_log_monitor.rs   # full-file parse fixture
 ```
 
 ## Build & test
