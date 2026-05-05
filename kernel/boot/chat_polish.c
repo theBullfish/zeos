@@ -7,6 +7,7 @@
 #include "chat_polish.h"
 #include "chat_zeos.h"
 #include "chat_e2ee.h"
+#include "md_render.h"
 #include "fb.h"
 #include "font.h"
 #include "theme.h"
@@ -254,8 +255,11 @@ static void cp_msg_cb(uint64_t ts, const char *author, const char *body, void *u
     font_draw(g_msg_x + 44, g_msg_y, author, FONT_UI_BOLD, TYPE_LABEL, COLOR_ON_SURFACE);
     char rel[32]; cp_relative(ts, rel, sizeof(rel));
     font_draw(g_msg_x + 160, g_msg_y + 2, rel, FONT_UI, TYPE_CAPTION, COLOR_ON_SURFACE_3);
-    /* Body */
-    font_draw(g_msg_x + 44, g_msg_y + 18, body, FONT_UI, TYPE_BODY, COLOR_ON_SURFACE);
+    /* Body — render markdown inline (bold / italic / code / wikilinks /
+     * auto-linked URLs). Falls back gracefully on plain text. */
+    int body_len = 0; if (body) while (body[body_len]) body_len++;
+    md_render_inline(g_msg_x + 44, g_msg_y + 18, g_msg_w - 60,
+                     body ? body : "", body_len);
     g_msg_y += 56;
     C.msgs_drawn++;
 }

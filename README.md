@@ -88,7 +88,7 @@ Where Zeos is **not** done. These are not weaknesses we hide.
 - **Intel iGPU driver:** no hardware in the lab stack; held until then.
 - **Real S3 wake trampoline:** code path exists, validation requires hardware not yet wired.
 - **Per-chain SMP transitive sweep:** 1 of 4 target chains lifted (CHAIN_MDE). Net TX / Block / Audio have submit-staging locks landed but lift wedges on AP-side resolve — needs a follow-up bisect into AP scheduler.
-- **JPEG decode in image viewer and UVC preview:** placeholder rendering; no decoder yet.
+- **Progressive / arithmetic JPEG, EXIF rotation:** baseline JPEG (SOF0) lands; progressive (SOF2), arithmetic coding, EXIF rotation, JFIF thumbnails, and UVC-frame JPEG decode are follow-ups.
 - **Voice/video federation in chat-zeos:** single-host today; Zeos↔Zeos federation needs a small TLS-on-top protocol that isn't written.
 - **AML EC sub-ops:** the AML interpreter doesn't cover the EC OperationRegion variants that some laptop firmwares use for battery; battery values fall back to ACPI table reads where available.
 - **NVIDIA Stage 2:** GSP firmware located and staged; RM channel completion pending. Today's NVIDIA support is scanout-only.

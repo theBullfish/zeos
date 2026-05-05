@@ -7,6 +7,7 @@
 
 #include "notes_polish.h"
 #include "notes_zeos.h"
+#include "md_render.h"
 #include "fb.h"
 #include "font.h"
 #include "theme.h"
@@ -90,119 +91,9 @@ void notes_polish_set_source(const char *md, int len) {
     N.source_len = len;
 }
 
-/* ── Markdown renderer (compact) ────────────────────────────────── */
-static int is_space(char c) { return c == ' ' || c == '\t'; }
-
+/* ── Markdown renderer (delegates to shared md_render) ────────── */
 static void np_render_md(int x, int y, int w, int h) {
-    fb_rect(x, y, w, h, COLOR_SURFACE);
-    int cx = x + 12;
-    int cy = y + 12;
-    int line_h = 18;
-    int i = 0;
-    int in_code = 0;
-    while (i < N.source_len && cy < y + h - 16) {
-        /* Read one line. */
-        int line_start = i;
-        while (i < N.source_len && N.source[i] != '\n') i++;
-        int line_end = i;
-        if (i < N.source_len) i++; /* skip \n */
-
-        /* Code-fence toggle */
-        if (line_end - line_start >= 3
-            && N.source[line_start] == '`' && N.source[line_start + 1] == '`'
-            && N.source[line_start + 2] == '`') {
-            in_code = !in_code;
-            cy += 6;
-            continue;
-        }
-
-        /* Slice */
-        char buf[256];
-        int n = line_end - line_start;
-        if (n > 255) n = 255;
-        for (int k = 0; k < n; k++) buf[k] = N.source[line_start + k];
-        buf[n] = 0;
-
-        if (in_code) {
-            fb_rect(cx - 4, cy - 2, w - 24, line_h + 2, COLOR_SURFACE_HIGH);
-            font_draw(cx, cy, buf, FONT_CODE, TYPE_LABEL, COLOR_PRIMARY);
-            cy += line_h;
-            continue;
-        }
-
-        /* Headings */
-        int p = 0; while (p < n && is_space(buf[p])) p++;
-        if (p < n && buf[p] == '#') {
-            int level = 0;
-            while (p < n && buf[p] == '#') { level++; p++; }
-            while (p < n && is_space(buf[p])) p++;
-            int sz = (level == 1) ? TYPE_TITLE : (level == 2) ? TYPE_HEADING : TYPE_BODY;
-            font_draw(cx, cy, buf + p, FONT_UI_BOLD, sz, COLOR_ON_SURFACE);
-            cy += sz + 8;
-            continue;
-        }
-        /* Blockquote */
-        if (p < n && buf[p] == '>') {
-            fb_rect(cx, cy, 3, line_h, COLOR_PRIMARY);
-            font_draw(cx + 12, cy, buf + p + 1, FONT_UI, TYPE_BODY, COLOR_ON_SURFACE_2);
-            cy += line_h;
-            continue;
-        }
-        /* Unordered list */
-        if (p < n && buf[p] == '-' && p + 1 < n && buf[p+1] == ' ') {
-            fb_circle_filled(cx + 4, cy + 8, 2, COLOR_PRIMARY);
-            font_draw(cx + 16, cy, buf + p + 2, FONT_UI, TYPE_BODY, COLOR_ON_SURFACE);
-            cy += line_h;
-            continue;
-        }
-        /* Default body — naive bold/italic/code/wikilink rendering: print
-         * with primary text color and special-tint substring runs. We do
-         * a single pass that tints **bold**, [[wikilinks]] and `code`. */
-        int xpos = cx;
-        int j = 0;
-        while (j < n) {
-            /* wikilink? */
-            if (j + 1 < n && buf[j] == '[' && buf[j+1] == '[') {
-                int k = j + 2;
-                while (k + 1 < n && !(buf[k] == ']' && buf[k+1] == ']')) k++;
-                int len = k - (j + 2);
-                char tmp[96];
-                int m = len > 95 ? 95 : len;
-                for (int q = 0; q < m; q++) tmp[q] = buf[j + 2 + q];
-                tmp[m] = 0;
-                xpos = font_draw(xpos, cy, tmp, FONT_UI, TYPE_BODY, COLOR_PRIMARY);
-                j = (k + 2 <= n) ? k + 2 : n;
-                continue;
-            }
-            /* bold? */
-            if (j + 1 < n && buf[j] == '*' && buf[j+1] == '*') {
-                int k = j + 2;
-                while (k + 1 < n && !(buf[k] == '*' && buf[k+1] == '*')) k++;
-                int len = k - (j + 2);
-                char tmp[96]; int m = len > 95 ? 95 : len;
-                for (int q = 0; q < m; q++) tmp[q] = buf[j + 2 + q]; tmp[m] = 0;
-                xpos = font_draw(xpos, cy, tmp, FONT_UI_BOLD, TYPE_BODY, COLOR_ON_SURFACE);
-                j = (k + 2 <= n) ? k + 2 : n;
-                continue;
-            }
-            /* inline code? */
-            if (buf[j] == '`') {
-                int k = j + 1;
-                while (k < n && buf[k] != '`') k++;
-                int len = k - (j + 1);
-                char tmp[96]; int m = len > 95 ? 95 : len;
-                for (int q = 0; q < m; q++) tmp[q] = buf[j + 1 + q]; tmp[m] = 0;
-                xpos = font_draw(xpos, cy, tmp, FONT_CODE, TYPE_LABEL, COLOR_WARNING);
-                j = (k + 1 <= n) ? k + 1 : n;
-                continue;
-            }
-            /* default: emit one character, batched as small string */
-            char ch[2] = { buf[j], 0 };
-            xpos = font_draw(xpos, cy, ch, FONT_UI, TYPE_BODY, COLOR_ON_SURFACE);
-            j++;
-        }
-        cy += line_h;
-    }
+    md_render(x, y, w, h, N.source, N.source_len);
 }
 
 /* ── Source pane ───────────────────────────────────────────────── */
