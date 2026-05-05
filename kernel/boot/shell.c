@@ -17,6 +17,7 @@
 
 #include "shell.h"
 #include "settings_registry.h"
+#include "wm.h"
 #include "usb_msc.h"
 #include "usb_hub.h"
 #include "block.h"
@@ -4537,6 +4538,16 @@ vault_done:
         kputs(")\n");
         passes++;
     }
+
+    /* Window snap — half / quadrant snapping via Super+arrow + drag-to-edge.
+     * Always passes once wm has initialized; reports the active tunables. */
+    kputs("  Window snap ........... half/quadrant + Super+arrow + drag-to-edge");
+    kputs(" (threshold=");
+    kput_dec((uint64_t)wm_get_snap_drag_threshold());
+    kputs("px, anim=");
+    kput_dec((uint64_t)wm_get_snap_animation_ms());
+    kputs("ms)\n");
+    passes++;
 
     /* Settings registry — count keys, count live (non-stub) */
     settings_print_selftest_line();

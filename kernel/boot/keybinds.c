@@ -53,6 +53,7 @@
 #define SC_W          0x11
 #define SC_F1         0x3B
 #define SC_F2         0x3C
+#define SC_ESC        0x01
 
 /* ── Modifier state ── */
 static uint8_t mod_state;
@@ -81,17 +82,25 @@ void keybinds_init(void)
     mod_state  = MOD_NONE;
     bind_count = 0;
 
-    /* Window management — Super + arrow keys (extended scancodes) */
+    /* Window management — Super + arrow keys (extended scancodes).
+     * Super + Left/Right cycle: half -> two-thirds -> restore.
+     * Super + Up maximizes. Super + Down restores (un-maximize / un-snap). */
     bind(SC_EXT_LEFT_ARROW,  MOD_SUPER, 1, ACTION_SNAP_LEFT);
     bind(SC_EXT_RIGHT_ARROW, MOD_SUPER, 1, ACTION_SNAP_RIGHT);
     bind(SC_EXT_UP_ARROW,    MOD_SUPER, 1, ACTION_MAXIMIZE);
-    bind(SC_EXT_DOWN_ARROW,  MOD_SUPER, 1, ACTION_MINIMIZE);
+    bind(SC_EXT_DOWN_ARROW,  MOD_SUPER, 1, ACTION_RESTORE);
 
-    /* Quarter-screen snapping — Super + 1/2/3/4 */
+    /* Quadrant snapping — Super + 1/2/3/4, also Super + Shift + arrows. */
     bind(SC_1, MOD_SUPER, 0, ACTION_SNAP_TL);
     bind(SC_2, MOD_SUPER, 0, ACTION_SNAP_TR);
     bind(SC_3, MOD_SUPER, 0, ACTION_SNAP_BL);
     bind(SC_4, MOD_SUPER, 0, ACTION_SNAP_BR);
+    bind(SC_EXT_LEFT_ARROW,  MOD_SUPER | MOD_SHIFT, 1, ACTION_SNAP_TL);
+    bind(SC_EXT_RIGHT_ARROW, MOD_SUPER | MOD_SHIFT, 1, ACTION_SNAP_TR);
+    bind(SC_EXT_DOWN_ARROW,  MOD_SUPER | MOD_SHIFT, 1, ACTION_MOVE_TO_NEXT_DISPLAY);
+
+    /* Escape cancels an in-progress drag (no-op when no drag is active). */
+    bind(SC_ESC, MOD_NONE, 0, ACTION_CANCEL_DRAG);
 
     /* Super + T — toggle tiling */
     bind(SC_T, MOD_SUPER, 0, ACTION_TOGGLE_TILING);
@@ -110,8 +119,10 @@ void keybinds_init(void)
     /* Workspaces */
     bind(SC_F1, MOD_SUPER, 0, ACTION_WORKSPACE_1);
     bind(SC_F2, MOD_SUPER, 0, ACTION_WORKSPACE_2);
-    bind(SC_EXT_RIGHT_ARROW, MOD_SUPER | MOD_SHIFT, 1, ACTION_WORKSPACE_NEXT);
-    bind(SC_EXT_LEFT_ARROW,  MOD_SUPER | MOD_SHIFT, 1, ACTION_WORKSPACE_PREV);
+    /* Workspace prev/next moved to Super+Ctrl+arrow to free Super+Shift+arrow
+     * for the spec'd quadrant + move-to-display snaps. */
+    bind(SC_EXT_RIGHT_ARROW, MOD_SUPER | MOD_CTRL, 1, ACTION_WORKSPACE_NEXT);
+    bind(SC_EXT_LEFT_ARROW,  MOD_SUPER | MOD_CTRL, 1, ACTION_WORKSPACE_PREV);
 
     /* System */
     bind(SC_ENTER, MOD_SUPER, 0, ACTION_OPEN_TERMINAL);
@@ -220,12 +231,12 @@ void keybinds_execute(action_id_t action)
     /* ── Window management ── */
     case ACTION_SNAP_LEFT:
         focused = wm_get_focused();
-        if (focused >= 0) wm_snap_surface(focused, SURFACE_SNAPPED_LEFT);
+        if (focused >= 0) wm_snap_cycle_left(focused);
         break;
 
     case ACTION_SNAP_RIGHT:
         focused = wm_get_focused();
-        if (focused >= 0) wm_snap_surface(focused, SURFACE_SNAPPED_RIGHT);
+        if (focused >= 0) wm_snap_cycle_right(focused);
         break;
 
     case ACTION_MAXIMIZE:
@@ -233,9 +244,34 @@ void keybinds_execute(action_id_t action)
         if (focused >= 0) wm_maximize_surface(focused);
         break;
 
+    case ACTION_RESTORE:
+        focused = wm_get_focused();
+        if (focused >= 0) {
+            chain_surface_t *s = wm_get_surface(focused);
+            if (s) {
+                if (s->state == SURFACE_MAXIMIZED) {
+                    /* Unmaximize: maximize toggle restores. */
+                    wm_maximize_surface(focused);
+                } else if (s->state != SURFACE_NORMAL && s->state != SURFACE_TILED) {
+                    wm_snap(focused, SURFACE_NORMAL);
+                }
+                /* If already NORMAL, do nothing (don't minimize on Down). */
+            }
+        }
+        break;
+
     case ACTION_MINIMIZE:
         focused = wm_get_focused();
         if (focused >= 0) wm_minimize_surface(focused);
+        break;
+
+    case ACTION_MOVE_TO_NEXT_DISPLAY:
+        focused = wm_get_focused();
+        if (focused >= 0) wm_move_to_next_display(focused);
+        break;
+
+    case ACTION_CANCEL_DRAG:
+        (void)wm_cancel_drag();
         break;
 
     case ACTION_SNAP_TL:

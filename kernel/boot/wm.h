@@ -38,8 +38,13 @@ typedef enum {
     SURFACE_SNAPPED_TR,
     SURFACE_SNAPPED_BL,
     SURFACE_SNAPPED_BR,
+    SURFACE_SNAPPED_LEFT_2_3,    /* Left two-thirds (cycle target) */
+    SURFACE_SNAPPED_RIGHT_2_3,   /* Right two-thirds (cycle target) */
     SURFACE_TILED,
 } surface_state_t;
+
+/* Public alias used by snap API. */
+typedef surface_state_t snap_kind_t;
 
 /* ── Signal health ── */
 typedef enum {
@@ -179,6 +184,22 @@ void wm_resize_surface(int id, int w, int h);
 
 /* ── Snap / tile ── */
 void wm_snap_surface(int id, surface_state_t snap);
+/* New canonical snap entry — sets target geometry for the kind, animates
+ * via spring, multi-display aware. Saves pre-snap geometry on transition
+ * out of NORMAL so SURFACE_NORMAL un-snaps back to it. */
+void wm_snap(int window_id, snap_kind_t kind);
+/* Cycle Super+Left/Right: half -> two-thirds -> normal restore. */
+void wm_snap_cycle_left(int window_id);
+void wm_snap_cycle_right(int window_id);
+/* Move focused window to next display (multi-display awareness). */
+void wm_move_to_next_display(int window_id);
+/* Cancel an in-progress drag (Escape key). Returns 1 if a drag was cancelled. */
+int  wm_cancel_drag(void);
+/* Tunables (settings registry). */
+void wm_set_snap_drag_threshold(int px);
+int  wm_get_snap_drag_threshold(void);
+void wm_set_snap_animation_ms(int ms);
+int  wm_get_snap_animation_ms(void);
 void wm_toggle_tiling(void);
 
 /* ── Workspace ── */

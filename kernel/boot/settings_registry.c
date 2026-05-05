@@ -19,6 +19,7 @@
 #include "power_buttons.h"
 #include "gpu_compute.h"
 #include "mde_chain.h"
+#include "wm.h"
 
 #include <stdint.h>
 
@@ -601,6 +602,29 @@ static int s_mde_policy(const char *v) {
     return 0;
 }
 
+/* wm.snap_drag_threshold — pixels from screen edge that trigger a snap
+ * preview while dragging a window. */
+static int g_wm_snap_drag(char *out, int n) {
+    return sr_itoa(wm_get_snap_drag_threshold(), out, n);
+}
+static int s_wm_snap_drag(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 1 || x > 256) return -1;
+    wm_set_snap_drag_threshold(x);
+    return 0;
+}
+
+/* wm.snap_animation_ms — total time hint for the spring-animated snap. */
+static int g_wm_snap_anim(char *out, int n) {
+    return sr_itoa(wm_get_snap_animation_ms(), out, n);
+}
+static int s_wm_snap_anim(const char *v) {
+    int x; if (sr_atoi(v, &x) != 0) return -1;
+    if (x < 30 || x > 2000) return -1;
+    wm_set_snap_animation_ms(x);
+    return 0;
+}
+
 /* ── Static entry table. Pointers handed to settings_register. ── */
 
 static const settings_entry_t E_AUDIO_VOLUME = {
@@ -670,6 +694,16 @@ static const settings_entry_t E_THEME_DARK = {
     "theme.dark_mode", SK_BOOL, 0, g_theme_dark, s_theme_dark, 0,
     "dark mode (0=light, 1=dark/auto)"
 };
+static const settings_entry_t E_WM_SNAP_DRAG = {
+    "wm.snap_drag_threshold", SK_INT_PCT, 0,
+    g_wm_snap_drag, s_wm_snap_drag, 0,
+    "drag-to-edge snap activation distance (px from edge)"
+};
+static const settings_entry_t E_WM_SNAP_ANIM = {
+    "wm.snap_animation_ms", SK_INT, 0,
+    g_wm_snap_anim, s_wm_snap_anim, 0,
+    "snap commit spring animation total time (ms)"
+};
 static const settings_entry_t E_MDE_SELECT_POLICY = {
     "mde.select_policy", SK_ENUM, 0,
     g_mde_policy, s_mde_policy,
@@ -699,6 +733,8 @@ void settings_register_all(void)
     settings_register(&E_NET_DHCP);
     settings_register(&E_THEME_DARK);
     settings_register(&E_MDE_SELECT_POLICY);
+    settings_register(&E_WM_SNAP_DRAG);
+    settings_register(&E_WM_SNAP_ANIM);
 
 }
 

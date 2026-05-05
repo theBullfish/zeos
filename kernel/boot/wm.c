@@ -3,6 +3,10 @@
  *
  * Chain surface management: chrome, stacking, drag, resize, snap.
  * Everything spring-animated where it makes sense.
+ *
+ * Window snap: half / quadrant / maximize via drag-to-edge or
+ * Super+arrow. Drag preview overlay, spring-animated commit,
+ * pre-snap geometry stack for restore. Multi-display aware.
  */
 
 #include "wm.h"
@@ -15,6 +19,42 @@
 /* ── Global state ── */
 static wm_state_t g_wm;
 static int g_desktop_shown;  /* 1 = show-desktop mode active */
+
+/* ── Snap tunables (settings.snap_drag_threshold / snap_animation_ms) ── */
+static int g_snap_drag_threshold = 16;   /* pixels from edge */
+static int g_snap_animation_ms   = 180;  /* total animation time hint */
+
+/* Drag-anchor remembers where the drag started so we can cancel. */
+static int g_drag_anchor_x;
+static int g_drag_anchor_y;
+
+void wm_set_snap_drag_threshold(int px) {
+    if (px < 1) px = 1;
+    if (px > 256) px = 256;
+    g_snap_drag_threshold = px;
+}
+int wm_get_snap_drag_threshold(void) { return g_snap_drag_threshold; }
+
+void wm_set_snap_animation_ms(int ms) {
+    if (ms < 30)   ms = 30;
+    if (ms > 2000) ms = 2000;
+    g_snap_animation_ms = ms;
+}
+int wm_get_snap_animation_ms(void) { return g_snap_animation_ms; }
+
+/* Map snap_animation_ms to spring constants. Shorter ms -> stiffer spring.
+ * Default 180ms ≈ INTERACTIVE preset. */
+static void snap_spring_constants(float *stiff, float *damp) {
+    /* Stiffness scales inversely with target time. SPRING_INTERACTIVE_S
+     * (400) settles in ~180ms. Below 100ms, push to a snappier preset. */
+    if (g_snap_animation_ms <= 120) {
+        *stiff = 600.0f; *damp = 32.0f;
+    } else if (g_snap_animation_ms <= 240) {
+        *stiff = SPRING_INTERACTIVE_S; *damp = SPRING_INTERACTIVE_D;
+    } else {
+        *stiff = SPRING_SNAPPY_S; *damp = SPRING_SNAPPY_D;
+    }
+}
 
 /* ── Helpers ── */
 
@@ -342,54 +382,194 @@ void wm_resize_surface(int id, int w, int h) {
 
 /* ── Snap / tile ── */
 
+/* Multi-display awareness:
+ * Displays are laid out horizontally (display 0 at x=0, then display 1
+ * at x=screen_w0, etc.). For now, all queried displays share width
+ * g_wm.screen_w (the WM's logical screen). This still gives us a
+ * meaningful "which display does the window center live in?" answer
+ * for kernels with one scanout (idx always 0), and a tile-able layout
+ * for the multi-scanout case. */
+
+static int wm_display_count_safe(void) {
+    extern int gpu_virtio_display_count(void);
+    int n = gpu_virtio_display_count();
+    return n > 0 ? n : 1;
+}
+
+/* Returns origin x and width for a display index. */
+static void wm_display_geom(int idx, int *out_x, int *out_w) {
+    int dn = wm_display_count_safe();
+    if (idx < 0)         idx = 0;
+    if (idx >= dn)       idx = dn - 1;
+    *out_x = idx * g_wm.screen_w;
+    *out_w = g_wm.screen_w;
+}
+
+/* Which display contains the surface's center? */
+static int wm_display_for_surface(chain_surface_t *s) {
+    int cx = s->x + s->w / 2;
+    int dn = wm_display_count_safe();
+    int sw = g_wm.screen_w;
+    int idx = (sw > 0) ? (cx / sw) : 0;
+    if (idx < 0)   idx = 0;
+    if (idx >= dn) idx = dn - 1;
+    return idx;
+}
+
+/* Compute target geometry for a snap kind, scoped to the display the
+ * surface is currently on. */
+static void wm_compute_snap_target(chain_surface_t *s, snap_kind_t kind,
+                                    int *tx, int *ty, int *tw, int *th)
+{
+    int disp = wm_display_for_surface(s);
+    int dx, dw;
+    wm_display_geom(disp, &dx, &dw);
+
+    int top = g_wm.panel_h;
+    int avail_h = g_wm.screen_h - top;
+    int half_w = dw / 2;
+    int half_h = avail_h / 2;
+    int two_thirds_w = (dw * 2) / 3;
+
+    *tx = s->x; *ty = s->y; *tw = s->w; *th = s->h;
+
+    switch (kind) {
+    case SURFACE_SNAPPED_LEFT:
+        *tx = dx; *ty = top; *tw = half_w; *th = avail_h; break;
+    case SURFACE_SNAPPED_RIGHT:
+        *tx = dx + dw - half_w; *ty = top; *tw = half_w; *th = avail_h; break;
+    case SURFACE_SNAPPED_LEFT_2_3:
+        *tx = dx; *ty = top; *tw = two_thirds_w; *th = avail_h; break;
+    case SURFACE_SNAPPED_RIGHT_2_3:
+        *tx = dx + dw - two_thirds_w; *ty = top;
+        *tw = two_thirds_w; *th = avail_h; break;
+    case SURFACE_SNAPPED_TL:
+        *tx = dx; *ty = top; *tw = half_w; *th = half_h; break;
+    case SURFACE_SNAPPED_TR:
+        *tx = dx + dw - half_w; *ty = top;
+        *tw = half_w; *th = half_h; break;
+    case SURFACE_SNAPPED_BL:
+        *tx = dx; *ty = top + half_h; *tw = half_w; *th = half_h; break;
+    case SURFACE_SNAPPED_BR:
+        *tx = dx + dw - half_w; *ty = top + half_h;
+        *tw = half_w; *th = half_h; break;
+    case SURFACE_MAXIMIZED:
+        *tx = dx; *ty = top; *tw = dw; *th = avail_h; break;
+    default:
+        /* Unsnap — restore saved */
+        *tx = s->saved_x; *ty = s->saved_y;
+        *tw = s->saved_w; *th = s->saved_h; break;
+    }
+}
+
 void wm_snap_surface(int id, surface_state_t snap) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;
 
-    /* Save current geometry for unsnap */
+    /* Save current geometry for unsnap (only on transition out of NORMAL) */
     if (s->state == SURFACE_NORMAL) {
         s->saved_x = s->x; s->saved_y = s->y;
         s->saved_w = s->w; s->saved_h = s->h;
     }
 
-    int top = g_wm.panel_h;
-    int avail_h = g_wm.screen_h - top;
-    int half_w = g_wm.screen_w / 2;
-    int half_h = avail_h / 2;
-
-    int tx = s->x, ty = s->y, tw = s->w, th = s->h;
-
-    switch (snap) {
-    case SURFACE_SNAPPED_LEFT:
-        tx = 0; ty = top; tw = half_w; th = avail_h; break;
-    case SURFACE_SNAPPED_RIGHT:
-        tx = half_w; ty = top; tw = half_w; th = avail_h; break;
-    case SURFACE_SNAPPED_TL:
-        tx = 0; ty = top; tw = half_w; th = half_h; break;
-    case SURFACE_SNAPPED_TR:
-        tx = half_w; ty = top; tw = half_w; th = half_h; break;
-    case SURFACE_SNAPPED_BL:
-        tx = 0; ty = top + half_h; tw = half_w; th = half_h; break;
-    case SURFACE_SNAPPED_BR:
-        tx = half_w; ty = top + half_h; tw = half_w; th = half_h; break;
-    case SURFACE_MAXIMIZED:
-        tx = 0; ty = top; tw = g_wm.screen_w; th = avail_h; break;
-    default:
-        /* Unsnap — restore saved */
-        tx = s->saved_x; ty = s->saved_y;
-        tw = s->saved_w; th = s->saved_h;
-        snap = SURFACE_NORMAL;
-        break;
+    int tx, ty, tw, th;
+    snap_kind_t kind = snap;
+    if (kind != SURFACE_NORMAL && kind != SURFACE_MAXIMIZED &&
+        kind != SURFACE_SNAPPED_LEFT && kind != SURFACE_SNAPPED_RIGHT &&
+        kind != SURFACE_SNAPPED_LEFT_2_3 && kind != SURFACE_SNAPPED_RIGHT_2_3 &&
+        kind != SURFACE_SNAPPED_TL && kind != SURFACE_SNAPPED_TR &&
+        kind != SURFACE_SNAPPED_BL && kind != SURFACE_SNAPPED_BR)
+    {
+        kind = SURFACE_NORMAL;
     }
+    wm_compute_snap_target(s, kind, &tx, &ty, &tw, &th);
 
     /* Set final geometry (hit-testing uses these) */
     s->x = tx; s->y = ty; s->w = tw; s->h = th;
 
-    /* Spring-animate from current rendered position to target */
-    spring_geom_to(s, tx, ty, tw, th,
-                    SPRING_INTERACTIVE_S, SPRING_INTERACTIVE_D);
+    float stiff, damp;
+    snap_spring_constants(&stiff, &damp);
+    spring_geom_to(s, tx, ty, tw, th, stiff, damp);
 
-    s->state = snap;
+    s->state = kind;
+}
+
+/* Public canonical entry — same behavior, named per spec. */
+void wm_snap(int window_id, snap_kind_t kind) {
+    wm_snap_surface(window_id, kind);
+}
+
+/* Cycle: NORMAL -> LEFT half -> LEFT 2/3 -> NORMAL (restore). */
+void wm_snap_cycle_left(int window_id) {
+    chain_surface_t *s = find_surface(window_id);
+    if (!s) return;
+    snap_kind_t next;
+    switch (s->state) {
+    case SURFACE_SNAPPED_LEFT:        next = SURFACE_SNAPPED_LEFT_2_3; break;
+    case SURFACE_SNAPPED_LEFT_2_3:    next = SURFACE_NORMAL;           break;
+    default:                          next = SURFACE_SNAPPED_LEFT;     break;
+    }
+    wm_snap_surface(window_id, next);
+}
+
+void wm_snap_cycle_right(int window_id) {
+    chain_surface_t *s = find_surface(window_id);
+    if (!s) return;
+    snap_kind_t next;
+    switch (s->state) {
+    case SURFACE_SNAPPED_RIGHT:       next = SURFACE_SNAPPED_RIGHT_2_3; break;
+    case SURFACE_SNAPPED_RIGHT_2_3:   next = SURFACE_NORMAL;            break;
+    default:                          next = SURFACE_SNAPPED_RIGHT;     break;
+    }
+    wm_snap_surface(window_id, next);
+}
+
+void wm_move_to_next_display(int window_id) {
+    chain_surface_t *s = find_surface(window_id);
+    if (!s) return;
+    int dn = wm_display_count_safe();
+    if (dn <= 1) return;  /* no other display */
+
+    int cur = wm_display_for_surface(s);
+    int nxt = (cur + 1) % dn;
+
+    int cur_x, cur_w, nxt_x, nxt_w;
+    wm_display_geom(cur, &cur_x, &cur_w);
+    wm_display_geom(nxt, &nxt_x, &nxt_w);
+
+    /* Translate window's x by the inter-display delta. Saved geometry
+     * (for un-snap) follows so that restoring also lands on the new
+     * display. */
+    int dx = nxt_x - cur_x;
+    int tx = s->x + dx;
+    int ty = s->y;
+    int tw = s->w;
+    int th = s->h;
+
+    s->saved_x += dx;
+    s->x = tx; s->y = ty; s->w = tw; s->h = th;
+
+    float stiff, damp;
+    snap_spring_constants(&stiff, &damp);
+    spring_geom_to(s, tx, ty, tw, th, stiff, damp);
+}
+
+int wm_cancel_drag(void) {
+    int cancelled = 0;
+    for (int i = 0; i < g_wm.surface_count; i++) {
+        chain_surface_t *s = &g_wm.surfaces[i];
+        if (s->dragging) {
+            /* Restore window to drag-anchor position. */
+            s->x = g_drag_anchor_x;
+            s->y = g_drag_anchor_y;
+            s->anim_x = (float)s->x;
+            s->anim_y = (float)s->y;
+            s->dragging = 0;
+            cancelled = 1;
+        }
+    }
+    g_wm.ghost.active = 0;
+    return cancelled;
 }
 
 void wm_toggle_tiling(void) {
@@ -527,24 +707,78 @@ static int hit_resize_edge(chain_surface_t *s, int x, int y) {
     return edge;
 }
 
-/* Detect snap zone from cursor position */
+/* Detect snap zone from cursor position. Display-aware: zones are
+ * relative to the display containing the cursor. */
 static surface_state_t detect_snap_zone(int x, int y) {
     int top = g_wm.panel_h;
-    int sw = g_wm.screen_w;
     int sh = g_wm.screen_h;
+    int thr = g_snap_drag_threshold;
+    int dn = wm_display_count_safe();
+
+    /* Find display under cursor. */
+    int sw = g_wm.screen_w;
+    int disp = (sw > 0) ? (x / sw) : 0;
+    if (disp < 0)   disp = 0;
+    if (disp >= dn) disp = dn - 1;
+    int dx, dw;
+    wm_display_geom(disp, &dx, &dw);
+
+    int local_x = x - dx;
 
     /* Corners first (higher priority) */
-    if (x < WM_SNAP_ZONE && y < top + WM_SNAP_ZONE) return SURFACE_SNAPPED_TL;
-    if (x >= sw - WM_SNAP_ZONE && y < top + WM_SNAP_ZONE) return SURFACE_SNAPPED_TR;
-    if (x < WM_SNAP_ZONE && y >= sh - WM_SNAP_ZONE) return SURFACE_SNAPPED_BL;
-    if (x >= sw - WM_SNAP_ZONE && y >= sh - WM_SNAP_ZONE) return SURFACE_SNAPPED_BR;
+    if (local_x < thr && y < top + thr) return SURFACE_SNAPPED_TL;
+    if (local_x >= dw - thr && y < top + thr) return SURFACE_SNAPPED_TR;
+    if (local_x < thr && y >= sh - thr) return SURFACE_SNAPPED_BL;
+    if (local_x >= dw - thr && y >= sh - thr) return SURFACE_SNAPPED_BR;
 
     /* Edges */
-    if (x < WM_SNAP_ZONE) return SURFACE_SNAPPED_LEFT;
-    if (x >= sw - WM_SNAP_ZONE) return SURFACE_SNAPPED_RIGHT;
-    if (y < top + WM_SNAP_ZONE) return SURFACE_MAXIMIZED;
+    if (local_x < thr) return SURFACE_SNAPPED_LEFT;
+    if (local_x >= dw - thr) return SURFACE_SNAPPED_RIGHT;
+    if (y < top + thr) return SURFACE_MAXIMIZED;
 
     return SURFACE_NORMAL;  /* No snap */
+}
+
+/* Compute ghost rect for a snap kind under cursor x/y. */
+static void ghost_rect_for(int x, int y, surface_state_t kind,
+                            int *gx, int *gy, int *gw, int *gh)
+{
+    int top = g_wm.panel_h;
+    int avail_h = g_wm.screen_h - top;
+    int dn = wm_display_count_safe();
+    int sw = g_wm.screen_w;
+    int disp = (sw > 0) ? (x / sw) : 0;
+    if (disp < 0)   disp = 0;
+    if (disp >= dn) disp = dn - 1;
+    (void)y;
+
+    int dx, dw;
+    wm_display_geom(disp, &dx, &dw);
+    int half_w = dw / 2;
+    int half_h = avail_h / 2;
+
+    *gx = dx; *gy = top; *gw = dw; *gh = avail_h;
+    switch (kind) {
+    case SURFACE_SNAPPED_LEFT:
+        *gx = dx; *gy = top; *gw = half_w; *gh = avail_h; break;
+    case SURFACE_SNAPPED_RIGHT:
+        *gx = dx + dw - half_w; *gy = top;
+        *gw = half_w; *gh = avail_h; break;
+    case SURFACE_SNAPPED_TL:
+        *gx = dx; *gy = top; *gw = half_w; *gh = half_h; break;
+    case SURFACE_SNAPPED_TR:
+        *gx = dx + dw - half_w; *gy = top;
+        *gw = half_w; *gh = half_h; break;
+    case SURFACE_SNAPPED_BL:
+        *gx = dx; *gy = top + half_h;
+        *gw = half_w; *gh = half_h; break;
+    case SURFACE_SNAPPED_BR:
+        *gx = dx + dw - half_w; *gy = top + half_h;
+        *gw = half_w; *gh = half_h; break;
+    case SURFACE_MAXIMIZED:
+        *gx = dx; *gy = top; *gw = dw; *gh = avail_h; break;
+    default: break;
+    }
 }
 
 void wm_mouse_down(int x, int y, int button) {
@@ -583,6 +817,9 @@ void wm_mouse_down(int x, int y, int button) {
         s->dragging = 1;
         s->drag_offset_x = x - s->x;
         s->drag_offset_y = y - s->y;
+        /* Anchor for Escape-cancel. */
+        g_drag_anchor_x = s->x;
+        g_drag_anchor_y = s->y;
 
         /* Unsnap if dragging a snapped window — spring resize back */
         if (s->state != SURFACE_NORMAL && s->state != SURFACE_TILED) {
@@ -645,41 +882,14 @@ void wm_mouse_move(int x, int y) {
             s->anim_x = (float)s->x;
             s->anim_y = (float)s->y;
 
-            /* Update snap ghost */
+            /* Update snap ghost (display-aware via ghost_rect_for). */
             surface_state_t snap = detect_snap_zone(x, y);
             if (snap != SURFACE_NORMAL) {
                 g_wm.ghost.active = 1;
                 g_wm.ghost.target_state = snap;
-
-                int top = g_wm.panel_h;
-                int avail_h = g_wm.screen_h - top;
-                int half_w = g_wm.screen_w / 2;
-                int half_h = avail_h / 2;
-
-                switch (snap) {
-                case SURFACE_SNAPPED_LEFT:
-                    g_wm.ghost.x = 0; g_wm.ghost.y = top;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = avail_h; break;
-                case SURFACE_SNAPPED_RIGHT:
-                    g_wm.ghost.x = half_w; g_wm.ghost.y = top;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = avail_h; break;
-                case SURFACE_SNAPPED_TL:
-                    g_wm.ghost.x = 0; g_wm.ghost.y = top;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = half_h; break;
-                case SURFACE_SNAPPED_TR:
-                    g_wm.ghost.x = half_w; g_wm.ghost.y = top;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = half_h; break;
-                case SURFACE_SNAPPED_BL:
-                    g_wm.ghost.x = 0; g_wm.ghost.y = top + half_h;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = half_h; break;
-                case SURFACE_SNAPPED_BR:
-                    g_wm.ghost.x = half_w; g_wm.ghost.y = top + half_h;
-                    g_wm.ghost.w = half_w; g_wm.ghost.h = half_h; break;
-                case SURFACE_MAXIMIZED:
-                    g_wm.ghost.x = 0; g_wm.ghost.y = top;
-                    g_wm.ghost.w = g_wm.screen_w; g_wm.ghost.h = avail_h; break;
-                default: g_wm.ghost.active = 0; break;
-                }
+                ghost_rect_for(x, y, snap,
+                               &g_wm.ghost.x, &g_wm.ghost.y,
+                               &g_wm.ghost.w, &g_wm.ghost.h);
             } else {
                 g_wm.ghost.active = 0;
             }
@@ -810,8 +1020,8 @@ void wm_draw_all(void) {
     /* Sort by z-index (lowest first = painted first) */
     sort_by_z(visible, vis_count);
 
-    /* Draw snap ghost behind everything */
-    wm_draw_ghost();
+    /* NOTE: Snap ghost is drawn by the compositor between notify_draw
+     * and context_menu_draw so it sits above windows during drag. */
 
     /* Draw each surface (with spring-animated scale, opacity, geometry) */
     for (int v = 0; v < vis_count; v++) {

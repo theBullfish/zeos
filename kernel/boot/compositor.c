@@ -209,6 +209,10 @@ void compositor_frame(void) {
     if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
         notify_tick();
         notify_draw();
+        /* Layer 4b.5: WM snap ghost overlay — drawn AFTER notify_draw
+         * (so it sits above windows + toasts during drag) and BEFORE
+         * context_menu so a right-click menu still wins z-order. */
+        wm_draw_ghost();
         /* Layer 4c: UI overlays (context menu, quick look, dirty modal).
          * Drawn after notifications so a modal sits above a stale toast. */
         context_menu_draw();

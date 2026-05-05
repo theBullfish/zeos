@@ -28,14 +28,17 @@ typedef enum {
     ACTION_NONE = 0,
 
     /* Window management */
-    ACTION_SNAP_LEFT,           /* Super + Left       */
-    ACTION_SNAP_RIGHT,          /* Super + Right      */
+    ACTION_SNAP_LEFT,           /* Super + Left  (cycle: half -> 2/3 -> restore) */
+    ACTION_SNAP_RIGHT,          /* Super + Right (cycle: half -> 2/3 -> restore) */
     ACTION_MAXIMIZE,            /* Super + Up         */
-    ACTION_MINIMIZE,            /* Super + Down       */
-    ACTION_SNAP_TL,             /* Super + 1          */
-    ACTION_SNAP_TR,             /* Super + 2          */
-    ACTION_SNAP_BL,             /* Super + 3          */
-    ACTION_SNAP_BR,             /* Super + 4          */
+    ACTION_RESTORE,             /* Super + Down  (un-maximize / un-snap)        */
+    ACTION_MINIMIZE,            /* (no default binding — kept for palette use)  */
+    ACTION_SNAP_TL,             /* Super + 1, Super + Shift + Left */
+    ACTION_SNAP_TR,             /* Super + 2, Super + Shift + Right */
+    ACTION_SNAP_BL,             /* Super + 3 */
+    ACTION_SNAP_BR,             /* Super + 4 */
+    ACTION_MOVE_TO_NEXT_DISPLAY,/* Super + Shift + Down */
+    ACTION_CANCEL_DRAG,         /* Escape — cancel an in-progress window drag */
     ACTION_TOGGLE_TILING,       /* Super + T          */
     ACTION_CLOSE_SURFACE,       /* Super + W (detach) */
     ACTION_CYCLE_SURFACE,       /* Alt + Tab          */
