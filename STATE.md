@@ -134,8 +134,20 @@ session. Three sections, that's it.
   `programs/demos/two_speeds.zp` run end-to-end (5 ticks → 5
   emissions; 6 ticks → 9 emissions across two rates).
 
-  All three corpus ratchets (merge arity, Flow connectivity, named-arg
-  types) stay at zero. **138 tests green** (110 unit + 28 integration).
+- **Runtime v1.5: two independent time knobs (commit `4a41139`).**
+  `RuntimeConfig::ticks_per_real_second` (wall-clock pacing) and
+  `RuntimeConfig::simulated_ms_per_tick` (what a tick *means* in
+  simulated time) are independent. Default config: unbounded real
+  pacing, 1000 ms/tick (one tick = one simulated second).
+  `tick(rate: 5s)` converts to ticks via the config —
+  `duration_to_ticks(5, S)` returns 5 at default, 1 at compressed
+  (60000 ms/tick = 1 simulated minute per tick). New
+  `programs/demos/time_machine.zp` demonstrates compressed-time
+  simulation. CLI: `zplus-run ... --ms-per-tick 60000`.
+
+  All three corpus ratchets (merge arity, Flow connectivity,
+  named-arg types) stay at zero. **143 tests green** (115 unit +
+  28 integration).
 
 - Measurement spec open questions resolved (commit `f4ad27b`).
   Per-window aggregation default (5min) with per-event for chord-
@@ -210,20 +222,26 @@ session. Three sections, that's it.
   args today. Add a `positional: Vec<Type>` to the side-table and
   walk Positional args by index.
 
-- **Runtime v2.** v1 runs heartbeats and merges. Next:
-  - Wall-clock time. `tick(rate: 1m)` should fire once per minute,
-    not once per step. Either real-time mode (sleep between steps)
-    or simulated-time mode (advance by configurable dt).
-  - Forks. AST has them; runtime is a no-op. Wire each branch's body
-    against the upstream value.
-  - Real merge timing windows. `Within(30s)` should buffer inputs
-    in a sliding window and resolve when the window's complete.
-  - Real semantics for the identity-stub transformers (`delta`,
-    `rate`, `baseline`, etc.). Each has a SEMANTIC_CONTRACTS.md
-    contract; the runtime should implement it.
-  - File / network I/O. `fs("...")` should actually read a file;
+- **Runtime v2.** v1 + v1.5 cover ticks, time-as-derived, merges,
+  taps, sinks. Next:
+  - **Real-time pacing.** `RuntimeConfig::ticks_per_real_second` is
+    captured but the runtime doesn't sleep yet. Implement
+    sleep-to-pace mode for hardware-bound demos.
+  - **Forks.** AST has them; runtime is a no-op. Wire each branch's
+    body against the upstream value, run all branches per tick.
+  - **Real merge timing windows.** `Within(30s)` should buffer
+    inputs in a sliding window and resolve when the window completes.
+    Currently falls back to All.
+  - **Real semantics for identity-stub transformers** (`delta`,
+    `rate`, `baseline`, `deviation`, `decay`, `normalize`). Each has
+    a SEMANTIC_CONTRACTS.md contract; the runtime should implement
+    it. `delta` needs to remember the previous value; `rate` needs a
+    sliding window; `baseline` needs a long-window mean; `decay`
+    needs an exponential filter.
+  - **File / network I/O.** `fs("...")` should actually read a file;
     `net.listen(...)` should actually bind a port (in test mode at
-    least).
+    least). For the test runner per `OPT_IN_TEST_REPORTING.md`, an
+    in-memory file source would be enough.
 
 - **IR / `.zpc` bytecode.** Once the runtime is feature-complete
   enough to be useful, the next step is a serialized form so chains
