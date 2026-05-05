@@ -23,4 +23,4 @@ pub use check::{
 };
 pub use lex::{lex, Lexer, Token, TokenKind};
 pub use parse::{parse, ParseError};
-pub use runtime::{Emission, Runtime, RuntimeError, Value};
+pub use runtime::{Emission, Runtime, RuntimeConfig, RuntimeError, Value};

@@ -4,6 +4,33 @@
 //! codegen, no LLVM. Walks the AST, advances a tick counter, propagates
 //! emissions through Flow / Tap / Merge nodes, fires sinks.
 //!
+//! ## Time model — two independent knobs
+//!
+//! Ticks are atomic. Time is derived. Two configs control time
+//! independently:
+//!
+//! 1. **`ticks_per_real_second: Option<u64>`** — how fast the runtime
+//!    ticks against wall-clock. `None` (default) = unbounded; the
+//!    runtime steps as fast as it can. `Some(60)` = real-time mode at
+//!    60 Hz (sleeps between ticks to match — not yet implemented in
+//!    v1; recorded in the config so callers can opt in).
+//!
+//! 2. **`simulated_ms_per_tick: u64`** — what a tick *means* in
+//!    simulated time. Default 1000 (one tick = one simulated second).
+//!    Decrease to 1 for ms-resolution simulation; increase to 60000
+//!    for minute-per-tick compressed simulation. Slowing or speeding
+//!    this knob "changes our relationship to ticks" without changing
+//!    how fast they fire.
+//!
+//! Together they let the runtime do four useful things:
+//!
+//! | mode                 | real_per_sec | sim_ms_per_tick | use case |
+//! |----------------------|--------------|-----------------|----------|
+//! | as-fast-as-possible  | None         | 1000            | tests, simulation |
+//! | real-time            | Some(1000)   | 1               | hardware-bound demo |
+//! | accelerated sim      | None         | 60000           | days-in-seconds replay |
+//! | step-debug           | Some(0)      | any             | manually advance tick |
+//!
 //! ## Execution model
 //!
 //! Time is discrete ticks. Each `step()` advances one tick. On each tick:
@@ -51,7 +78,42 @@
 
 use std::collections::HashMap;
 
-use crate::ast::*;
+use crate::ast::{self, *};
+
+/// Runtime time configuration. See module docstring for the two-knob model.
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeConfig {
+    /// Wall-clock ticks per real second. `None` = unbounded (run as
+    /// fast as possible). v1 records this but doesn't yet sleep — the
+    /// stepper runs as fast as the call site lets it.
+    pub ticks_per_real_second: Option<u64>,
+    /// Simulated milliseconds advanced per tick. Default 1000 means
+    /// "one tick = one simulated second." A duration like `5m` maps
+    /// to `5 * 60_000 / sim_ms_per_tick` ticks.
+    pub simulated_ms_per_tick: u64,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self { ticks_per_real_second: None, simulated_ms_per_tick: 1000 }
+    }
+}
+
+impl RuntimeConfig {
+    /// Convert a duration (value, unit) to a number of ticks at this
+    /// config's mapping. Always at least 1.
+    pub fn duration_to_ticks(&self, value: f64, unit: ast::DurationUnit) -> u64 {
+        let ms = match unit {
+            ast::DurationUnit::Ms => value,
+            ast::DurationUnit::S => value * 1000.0,
+            ast::DurationUnit::M => value * 60_000.0,
+            ast::DurationUnit::H => value * 3_600_000.0,
+            ast::DurationUnit::D => value * 86_400_000.0,
+        };
+        let ticks = ms / self.simulated_ms_per_tick.max(1) as f64;
+        (ticks.round() as u64).max(1)
+    }
+}
 
 /// A value carried on a wire at a moment in time.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +123,9 @@ pub enum Value {
     Str(String),
     Tick(u64),
     Bool(bool),
+    /// Duration value with its unit preserved — needed so the runtime
+    /// can convert to ticks via `RuntimeConfig::duration_to_ticks`.
+    Duration { value: f64, unit: ast::DurationUnit },
     Unit,
 }
 
@@ -72,6 +137,7 @@ impl std::fmt::Display for Value {
             Value::Str(s) => write!(f, "{}", s),
             Value::Tick(t) => write!(f, "tick({})", t),
             Value::Bool(b) => write!(f, "{}", b),
+            Value::Duration { value, unit } => write!(f, "{}{}", value, unit),
             Value::Unit => write!(f, "()"),
         }
     }
@@ -102,6 +168,9 @@ impl std::error::Error for RuntimeError {}
 
 pub struct Runtime<'src> {
     module: Module<'src>,
+    /// Time / tick configuration — the two-knob model from the module
+    /// docstring.
+    pub config: RuntimeConfig,
     /// Current tick number. Starts at 0; first `step()` advances to 1.
     pub tick: u64,
     /// Named-wire state: last emission per named wire. `None` if the
@@ -116,13 +185,23 @@ pub struct Runtime<'src> {
 
 impl<'src> Runtime<'src> {
     pub fn new(module: Module<'src>) -> Self {
+        Self::with_config(module, RuntimeConfig::default())
+    }
+
+    pub fn with_config(module: Module<'src>, config: RuntimeConfig) -> Self {
         Self {
             module,
+            config,
             tick: 0,
             wires: HashMap::new(),
             merge_pending: HashMap::new(),
             emissions: Vec::new(),
         }
+    }
+
+    /// Current simulated time in milliseconds — `tick * sim_ms_per_tick`.
+    pub fn simulated_time_ms(&self) -> u64 {
+        self.tick.saturating_mul(self.config.simulated_ms_per_tick)
     }
 
     /// Run `steps` ticks. Returns all emissions in tick order.
@@ -259,20 +338,26 @@ impl<'src> Runtime<'src> {
         match name.as_str() {
             // ── sources ────────────────────────
             "tick" => {
-                // tick(rate: N) — emit Tick(self.tick) every N ticks.
-                // For now, accept any duration as "every step" since
-                // v1 doesn't model wall-clock.
+                // tick(rate: ...) — fire every N ticks where N is
+                // determined by the rate value:
+                //   Int N        → every N ticks (literal count)
+                //   Duration D   → every duration_to_ticks(D) ticks
+                //                  (config-dependent: see RuntimeConfig)
+                //   anything else → every tick
                 let rate = call.args.iter().find_map(|a| match a {
                     Arg::Named { name, value, .. } if name.text == "rate" => {
                         eval_simple(value)
                     }
                     _ => None,
                 });
-                let rate_n = match rate {
+                let period = match rate {
                     Some(Value::Int(n)) if n > 0 => n as u64,
+                    Some(Value::Duration { value, unit }) => {
+                        self.config.duration_to_ticks(value, unit)
+                    }
                     _ => 1,
                 };
-                if self.tick % rate_n == 0 {
+                if self.tick % period.max(1) == 0 {
                     Ok(Some(Value::Tick(self.tick)))
                 } else {
                     Ok(None)
@@ -444,7 +529,7 @@ fn literal_to_value(lit: &Literal<'_>) -> Value {
         Literal::Float(x, _) => Value::Float(*x),
         Literal::String(s, _) => Value::Str(strip_quotes(s).into()),
         Literal::TemplateString(s, _) => Value::Str(strip_quotes(s).into()),
-        Literal::Duration { value, .. } => Value::Float(*value),
+        Literal::Duration { value, unit, .. } => Value::Duration { value: *value, unit: *unit },
         Literal::Ratio(x, _) => Value::Float(*x),
         Literal::Sigma(x, _) => Value::Float(*x),
         Literal::Percent(x, _) => Value::Float(*x),
@@ -628,5 +713,68 @@ mod tests {
     fn binop_lt_returns_bool() {
         let r = eval_binop(BinOp::Lt, Some(Value::Int(3)), Some(Value::Int(5)));
         assert_eq!(r, Some(Value::Bool(true)));
+    }
+
+    // ── time / config ────────────────────────────────────────────
+
+    #[test]
+    fn duration_to_ticks_default_config() {
+        let cfg = RuntimeConfig::default(); // 1000 ms/tick
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::S), 1);
+        assert_eq!(cfg.duration_to_ticks(5.0, ast::DurationUnit::S), 5);
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::M), 60);
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::H), 3600);
+        // ms < ms_per_tick rounds up to 1.
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::Ms), 1);
+    }
+
+    #[test]
+    fn duration_to_ticks_compressed_config() {
+        // 1 tick = 1 simulated minute.
+        let cfg = RuntimeConfig {
+            ticks_per_real_second: None,
+            simulated_ms_per_tick: 60_000,
+        };
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::M), 1);
+        assert_eq!(cfg.duration_to_ticks(5.0, ast::DurationUnit::M), 5);
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::H), 60);
+        // Sub-minute durations all collapse to 1 tick.
+        assert_eq!(cfg.duration_to_ticks(1.0, ast::DurationUnit::S), 1);
+    }
+
+    #[test]
+    fn tick_with_duration_rate_default_config() {
+        // tick(rate: 5s) at default (1 tick = 1 sec) fires on tick 5, 10, ...
+        let src = "slow : tick(rate: 5s) -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        let emissions = rt.run(15).expect("run");
+        let ticks: Vec<u64> = emissions.iter().map(|e| e.tick).collect();
+        assert_eq!(ticks, vec![5, 10, 15]);
+    }
+
+    #[test]
+    fn tick_with_duration_rate_compressed_config() {
+        // tick(rate: 5s) at 1 tick = 1 min: 5s rounds to 1 tick → fires every tick.
+        let src = "fast : tick(rate: 5s) -> print";
+        let module = parse(src).expect("parse");
+        let cfg = RuntimeConfig {
+            ticks_per_real_second: None,
+            simulated_ms_per_tick: 60_000,
+        };
+        let mut rt = Runtime::with_config(module, cfg);
+        let emissions = rt.run(3).expect("run");
+        assert_eq!(emissions.len(), 3);
+    }
+
+    #[test]
+    fn simulated_time_advances_per_tick() {
+        let module = parse("").expect("parse");
+        let mut rt = Runtime::new(module);
+        assert_eq!(rt.simulated_time_ms(), 0);
+        rt.step().expect("step");
+        assert_eq!(rt.simulated_time_ms(), 1000); // 1 tick * 1000 ms/tick
+        rt.step().expect("step");
+        assert_eq!(rt.simulated_time_ms(), 2000);
     }
 }
