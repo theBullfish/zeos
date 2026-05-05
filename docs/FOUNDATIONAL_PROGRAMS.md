@@ -383,7 +383,7 @@ These don't exist yet. Zeos needs them.
 ## Conversion Strategy
 
 ### Phase 1: Boot & Build (P0)
-Get the POSIX compat layer running. Python, git, bash, SSH, curl work. Devs can log in and do familiar things. Z+ compiler produces first `.zp` → kernel native output. VAULT stores first data. zeos-pkg installs first `.zdx`.
+Get the POSIX compat layer running per **§12** — the P0 components there (ELF loader, dynamic linker, syscall translator, vDSO, FHS layout, glibc, /proc, /dev, fds, pthread/futex, signals, PTYs, BSD sockets, DNS resolver) are the Phase 1 work. Once they ship: Python, git, bash, SSH, curl run unmodified. Devs can log in and do familiar things. Z+ compiler produces first `.zp` → kernel native output. VAULT stores first data. zeos-pkg installs first `.zdx`.
 
 ### Phase 2: AI Workflow (P0-P1)
 PyTorch MDE backend. `torch.device("mde")` routes to Goya/FPGA/Coral through the signal graph. Jupyter gets a Z+ kernel. Hugging Face models load and run. This is where AI devs see the speed and get curious.
@@ -395,7 +395,7 @@ zeos-debug, zeos-vc, VS Code extension, Z+ LSP. The native toolchain becomes pro
 ONNX-to-signal-chain compiler. Native Arrow/Parquet readers. CFA-based isolation replaces containers for native workloads. Zixel telemetry exports to Grafana. MasQ replaces MLflow.
 
 ### Phase 5: Full Native (P2-P3)
-Everything that wants to go native can. Compat layer is still there but fewer devs need it. Zeos-native apps outperform compat equivalents because they speak signal graph natively.
+Everything that wants to go native can. Compat layer (§12) is still there but fewer devs reach for it; the §12.6 guest-VM escape hatch handles the long tail (kernel modules, eBPF, the rare program that won't fit the translator). Zeos-native apps outperform compat equivalents because they speak signal graph natively.
 
 ---
 
