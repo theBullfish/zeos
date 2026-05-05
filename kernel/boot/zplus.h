@@ -273,4 +273,80 @@ int  zp_array_push_str(int arr_handle, int str_handle);
 int  zp_array_len(int arr_handle);
 int  zp_array_get_str(int arr_handle, int idx);
 
+/* ── Pass 2: modules + import ─────────────────────────────────────────
+ *
+ * A module is a .zp file (or kernel-builtin source). Top-level chain,
+ * struct, and verb declarations from a module become module-scoped.
+ * `import path [as alias]` makes them visible in the importing program
+ * via `alias.symbol` references.
+ *
+ * Resolution rules for `import x.y`:
+ *   1. exact builtin name match (e.g. "std.math") — highest priority.
+ *   2. filesystem path /programs/x/y.zp via vault_read.
+ *   3. literal path import (`/programs/lib/foo.zp` or `./foo`) — vault_read.
+ *
+ * A module marked `private chain inner { ... }` is NOT exported. Outside
+ * lookup of `alias.inner` produces a parse error.
+ *
+ * Circular imports are detected via the load stack and rejected.
+ *
+ * Modules are interned by canonical path: re-importing the same file is
+ * idempotent (refcount bump only).
+ */
+
+#define ZP_MAX_MODULES        16
+#define ZP_MAX_MODULE_PATH    96
+#define ZP_MAX_MODULE_ALIAS   32
+#define ZP_MAX_MODULE_CHAINS  16
+#define ZP_MAX_MODULE_IMPORTS 16
+
+/* A single chain template inside a module.  Mirrors zp_chain_def's per-step
+ * verb capture but stripped to what we need to expand at a call site. */
+struct zp_module_chain {
+    char    name[ZP_MAX_NAME];
+    int     is_private;            /* 1 => not exported across import */
+    int     node_count;
+    char    node_names[ZP_MAX_CHAIN_NODES][ZP_MAX_NAME];
+    struct zp_node_decl decls[ZP_MAX_CHAIN_NODES];
+    uint8_t have_decl[ZP_MAX_CHAIN_NODES];
+};
+
+/* A loaded module. */
+struct zp_module {
+    int     in_use;
+    int     refcount;
+    char    path[ZP_MAX_MODULE_PATH]; /* canonical key */
+    int     chain_count;
+    struct zp_module_chain chains[ZP_MAX_MODULE_CHAINS];
+};
+
+/* Initialize the module table. Idempotent. */
+void zp_modules_init(void);
+
+/* Register a kernel-builtin module under a path (used at boot to ship
+ * std.* without filesystem support). Returns slot index or -1. Re-
+ * registering the same path replaces in place (does not bump refcount). */
+int  zp_module_register_builtin(const char *path, const char *source);
+
+/* Load (parse + cache) a module by path.
+ *  - If already loaded, returns existing slot, bumps refcount.
+ *  - If a builtin with the same path is registered, returns that slot.
+ *  - Otherwise tries vault_read(path, ...) and parses the result.
+ * Returns slot index on success, -1 on parse error or not-found.
+ *
+ * Cycle detection: if `path` is already in the active load stack, the
+ * call returns -1 ("circular import").
+ */
+int  zp_module_load(const char *path);
+
+/* Look up a chain in a module by name. Returns pointer or NULL if missing
+ * or private (when `from_outside` is non-zero, private chains return NULL). */
+const struct zp_module_chain *zp_module_find_chain(int module_slot,
+                                                    const char *chain_name,
+                                                    int from_outside);
+
+/* Counts for selftest. */
+int  zp_module_count(void);
+int  zp_module_imports_resolved(void);
+
 #endif /* ZEOS_ZPLUS_H */

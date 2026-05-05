@@ -1,0 +1,17 @@
+// 52_module_demo.zp — Pass 2 — modules + import.
+//
+// Imports a sibling module, aliases it, and references its exported
+// chains as steps inside a parent chain. Each `math.double` /
+// `math.triple` reference inlines the module's chain content at the
+// call site.
+//
+// Expected tap.log:
+//   14   (= 7 * 2 via math.double)
+//    9   (= 3 * 3 via math.triple)
+
+import lib.math_helpers as math
+
+chain demo {
+  in : emit(7) -> math.double -> tap.log
+  bn : emit(3) -> math.triple -> tap.log
+}

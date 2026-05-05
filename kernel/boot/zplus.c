@@ -348,6 +348,264 @@ int zp_array_get_str(int arr_handle, int idx)
     return g_array_pool[arr_handle].elems[idx];
 }
 
+/* ── Pass 2: module table (definitions) ─────────────────────────────
+ *
+ * Forward declarations so the module loader can call the parser, which
+ * is defined later in the file.  Implementations live after parse_line
+ * (search for "Pass 2: module table — implementation").
+ */
+
+#include "vault.h"
+
+/* Builtin source registry — consulted before the filesystem so std.* can
+ * be shipped in the kernel image. */
+struct zp_module_builtin {
+    char        path[ZP_MAX_MODULE_PATH];
+    const char *source;
+    int         in_use;
+};
+static struct zp_module_builtin g_module_builtins[ZP_MAX_MODULES];
+
+static struct zp_module g_modules[ZP_MAX_MODULES];
+static int g_modules_initialized = 0;
+static int g_module_imports_resolved = 0;
+
+/* Load stack for circular-import detection. */
+static char g_module_load_stack[ZP_MAX_MODULES][ZP_MAX_MODULE_PATH];
+static int  g_module_load_stack_depth = 0;
+
+/* Kernel-shipped module sources (registered at zp_modules_init time so
+ * `import lib.math_helpers` works in QEMU without a vault file). The
+ * canonical import path uses dotted notation; zp_import_resolve_path
+ * expands it to /programs/lib/math_helpers.zp, which the builtin lookup
+ * matches first. */
+static const char zp_builtin_lib_math_helpers[] =
+    "// math_helpers — kernel-shipped Pass 2 demo module.\n"
+    "chain double {\n"
+    "  in : input -> * 2 -> output\n"
+    "}\n"
+    "chain triple {\n"
+    "  in : input -> * 3 -> output\n"
+    "}\n"
+    "private chain hidden {\n"
+    "  in : input -> + 1 -> output\n"
+    "}\n";
+
+void zp_modules_init(void)
+{
+    if (g_modules_initialized) return;
+    for (int i = 0; i < ZP_MAX_MODULES; i++) {
+        g_modules[i].in_use = 0;
+        g_modules[i].refcount = 0;
+        g_modules[i].path[0] = '\0';
+        g_modules[i].chain_count = 0;
+        g_module_builtins[i].in_use = 0;
+        g_module_builtins[i].path[0] = '\0';
+        g_module_builtins[i].source = 0;
+    }
+    g_module_load_stack_depth = 0;
+    g_module_imports_resolved = 0;
+    g_modules_initialized = 1;
+
+    /* Register kernel-shipped module sources. The path here MUST match
+     * what zp_import_resolve_path produces for the canonical import
+     * spelling so the builtin lookup short-circuits before vault. */
+    zp_module_register_builtin("/programs/lib/math_helpers.zp",
+                               zp_builtin_lib_math_helpers);
+}
+
+int zp_module_count(void)
+{
+    if (!g_modules_initialized) return 0;
+    int n = 0;
+    for (int i = 0; i < ZP_MAX_MODULES; i++)
+        if (g_modules[i].in_use) n++;
+    return n;
+}
+
+int zp_module_imports_resolved(void)
+{
+    if (!g_modules_initialized) return 0;
+    return g_module_imports_resolved;
+}
+
+static int zp_module_find_slot(const char *path)
+{
+    for (int i = 0; i < ZP_MAX_MODULES; i++) {
+        if (!g_modules[i].in_use) continue;
+        if (zp_streq(g_modules[i].path, path)) return i;
+    }
+    return -1;
+}
+
+static const char *zp_module_builtin_lookup(const char *path)
+{
+    for (int i = 0; i < ZP_MAX_MODULES; i++) {
+        if (!g_module_builtins[i].in_use) continue;
+        if (zp_streq(g_module_builtins[i].path, path))
+            return g_module_builtins[i].source;
+    }
+    return 0;
+}
+
+int zp_module_register_builtin(const char *path, const char *source)
+{
+    zp_modules_init();
+    if (!path || !source) return -1;
+    /* Replace if exists. */
+    int slot = -1;
+    for (int i = 0; i < ZP_MAX_MODULES; i++) {
+        if (g_module_builtins[i].in_use &&
+            zp_streq(g_module_builtins[i].path, path)) {
+            slot = i; break;
+        }
+    }
+    if (slot < 0) {
+        for (int i = 0; i < ZP_MAX_MODULES; i++) {
+            if (!g_module_builtins[i].in_use) { slot = i; break; }
+        }
+    }
+    if (slot < 0) return -1;
+    zp_strcpy(g_module_builtins[slot].path, path, ZP_MAX_MODULE_PATH);
+    g_module_builtins[slot].source = source;
+    g_module_builtins[slot].in_use = 1;
+    return slot;
+}
+
+static int zp_module_load_stack_contains(const char *path)
+{
+    for (int i = 0; i < g_module_load_stack_depth; i++) {
+        if (zp_streq(g_module_load_stack[i], path)) return 1;
+    }
+    return 0;
+}
+
+/* zp_module_parse_into and zp_module_load implementations live AFTER
+ * parse_line so the lexer/parser symbols resolve. */
+
+const struct zp_module_chain *zp_module_find_chain(int module_slot,
+                                                    const char *chain_name,
+                                                    int from_outside)
+{
+    if (module_slot < 0 || module_slot >= ZP_MAX_MODULES) return 0;
+    if (!g_modules[module_slot].in_use) return 0;
+    struct zp_module *m = &g_modules[module_slot];
+    for (int i = 0; i < m->chain_count; i++) {
+        if (!zp_streq(m->chains[i].name, chain_name)) continue;
+        if (from_outside && m->chains[i].is_private) return 0;
+        return &m->chains[i];
+    }
+    return 0;
+}
+
+/* ── Pass 2: import alias table for the program currently being parsed ──
+ *
+ * Stored as a parser-global so parse_line can resolve `alias.symbol`
+ * references without threading state through every helper. Reset at the
+ * start of each zp_parse() call.
+ */
+struct zp_import_binding {
+    char alias[ZP_MAX_MODULE_ALIAS];
+    int  module_slot;
+};
+static struct zp_import_binding g_imports[ZP_MAX_MODULE_IMPORTS];
+static int g_import_count = 0;
+
+static void zp_imports_reset(void)
+{
+    for (int i = 0; i < ZP_MAX_MODULE_IMPORTS; i++) {
+        g_imports[i].alias[0] = '\0';
+        g_imports[i].module_slot = -1;
+    }
+    g_import_count = 0;
+}
+
+static int zp_import_find_alias(const char *alias)
+{
+    for (int i = 0; i < g_import_count; i++) {
+        if (zp_streq(g_imports[i].alias, alias)) return i;
+    }
+    return -1;
+}
+
+/* Resolve an `import x.y` form to a canonical /programs path or builtin
+ * lookup. Rules:
+ *   - "/...." literal path → use as-is.
+ *   - "./name" → "./name.zp" (current dir not yet meaningful — treat as
+ *      bare programs path).
+ *   - "x.y" → if a builtin "x.y" is registered, that wins. Otherwise
+ *      "/programs/x/y.zp".
+ */
+static void zp_import_resolve_path(const char *spec, char *out, int outsz)
+{
+    /* Literal path? */
+    if (spec[0] == '/') {
+        zp_strcpy(out, spec, outsz);
+        /* Append .zp if missing */
+        int n = zp_strlen(out);
+        if (n < 3 || out[n-3] != '.' || out[n-2] != 'z' || out[n-1] != 'p') {
+            if (n + 3 < outsz) {
+                out[n] = '.'; out[n+1] = 'z'; out[n+2] = 'p'; out[n+3] = '\0';
+            }
+        }
+        return;
+    }
+    if (spec[0] == '.' && spec[1] == '/') {
+        /* Relative — treat as /programs/<name>.zp */
+        out[0] = '/';
+        zp_strcpy(out + 1, "programs/", outsz - 1);
+        int n = zp_strlen(out);
+        const char *p = spec + 2;
+        while (*p && n < outsz - 4) out[n++] = *p++;
+        out[n] = '\0';
+        n = zp_strlen(out);
+        if (n < 3 || out[n-3] != '.' || out[n-2] != 'z' || out[n-1] != 'p') {
+            if (n + 3 < outsz) {
+                out[n] = '.'; out[n+1] = 'z'; out[n+2] = 'p'; out[n+3] = '\0';
+            }
+        }
+        return;
+    }
+    /* Builtin first — use spec as-is. */
+    if (zp_module_builtin_lookup(spec)) {
+        zp_strcpy(out, spec, outsz);
+        return;
+    }
+    /* Otherwise expand "x.y.z" → "/programs/x/y/z.zp" */
+    int n = 0;
+    const char *prefix = "/programs/";
+    while (prefix[n] && n < outsz - 1) { out[n] = prefix[n]; n++; }
+    const char *p = spec;
+    while (*p && n < outsz - 4) {
+        out[n++] = (*p == '.') ? '/' : *p;
+        p++;
+    }
+    out[n++] = '.'; out[n++] = 'z'; out[n++] = 'p'; out[n] = '\0';
+}
+
+/* Default alias for `import x.y` without `as`: take the trailing name
+ * after the last separator. For "std.http" → "http". For
+ * "/programs/lib/auth.zp" → "auth". */
+static void zp_import_default_alias(const char *spec, char *out, int outsz)
+{
+    int n = zp_strlen(spec);
+    int last = -1;
+    for (int i = 0; i < n; i++) {
+        char c = spec[i];
+        if (c == '.' || c == '/') last = i;
+    }
+    int start = last + 1;
+    int j = 0;
+    for (int i = start; i < n && j < outsz - 1; i++) {
+        char c = spec[i];
+        /* stop at .zp suffix */
+        if (c == '.') break;
+        out[j++] = c;
+    }
+    out[j] = '\0';
+    if (j == 0) zp_strcpy(out, "mod", outsz);
+}
+
 /* ── Tokenizer ────────────────────────────────── */
 
 enum zp_token_type {
@@ -805,10 +1063,97 @@ static enum zp_node_type parse_gate_expr(struct zp_lexer *lex, int32_t *out_val)
     return parse_gate_expr_full(lex, out_val, 0, 0);
 }
 
+/* Pass 2 helpers: expand a `alias.symbol` step into its module chain's
+ * decls, appending into the parent chain definition. Returns 1 on success
+ * (expansion done), 0 if not an alias-qualified reference, -1 on error. */
+static int try_expand_module_step(struct zp_chain_def *def,
+                                  const char *first_name,
+                                  const char *parent_chain_name,
+                                  int *auto_seq)
+{
+    /* Find a `.` in first_name. */
+    int dot = -1;
+    for (int i = 0; first_name[i]; i++) {
+        if (first_name[i] == '.') { dot = i; break; }
+    }
+    if (dot <= 0) return 0;
+
+    char alias[ZP_MAX_NAME];
+    char sym[ZP_MAX_NAME];
+    int j = 0;
+    for (int i = 0; i < dot && j < ZP_MAX_NAME - 1; i++) alias[j++] = first_name[i];
+    alias[j] = '\0';
+    j = 0;
+    for (int i = dot + 1; first_name[i] && j < ZP_MAX_NAME - 1; i++)
+        sym[j++] = first_name[i];
+    sym[j] = '\0';
+
+    int ai = zp_import_find_alias(alias);
+    if (ai < 0) return 0;  /* not a module alias — let caller continue */
+
+    int mod_slot = g_imports[ai].module_slot;
+    const struct zp_module_chain *mc =
+        zp_module_find_chain(mod_slot, sym, /*from_outside=*/1);
+    if (!mc) {
+        /* Maybe it's private — confirm and emit a clear error. */
+        const struct zp_module_chain *priv =
+            zp_module_find_chain(mod_slot, sym, /*from_outside=*/0);
+        if (priv && priv->is_private) {
+            kputs("Z+ parse error: '");
+            kputs(alias);
+            kputs(".");
+            kputs(sym);
+            kputs("' is private to its module\n");
+        } else {
+            kputs("Z+ parse error: '");
+            kputs(alias);
+            kputs(".");
+            kputs(sym);
+            kputs("' not found in module\n");
+        }
+        return -1;
+    }
+
+    /* Inline the module chain's nodes into the parent chain. Generate
+     * unique names so multiple call sites don't collide. */
+    for (int n = 0; n < mc->node_count && def->node_count < ZP_MAX_CHAIN_NODES; n++) {
+        int slot = def->node_count;
+        char nm[ZP_MAX_NAME];
+        int p = 0;
+        const char *src = parent_chain_name ? parent_chain_name : "x";
+        while (*src && p < ZP_MAX_NAME - 8) nm[p++] = *src++;
+        if (p < ZP_MAX_NAME - 8) nm[p++] = '_';
+        src = alias;
+        while (*src && p < ZP_MAX_NAME - 8) nm[p++] = *src++;
+        if (p < ZP_MAX_NAME - 8) nm[p++] = '_';
+        src = mc->node_names[n];
+        while (*src && p < ZP_MAX_NAME - 4) nm[p++] = *src++;
+        int seq = (*auto_seq)++;
+        if (seq >= 10 && p < ZP_MAX_NAME - 3) {
+            nm[p++] = '0' + (seq / 10);
+            nm[p++] = '0' + (seq % 10);
+        } else if (p < ZP_MAX_NAME - 2) {
+            nm[p++] = '0' + (seq % 10);
+        }
+        nm[p] = '\0';
+
+        zp_strcpy(def->node_names[slot], nm, ZP_MAX_NAME);
+        def->decls[slot] = mc->decls[n];
+        zp_strcpy(def->decls[slot].name, nm, ZP_MAX_NAME);
+        def->have_decl[slot] = mc->have_decl[n];
+        def->node_count++;
+    }
+
+    g_module_imports_resolved++;
+    return 1;
+}
+
 /*
  * Parse one line of Z+ source.
  *
  * Patterns:
+ *   import x.y [as alias]                 — Pass 2: load a module
+ *   private chain name { ... }            — Pass 2: module-private chain
  *   name : emit(N)                        — source node
  *   name : input -> * N -> output         — multiply transform
  *   name : input -> + N -> output         — add transform
@@ -832,6 +1177,94 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
     /* Must start with identifier */
     if (tok.type != TOK_IDENT)
         return 0;  /* Skip lines we can't parse */
+
+    /* ── Pass 2: import directive ──────────────────────────────────
+     *   import x.y [as alias]
+     *   import /programs/lib/foo.zp
+     *   import ./local
+     * Resolves through builtin first, then vault. Sets up an alias
+     * binding that subsequent chain steps can reference.
+     */
+    if (zp_streq(tok.text, "import")) {
+        struct zp_token t;
+        lexer_token(lex, &t);  /* path/spec — TOK_IDENT or '/' path */
+        char spec[ZP_MAX_MODULE_PATH];
+        spec[0] = '\0';
+
+        if (t.type == TOK_IDENT) {
+            zp_strcpy(spec, t.text, ZP_MAX_MODULE_PATH);
+        } else {
+            /* path starting with '/' or '.' isn't a single TOK_IDENT.
+             * Re-scan from current lex position by walking raw chars
+             * up to whitespace or 'as'. */
+            int p = 0;
+            /* The lexer already consumed `t`. If it was MINUS, we need
+             * to go back and consume from t.text + the rest. Since the
+             * lexer for a leading '/' would skip it as unknown char,
+             * we instead require that filesystem-style imports use a
+             * canonicalised form like `lib.auth` (which expands to
+             * /programs/lib/auth.zp via zp_import_resolve_path) — see
+             * the honest gap note in the brief. For now if the first
+             * token isn't TOK_IDENT, we bail. */
+            (void)p;
+            kputs("Z+ parse error: import requires dotted name (e.g. lib.auth)\n");
+            goto skip_line;
+        }
+
+        char alias[ZP_MAX_MODULE_ALIAS];
+        zp_import_default_alias(spec, alias, ZP_MAX_MODULE_ALIAS);
+
+        /* Optional `as alias` */
+        struct zp_token la;
+        lexer_token(lex, &la);
+        if (la.type == TOK_IDENT && zp_streq(la.text, "as")) {
+            lexer_token(lex, &la);
+            if (la.type == TOK_IDENT) {
+                zp_strcpy(alias, la.text, ZP_MAX_MODULE_ALIAS);
+            }
+        }
+
+        char path[ZP_MAX_MODULE_PATH];
+        zp_import_resolve_path(spec, path, ZP_MAX_MODULE_PATH);
+
+        int slot = zp_module_load(path);
+        if (slot < 0) {
+            kputs("Z+ parse error: import failed: ");
+            kputs(spec);
+            kputs(" (resolved: ");
+            kputs(path);
+            kputs(")\n");
+            goto skip_line;
+        }
+
+        if (g_import_count < ZP_MAX_MODULE_IMPORTS) {
+            zp_strcpy(g_imports[g_import_count].alias, alias, ZP_MAX_MODULE_ALIAS);
+            g_imports[g_import_count].module_slot = slot;
+            g_import_count++;
+        }
+        goto skip_line;
+    }
+
+    /* ── Pass 2: private modifier on a chain definition ───────────
+     * `private chain X { ... }` — the parsing of the chain body is
+     * unchanged; the private flag is attached to the chain decl by
+     * recording the name in a side table consulted by the module
+     * loader.  At top level (a non-module program), `private` is a
+     * documentation hint with no effect.
+     */
+    if (zp_streq(tok.text, "private")) {
+        struct zp_token t;
+        lexer_token(lex, &t);
+        if (t.type != TOK_IDENT || !zp_streq(t.text, "chain")) {
+            /* Unexpected — skip the rest of the line. */
+            goto skip_line;
+        }
+        /* Replace tok with `chain` and fall through into chain handling
+         * below.  The privacy mark is captured by zp_module_parse_into
+         * via its first-pass scan, so within a non-module program this
+         * is a no-op. */
+        zp_strcpy(tok.text, "chain", ZP_MAX_NAME);
+    }
 
     /* ── Struct definition: struct name { field: type ... } ── */
     if (zp_streq(tok.text, "struct")) {
@@ -1172,6 +1605,26 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
             }
 
             /* No colon — it's a bare reference or a bare verb-only node. */
+
+            /* Pass 2: alias.symbol — inline a module's chain at this step. */
+            {
+                int er = try_expand_module_step(def, first, def->name, &auto_seq);
+                if (er > 0) {
+                    /* Module step expanded to N nodes; current `slot` was
+                     * filled, def->node_count advanced. Continue with the
+                     * next chain step. */
+                    t = la;
+                    continue;
+                }
+                if (er < 0) {
+                    /* Hard parse error reported by helper — abort the
+                     * chain block by skipping to its closing brace. */
+                    while (t.type != TOK_RBRACE && t.type != TOK_EOF)
+                        lexer_token(lex, &t);
+                    break;
+                }
+            }
+
             enum zp_node_type vt;
             if (verb_to_type(first, &vt)) {
                 /* Auto-name: verbN where N is the slot index. */
@@ -1574,6 +2027,172 @@ skip_line:
         } while (t.type != TOK_NEWLINE && t.type != TOK_EOF);
     }
     return 0;
+}
+
+/* ── Pass 2: module table — implementation ───────────────────────── */
+
+/*
+ * Parse a module source into a fresh module slot.  Extracts any chain
+ * definitions and copies them as exported templates.  `private chain ...`
+ * marks the chain as non-exported.
+ */
+static int zp_module_parse_into(int slot, const char *source)
+{
+    struct zp_module *m = &g_modules[slot];
+    m->chain_count = 0;
+
+    /* First pass: scan for `private` markers so we can tag the next chain
+     * definition. The standard parser would treat `private` as a stray
+     * identifier and skip it, so we mark privacy by name out-of-band. */
+    char private_names[ZP_MAX_MODULE_CHAINS][ZP_MAX_NAME];
+    int private_count = 0;
+    {
+        struct zp_lexer lex;
+        lexer_init(&lex, source);
+        struct zp_token t;
+        int next_is_private = 0;
+        while (lex.pos < lex.len) {
+            lexer_token(&lex, &t);
+            if (t.type == TOK_EOF) break;
+            if (t.type == TOK_IDENT && zp_streq(t.text, "private")) {
+                next_is_private = 1;
+                continue;
+            }
+            if (t.type == TOK_IDENT && zp_streq(t.text, "chain")) {
+                struct zp_token name;
+                lexer_token(&lex, &name);
+                if (name.type == TOK_IDENT && next_is_private &&
+                    private_count < ZP_MAX_MODULE_CHAINS) {
+                    zp_strcpy(private_names[private_count],
+                              name.text, ZP_MAX_NAME);
+                    private_count++;
+                }
+                next_is_private = 0;
+                continue;
+            }
+            if (t.type == TOK_NEWLINE) continue;
+            if (t.type != TOK_NEWLINE) next_is_private = 0;
+        }
+    }
+
+    /* Second pass: full parse. Modules don't recursively run import (we'd
+     * detect cycles, but for Pass 2 we declare nested imports unsupported
+     * — see honest gaps note in the brief). */
+    struct zp_program *tmp =
+        (struct zp_program *)kmalloc(sizeof(struct zp_program));
+    if (!tmp) return -1;
+    tmp->node_count = 0;
+    tmp->edge_count = 0;
+    tmp->chain_id = -1;
+    tmp->chain_def_count = 0;
+
+    struct zp_lexer lex;
+    lexer_init(&lex, source);
+    while (lex.pos < lex.len) {
+        parse_line(&lex, tmp);
+    }
+
+    for (int i = 0; i < tmp->chain_def_count &&
+                    m->chain_count < ZP_MAX_MODULE_CHAINS; i++) {
+        struct zp_chain_def *cd = &tmp->chain_defs[i];
+        struct zp_module_chain *mc = &m->chains[m->chain_count];
+        zp_strcpy(mc->name, cd->name, ZP_MAX_NAME);
+        mc->node_count = cd->node_count;
+        mc->is_private = 0;
+        for (int p = 0; p < private_count; p++) {
+            if (zp_streq(private_names[p], cd->name)) {
+                mc->is_private = 1;
+                break;
+            }
+        }
+        for (int n = 0; n < cd->node_count && n < ZP_MAX_CHAIN_NODES; n++) {
+            zp_strcpy(mc->node_names[n], cd->node_names[n], ZP_MAX_NAME);
+            mc->decls[n]     = cd->decls[n];
+            mc->have_decl[n] = cd->have_decl[n];
+        }
+        m->chain_count++;
+    }
+
+    kfree(tmp);
+    return 0;
+}
+
+int zp_module_load(const char *path)
+{
+    zp_modules_init();
+    if (!path || !*path) return -1;
+
+    int existing = zp_module_find_slot(path);
+    if (existing >= 0) {
+        g_modules[existing].refcount++;
+        return existing;
+    }
+
+    if (zp_module_load_stack_contains(path)) {
+        kputs("Z+ error: circular import: ");
+        kputs(path);
+        kputs("\n");
+        return -1;
+    }
+    if (g_module_load_stack_depth >= ZP_MAX_MODULES) {
+        kputs("Z+ error: import depth exceeded\n");
+        return -1;
+    }
+
+    const char *src = zp_module_builtin_lookup(path);
+    char *vault_buf = 0;
+    if (!src) {
+        int sz = vault_size(path);
+        if (sz <= 0 || sz > 8192) {
+            kputs("Z+ error: module not found: ");
+            kputs(path);
+            kputs("\n");
+            return -1;
+        }
+        vault_buf = (char *)kmalloc((uint64_t)(sz + 1));
+        if (!vault_buf) return -1;
+        int got = vault_read(path, vault_buf, sz);
+        if (got <= 0) {
+            kfree(vault_buf);
+            kputs("Z+ error: module read failed: ");
+            kputs(path);
+            kputs("\n");
+            return -1;
+        }
+        vault_buf[got] = '\0';
+        src = vault_buf;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < ZP_MAX_MODULES; i++) {
+        if (!g_modules[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) {
+        if (vault_buf) kfree(vault_buf);
+        kputs("Z+ error: module table full\n");
+        return -1;
+    }
+
+    g_modules[slot].in_use = 1;
+    g_modules[slot].refcount = 1;
+    zp_strcpy(g_modules[slot].path, path, ZP_MAX_MODULE_PATH);
+    g_modules[slot].chain_count = 0;
+
+    zp_strcpy(g_module_load_stack[g_module_load_stack_depth],
+              path, ZP_MAX_MODULE_PATH);
+    g_module_load_stack_depth++;
+
+    int rc = zp_module_parse_into(slot, src);
+
+    g_module_load_stack_depth--;
+
+    if (vault_buf) kfree(vault_buf);
+
+    if (rc < 0) {
+        g_modules[slot].in_use = 0;
+        return -1;
+    }
+    return slot;
 }
 
 /* ── Signal chain process functions ───────────── */
@@ -2546,6 +3165,10 @@ static int zp_compile_chains(struct zp_program *prog)
 int zp_parse(const char *source, struct zp_program *prog)
 {
     zp_pools_init();
+    zp_modules_init();
+    /* Reset per-program import bindings. Modules persist across parses
+     * (interned by path); aliases are scoped to one parse. */
+    zp_imports_reset();
     prog->node_count = 0;
     prog->edge_count = 0;
     prog->chain_id = -1;

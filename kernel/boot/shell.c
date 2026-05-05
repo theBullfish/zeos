@@ -2136,6 +2136,24 @@ static const char zp_struct_demo[] =
     "src -> filt -> acc -> log\n"
     "chain count_clicks { src filt acc log }\n";
 
+/* 52_module_demo — pass 2 modules: import + alias.symbol expansion.
+ * Imports lib.math_helpers (kernel-registered builtin module) under
+ * alias `math` and references math.double / math.triple as steps. */
+static const char zp_module_demo[] =
+    "// Pass 2 — modules + import. Two parent chain steps inline\n"
+    "// helper chains pulled from a sibling module.\n"
+    "import lib.math_helpers as math\n"
+    "chain demo {\n"
+    "  in : emit(7) -> math.double -> tap.log\n"
+    "  bn : emit(3) -> math.triple -> tap.log\n"
+    "}\n";
+
+/* Negative test — references a private chain. Must fail at parse. */
+static const char zp_module_private_neg[] =
+    "// Pass 2 negative test — math.hidden is private. Parse fails.\n"
+    "import lib.math_helpers as math\n"
+    "chain bad { in : emit(1) -> math.hidden -> tap.log }\n";
+
 struct zp_builtin {
     const char *name;
     const char *desc;
@@ -2154,6 +2172,8 @@ static const struct zp_builtin builtins[] = {
     {"40_runtime_chain", "Z+ registers a chain into the live kernel registry", zp_runtime_chain},
     {"50_strings_demo", "Pass 1 — first-class strings (split + len_of_array)",  zp_strings_demo},
     {"51_struct_demo",  "Pass 1 — typed structs (gate(.field == \"lit\") + sum)", zp_struct_demo},
+    {"52_module_demo",  "Pass 2 — modules + import (math.double / math.triple)", zp_module_demo},
+    {"52_module_neg",   "Pass 2 negative — references private chain (must fail)", zp_module_private_neg},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -4456,6 +4476,23 @@ vault_done:
         kputs(" string ops, ");
         kput_dec((uint64_t)st);
         kputs(" struct types defined)\n");
+        passes++;
+    }
+
+    /* Z+ modules: count loaded modules and resolved import references.
+     * Both counts are zero until a Pass-2 program runs. */
+    {
+        extern void zp_modules_init(void);
+        extern int  zp_module_count(void);
+        extern int  zp_module_imports_resolved(void);
+        zp_modules_init();
+        int mc = zp_module_count();
+        int ir = zp_module_imports_resolved();
+        kputs("  Z+ modules ........... ");
+        kput_dec((uint64_t)mc);
+        kputs(" modules loaded, ");
+        kput_dec((uint64_t)ir);
+        kputs(" imports resolved\n");
         passes++;
     }
 

@@ -1,0 +1,16 @@
+// math_helpers.zp — module: simple integer transforms.
+//
+// Pass 2 demo. Three chains, two exported and one private. Importers
+// see `math.double` and `math.triple`; `math.hidden` is module-local.
+
+chain double {
+  in : input -> * 2 -> output
+}
+
+chain triple {
+  in : input -> * 3 -> output
+}
+
+private chain hidden {
+  in : input -> + 1 -> output
+}
