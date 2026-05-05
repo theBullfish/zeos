@@ -160,12 +160,15 @@ We don't build all 10 categories at once. Suggested order, easiest-first AND hig
 
 ---
 
-## Open questions
+## Decisions (these were the open questions; resolved 2026-05-05)
 
-- Aggregation level. Per-event (high signal, high cost) vs per-window (lossy, cheap). Probably per-window for most, per-event for security violations.
-- How to prevent measurement from itself becoming a bottleneck. Layer 0 is "computation IS telemetry" — but we still need to be careful about pull-cost when reading.
-- Per-category opt-in vs global. Some users may want to share thermal data but not session-shape data. (Cross-link: `OPT_IN_TEST_REPORTING.md` open questions.)
-- How long do we retain raw vs aggregated data on Codex Labs' side? Affects what's safe to send.
+**Aggregation level — per-window default, per-event for security.** Categories 1, 2, 4, 5, 6, 7, 8, 10 aggregate over rolling windows (5 min default; configurable per layer). Category 3 (chord-rule runtime) reports per-event for `chord-vs-serialized fallback` ONLY — every fallback is evidence the runtime drifted, and we want forensic detail on each. Category 9 (security invariants) reports per-event on every violation. Rationale: per-window minimizes report size and avoids timing-pattern fingerprinting; per-event survives where forensic detail matters.
+
+**Measurement self-cost — ride along, don't pull.** Measurements piggyback on Layer 0's existing timing-delta capture (the "computation IS telemetry" model). Each layer writes to a per-CPU lock-free circular buffer; the reporter aggregates at read time, never at write time. No scheduler hook, no IPC, no extra resolves on the chain graph. Worst case is a buffer overflow under sustained load — handled by dropping oldest, never blocking the producer.
+
+**Opt-in granularity — global toggle in v1, per-category for power users.** `zeos privacy on / off` flips a single Boolean. The sovereign-tier record has 10 Booleans (one per category) under the hood; v1 sets all 10 atomically from the global toggle. v2 exposes `zeos privacy categories thermal=on session=off ...` for users who want fine-grained control. Default-off across the board.
+
+**Retention — 30 days local, 90 days raw on our side, indefinite aggregate.** User device: encrypted in sovereign-tier VAULT, oldest-first eviction at 30 days OR queue-depth cap (whichever comes first). Codex Labs side: raw test results retained 90 days for forensic / regression debugging, then aggregated to category-level statistics with no per-device dimension. Aggregate retention indefinite — that's the long-term learning corpus for MDE. Per-user delete-on-request is supported and overrides retention immediately (raw + aggregate that's still device-attributable).
 
 ---
 

@@ -119,13 +119,17 @@ Each is a separate work unit. Sequence: 1 first (we need the data flowing intern
 
 ---
 
-## Open questions
+## Decisions (resolved 2026-05-05)
 
-- Key rotation cadence and revocation strategy for Codex Labs' public key
-- Hardware-fingerprint stability across firmware updates (if firmware changes the Zixel signature, do we treat it as the same device or new?)
-- Aggregate vs per-device retention on Codex Labs' side
-- GDPR / regional regulatory compliance — opt-in language and data retention
-- Whether to support per-layer opt-in (e.g., share thermal but not timing) vs global on/off
+**Key rotation — annual scheduled, immediate on compromise.** Codex Labs' public key rotates yearly on a published schedule; Zeos clients ship with a list of valid keys and accept reports encrypted under any unrevoked key. Compromise triggers an out-of-band kill list distributed via the next OTA update.
+
+**Hardware fingerprint stability across firmware — track both.** A firmware update CAN change the Zixel timing signature. The fingerprint format includes both a `device_id` (stable across firmware) and a `firmware_signature` (changes with every update). Reports from the same device-id across different firmware-signatures are aggregated together for long-term learning AND kept distinct for firmware-regression detection.
+
+**Retention on our side — 90 days raw, indefinite aggregate.** Same as `MEASUREMENT_TARGETS.md` §Decisions. Per-user delete-on-request supported.
+
+**Opt-in granularity — global in v1, per-category in v2.** Same as `MEASUREMENT_TARGETS.md` §Decisions. Default-off.
+
+**Regional compliance — TBD, blocking on legal review.** Default behavior MUST treat all users as if GDPR / strictest regime applies until per-region overrides ship. Implementation note: the opt-in record includes a `region_acknowledged` field; reports don't send unless the user has confirmed a region-appropriate opt-in screen.
 
 ---
 
