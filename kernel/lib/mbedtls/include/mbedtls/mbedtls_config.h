@@ -103,7 +103,8 @@
 #define PSA_WANT_ECC_MONTGOMERY_255 1
 
 /* ── SSL/TLS ── */
-#define MBEDTLS_SSL_CLI_C              /* Client only — no server */
+#define MBEDTLS_SSL_CLI_C              /* Client (https outbound) */
+#define MBEDTLS_SSL_SRV_C              /* Server (tls.listen) */
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_PROTO_TLS1_3      /* TLS 1.3 */
 #define MBEDTLS_SSL_PROTO_TLS1_2      /* TLS 1.2 fallback */

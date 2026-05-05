@@ -1,0 +1,49 @@
+// 54_stdlib_gaps_demo.zp
+// Stdlib gap closers landing 2026-05-03.
+//
+// Exercises the four new bounded verbs that the five replacements
+// (kv-zeos, web-zeos, build-zeos, notes-zeos, chat-zeos) needed:
+//
+//   1. tls.listen(cert, key)            — server-side TLS termination
+//   2. http.request_to(method)          — outbound HTTP (proxy hop)
+//   3. register_chain(name)             — runtime chain registration
+//   4. fs.vault_version_of(path)        — input-change detection
+//
+// Each chain below tap.logs the verb's return so you can verify the
+// kernel ran each one (not just routed through it).
+
+import std.tls   as tls
+import std.http  as http
+import std.fs    as fs
+
+// 1. TLS server on 8443. cert/key paths point at vault entries the
+//    operator must populate (`vault put cert.pem ...`). When the
+//    paths are absent the verb returns -1 and tap.log records the
+//    failure mode honestly — no fake success.
+cert_path : emit("cert.pem")
+key_path  : emit("key.pem")
+port_443  : emit(8443)
+tls_arm   : input -> tls.listen("cert.pem", "key.pem")
+port_443 -> tls_arm -> tap.log
+
+// 2. Outbound proxy hop. Wire input is the absolute URL string;
+//    method comes from the verb arg.
+proxy_url : emit("http://10.0.4.1/health")
+proxy_get : input -> http.request_to("GET")
+proxy_url -> proxy_get -> tap.log
+
+// 3. Register a runtime chain by name and capture the chain_id.
+chain_nm  : emit("build_rule_main_o")
+reg       : input -> register_chain("build_rule_main_o")
+chain_nm -> reg -> tap.log
+
+// 4. Per-path mutation counter — read it at boot (likely 0), edit
+//    a known file, read it again to see the bump.
+some_path : emit("/web/index.html")
+ver       : input -> fs.vault_version_of
+some_path -> ver -> tap.log
+
+chain stdlib_gaps_demo {
+  cert_path key_path port_443 tls_arm proxy_url proxy_get
+  chain_nm reg some_path ver
+}

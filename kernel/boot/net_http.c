@@ -372,3 +372,167 @@ int http_get_once_loc(const char *host, const char *path,
 
     return 0;
 }
+
+/* ── Generic outbound request (GET/POST/PUT/DELETE/PATCH) ───────────
+ * Reuses the dual-stack TCP path used by http_get_once_loc, but we
+ * don't share the redirect-chasing buffer/state because the verb is
+ * called from inside the Z+ proc which already runs on the request
+ * path; one redirect hop is enough for the proxy use-case. */
+
+static int hr_strlen(const char *s) { int n = 0; if (!s) return 0; while (s[n]) n++; return n; }
+static int hr_streq_ci(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        char x = *a++, y = *b++;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+    }
+    return *a == 0 && *b == 0;
+}
+
+int http_request(const char *url, const char *method,
+                 const char *body, int body_len,
+                 const char *headers,
+                 struct http_response *resp)
+{
+    if (!url || !*url || !resp) return -1;
+    /* Zero out resp up front. */
+    {
+        unsigned char *r = (unsigned char *)resp;
+        for (unsigned i = 0; i < sizeof(*resp); i++) r[i] = 0;
+    }
+
+    /* GET fast-path: defer to http_get / https_get for redirect chasing. */
+    const char *m = (method && *method) ? method : "GET";
+    if (hr_streq_ci(m, "GET")) {
+        char host[256], path[1024];
+        int use_tls = 0;
+        split_url(url, &use_tls, host, sizeof(host), path, sizeof(path));
+        if (use_tls) {
+            static char tls_buf[HTTP_MAX_BODY + 2048];
+            int blen = 0;
+            int status = https_get(host, path, tls_buf, sizeof(tls_buf), &blen);
+            if (status < 0) return -1;
+            resp->status_code = status;
+            int copy = blen;
+            if (copy > HTTP_MAX_BODY - 1) copy = HTTP_MAX_BODY - 1;
+            for (int k = 0; k < copy; k++) resp->body[k] = tls_buf[k];
+            resp->body[copy] = 0;
+            resp->body_len = (uint32_t)copy;
+            return 0;
+        }
+        return http_get(host, path, resp);
+    }
+
+    /* Non-GET: parse, connect, send method+body, read response. */
+    char host[256], path[1024];
+    int use_tls = 0;
+    split_url(url, &use_tls, host, sizeof(host), path, sizeof(path));
+    if (use_tls) {
+        kputs("  HTTP: ");
+        kputs(m);
+        kputs(" over TLS not yet supported (GET works); use http://\n");
+        return -1;
+    }
+
+    /* v4-only fast path -- the dual-stack happy-eyeballs lives in
+     * http_get_once_loc; non-GET is uncommon enough that v4-only is
+     * the right tradeoff today. */
+    struct ipv4_addr server_ip;
+    if (dns_resolve(host, &server_ip) < 0) return -1;
+
+    struct tcp_conn conn;
+    if (tcp_connect(&conn, server_ip, 80) < 0) return -1;
+
+    /* Request line + headers. Static buffer because UEFI stack budgets. */
+    static char request[4096];
+    int rpos = 0;
+    for (int i = 0; m[i]; i++) request[rpos++] = m[i];
+    request[rpos++] = ' ';
+    for (int i = 0; path[i]; i++) request[rpos++] = path[i];
+    const char *vhdr = " HTTP/1.1\r\nHost: ";
+    for (int i = 0; vhdr[i]; i++) request[rpos++] = vhdr[i];
+    for (int i = 0; host[i]; i++) request[rpos++] = host[i];
+    const char *cclose = "\r\nConnection: close\r\n"
+                         "User-Agent: Zeos/0.1\r\n";
+    for (int i = 0; cclose[i]; i++) request[rpos++] = cclose[i];
+
+    /* Optional caller-supplied extra headers. Caller responsible for
+     * \r\n separation. */
+    if (headers && *headers) {
+        for (int i = 0; headers[i] && rpos < (int)sizeof(request) - 64; i++)
+            request[rpos++] = headers[i];
+    }
+
+    /* Body framing: if body present and no caller-supplied
+     * Content-Length, add one. Default Content-Type only if needed. */
+    int has_body = body && body_len > 0;
+    if (has_body) {
+        const char *cl = "Content-Length: ";
+        for (int i = 0; cl[i]; i++) request[rpos++] = cl[i];
+        char num[16]; int nb = 0; int v = body_len;
+        if (v == 0) num[nb++] = '0';
+        char tmp[16]; int tn = 0;
+        while (v > 0) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+        for (int i = tn - 1; i >= 0; i--) num[nb++] = tmp[i];
+        for (int i = 0; i < nb; i++) request[rpos++] = num[i];
+        request[rpos++] = '\r'; request[rpos++] = '\n';
+    }
+    request[rpos++] = '\r'; request[rpos++] = '\n';
+
+    if (tcp_send(&conn, request, (uint16_t)rpos) < 0) {
+        tcp_close(&conn);
+        return -1;
+    }
+    if (has_body) {
+        int sent = 0;
+        while (sent < body_len) {
+            int chunk = body_len - sent;
+            if (chunk > 0xF000) chunk = 0xF000;
+            int n = tcp_send(&conn, body + sent, (uint16_t)chunk);
+            if (n <= 0) break;
+            sent += n;
+        }
+    }
+
+    /* Receive response. */
+    static char raw[HTTP_MAX_BODY + 2048];
+    int total = 0;
+    int cap = (int)sizeof(raw) - 1;
+    while (total < cap) {
+        int remaining = cap - total;
+        uint16_t chunk = remaining > 0xF000 ? 0xF000 : (uint16_t)remaining;
+        int got = tcp_recv(&conn, raw + total, chunk);
+        if (got <= 0) break;
+        total += got;
+    }
+    raw[total] = 0;
+    tcp_close(&conn);
+
+    if (total < 12) return -1;
+    if (raw[9] >= '0' && raw[9] <= '9' &&
+        raw[10] >= '0' && raw[10] <= '9' &&
+        raw[11] >= '0' && raw[11] <= '9') {
+        resp->status_code = (raw[9] - '0') * 100 + (raw[10] - '0') * 10 + (raw[11] - '0');
+    }
+
+    const char *ct = find_header(raw, total, "content-type: ");
+    if (ct) {
+        int ci = 0;
+        while (*ct && *ct != '\r' && *ct != '\n' && ci < 63)
+            resp->content_type[ci++] = *ct++;
+        resp->content_type[ci] = 0;
+    }
+
+    int body_start = find_body_start(raw, total);
+    if (body_start > 0) {
+        int blen = total - body_start;
+        if (blen > HTTP_MAX_BODY - 1) blen = HTTP_MAX_BODY - 1;
+        for (int i = 0; i < blen; i++) resp->body[i] = raw[body_start + i];
+        resp->body[blen] = 0;
+        resp->body_len = (uint32_t)blen;
+    }
+    (void)hr_strlen;
+    return 0;
+}

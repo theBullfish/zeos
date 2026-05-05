@@ -157,6 +157,12 @@ enum zp_node_type {
     ZP_FS_SIZE,         /* fs.size(path) -> int */
     ZP_FS_READ_STRING,  /* fs.read_string(path) -> str */
     ZP_FS_WRITE_STRING, /* fs.write_string(path, s) -> int */
+
+    /* ── Stdlib gap closers (2026-05-03) ────────── */
+    ZP_TLS_LISTEN,           /* tls.listen(port, cert, key, chain) -> int */
+    ZP_HTTP_REQUEST_TO,      /* http.request_to(url, method) -> http_resp handle */
+    ZP_REGISTER_CHAIN,       /* register_chain(name) -> chain_id */
+    ZP_FS_VAULT_VERSION_OF,  /* fs.vault_version_of(path) -> int */
 };
 
 /* ── Pass 3 public surface ────────────────────────────────────────── */

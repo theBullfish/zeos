@@ -696,6 +696,10 @@ static void cmd_fat_cat(const char *args);
 static void cmd_view(const char *args);
 static void cmd_calc(const char *args);
 static void cmd_zkv(const char *args);
+static void cmd_webview(const char *args);
+static void cmd_bview(const char *args);
+static void cmd_notesui(const char *args);
+static void cmd_chatui(const char *args);
 static void cmd_edit(const char *args);
 static void cmd_fm(const char *args);
 static void cmd_fs_undo(const char *args);
@@ -840,6 +844,10 @@ static const struct shell_cmd commands[] = {
     {"view",    "open image viewer (view <path>; PNG only for now)", cmd_view, VIS_ALWAYS},
     {"calc",    "calculator (calc | calc <expr>); modes: standard/scientific/programmer", cmd_calc, VIS_ALWAYS},
     {"zkv",     "kv-zeos REPL window (Redis-cli killer)", cmd_zkv, VIS_ALWAYS},
+    {"webview", "web-zeos admin window (nginx admin killer)", cmd_webview, VIS_ALWAYS},
+    {"bview",   "build-zeos DAG window (make/bazel killer)", cmd_bview, VIS_ALWAYS},
+    {"notesui", "notes-zeos beautiful viewer (Notion/Obsidian killer)", cmd_notesui, VIS_ALWAYS},
+    {"chatui",  "chat-zeos 3-pane window (Slack/Discord killer)", cmd_chatui, VIS_ALWAYS},
     {"edit",    "open text editor (edit | edit <path>); chain over text_edit signals", cmd_edit, VIS_ALWAYS},
     {"fm",      "open file manager (fm [path]); stream renderer over CHAIN_FS_EVENT", cmd_fm, VIS_ALWAYS},
     {"fs-undo", "reverse the most recent FS op (universal undo)", cmd_fs_undo, VIS_ALWAYS},
@@ -4971,7 +4979,8 @@ vault_done:
         int sc = zp_stdlib_module_count();
         kputs("  Z+ stdlib ............ ");
         kput_dec((uint64_t)sc);
-        kputs(" modules registered (http/json/regex/cmd/time/crypto/btree/fs)\n");
+        kputs(" modules registered (http/json/regex/cmd/time/crypto/btree/fs/tls)");
+        kputs(" +TLS server, +HTTP request, +register_chain, +fs.vault_version_of\n");
         passes++;
     }
 
@@ -6424,6 +6433,26 @@ static void cmd_zkv(const char *args)
 {
     extern void kv_polish_cmd(const char *args);
     kv_polish_cmd(args);
+}
+static void cmd_webview(const char *args)
+{
+    extern void web_polish_cmd(const char *args);
+    web_polish_cmd(args);
+}
+static void cmd_bview(const char *args)
+{
+    extern void build_polish_cmd(const char *args);
+    build_polish_cmd(args);
+}
+static void cmd_notesui(const char *args)
+{
+    extern void notes_polish_cmd(const char *args);
+    notes_polish_cmd(args);
+}
+static void cmd_chatui(const char *args)
+{
+    extern void chat_polish_cmd(const char *args);
+    chat_polish_cmd(args);
 }
 
 /* Calculator — open the window, or evaluate an expression and print result. */

@@ -37,7 +37,7 @@ chain build_engine {
 dispatch_rule : input -> {
   in_present  : fs.exists -> gate(== 1),
   out_missing : fs.exists -> gate(== 0) -> cmd.run,
-  out_stale   : fs.size   -> gate(.changed_since_last) -> cmd.run
+  out_stale   : fs.vault_version_of -> gate(.changed_since_last) -> cmd.run
 }
 
 // ── RULE GENERATION ──────────────────────────────
@@ -53,14 +53,14 @@ per_src : srcs -> rule {
   input   = .input,
   output  = o_for,
   command = "gcc -c " + .input + " -o " + o_for
-} -> register_chain
+} -> register_chain("build_rule")
 
 link_rule : emit(rule {
   name    = "kernel/build/BOOTZ.EFI",
   input   = "build/*.o",
   output  = "build/BOOTZ.EFI",
   command = "ld -o build/BOOTZ.EFI build/*.o -lefi -lgnuefi"
-}) -> register_chain
+}) -> register_chain("build_link_rule")
 
 // ── KICK OFF ─────────────────────────────────────
 

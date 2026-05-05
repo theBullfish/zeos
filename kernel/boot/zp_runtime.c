@@ -333,6 +333,8 @@ void zp_kernel_resolve_thunk(chain_node_t *self, void *input, void *output)
     case ZP_BTREE_DELETE: case ZP_BTREE_RANGE: case ZP_FS_LIST:
     case ZP_FS_EXISTS: case ZP_FS_SIZE: case ZP_FS_READ_STRING:
     case ZP_FS_WRITE_STRING:
+    case ZP_TLS_LISTEN: case ZP_HTTP_REQUEST_TO:
+    case ZP_REGISTER_CHAIN: case ZP_FS_VAULT_VERSION_OF:
         out_val = in_val;
         break;
     }

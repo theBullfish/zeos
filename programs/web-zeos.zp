@@ -89,7 +89,7 @@ chain api_users_handler {
 // http.request_to is a one-line change.
 
 chain proxy_handler {
-  req : input -> emit(502)
+  req : input -> http.request_to("GET")
        -> http.respond
        ~> tap.log
 }
@@ -133,7 +133,7 @@ chain web_cache_lookup {
 // production; fine for QEMU/loopback bench).
 
 chain web_tls_listen {
-  bind : emit(443) -> http.listen ~> tap.log
+  bind : emit(443) -> tls.listen("cert.pem", "key.pem") ~> tap.log
 }
 
 // ── ENTRY ─────────────────────────────────────────────────────────

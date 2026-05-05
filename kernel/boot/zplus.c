@@ -35,6 +35,8 @@
 #include "std_json.h"
 #include "std_regex.h"
 #include "std_http.h"
+#include "net_http.h"
+#include "fs_event.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/md.h"
 #include "mbedtls/aes.h"
@@ -1015,6 +1017,11 @@ static int verb_to_type(const char *t, enum zp_node_type *out)
     if (zp_streq(t, "fs.size"))          { *out = ZP_FS_SIZE;        return 1; }
     if (zp_streq(t, "fs.read_string"))   { *out = ZP_FS_READ_STRING; return 1; }
     if (zp_streq(t, "fs.write_string"))  { *out = ZP_FS_WRITE_STRING;return 1; }
+    /* Stdlib gap closers (2026-05-03). */
+    if (zp_streq(t, "tls.listen"))           { *out = ZP_TLS_LISTEN;            return 1; }
+    if (zp_streq(t, "http.request_to"))      { *out = ZP_HTTP_REQUEST_TO;       return 1; }
+    if (zp_streq(t, "register_chain"))       { *out = ZP_REGISTER_CHAIN;        return 1; }
+    if (zp_streq(t, "fs.vault_version_of"))  { *out = ZP_FS_VAULT_VERSION_OF;   return 1; }
     return 0;
 }
 
@@ -1964,7 +1971,9 @@ static int parse_line(struct zp_lexer *lex, struct zp_program *prog)
                                    vt == ZP_REGEX_MATCH || vt == ZP_REGEX_FIND ||
                                    vt == ZP_REGEX_REPLACE || vt == ZP_CRYPTO_HMAC ||
                                    vt == ZP_CRYPTO_AES_ENC || vt == ZP_CRYPTO_AES_DEC ||
-                                   vt == ZP_TIME_FORMAT || vt == ZP_FS_WRITE_STRING) {
+                                   vt == ZP_TIME_FORMAT || vt == ZP_FS_WRITE_STRING ||
+                                   vt == ZP_TLS_LISTEN || vt == ZP_HTTP_REQUEST_TO ||
+                                   vt == ZP_REGISTER_CHAIN) {
                             /* First string arg into fmt[]. Optional second
                              * string arg into fmt2[] (for replace). */
                             lexer_token(lex, &p);
@@ -3543,6 +3552,198 @@ static int zp_proc_http_route(struct sig_node *node, struct sig_data *in,
     return 0;
 }
 
+/* ── Stdlib gap closers ────────────────────────────
+ * tls.listen(cert_path, key_path) — port is wire input (int).
+ *   cert_path is in fmt[] (zp_split_sep[] holds the interned handle),
+ *   key_path  is in fmt2[] (zp_field_lit[] holds the interned handle).
+ *   chain_id: -1 (we don't have an inline chain ref slot in the
+ *   parser today; the listener falls back to default 200 ok).
+ */
+extern int tls_srv_listen(uint16_t port, const char *cert_path,
+                          const char *key_path, int chain_id);
+
+static int zp_proc_tls_listen(struct sig_node *node, struct sig_data *in,
+                              struct sig_data *out)
+{
+    int idx = node->id;
+    int port = sig_data_read_i32(in);
+    int ch  = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    int kh  = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_field_lit[idx] : -1;
+    const char *cert_path = (ch >= 0) ? zp_str_get(ch, 0) : "";
+    const char *key_path  = (kh >= 0) ? zp_str_get(kh, 0) : "";
+    int rc = tls_srv_listen((uint16_t)port, cert_path, key_path, -1);
+    sig_data_write_i32(out, rc);
+    return 0;
+}
+
+/* http.request_to(method) — URL is wire input as a string handle.
+ * Returns a string handle containing the response body so downstream
+ * tap.log / json.parse works. Status is logged via tap. */
+extern int http_request(const char *url, const char *method,
+                        const char *body, int body_len,
+                        const char *headers,
+                        struct http_response *resp);
+
+static int zp_proc_http_request_to(struct sig_node *node, struct sig_data *in,
+                                   struct sig_data *out)
+{
+    int idx = node->id;
+    int url_h = sig_data_read_i32(in);
+    int slen = 0;
+    const char *url = (url_h >= 0) ? zp_str_get(url_h, &slen) : 0;
+    int mh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    const char *method = (mh >= 0) ? zp_str_get(mh, 0) : "GET";
+    if (!url || !*url) { sig_data_write_i32(out, zp_str_intern("", 0)); return 0; }
+
+    static struct http_response hresp;
+    int rc = http_request(url, method, 0, 0, 0, &hresp);
+    if (rc < 0) {
+        kputs("    [http.request_to] transport failed: ");
+        kputs(url);
+        kputc('\n');
+        sig_data_write_i32(out, zp_str_intern("", 0));
+        return 0;
+    }
+    kputs("    [http.request_to] ");
+    kputs(method);
+    kputs(" ");
+    kputs(url);
+    kputs(" -> ");
+    kput_dec((uint64_t)(uint32_t)hresp.status_code);
+    kputs(" (");
+    kput_dec((uint64_t)hresp.body_len);
+    kputs(" bytes)\n");
+    int bh = zp_str_intern(hresp.body, (int)hresp.body_len);
+    sig_data_write_i32(out, bh);
+    return 0;
+}
+
+/* register_chain(name) — wire input ignored (or used as a struct
+ * carrier). Creates/replaces a runtime chain with the given name and
+ * returns the chain_id. The chain has a single passthrough node so
+ * downstream wiring (e.g. fs.read_string into the registered name) can
+ * route by chain_id. */
+extern int zp_runtime_register_chain(const char *name,
+                                     const struct zp_runtime_node *nodes,
+                                     int node_count);
+
+static int zp_proc_register_chain(struct sig_node *node, struct sig_data *in,
+                                  struct sig_data *out)
+{
+    int idx = node->id;
+    (void)in;
+    int nh = (idx >= 0 && idx < ZP_MAX_NODES) ? zp_split_sep[idx] : -1;
+    const char *name = (nh >= 0) ? zp_str_get(nh, 0) : 0;
+    if (!name || !*name) { sig_data_write_i32(out, -1); return 0; }
+
+    /* Single passthrough node so the chain is resolvable. */
+    struct zp_runtime_node n;
+    int j;
+    for (j = 0; j < ZP_MAX_NAME && name[j]; j++) n.name[j] = name[j];
+    n.name[j < ZP_MAX_NAME ? j : ZP_MAX_NAME - 1] = 0;
+    n.type = ZP_PASSTHROUGH;
+    n.int_val = 0; n.int_val2 = 0; n.int_val3 = 0;
+    n.fmt[0] = 0; n.fmt2[0] = 0;
+    n.out_kind = ZP_VAL_INT;
+    n.struct_type = -1;
+    n.emit_handle = -1;
+    n.sustain_count = 0;
+    n.delta_prev = 0;
+    n.has_delta_prev = 0;
+    n.sum_acc = 0;
+
+    int cid = zp_runtime_register_chain(name, &n, 1);
+    kputs("    [register_chain] ");
+    kputs(name);
+    kputs(" -> chain_id=");
+    kput_dec((uint64_t)(uint32_t)cid);
+    kputc('\n');
+    sig_data_write_i32(out, cid);
+    return 0;
+}
+
+/* fs.vault_version_of(path) — wire input is the path string handle.
+ * Returns the per-path mutation counter (number of fs_event_emit calls
+ * for that exact path since boot). The map is populated by an
+ * fs_event listener registered on first call. */
+#define ZP_FSV_MAP_SLOTS 64
+struct zp_fsv_entry {
+    int      in_use;
+    char     path[64];
+    uint32_t version;
+};
+static struct zp_fsv_entry g_fsv_map[ZP_FSV_MAP_SLOTS];
+static int g_fsv_listener_armed = 0;
+
+static int zp_fsv_path_eq(const char *a, const char *b)
+{
+    while (*a && *b) { if (*a != *b) return 0; a++; b++; }
+    return *a == 0 && *b == 0;
+}
+
+/* fs_event listener — bumps the per-path counter. Path is truncated at
+ * 63 chars; collisions on truncated paths bump together (rare and
+ * acceptable for change-detection). */
+static void zp_fsv_listener(const fs_event_t *e, void *ctx)
+{
+    (void)ctx;
+    if (!e || !e->path[0]) return;
+    /* Find or allocate a slot. */
+    for (int i = 0; i < ZP_FSV_MAP_SLOTS; i++) {
+        if (g_fsv_map[i].in_use && zp_fsv_path_eq(g_fsv_map[i].path, e->path)) {
+            g_fsv_map[i].version++;
+            return;
+        }
+    }
+    for (int i = 0; i < ZP_FSV_MAP_SLOTS; i++) {
+        if (!g_fsv_map[i].in_use) {
+            g_fsv_map[i].in_use = 1;
+            int j;
+            for (j = 0; j < (int)sizeof(g_fsv_map[i].path) - 1 && e->path[j]; j++)
+                g_fsv_map[i].path[j] = e->path[j];
+            g_fsv_map[i].path[j] = 0;
+            g_fsv_map[i].version = 1;
+            return;
+        }
+    }
+    /* Map full — silently drop; selftest will reflect via chain version. */
+}
+
+static void zp_fsv_arm_listener(void)
+{
+    if (g_fsv_listener_armed) return;
+    if (fs_event_register_listener(zp_fsv_listener, 0) == 0)
+        g_fsv_listener_armed = 1;
+}
+
+static int zp_proc_fs_vault_version_of(struct sig_node *node,
+                                       struct sig_data *in,
+                                       struct sig_data *out)
+{
+    (void)node;
+    zp_fsv_arm_listener();
+    int sh = sig_data_read_i32(in);
+    int slen = 0;
+    const char *p = (sh >= 0) ? zp_str_get(sh, &slen) : 0;
+    if (!p) { sig_data_write_i32(out, 0); return 0; }
+    /* First: path-keyed counter (set by fs_event_emit since boot). */
+    for (int i = 0; i < ZP_FSV_MAP_SLOTS; i++) {
+        if (g_fsv_map[i].in_use && zp_fsv_path_eq(g_fsv_map[i].path, p)) {
+            sig_data_write_i32(out, (int32_t)g_fsv_map[i].version);
+            return 0;
+        }
+    }
+    /* No emit ever recorded for this path — fall back to the global
+     * CHAIN_FS_EVENT vault_version. Better than 0 because it lets the
+     * caller still distinguish "before X" from "after X" at boot. */
+    if (CHAIN_FS_EVENT >= 0) {
+        chain_t *c = chain_get(CHAIN_FS_EVENT);
+        if (c) { sig_data_write_i32(out, c->vault_version); return 0; }
+    }
+    sig_data_write_i32(out, 0);
+    return 0;
+}
+
 /* btree.new() -> handle */
 static int zp_proc_btree_new(struct sig_node *node, struct sig_data *in,
                              struct sig_data *out)
@@ -3714,10 +3915,11 @@ void zp_stdlib_init(void)
         "chain run     { in : input -> cmd.run }\n"
         "chain capture { in : input -> cmd.capture }\n";
     static const char m_http[]   =
-        "// std.http — listener registry + HTTP/1.1 server\n"
-        "chain listen  { in : input -> http.listen }\n"
-        "chain respond { in : input -> http.respond }\n"
-        "chain route   { in : input -> http.route }\n";
+        "// std.http — listener registry + HTTP/1.1 server + outbound\n"
+        "chain listen      { in : input -> http.listen }\n"
+        "chain respond     { in : input -> http.respond }\n"
+        "chain route       { in : input -> http.route }\n"
+        "chain request_to  { in : input -> http.request_to }\n";
     static const char m_btree[]  =
         "// std.btree — in-memory B-tree\n"
         "chain new    { in : input -> btree.new }\n"
@@ -3727,11 +3929,15 @@ void zp_stdlib_init(void)
         "chain range  { in : input -> btree.range }\n";
     static const char m_fs[]     =
         "// std.fs — high-level path ops over vault\n"
-        "chain list         { in : input -> fs.list }\n"
-        "chain exists       { in : input -> fs.exists }\n"
-        "chain size         { in : input -> fs.size }\n"
-        "chain read_string  { in : input -> fs.read_string }\n"
-        "chain write_string { in : input -> fs.write_string }\n";
+        "chain list              { in : input -> fs.list }\n"
+        "chain exists            { in : input -> fs.exists }\n"
+        "chain size              { in : input -> fs.size }\n"
+        "chain read_string       { in : input -> fs.read_string }\n"
+        "chain write_string      { in : input -> fs.write_string }\n"
+        "chain vault_version_of  { in : input -> fs.vault_version_of }\n";
+    static const char m_tls[]    =
+        "// std.tls — server-side TLS termination\n"
+        "chain listen { in : input -> tls.listen }\n";
 
     zp_module_register_builtin("std.time",   m_time);
     zp_module_register_builtin("std.crypto", m_crypto);
@@ -3741,8 +3947,16 @@ void zp_stdlib_init(void)
     zp_module_register_builtin("std.http",   m_http);
     zp_module_register_builtin("std.btree",  m_btree);
     zp_module_register_builtin("std.fs",     m_fs);
+    zp_module_register_builtin("std.tls",    m_tls);
 
-    g_stdlib_module_count = 8;
+    /* Init TLS server (idempotent). Listener pool created here so a
+     * Z+ program can call tls.listen as soon as stdlib is up. */
+    {
+        extern void tls_srv_init(void);
+        tls_srv_init();
+    }
+
+    g_stdlib_module_count = 9;
     inited = 1;
 }
 
@@ -4034,6 +4248,10 @@ int zp_compile(struct zp_program *prog)
         case ZP_FS_SIZE:         proc = zp_proc_fs_size;          break;
         case ZP_FS_READ_STRING:  proc = zp_proc_fs_read_string;   break;
         case ZP_FS_WRITE_STRING: proc = zp_proc_fs_write_string;  break;
+        case ZP_TLS_LISTEN:           proc = zp_proc_tls_listen;          break;
+        case ZP_HTTP_REQUEST_TO:      proc = zp_proc_http_request_to;     break;
+        case ZP_REGISTER_CHAIN:       proc = zp_proc_register_chain;      break;
+        case ZP_FS_VAULT_VERSION_OF:  proc = zp_proc_fs_vault_version_of; break;
         }
 
         int idx = sig_node_add(chain, decl->name, proc, user_data);
@@ -4084,7 +4302,9 @@ int zp_compile(struct zp_program *prog)
                 decl->type == ZP_REGEX_MATCH || decl->type == ZP_REGEX_FIND ||
                 decl->type == ZP_REGEX_REPLACE || decl->type == ZP_CRYPTO_HMAC ||
                 decl->type == ZP_CRYPTO_AES_ENC || decl->type == ZP_CRYPTO_AES_DEC ||
-                decl->type == ZP_TIME_FORMAT || decl->type == ZP_FS_WRITE_STRING) {
+                decl->type == ZP_TIME_FORMAT || decl->type == ZP_FS_WRITE_STRING ||
+                decl->type == ZP_TLS_LISTEN || decl->type == ZP_HTTP_REQUEST_TO ||
+                decl->type == ZP_REGISTER_CHAIN) {
                 zp_split_sep[idx] = (decl->fmt[0])
                     ? zp_str_intern(decl->fmt, -1) : -1;
                 if (decl->type == ZP_STR_REPLACE ||
