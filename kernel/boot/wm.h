@@ -106,6 +106,15 @@ typedef struct {
 
     /* Content draw callback */
     void           (*draw_content)(int id, int x, int y, int w, int h);
+
+    /* Right-click callback. The WM transforms the screen coord into
+     * window-content-relative coordinates and dispatches here. NULL =
+     * surface has no per-app context menu (falls back to generic). */
+    void           (*on_right_click)(int local_x, int local_y);
+
+    /* Persistence name. NULL = surface state is not persisted. The WM
+     * uses this on detach to flush via wm_persist_save(name). */
+    const char    *persist_name;
 } chain_surface_t;
 
 /* ── Snap zone ghost ── */
@@ -218,6 +227,24 @@ void wm_mouse_move(int x, int y);
 void wm_key_event(int keycode, int modifiers);
 
 /* ── Rendering ── */
+
+/* Set the right-click callback for a surface. Pass NULL to clear. */
+void wm_set_right_click(int id, void (*cb)(int local_x, int local_y));
+
+/* Set the persistence name for a surface (must be a static string;
+ * stored by reference). The WM auto-saves on detach and queues this
+ * surface for the 60s autosave sweep. */
+void wm_set_persist_name(int id, const char *name);
+
+/* Translate a screen coordinate to a window-content-relative coord.
+ * Returns 1 if the screen point falls inside the content area of the
+ * given window and writes the local coord to out_x/out_y; 0 otherwise. */
+int  wm_screen_to_window(int window_id, int screen_x, int screen_y,
+                         int *out_x, int *out_y);
+
+/* Find the topmost visible window whose content area contains (sx,sy).
+ * Returns the surface id, or -1 if none. */
+int  wm_window_at(int sx, int sy);
 
 /* Draw all visible surfaces (called by compositor) */
 void wm_draw_all(void);

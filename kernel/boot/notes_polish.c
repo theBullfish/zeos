@@ -11,9 +11,13 @@
 #include "font.h"
 #include "theme.h"
 #include "wm.h"
+#include "wm_persist.h"
 #include "compositor.h"
 #include "ui_states.h"
+#include "ui_context_menu.h"
 #include "kprint.h"
+#include "notify.h"
+#include "settings_registry.h"
 
 #define NP_W           1200
 #define NP_H            760
@@ -29,6 +33,16 @@ typedef struct {
     char  title[64];
     char  search[64];
     int   search_len;
+    /* View / context-menu state. */
+    int   selected_node;       /* index into g_nodes[] */
+    char  selected_path[96];
+    int   sort_col;
+    int   sort_dir;
+    int   theme_idx;            /* 0 light, 1 dark, 2 sepia */
+    int   scroll_pos;
+    /* Tunables. */
+    int   autosave_secs;
+    int   daily_note_enabled;
 } np_state_t;
 
 static np_state_t N;
@@ -36,10 +50,22 @@ static np_state_t N;
 static int  s_len(const char *s){int n=0;if(!s)return 0;while(s[n])n++;return n;}
 static void s_cpy(char *d,const char *s,int max){int i=0;if(!d||max<=0)return;if(s)while(i<max-1&&s[i]){d[i]=s[i];i++;}d[i]=0;}
 
+/* Forward decls. */
+static void np_get_state(wm_persist_blob_t *out);
+static void np_apply_state(const wm_persist_blob_t *in);
+static void np_on_right_click(int local_x, int local_y);
+static void np_register_settings(void);
+
 void notes_polish_init(void) {
     if (N.initialized) return;
     N.initialized = 1;
     N.surface_id = -1;
+    N.selected_node = -1;
+    N.theme_idx = 1;            /* dark default */
+    N.autosave_secs = 2;
+    N.daily_note_enabled = 1;
+    wm_persist_register("notes-zeos", np_get_state, np_apply_state);
+    np_register_settings();
     s_cpy(N.title, "scratch.md", sizeof(N.title));
     /* Seed source so the rendered preview is meaningful on first open. */
     const char *seed =
@@ -298,6 +324,8 @@ void notes_polish_open(void) {
                                      sx, sy, NP_W, NP_H, np_draw_content);
     if (N.surface_id < 0) return;
     wm_focus_surface(N.surface_id);
+    wm_set_right_click(N.surface_id, np_on_right_click);
+    wm_set_persist_name(N.surface_id, "notes-zeos");
     N.active = 1;
 }
 void notes_polish_close(void) {
@@ -321,4 +349,147 @@ void notes_polish_cmd(const char *args) {
     (void)args;
     notes_polish_open();
     kputs("notes opened\n");
+}
+
+/* ── Persistence ──────────────────────────────────────────────── */
+static void np_get_state(wm_persist_blob_t *out) {
+    chain_surface_t *s = (N.surface_id >= 0) ? wm_get_surface(N.surface_id) : 0;
+    if (s) { out->x = s->x; out->y = s->y; out->w = s->w; out->h = s->h; }
+    out->sort_col = N.sort_col; out->sort_dir = N.sort_dir;
+    out->theme_idx = N.theme_idx; out->scroll_pos = N.scroll_pos;
+    int i = 0; for (; i < (int)sizeof(out->filter_str)-1 && N.search[i]; i++)
+        out->filter_str[i] = N.search[i];
+    out->filter_str[i] = 0;
+}
+static void np_apply_state(const wm_persist_blob_t *in) {
+    N.sort_col = in->sort_col; N.sort_dir = in->sort_dir;
+    N.theme_idx = in->theme_idx; N.scroll_pos = in->scroll_pos;
+    int i = 0;
+    for (; i < (int)sizeof(N.search)-1 && in->filter_str[i]; i++)
+        N.search[i] = in->filter_str[i];
+    N.search[i] = 0; N.search_len = i;
+    if (N.surface_id >= 0 && in->w > 0 && in->h > 0) {
+        wm_move_surface(N.surface_id, in->x, in->y);
+        wm_resize_surface(N.surface_id, in->w, in->h);
+    }
+}
+
+/* ── Settings ─────────────────────────────────────────────────── */
+static int np_parse_int(const char *v, int *o){
+    if(!v||!*v)return -1; int n=0;
+    while(*v){ if(*v<'0'||*v>'9')return -1; n=n*10+(*v-'0'); v++; }
+    *o=n; return 0;
+}
+static void np_int_emit(int v, char *o, int max){
+    char t[12]; int ti=0; int k=0;
+    if(v==0)t[ti++]='0';
+    while(v>0&&ti<11){ t[ti++]=(char)('0'+v%10); v/=10; }
+    while(ti>0&&k<max-1) o[k++]=t[--ti]; o[k]=0;
+}
+static int np_g_as(char *o, int m){ np_int_emit(N.autosave_secs, o, m); return 0; }
+static int np_s_as(const char *v){ int n; if(np_parse_int(v,&n)<0||n<1||n>3600)return -1; N.autosave_secs=n; return 0; }
+static int np_g_dn(char *o, int m){ if(m<=0)return 0; o[0]=N.daily_note_enabled?'1':'0'; o[1]=0; return 0; }
+static int np_s_dn(const char *v){
+    if(!v)return -1;
+    if(v[0]=='0'||v[0]=='f'||v[0]=='F') N.daily_note_enabled=0;
+    else if(v[0]=='1'||v[0]=='t'||v[0]=='T') N.daily_note_enabled=1;
+    else return -1;
+    return 0;
+}
+static int np_g_th(char *o, int m){
+    const char *labels[] = {"light","dark","sepia"};
+    int idx = (N.theme_idx >= 0 && N.theme_idx < 3) ? N.theme_idx : 1;
+    int n = 0; while (labels[idx][n] && n < m-1) { o[n] = labels[idx][n]; n++; }
+    o[n] = 0; return 0;
+}
+static int np_s_th(const char *v){
+    if(!v)return -1;
+    if(v[0]=='l') N.theme_idx=0;
+    else if(v[0]=='d') N.theme_idx=1;
+    else if(v[0]=='s') N.theme_idx=2;
+    else return -1;
+    return 0;
+}
+static const settings_entry_t E_NOTES_AS = {
+    .name="notes.autosave_secs",.kind=SK_INT_SECS,.flags=0,
+    .getter=np_g_as,.setter=np_s_as,.enum_labels=0,
+    .desc="Auto-save interval for the active note"};
+static const settings_entry_t E_NOTES_DN = {
+    .name="notes.daily_note_enabled",.kind=SK_BOOL,.flags=0,
+    .getter=np_g_dn,.setter=np_s_dn,.enum_labels=0,
+    .desc="Auto-create a daily note at midnight"};
+static const settings_entry_t E_NOTES_TH = {
+    .name="notes.theme",.kind=SK_ENUM,.flags=0,
+    .getter=np_g_th,.setter=np_s_th,.enum_labels="light|dark|sepia",
+    .desc="Editor theme"};
+
+static void np_register_settings(void) {
+    (void)settings_register(&E_NOTES_AS);
+    (void)settings_register(&E_NOTES_DN);
+    (void)settings_register(&E_NOTES_TH);
+}
+
+/* ── Right-click ──────────────────────────────────────────────── */
+static void np_act_open(void *c){ (void)c;
+    if (N.selected_path[0]) notify_send(N.selected_path, "notes open", NOTIFY_INFO);
+}
+static void np_act_open_pane(void *c){ (void)c;
+    if (N.selected_path[0]) notify_send(N.selected_path, "open in new pane", NOTIFY_INFO);
+}
+static void np_act_rename(void *c){ (void)c;
+    if (N.selected_path[0]) notify_send(N.selected_path, "rename", NOTIFY_INFO);
+}
+static void np_act_delete(void *c){ (void)c;
+    if (N.selected_path[0]) notify_send(N.selected_path, "delete", NOTIFY_WARNING);
+}
+static void np_act_backlink(void *c){ (void)c;
+    if (N.selected_path[0]) {
+        char buf[128]; int k = 0;
+        const char *p = "[["; while (*p && k < 127) buf[k++] = *p++;
+        for (int i = 0; N.selected_path[i] && k < 125; i++) buf[k++] = N.selected_path[i];
+        buf[k++] = ']'; buf[k++] = ']'; buf[k] = 0;
+        notify_send(buf, "backlink path", NOTIFY_INFO);
+    }
+}
+
+static void np_on_right_click(int local_x, int local_y) {
+    chain_surface_t *s = (N.surface_id >= 0) ? wm_get_surface(N.surface_id) : 0;
+    if (!s) return;
+    int sw = s->w - 2;
+    int sh = s->h - WM_TITLEBAR_HEIGHT - 2;
+    /* Graph pane: bottom NP_GRAPH_H pixels. */
+    int graph_top = sh - NP_GRAPH_H;
+    if (local_y < graph_top) return;
+    int cx = s->x + 1;
+    int cy = s->y + WM_TITLEBAR_HEIGHT + 1;
+    int gpane_x_screen = cx;
+    int gpane_y_screen = cy + graph_top;
+    int sx_loc = local_x;
+    int sy_loc = local_y;
+    int abs_x = cx + sx_loc;
+    int abs_y = cy + sy_loc;
+    /* Pick nearest node in g_nodes (positions are in absolute screen
+     * coords from the last draw). */
+    int best = -1, best_d = 14 * 14;
+    for (int i = 0; i < g_node_count; i++) {
+        int dx = abs_x - g_nodes[i].x;
+        int dy = abs_y - g_nodes[i].y;
+        int d = dx*dx + dy*dy;
+        if (d < best_d) { best_d = d; best = i; }
+    }
+    if (best < 0) { (void)gpane_x_screen; (void)gpane_y_screen; (void)sw; return; }
+    N.selected_node = best;
+    s_cpy(N.selected_path, g_nodes[best].name, sizeof(N.selected_path));
+    ctx_menu_item_t items[5];
+    s_cpy(items[0].label, "Open",                CTX_MENU_LABEL_MAX);
+    items[0].action = np_act_open;       items[0].ctx = 0; items[0].enabled = 1;
+    s_cpy(items[1].label, "Open in new pane",    CTX_MENU_LABEL_MAX);
+    items[1].action = np_act_open_pane;  items[1].ctx = 0; items[1].enabled = 1;
+    s_cpy(items[2].label, "Rename",              CTX_MENU_LABEL_MAX);
+    items[2].action = np_act_rename;     items[2].ctx = 0; items[2].enabled = 1;
+    s_cpy(items[3].label, "Delete",              CTX_MENU_LABEL_MAX);
+    items[3].action = np_act_delete;     items[3].ctx = 0; items[3].enabled = 1;
+    s_cpy(items[4].label, "Copy backlink path",  CTX_MENU_LABEL_MAX);
+    items[4].action = np_act_backlink;   items[4].ctx = 0; items[4].enabled = 1;
+    context_menu_open(abs_x, abs_y, items, 5);
 }

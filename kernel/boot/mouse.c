@@ -29,6 +29,7 @@
 #include "ui_dirty.h"
 #include "quick_look.h"
 #include "image_viewer.h"
+#include "wm.h"
 
 /* ── Forward: dispatch button events to UI overlays.
  * Returns 1 if the event was consumed by an overlay (caller should
@@ -77,6 +78,22 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
         if (panel_right_click(x, y))     return 1;
         if (dock_right_click(x, y))      return 1;
         if (inspector_right_click(x, y)) return 1;
+        /* WM-routed per-window right-click: find the topmost window
+         * whose content area contains (x,y), translate to window-local
+         * coords, and dispatch to its on_right_click callback. */
+        {
+            int wid = wm_window_at(x, y);
+            if (wid >= 0) {
+                int lx, ly;
+                if (wm_screen_to_window(wid, x, y, &lx, &ly)) {
+                    chain_surface_t *cs = wm_get_surface(wid);
+                    if (cs && cs->on_right_click) {
+                        cs->on_right_click(lx, ly);
+                        return 1;
+                    }
+                }
+            }
+        }
         if (desktop_right_click(x, y))   return 1;
         /* Generic fallback menu — shouldn't normally be reached now. */
         static ctx_menu_item_t fallback[] = {

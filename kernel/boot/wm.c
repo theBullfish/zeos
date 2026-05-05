@@ -11,6 +11,7 @@
 
 #include "wm.h"
 #include "workspaces.h"
+#include "wm_persist.h"
 #include "fb.h"
 #include "font.h"
 #include "anim.h"
@@ -71,6 +72,56 @@ static chain_surface_t *find_surface(int id) {
             return &g_wm.surfaces[i];
     }
     return 0;
+}
+
+/* Compute content rect for a surface: chrome-stripped area in screen
+ * coords. Mirrors the geometry used in wm_draw_all. */
+static void surface_content_rect(const chain_surface_t *s,
+                                 int *cx, int *cy, int *cw, int *ch) {
+    *cx = s->x + 1;
+    *cy = s->y + WM_TITLEBAR_HEIGHT + 1;
+    *cw = s->w - 2;
+    *ch = s->h - WM_TITLEBAR_HEIGHT - 2;
+}
+
+void wm_set_right_click(int id, void (*cb)(int local_x, int local_y)) {
+    chain_surface_t *s = find_surface(id);
+    if (!s) return;
+    s->on_right_click = cb;
+}
+
+void wm_set_persist_name(int id, const char *name) {
+    chain_surface_t *s = find_surface(id);
+    if (!s) return;
+    s->persist_name = name;
+    /* On first attach, restore prior state (geometry, etc.). */
+    if (name) (void)wm_persist_restore(name);
+}
+
+int wm_screen_to_window(int window_id, int sx, int sy, int *out_x, int *out_y) {
+    chain_surface_t *s = find_surface(window_id);
+    if (!s) return 0;
+    int cx, cy, cw, ch;
+    surface_content_rect(s, &cx, &cy, &cw, &ch);
+    if (sx < cx || sy < cy || sx >= cx + cw || sy >= cy + ch) return 0;
+    if (out_x) *out_x = sx - cx;
+    if (out_y) *out_y = sy - cy;
+    return 1;
+}
+
+int wm_window_at(int sx, int sy) {
+    int best_id = -1, best_z = -1;
+    for (int i = 0; i < g_wm.surface_count; i++) {
+        chain_surface_t *s = &g_wm.surfaces[i];
+        if (!s->visible) continue;
+        if (s->workspace != g_wm.active_workspace) continue;
+        if (s->closing) continue;
+        int cx, cy, cw, ch;
+        surface_content_rect(s, &cx, &cy, &cw, &ch);
+        if (sx < cx || sy < cy || sx >= cx + cw || sy >= cy + ch) continue;
+        if (s->z_index > best_z) { best_z = s->z_index; best_id = s->id; }
+    }
+    return best_id;
 }
 
 static int next_z(void) {
@@ -232,6 +283,8 @@ int wm_create_surface(const char *title, int chain_id,
     s->dragging = 0;
     s->resizing = 0;
     s->draw_content = draw_content;
+    s->on_right_click = 0;
+    s->persist_name = 0;
 
     /* Initialize animation state */
     s->anim_scale = 0.8f;     /* Start small */
@@ -265,6 +318,9 @@ int wm_create_surface(const char *title, int chain_id,
 void wm_detach_surface(int id) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;
+
+    /* Persist state before the window starts vanishing. */
+    if (s->persist_name) (void)wm_persist_save(s->persist_name);
 
     /* Start close animation: scale 1.0 → 0.8, opacity 255 → 0 */
     s->closing = 1;
@@ -1009,6 +1065,10 @@ static void sort_by_z(int *indices, int count) {
 }
 
 void wm_draw_all(void) {
+    /* Periodic auto-save sweep for persisted surfaces. Cheap; no-op
+     * inside the 60s window. */
+    wm_persist_tick();
+
     /* Collect visible surfaces on current workspace and (during a
      * workspace slide) on the incoming workspace. */
     int visible[WM_MAX_SURFACES];

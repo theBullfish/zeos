@@ -18,12 +18,15 @@
 #include "font.h"
 #include "theme.h"
 #include "wm.h"
+#include "wm_persist.h"
 #include "compositor.h"
 #include "ui_states.h"
+#include "ui_context_menu.h"
 #include "kprint.h"
 #include "timeofday.h"
 #include "identity.h"
 #include "notify.h"
+#include "settings_registry.h"
 
 /* ── Sizing ─────────────────────────────────────────────────────────── */
 #define KVP_W            980
@@ -70,6 +73,16 @@ typedef struct {
     int  status_is_error;
     /* tiny output buffer: last line shown above the input. */
     char last_out[KVP_INPUT_MAX];
+    /* View / context-menu state. */
+    int  selected_row;       /* row index in the current visible list */
+    char selected_key[KVP_KEY_MAX];
+    int  sort_col;           /* 0 key, 1 hits */
+    int  sort_dir;           /* 0 asc, 1 desc */
+    int  theme_idx;
+    /* Tunables (settings registry). */
+    int  history_size_setting;
+    int  autosave_ms_setting;
+    int  show_ttl_colors_setting;
 } kvp_state_t;
 
 static kvp_state_t S;
@@ -166,15 +179,28 @@ static int kvp_ttl_class(const kvp_entry_t *e) {
     return 0;
 }
 
+/* Forward decls for settings + persistence + right-click. */
+static void kvp_get_state(wm_persist_blob_t *out);
+static void kvp_apply_state(const wm_persist_blob_t *in);
+static void kvp_on_right_click(int local_x, int local_y);
+static void kv_polish_register_settings(void);
+
 /* ── Init ──────────────────────────────────────────────────────────── */
 void kv_polish_init(void) {
     if (S.initialized) return;
     S.initialized = 1;
     S.surface_id = -1;
     S.hist_browse = -1;
-    /* Settings registry entries are intentionally lazy here; the registry
-     * needs static getter/setter pairs, which are wired in a follow-up
-     * along with the other apps' shared SR pass. Honest gap. */
+    S.selected_row = -1;
+    S.sort_col = 0;
+    S.sort_dir = 0;
+    S.theme_idx = 0;
+    S.history_size_setting = KVP_HIST_MAX;
+    S.autosave_ms_setting = 5000;
+    S.show_ttl_colors_setting = 1;
+    /* Register persistence + settings. Idempotent; safe on re-init. */
+    wm_persist_register("kv-zeos", kvp_get_state, kvp_apply_state);
+    kv_polish_register_settings();
 }
 
 /* ── Drawing ──────────────────────────────────────────────────────── */
@@ -346,6 +372,10 @@ void kv_polish_open(void) {
                                      sx, sy, KVP_W, KVP_H, kvp_draw_content);
     if (S.surface_id < 0) return;
     wm_focus_surface(S.surface_id);
+    wm_set_right_click(S.surface_id, kvp_on_right_click);
+    /* Register persist_name AFTER create — this triggers a restore that
+     * may move/resize the surface. */
+    wm_set_persist_name(S.surface_id, "kv-zeos");
     S.active = 1;
 }
 
@@ -606,6 +636,188 @@ void kv_polish_print_selftest_line(void) {
     kputs(" keys, ");
     kput_dec(kv_polish_total_contexts());
     kputs(" contexts isolated\n");
+}
+
+/* ── Persistence callbacks ─────────────────────────────────────── */
+static void kvp_get_state(wm_persist_blob_t *out) {
+    chain_surface_t *s = (S.surface_id >= 0) ? wm_get_surface(S.surface_id) : 0;
+    if (s) { out->x = s->x; out->y = s->y; out->w = s->w; out->h = s->h; }
+    out->sort_col   = S.sort_col;
+    out->sort_dir   = S.sort_dir;
+    out->theme_idx  = S.theme_idx;
+    out->scroll_pos = S.scroll;
+    out->filter_str[0] = 0;
+}
+static void kvp_apply_state(const wm_persist_blob_t *in) {
+    S.sort_col   = in->sort_col;
+    S.sort_dir   = in->sort_dir;
+    S.theme_idx  = in->theme_idx;
+    S.scroll     = in->scroll_pos;
+    if (S.surface_id >= 0 && in->w > 0 && in->h > 0) {
+        wm_move_surface(S.surface_id, in->x, in->y);
+        wm_resize_surface(S.surface_id, in->w, in->h);
+    }
+}
+
+/* ── Settings registry ────────────────────────────────────────── */
+static int kvp_set_history_g(char *out, int max) {
+    int v = S.history_size_setting; int n = 0;
+    char tmp[12]; int t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v > 0 && t < 11) { tmp[t++] = (char)('0' + v % 10); v /= 10; }
+    while (t > 0 && n < max - 1) out[n++] = tmp[--t];
+    out[n] = 0; return 0;
+}
+static int kvp_parse_int(const char *v, int *out) {
+    if (!v || !*v) return -1; int n = 0; int sign = 1;
+    if (*v == '-') { sign = -1; v++; }
+    while (*v) { if (*v < '0' || *v > '9') return -1; n = n*10 + (*v - '0'); v++; }
+    *out = n * sign; return 0;
+}
+static int kvp_set_history_s(const char *v) {
+    int n; if (kvp_parse_int(v, &n) < 0) return -1;
+    if (n < 1 || n > 4096) return -1;
+    S.history_size_setting = n; return 0;
+}
+static int kvp_set_autosave_g(char *out, int max) {
+    int v = S.autosave_ms_setting; int n = 0;
+    char tmp[12]; int t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v > 0 && t < 11) { tmp[t++] = (char)('0' + v % 10); v /= 10; }
+    while (t > 0 && n < max - 1) out[n++] = tmp[--t];
+    out[n] = 0; return 0;
+}
+static int kvp_set_autosave_s(const char *v) {
+    int n; if (kvp_parse_int(v, &n) < 0) return -1;
+    if (n < 100 || n > 600000) return -1;
+    S.autosave_ms_setting = n; return 0;
+}
+static int kvp_set_ttlcol_g(char *out, int max) {
+    if (max <= 0) return 0;
+    out[0] = S.show_ttl_colors_setting ? '1' : '0'; out[1] = 0; return 0;
+}
+static int kvp_set_ttlcol_s(const char *v) {
+    if (!v) return -1;
+    if (v[0] == '0' || v[0] == 'f' || v[0] == 'F') S.show_ttl_colors_setting = 0;
+    else if (v[0] == '1' || v[0] == 't' || v[0] == 'T') S.show_ttl_colors_setting = 1;
+    else return -1;
+    return 0;
+}
+
+static const settings_entry_t E_KV_HISTORY = {
+    .name = "kv.history_size", .kind = SK_INT, .flags = 0,
+    .getter = kvp_set_history_g, .setter = kvp_set_history_s,
+    .enum_labels = 0, .desc = "Command history depth"
+};
+static const settings_entry_t E_KV_AUTOSAVE = {
+    .name = "kv.autosave_ms", .kind = SK_INT, .flags = 0,
+    .getter = kvp_set_autosave_g, .setter = kvp_set_autosave_s,
+    .enum_labels = 0, .desc = "Autosave interval (milliseconds)"
+};
+static const settings_entry_t E_KV_TTLCOL = {
+    .name = "kv.show_ttl_colors", .kind = SK_BOOL, .flags = 0,
+    .getter = kvp_set_ttlcol_g, .setter = kvp_set_ttlcol_s,
+    .enum_labels = 0, .desc = "Color-code keys by TTL state"
+};
+
+void kv_polish_register_all_settings(void) {
+    kv_polish_init();
+}
+
+static void kv_polish_register_settings(void) {
+    (void)settings_register(&E_KV_HISTORY);
+    (void)settings_register(&E_KV_AUTOSAVE);
+    (void)settings_register(&E_KV_TTLCOL);
+}
+
+/* ── Right-click context menu ─────────────────────────────────── */
+static void kvp_action_copy_key(void *ctx) {
+    (void)ctx;
+    notify_send(S.selected_key, "kv copy key", NOTIFY_INFO);
+}
+static void kvp_action_copy_value(void *ctx) {
+    (void)ctx;
+    char buf[KVP_VAL_MAX];
+    if (kv_polish_get(S.selected_key, buf, sizeof(buf)) == 0)
+        notify_send(buf, "kv copy value", NOTIFY_INFO);
+    else
+        notify_send("(nil)", "kv copy value", NOTIFY_WARNING);
+}
+static void kvp_action_set_ttl(void *ctx) {
+    (void)ctx;
+    int slot = kvp_find_slot(kvp_active_ctx(), S.selected_key);
+    if (slot < 0) return;
+    g_table[slot].expires_unix = kvp_now_unix() + 60;
+    notify_send("TTL set to 60s", "kv set TTL", NOTIFY_INFO);
+}
+static void kvp_action_delete(void *ctx) {
+    (void)ctx;
+    if (kv_polish_del(S.selected_key) == 0)
+        notify_send(S.selected_key, "kv deleted", NOTIFY_INFO);
+}
+static void kvp_action_export(void *ctx) {
+    (void)ctx;
+    int slot = kvp_find_slot(kvp_active_ctx(), S.selected_key);
+    if (slot >= 0 && g_table[slot].sovereign) {
+        notify_send("Re-PIN required for SOVEREIGN export", "kv export", NOTIFY_WARNING);
+    } else {
+        char buf[KVP_VAL_MAX];
+        if (kv_polish_get(S.selected_key, buf, sizeof(buf)) == 0)
+            notify_send(buf, "kv export", NOTIFY_INFO);
+    }
+}
+
+static void kvp_on_right_click(int local_x, int local_y) {
+    /* Map local (within content area) to a row in the keys pane.
+     * Layout: status bar at top (KVP_STATUS_H), then keys list, REPL at bottom. */
+    int keys_top = KVP_STATUS_H;
+    int keys_bot_excl;
+    /* Surface content height — re-derive from the surface. */
+    chain_surface_t *s = (S.surface_id >= 0) ? wm_get_surface(S.surface_id) : 0;
+    if (!s) return;
+    int ch = s->h - WM_TITLEBAR_HEIGHT - 2;
+    keys_bot_excl = ch - KVP_REPL_H;
+    int keys_w = (s->w - 2) - KVP_HELP_W;
+    if (local_x < 0 || local_x >= keys_w) return;
+    if (local_y < keys_top || local_y >= keys_bot_excl) return;
+    int row = (local_y - keys_top) / KVP_ROW_H;
+    /* Walk the table to find the Nth visible row in this ctx. */
+    int ctx = kvp_active_ctx();
+    int idx = 0; int found = 0;
+    for (int i = 0; i < KVP_MAX_ENTRIES; i++) {
+        if (!g_table[i].used || g_table[i].ctx_id != ctx) continue;
+        if (idx++ < S.scroll) continue;
+        if (idx - 1 - S.scroll == row) {
+            s_cpy(S.selected_key, g_table[i].k, sizeof(S.selected_key));
+            S.selected_row = row;
+            found = 1;
+            break;
+        }
+    }
+    if (!found) return;
+    /* Find absolute screen coord for menu placement. */
+    int cx, cy, cw, ch2; (void)cw; (void)ch2;
+    cx = s->x + 1;
+    cy = s->y + WM_TITLEBAR_HEIGHT + 1;
+    int sx = cx + local_x;
+    int sy = cy + local_y;
+    /* Build menu. */
+    int slot = kvp_find_slot(ctx, S.selected_key);
+    int is_sov = (slot >= 0 && g_table[slot].sovereign);
+    ctx_menu_item_t items[6];
+    int n = 0;
+    items[n].action = kvp_action_copy_key;   items[n].ctx = 0; items[n].enabled = 1;
+    s_cpy(items[n].label, "Copy key",        CTX_MENU_LABEL_MAX); n++;
+    items[n].action = kvp_action_copy_value; items[n].ctx = 0; items[n].enabled = 1;
+    s_cpy(items[n].label, "Copy value",      CTX_MENU_LABEL_MAX); n++;
+    items[n].action = kvp_action_set_ttl;    items[n].ctx = 0; items[n].enabled = 1;
+    s_cpy(items[n].label, "Set TTL (60s)",   CTX_MENU_LABEL_MAX); n++;
+    items[n].action = kvp_action_delete;     items[n].ctx = 0; items[n].enabled = 1;
+    s_cpy(items[n].label, "Delete",          CTX_MENU_LABEL_MAX); n++;
+    items[n].action = kvp_action_export;     items[n].ctx = 0; items[n].enabled = 1;
+    s_cpy(items[n].label, is_sov ? "Export (re-PIN)" : "Export",
+          CTX_MENU_LABEL_MAX); n++;
+    context_menu_open(sx, sy, items, n);
 }
 
 /* ── Shell ─────────────────────────────────────────────────────────── */

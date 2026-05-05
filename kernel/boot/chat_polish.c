@@ -10,10 +10,14 @@
 #include "font.h"
 #include "theme.h"
 #include "wm.h"
+#include "wm_persist.h"
 #include "compositor.h"
 #include "ui_states.h"
+#include "ui_context_menu.h"
 #include "kprint.h"
 #include "timeofday.h"
+#include "notify.h"
+#include "settings_registry.h"
 
 #define CP_W              1200
 #define CP_H               760
@@ -40,6 +44,18 @@ typedef struct {
     int   palette_open;
     char  palette_input[64];
     int   palette_input_len;
+    /* Selection / view state. */
+    uint64_t selected_msg_ts;
+    char  selected_msg_author[64];
+    char  selected_msg_body[256];
+    int   sort_col;
+    int   sort_dir;
+    int   theme_idx;
+    int   scroll_pos;
+    /* Tunables. */
+    int   message_history_size;
+    int   typing_indicator;
+    int   relative_timestamps;
 } cp_state_t;
 
 static cp_state_t C;
@@ -48,10 +64,21 @@ static int  s_len(const char *s){int n=0;if(!s)return 0;while(s[n])n++;return n;
 static int  s_eq(const char *a,const char *b){while(*a&&*b&&*a==*b){a++;b++;}return *a==*b;}
 static void s_cpy(char *d,const char *s,int max){int i=0;if(!d||max<=0)return;if(s)while(i<max-1&&s[i]){d[i]=s[i];i++;}d[i]=0;}
 
+/* Forward decls. */
+static void cp_get_state(wm_persist_blob_t *out);
+static void cp_apply_state(const wm_persist_blob_t *in);
+static void cp_on_right_click(int local_x, int local_y);
+static void cp_register_settings(void);
+
 void chat_polish_init(void) {
     if (C.initialized) return;
     C.initialized = 1;
     C.surface_id = -1;
+    C.message_history_size = 1000;
+    C.typing_indicator = 1;
+    C.relative_timestamps = 1;
+    wm_persist_register("chat-zeos", cp_get_state, cp_apply_state);
+    cp_register_settings();
     chat_zeos_init();
     /* Default room: "general". Create if missing. */
     if (chat_zeos_create_room("general", "General", 1) == 0
@@ -194,9 +221,24 @@ static int g_msg_x;
 static int g_msg_w;
 static int g_msg_y_max;
 
+/* Row map for right-click hit-testing. Captured on each draw of the
+ * messages pane. */
+#define CP_ROW_MAP_MAX 32
+typedef struct { int y_top; int y_bot; uint64_t ts; char author[64]; char body[256]; } cp_row_t;
+static cp_row_t g_msg_rows[CP_ROW_MAP_MAX];
+static int g_msg_rows_count;
+
 static void cp_msg_cb(uint64_t ts, const char *author, const char *body, void *user) {
     (void)user;
     if (g_msg_y > g_msg_y_max - 60) return;
+    if (g_msg_rows_count < CP_ROW_MAP_MAX) {
+        g_msg_rows[g_msg_rows_count].y_top = g_msg_y;
+        g_msg_rows[g_msg_rows_count].y_bot = g_msg_y + 56;
+        g_msg_rows[g_msg_rows_count].ts = ts;
+        s_cpy(g_msg_rows[g_msg_rows_count].author, author ? author : "?", 64);
+        s_cpy(g_msg_rows[g_msg_rows_count].body, body ? body : "", 256);
+        g_msg_rows_count++;
+    }
     /* Avatar circle — first letter */
     uint32_t avc = avatar_color(author);
     fb_circle_filled(g_msg_x + 18, g_msg_y + 14, 14, avc);
@@ -225,6 +267,7 @@ static void cp_draw_messages(int x, int y, int w, int h) {
     int bot = y + h - CP_INPUT_H - 8;
     g_msg_x = x; g_msg_y = top; g_msg_w = w; g_msg_y_max = bot;
     C.msgs_drawn = 0;
+    g_msg_rows_count = 0;
     chat_zeos_walk_tail(C.active_room, chat_zeos_current_ctx(), 16, cp_msg_cb, 0);
     if (C.msgs_drawn == 0) {
         list_state_ctx_t lc = {.x = x, .y = top, .w = w, .h = bot - top,
@@ -299,6 +342,8 @@ void chat_polish_open(void) {
                                      sx, sy, CP_W, CP_H, cp_draw_content);
     if (C.surface_id < 0) return;
     wm_focus_surface(C.surface_id);
+    wm_set_right_click(C.surface_id, cp_on_right_click);
+    wm_set_persist_name(C.surface_id, "chat-zeos");
     C.active = 1;
 }
 void chat_polish_close(void) {
@@ -328,4 +373,154 @@ void chat_polish_cmd(const char *args) {
     (void)args;
     chat_polish_open();
     kputs("chat opened\n");
+}
+
+/* ── Persistence ──────────────────────────────────────────────── */
+static void cp_get_state(wm_persist_blob_t *out) {
+    chain_surface_t *s = (C.surface_id >= 0) ? wm_get_surface(C.surface_id) : 0;
+    if (s) { out->x = s->x; out->y = s->y; out->w = s->w; out->h = s->h; }
+    out->sort_col = C.sort_col; out->sort_dir = C.sort_dir;
+    out->theme_idx = C.theme_idx; out->scroll_pos = C.scroll_pos;
+    int i = 0;
+    for (; i < (int)sizeof(out->filter_str)-1 && C.active_room[i]; i++)
+        out->filter_str[i] = C.active_room[i];
+    out->filter_str[i] = 0;
+}
+static void cp_apply_state(const wm_persist_blob_t *in) {
+    C.sort_col = in->sort_col; C.sort_dir = in->sort_dir;
+    C.theme_idx = in->theme_idx; C.scroll_pos = in->scroll_pos;
+    if (in->filter_str[0]) {
+        /* Best-effort: ignore failure if room missing; default stays. */
+        (void)chat_polish_set_active_room(in->filter_str);
+    }
+    if (C.surface_id >= 0 && in->w > 0 && in->h > 0) {
+        wm_move_surface(C.surface_id, in->x, in->y);
+        wm_resize_surface(C.surface_id, in->w, in->h);
+    }
+}
+
+/* ── Settings ─────────────────────────────────────────────────── */
+static int cp_parse_int(const char *v, int *o){
+    if(!v||!*v)return -1; int n=0;
+    while(*v){ if(*v<'0'||*v>'9')return -1; n=n*10+(*v-'0'); v++; }
+    *o=n; return 0;
+}
+static void cp_int_emit(int v, char *o, int max){
+    char t[12]; int ti=0; int k=0;
+    if(v==0)t[ti++]='0';
+    while(v>0&&ti<11){ t[ti++]=(char)('0'+v%10); v/=10; }
+    while(ti>0&&k<max-1) o[k++]=t[--ti]; o[k]=0;
+}
+static int cp_g_hist(char *o, int m){ cp_int_emit(C.message_history_size, o, m); return 0; }
+static int cp_s_hist(const char *v){ int n; if(cp_parse_int(v,&n)<0||n<10||n>100000)return -1; C.message_history_size=n; return 0; }
+static int cp_g_ti(char *o, int m){ if(m<=0)return 0; o[0]=C.typing_indicator?'1':'0'; o[1]=0; return 0; }
+static int cp_s_ti(const char *v){
+    if(!v)return -1;
+    if(v[0]=='0'||v[0]=='f'||v[0]=='F') C.typing_indicator=0;
+    else if(v[0]=='1'||v[0]=='t'||v[0]=='T') C.typing_indicator=1;
+    else return -1;
+    return 0;
+}
+static int cp_g_rt(char *o, int m){ if(m<=0)return 0; o[0]=C.relative_timestamps?'1':'0'; o[1]=0; return 0; }
+static int cp_s_rt(const char *v){
+    if(!v)return -1;
+    if(v[0]=='0'||v[0]=='f'||v[0]=='F') C.relative_timestamps=0;
+    else if(v[0]=='1'||v[0]=='t'||v[0]=='T') C.relative_timestamps=1;
+    else return -1;
+    return 0;
+}
+static const settings_entry_t E_CHAT_HIST = {
+    .name="chat.message_history_size",.kind=SK_INT,.flags=0,
+    .getter=cp_g_hist,.setter=cp_s_hist,.enum_labels=0,
+    .desc="Per-room messages held in memory"};
+static const settings_entry_t E_CHAT_TYPE = {
+    .name="chat.typing_indicator",.kind=SK_BOOL,.flags=0,
+    .getter=cp_g_ti,.setter=cp_s_ti,.enum_labels=0,
+    .desc="Show typing indicator"};
+static const settings_entry_t E_CHAT_REL = {
+    .name="chat.relative_timestamps",.kind=SK_BOOL,.flags=0,
+    .getter=cp_g_rt,.setter=cp_s_rt,.enum_labels=0,
+    .desc="Render timestamps as relative (\"2m ago\")"};
+
+static void cp_register_settings(void) {
+    (void)settings_register(&E_CHAT_HIST);
+    (void)settings_register(&E_CHAT_TYPE);
+    (void)settings_register(&E_CHAT_REL);
+}
+
+/* ── Right-click ──────────────────────────────────────────────── */
+static int cp_is_own_msg(void) {
+    return s_eq(C.selected_msg_author, chat_zeos_current_ctx());
+}
+static void cp_act_reply(void *c){ (void)c;
+    notify_send(C.selected_msg_body, "reply in thread", NOTIFY_INFO);
+}
+static void cp_act_quote(void *c){ (void)c;
+    notify_send(C.selected_msg_body, "quoted", NOTIFY_INFO);
+}
+static void cp_act_react(void *c){ (void)c;
+    notify_send(C.selected_msg_body, "reaction added", NOTIFY_INFO);
+}
+static void cp_act_edit(void *c){ (void)c;
+    if (cp_is_own_msg())
+        notify_send(C.selected_msg_body, "editing", NOTIFY_INFO);
+}
+static void cp_act_delete(void *c){ (void)c;
+    if (cp_is_own_msg())
+        notify_send(C.selected_msg_body, "deleted", NOTIFY_WARNING);
+}
+static void cp_act_permalink(void *c){ (void)c;
+    /* Build a chat://<room>/ts permalink. */
+    char buf[160]; int k = 0;
+    const char *p = "chat://";
+    while (*p && k < 159) buf[k++] = *p++;
+    for (int i = 0; C.active_room[i] && k < 158; i++) buf[k++] = C.active_room[i];
+    if (k < 158) buf[k++] = '/';
+    /* Append ts as decimal. */
+    uint64_t v = C.selected_msg_ts;
+    char tmp[24]; int ti = 0;
+    if (v == 0) tmp[ti++] = '0';
+    while (v > 0 && ti < 23) { tmp[ti++] = (char)('0' + (v % 10)); v /= 10; }
+    while (ti > 0 && k < 159) buf[k++] = tmp[--ti];
+    buf[k] = 0;
+    notify_send(buf, "permalink", NOTIFY_INFO);
+}
+
+static void cp_on_right_click(int local_x, int local_y) {
+    chain_surface_t *s = (C.surface_id >= 0) ? wm_get_surface(C.surface_id) : 0;
+    if (!s) return;
+    int cx = s->x + 1;
+    int cy = s->y + WM_TITLEBAR_HEIGHT + 1;
+    int abs_x = cx + local_x;
+    int abs_y = cy + local_y;
+    /* Hit-test against last drawn rows (rows are absolute screen y). */
+    int hit = -1;
+    for (int i = 0; i < g_msg_rows_count; i++) {
+        if (abs_y >= g_msg_rows[i].y_top && abs_y < g_msg_rows[i].y_bot) {
+            hit = i; break;
+        }
+    }
+    if (hit < 0) return;
+    /* Make sure we're in the messages pane horizontally. */
+    int center_x_start = CP_LEFT_W;
+    int center_x_end = (s->w - 2) - CP_RIGHT_W;
+    if (local_x < center_x_start || local_x >= center_x_end) return;
+    C.selected_msg_ts = g_msg_rows[hit].ts;
+    s_cpy(C.selected_msg_author, g_msg_rows[hit].author, sizeof(C.selected_msg_author));
+    s_cpy(C.selected_msg_body, g_msg_rows[hit].body, sizeof(C.selected_msg_body));
+    int own = cp_is_own_msg();
+    ctx_menu_item_t items[6];
+    s_cpy(items[0].label, "Reply in thread", CTX_MENU_LABEL_MAX);
+    items[0].action = cp_act_reply;     items[0].ctx = 0; items[0].enabled = 1;
+    s_cpy(items[1].label, "Quote",           CTX_MENU_LABEL_MAX);
+    items[1].action = cp_act_quote;     items[1].ctx = 0; items[1].enabled = 1;
+    s_cpy(items[2].label, "React",           CTX_MENU_LABEL_MAX);
+    items[2].action = cp_act_react;     items[2].ctx = 0; items[2].enabled = 1;
+    s_cpy(items[3].label, "Edit",            CTX_MENU_LABEL_MAX);
+    items[3].action = cp_act_edit;      items[3].ctx = 0; items[3].enabled = own;
+    s_cpy(items[4].label, "Delete",          CTX_MENU_LABEL_MAX);
+    items[4].action = cp_act_delete;    items[4].ctx = 0; items[4].enabled = own;
+    s_cpy(items[5].label, "Copy permalink",  CTX_MENU_LABEL_MAX);
+    items[5].action = cp_act_permalink; items[5].ctx = 0; items[5].enabled = 1;
+    context_menu_open(abs_x, abs_y, items, 6);
 }

@@ -18,7 +18,7 @@
 
 #include <stdint.h>
 
-#define SETTINGS_REGISTRY_MAX     32
+#define SETTINGS_REGISTRY_MAX     64
 #define SETTINGS_VALUE_MAX        64
 #define SETTINGS_NAME_MAX         48
 

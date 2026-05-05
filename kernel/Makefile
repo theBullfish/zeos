@@ -133,6 +133,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/build_polish.c \
            boot/notes_polish.c \
            boot/chat_polish.c \
+           boot/wm_persist.c \
            boot/activity.c \
            boot/tests.c
 
