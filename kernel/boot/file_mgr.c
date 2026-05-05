@@ -512,7 +512,7 @@ static void fm_draw_places(int wx, int wy) {
         int active = fm_streq(g_fm.cwd, places[i]) ? 1 : 0;
         if (active) fb_rect(wx + 4, yy - 2, FM_PLACES_W - 8, FM_ROW_H, COLOR_PRIMARY);
         font_draw(wx + 12, yy + 2, places[i], FONT_UI, FM_FONT_PX,
-                  active ? 0xFFFFFFFF : COLOR_ON_SURFACE);
+                  active ? COLOR_ON_SURFACE : COLOR_ON_SURFACE);
         yy += FM_ROW_H;
     }
 
@@ -555,10 +555,10 @@ static void fm_draw_listing(int wx, int wy) {
             int focused = (i == g_fm.focus_idx);
             if (focused) fb_rect(lx + 2, row_y - 1, lw - 4, FM_ROW_H, COLOR_PRIMARY);
             font_draw(lx + 8, row_y + 2, g_fm.trash[i].orig_path,
-                      FONT_UI, FM_FONT_PX, focused ? 0xFFFFFFFF : COLOR_ON_SURFACE);
+                      FONT_UI, FM_FONT_PX, focused ? COLOR_ON_SURFACE : COLOR_ON_SURFACE);
             char ns[16]; fm_itoa(g_fm.trash[i].size, ns);
             font_draw(lx + lw - 80, row_y + 2, ns, FONT_UI, FM_FONT_PX,
-                      focused ? 0xFFFFFFFF : COLOR_ON_SURFACE_3);
+                      focused ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_3);
             row_y += FM_ROW_H;
         }
         return;
@@ -574,11 +574,11 @@ static void fm_draw_listing(int wx, int wy) {
         const char *icon = e->is_dir ? "[d]" : "   ";
         font_draw(lx + 6, row_y + 2, icon, FONT_UI, FM_FONT_PX, COLOR_ON_SURFACE_3);
         font_draw(lx + 32, row_y + 2, e->name, FONT_UI, FM_FONT_PX,
-                  e->selected ? 0xFFFFFFFF : COLOR_ON_SURFACE);
+                  e->selected ? COLOR_ON_SURFACE : COLOR_ON_SURFACE);
         if (!e->is_dir) {
             char ns[16]; fm_itoa(e->size, ns);
             font_draw(lx + lw - 80, row_y + 2, ns, FONT_UI, FM_FONT_PX,
-                      e->selected ? 0xFFFFFFFF : COLOR_ON_SURFACE_3);
+                      e->selected ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_3);
         }
         row_y += FM_ROW_H;
     }
@@ -606,7 +606,7 @@ static void fm_draw_preview(int wx, int wy) {
             int bx = px + FM_PAD;
             int by = py + ph - 60;
             fb_rect(bx, by, FM_PREVIEW_W - FM_PAD*2, 22, COLOR_PRIMARY);
-            font_draw(bx + 8, by + 4, "Restore", FONT_UI, FM_FONT_PX, 0xFFFFFFFF);
+            font_draw(bx + 8, by + 4, "Restore", FONT_UI, FM_FONT_PX, COLOR_ON_SURFACE);
             int by2 = py + ph - 32;
             fb_rect(bx, by2, FM_PREVIEW_W - FM_PAD*2, 22, COLOR_SURFACE);
             fb_rect_outline(bx, by2, FM_PREVIEW_W - FM_PAD*2, 22, COLOR_SEPARATOR, 1);

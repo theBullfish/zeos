@@ -26,6 +26,14 @@ uint32_t theme_on_surface_3(void);
 uint32_t theme_on_surface_4(void);
 uint32_t theme_separator(void);
 
+/* ── Active persona accent (Zeros/DereZ/Full) ──
+ * Returns the single accent color for the active persona. Use this
+ * for any chrome element that should track the active persona — never
+ * hardcode COLOR_ZEROS_ACCENT / COLOR_FULL_ACCENT in UI code.
+ */
+uint32_t theme_active_accent(void);
+uint32_t theme_active_accent_dim(void);
+
 /* ── Scheme control ── */
 void           theme_set_scheme(color_scheme_t scheme);
 color_scheme_t theme_get_scheme(void);

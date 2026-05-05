@@ -440,7 +440,7 @@ void quick_look_draw(void)
     int qx = (sw - QL_W) / 2, qy = (sh - QL_H) / 2;
 
     /* Dim background */
-    fb_rect_blend(0, 0, sw, sh, 0x80000000);
+    fb_rect_blend(0, 0, sw, sh, (COLOR_SURFACE & 0x00FFFFFF) | 0x80000000);
 
     /* Card */
     fb_rect(qx, qy, QL_W, QL_H, COLOR_SURFACE_HIGH);

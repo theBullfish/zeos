@@ -18,6 +18,9 @@
 /* Set the active persona (affects what chains are visible system-wide) */
 void persona_set_active(int persona);  /* 0=zeros, 1=derez, 2=full */
 
+/* Get the currently-active persona (returns enum persona). */
+int persona_get_active(void);
+
 /* Get the MasQ tier that the current persona can perceive up to */
 masq_tier_t persona_max_tier(void);
 

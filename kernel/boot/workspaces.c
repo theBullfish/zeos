@@ -209,14 +209,19 @@ static void slide_cb(int aid, float pos, void *ctx) {
     compositor_dirty_all();
 }
 
-/* Spring constants from animation_ms. Shorter ms = stiffer. */
+/* Spring constants from animation_ms. Shorter ms = stiffer.
+ * Mapped onto theme.h presets where possible:
+ *  - <=140ms : extra-snappy derivation (no preset; tightest user-tunable)
+ *  - <=260ms : INTERACTIVE preset (default snap window)
+ *  - else    : SNAPPY preset (relaxed)
+ */
 static void slide_spring_constants(float *stiff, float *damp) {
     if (g_anim_ms <= 140) {
         *stiff = 600.0f; *damp = 32.0f;
     } else if (g_anim_ms <= 260) {
-        *stiff = 400.0f; *damp = 28.0f;
+        *stiff = SPRING_INTERACTIVE_S; *damp = SPRING_INTERACTIVE_D;
     } else {
-        *stiff = 220.0f; *damp = 22.0f;
+        *stiff = SPRING_SNAPPY_S; *damp = SPRING_SNAPPY_D;
     }
 }
 

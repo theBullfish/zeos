@@ -97,13 +97,13 @@ static palette_state_t pal;
 #define PAL_CORNER_INSET     8
 
 /* Semi-transparent surface: COLOR_SURFACE with ~85% alpha (0xD9) */
-#define PAL_BG_COLOR       0xD90D1117
-/* Search box background */
-#define PAL_SEARCH_BG      0xFF161B22
-/* Search box border */
-#define PAL_SEARCH_BORDER  0xFF21262D
-/* Selected item highlight */
-#define PAL_SELECT_BG      0xFF21262D
+#define PAL_BG_COLOR       ((COLOR_SURFACE & 0x00FFFFFF) | 0xD9000000)
+/* Search box background — surface_high */
+#define PAL_SEARCH_BG      COLOR_SURFACE_HIGH
+/* Search box border — separator */
+#define PAL_SEARCH_BORDER  COLOR_SEPARATOR
+/* Selected item highlight — surface_top */
+#define PAL_SELECT_BG      COLOR_SURFACE_TOP
 
 /* ── Default action callbacks ───────────────────────────────────── */
 

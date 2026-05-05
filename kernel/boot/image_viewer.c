@@ -674,7 +674,7 @@ void image_viewer_draw(void)
     /* Viewport. */
     int vx, vy, vw, vh;
     iv_viewport_rect(&vx, &vy, &vw, &vh);
-    fb_rect(vx, vy, vw, vh, 0xFF000000);
+    fb_rect(vx, vy, vw, vh, COLOR_SURFACE);
     fb_rect_outline(vx, vy, vw, vh, COLOR_SEPARATOR, 1);
 
     if (g_iv.state == IV_STATE_LOADED) {

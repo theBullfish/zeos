@@ -828,7 +828,7 @@ static void draw_tab_calendar(int x, int y, int w, int h) {
             uint32_t fg = COLOR_ON_SURFACE;
             int is_today = today_in_view && day == today.day;
             int is_sel   = day == S.sel_day;
-            if (is_today) { bg = COLOR_PRIMARY_DIM; fg = 0xFFFFFFFF; }
+            if (is_today) { bg = COLOR_PRIMARY_DIM; fg = COLOR_ON_SURFACE; }
             else if (is_sel) { bg = COLOR_SURFACE_TOP; }
             fb_rect(cx, cy, cw, ch, bg);
             fb_rect_outline(cx, cy, cw, ch, COLOR_SEPARATOR, 1);

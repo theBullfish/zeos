@@ -1333,7 +1333,7 @@ void calculator_draw(void)
         int tx, ty, tw, th;
         calc_tab_rect(i, &tx, &ty, &tw, &th);
         uint32_t bg = (g_calc.mode == (calc_mode_t)i) ? COLOR_PRIMARY : COLOR_SURFACE;
-        uint32_t fg = (g_calc.mode == (calc_mode_t)i) ? 0xFFFFFFFF : COLOR_ON_SURFACE_2;
+        uint32_t fg = (g_calc.mode == (calc_mode_t)i) ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_2;
         draw_button(tx, ty, tw, th, mode_label((calc_mode_t)i), bg, fg);
     }
 
@@ -1405,7 +1405,7 @@ void calculator_draw(void)
             const calc_btn_t *b = &grid[r * BTN_COLS + c];
             uint32_t bg = COLOR_SURFACE;
             uint32_t fg = COLOR_ON_SURFACE;
-            if (b->kind == 3) { bg = COLOR_PRIMARY; fg = 0xFFFFFFFF; }
+            if (b->kind == 3) { bg = COLOR_PRIMARY; fg = COLOR_ON_SURFACE; }
             else if (b->kind == 1 || b->kind == 2) { bg = COLOR_SURFACE_TOP; }
             draw_button(bx, by, bw, bh, b->label, bg, fg);
         }
@@ -1421,7 +1421,7 @@ void calculator_draw(void)
             calc_bit_rect(b, &bx, &by, &bw, &bh);
             int set = (v >> b) & 1;
             uint32_t bg = set ? COLOR_PRIMARY : COLOR_SURFACE;
-            uint32_t fg = set ? 0xFFFFFFFF : COLOR_ON_SURFACE_3;
+            uint32_t fg = set ? COLOR_ON_SURFACE : COLOR_ON_SURFACE_3;
             char lbl[2] = { (char)('0' + set), 0 };
             draw_button(bx, by, bw, bh, lbl, bg, fg);
             /* Bit index marker every 8 bits, drawn under the toggle. */

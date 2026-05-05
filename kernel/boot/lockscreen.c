@@ -27,6 +27,7 @@
 #include "idle.h"
 #include "keyboard.h"
 #include "serial.h"
+#include "theme.h"
 
 #include <stdint.h>
 
@@ -495,13 +496,13 @@ void lockscreen_draw(void)
     if (cx < 0) cx = 0;
     if (cy < 0) cy = 0;
 
-    /* Card background (dark slate, 95% opaque). */
-    fb_rect_blend(cx, cy, CARD_W, CARD_H, 0xF01A1F2A);
+    /* Card background (surface_high, 94% opaque). */
+    fb_rect_blend(cx, cy, CARD_W, CARD_H, (COLOR_SURFACE_HIGH & 0x00FFFFFF) | 0xF0000000);
 
-    /* Border: red while flashing, accent otherwise. */
-    uint32_t border = 0xFF3B82F6;   /* accent blue */
+    /* Border: danger while flashing, persona accent otherwise. */
+    uint32_t border = COLOR_PRIMARY;
     if (g_flash_frames > 0) {
-        border = 0xFFEF4444;        /* red */
+        border = COLOR_DANGER;
         g_flash_frames--;
     }
     fb_rect_outline(cx, cy, CARD_W, CARD_H, border, 2);
@@ -513,7 +514,7 @@ void lockscreen_draw(void)
     int title_w = ls_strlen(title) * 8;
     int tx = cx + (CARD_W - title_w) / 2;
     int ty = cy + 32;
-    font_draw(tx, ty, title, FONT_BOOT, 16, 0xFFFFFFFF);
+    font_draw(tx, ty, title, FONT_BOOT, 16, COLOR_ON_SURFACE);
 
     /* Prompt with masked entry. Spec asks for "[PIN: ____]". We use
      * '*' for entered digits, '_' for missing slots, fixed-width on
@@ -538,7 +539,7 @@ void lockscreen_draw(void)
     int prompt_w = bi * 8;
     int px = cx + (CARD_W - prompt_w) / 2;
     int py = cy + 96;
-    font_draw(px, py, buf, FONT_BOOT, 16, 0xFFE2E8F0);
+    font_draw(px, py, buf, FONT_BOOT, 16, COLOR_ON_SURFACE);
 
     /* Hint line. */
     const char *hint;
@@ -554,7 +555,7 @@ void lockscreen_draw(void)
     int hint_w = ls_strlen(hint) * 8;
     int hx = cx + (CARD_W - hint_w) / 2;
     int hy = cy + 144;
-    font_draw(hx, hy, hint, FONT_BOOT, 16, 0xFF94A3B8);
+    font_draw(hx, hy, hint, FONT_BOOT, 16, COLOR_ON_SURFACE_2);
 }
 
 /* ── Cold-boot login gate ─────────────────────────────────────── */
@@ -607,7 +608,7 @@ void lockscreen_run_cold_boot_gate(void)
      * centered card -- one paint plus per-input repaints is enough. */
     extern void idle_post_overlay(void);
 
-    fb_clear(0xFF0F1115);
+    fb_clear(COLOR_SURFACE);
     lockscreen_draw();
 
     while (g_active) {
@@ -642,7 +643,7 @@ void lockscreen_run_cold_boot_gate(void)
 
         if (rx_any || kb_any) {
             /* Repaint the masked entry on every keystroke. */
-            fb_clear(0xFF0F1115);
+            fb_clear(COLOR_SURFACE);
             lockscreen_draw();
         }
 

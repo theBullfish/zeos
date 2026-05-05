@@ -949,7 +949,7 @@ static void render_img_placeholder(int x, int y, int draw_w, int draw_h,
                                    int img_w, int img_h, const char *alt)
 {
     /* Accent-tinted background (primary at ~20% opacity) */
-    uint32_t bg = 0xFF1A2633;  /* dark blue-tinted rect */
+    uint32_t bg = COLOR_SURFACE_HIGH;  /* persona-neutral elevated rect */
     fb_rect(x, y, draw_w, draw_h, bg);
     fb_rect_outline(x, y, draw_w, draw_h, COLOR_PRIMARY_DIM, 1);
 

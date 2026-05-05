@@ -26,14 +26,15 @@ static int      s_rc_kind = -1;
 static int      s_rc_idx  = -1;
 
 /* ── Constants ── */
-#define DOCK_ITEM_SIZE    40    /* Cell size for each item */
-#define DOCK_ITEM_PAD      4    /* Padding between items */
-#define DOCK_MARGIN       12    /* Left/right internal margin */
-#define DOCK_DIVIDER_W     1    /* Vertical divider width */
-#define DOCK_DIVIDER_GAP   8    /* Space around divider */
-#define DOCK_DOT_RADIUS    3    /* State dot radius */
-#define DOCK_CORNER_R      8    /* Top corner radius */
-#define DOCK_HEIGHT       56    /* Total dock height */
+/* All metrics snap to the Z* spacing scale (theme.h). */
+#define DOCK_ITEM_SIZE    (Z8 + Z2)     /* 40px — Z8 + Z2 */
+#define DOCK_ITEM_PAD      Z1           /* 4px  — Z1 */
+#define DOCK_MARGIN        Z3           /* 12px — Z3 */
+#define DOCK_DIVIDER_W     1            /* 1px hairline (separator thickness) */
+#define DOCK_DIVIDER_GAP   Z2           /* 8px — Z2 */
+#define DOCK_DOT_RADIUS    3            /* 3px state dot */
+#define DOCK_CORNER_R      Z2           /* 8px corner radius — BORDER_RADIUS */
+#define DOCK_HEIGHT       (Z12 + Z2)    /* 56px — Z12 + Z2 */
 
 static dock_state_t g_dock;
 

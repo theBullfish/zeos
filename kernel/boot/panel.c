@@ -453,5 +453,5 @@ void panel_overlay_draw_camera_indicator(void)
     int rz_x = pw - PANEL_RIGHT_W;
     int ry_center = ph / 2;
     /* Draw a 4-px red dot just to the left of the health dot. */
-    fb_circle_filled(rz_x + 6, ry_center, 4, 0xFFFF3030);
+    fb_circle_filled(rz_x + 6, ry_center, 4, COLOR_DANGER);
 }

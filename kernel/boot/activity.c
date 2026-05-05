@@ -694,7 +694,7 @@ static void draw_tabs(int wx, int wy) {
         int bw = 110;
         if (active) fb_rect(bx, ty + 4, bw, 20, COLOR_PRIMARY);
         font_draw(bx + 8, ty + 7, s_tab_names[t], FONT_UI, ACT_FONT_PX,
-                  active ? 0xFFFFFFFF : COLOR_ON_SURFACE);
+                  active ? COLOR_ON_SURFACE : COLOR_ON_SURFACE);
         bx += bw + 6;
     }
 }
@@ -789,7 +789,7 @@ static void draw_tab_chains(int x, int y, int w, int h) {
         const act_chain_sample_t *cs = &s_latest.chains[start + i];
         int focused = (g_ui.focus_idx == start + i);
         if (focused) fb_rect(x + 4, row_y - 1, w - 8, ACT_ROW_H, COLOR_PRIMARY);
-        uint32_t fg = focused ? 0xFFFFFFFF : COLOR_ON_SURFACE;
+        uint32_t fg = focused ? COLOR_ON_SURFACE : COLOR_ON_SURFACE;
         char ns[16];
         a_itoa((uint64_t)cs->chain_id, ns);
         font_draw(hx,        row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
@@ -799,10 +799,10 @@ static void draw_tab_chains(int x, int y, int w, int h) {
         font_draw(hx + 220,  row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
         font_draw(hx + 256,  row_y + 2, tier_name(cs->tier),   FONT_UI, ACT_FONT_PX, fg);
         font_draw(hx + 296,  row_y + 2, status_name(cs->status),FONT_UI, ACT_FONT_PX,
-                  cs->status == 2 ? 0xFFE06060 : fg);
+                  cs->status == 2 ? COLOR_DANGER : fg);
         char fb_buf[12]; fmt_float2(cs->b3_ratio, fb_buf, sizeof(fb_buf));
         font_draw(hx + 360,  row_y + 2, fb_buf, FONT_UI, ACT_FONT_PX,
-                  cs->b3_ratio > 0.7f ? 0xFFE06060 : fg);
+                  cs->b3_ratio > 0.7f ? COLOR_DANGER : fg);
         char ms_buf[12]; fmt_float2(cs->last_resolve_ms, ms_buf, sizeof(ms_buf));
         font_draw(hx + 410,  row_y + 2, ms_buf, FONT_UI, ACT_FONT_PX, fg);
         a_itoa((uint64_t)cs->vault_version, ns);
@@ -839,13 +839,13 @@ static void draw_tab_cores(int x, int y, int w, int h) {
         const act_cpu_sample_t *cp = &s_latest.cpus[i];
         int focused = (g_ui.focus_idx == i);
         if (focused) fb_rect(x + 4, row_y - 1, w - 8, ACT_ROW_H, COLOR_PRIMARY);
-        uint32_t fg = focused ? 0xFFFFFFFF : COLOR_ON_SURFACE;
+        uint32_t fg = focused ? COLOR_ON_SURFACE : COLOR_ON_SURFACE;
         char ns[16];
         a_itoa((uint64_t)cp->cpu_idx, ns); font_draw(hx, row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
         a_itoa((uint64_t)cp->lapic_id, ns); font_draw(hx + 40, row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
         font_draw(hx + 90, row_y + 2, cp->is_bsp ? "BSP" : "AP", FONT_UI, ACT_FONT_PX, fg);
         font_draw(hx + 140, row_y + 2, cp->alive ? "yes" : "no",
-                  FONT_UI, ACT_FONT_PX, cp->alive ? fg : 0xFFE06060);
+                  FONT_UI, ACT_FONT_PX, cp->alive ? fg : COLOR_DANGER);
         a_itoa((uint64_t)cp->tps, ns);  font_draw(hx + 200, row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
         a_itoa(cp->chains_resolved, ns); font_draw(hx + 250, row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
         a_itoa(cp->tick_count, ns);     font_draw(hx + 340, row_y + 2, ns, FONT_UI, ACT_FONT_PX, fg);
@@ -855,7 +855,7 @@ static void draw_tab_cores(int x, int y, int w, int h) {
         if (cp->is_bsp) a_strncpy(ns, "-", sizeof(ns));
         else            a_itoa(cp->heartbeat_age_ms, ns);
         font_draw(hx + 560, row_y + 2, ns, FONT_UI, ACT_FONT_PX,
-                  cp->heartbeat_age_ms > 5000 ? 0xFFE06060 : fg);
+                  cp->heartbeat_age_ms > 5000 ? COLOR_DANGER : fg);
         row_y += ACT_ROW_H;
     }
 

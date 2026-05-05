@@ -12,6 +12,8 @@
 #include "access.h"
 #include "timer.h"
 #include "fb.h"
+#include "persona.h"
+#include "persona_filter.h"
 
 /* ── AUTO heuristic ── */
 
@@ -89,6 +91,28 @@ uint32_t theme_on_surface_4(void)
 uint32_t theme_separator(void)
 {
     return is_light_active() ? COLOR_LIGHT_SEPARATOR : COLOR_SEPARATOR;
+}
+
+/* ── Active persona accent ── */
+
+uint32_t theme_active_accent(void)
+{
+    switch (persona_get_active()) {
+    case PERSONA_ZEROS: return COLOR_ZEROS_ACCENT;
+    case PERSONA_DEREZ: return COLOR_DEREZ_ACCENT;
+    case PERSONA_FULL:  return COLOR_FULL_ACCENT;
+    }
+    return COLOR_FULL_ACCENT;
+}
+
+uint32_t theme_active_accent_dim(void)
+{
+    switch (persona_get_active()) {
+    case PERSONA_ZEROS: return COLOR_ZEROS_DIM;
+    case PERSONA_DEREZ: return COLOR_DEREZ_DIM;
+    case PERSONA_FULL:  return COLOR_FULL_DIM;
+    }
+    return COLOR_FULL_DIM;
 }
 
 /* ── Scheme control ── */

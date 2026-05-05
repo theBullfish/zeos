@@ -42,6 +42,11 @@ void persona_set_active(int persona)
     kputc('\n');
 }
 
+int persona_get_active(void)
+{
+    return active_persona;
+}
+
 masq_tier_t persona_max_tier(void)
 {
     /*

@@ -54,7 +54,8 @@ static int   g_pct_x;
 
 /* Color choices — derived from theme.h tokens */
 #define COL_BG_TOP     COLOR_SURFACE         /* 0xFF0D1117 */
-#define COL_BG_BOTTOM  0xFF06080C            /* slightly darker, hand-picked */
+/* COL_BG_BOTTOM: COLOR_SURFACE darkened ~30% for vertical gradient */
+#define COL_BG_BOTTOM  0xFF06080C
 #define COL_WORDMARK   COLOR_FULL_ACCENT     /* steel blue, persona Full */
 #define COL_STEP       COLOR_ON_SURFACE_2    /* secondary text */
 #define COL_BAR_TRACK  COLOR_SURFACE_TOP

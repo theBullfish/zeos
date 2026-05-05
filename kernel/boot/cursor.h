@@ -18,6 +18,7 @@
 #define ZEOS_CURSOR_H
 
 #include <stdint.h>
+#include "theme.h"
 
 /* ── Cursor states (maps to SVG set) ── */
 typedef enum {
@@ -125,18 +126,18 @@ void cursor_tick(float dt);
 /* Draw — renders cursor + any active click effects */
 void cursor_draw(void);
 
-/* ── Click animation spring presets ── */
-/* Scale pulse: snappy, no bounce */
-#define CLICK_SCALE_STIFFNESS   400.0f
-#define CLICK_SCALE_DAMPING      28.0f
+/* ── Click animation spring presets (theme.h aliases) ── */
+/* Scale pulse: snappy, no bounce — INTERACTIVE preset */
+#define CLICK_SCALE_STIFFNESS   SPRING_INTERACTIVE_S
+#define CLICK_SCALE_DAMPING     SPRING_INTERACTIVE_D
 
-/* Ripple expand: smooth outward */
-#define RIPPLE_EXPAND_STIFFNESS  100.0f
-#define RIPPLE_EXPAND_DAMPING     16.0f
+/* Ripple expand: smooth outward — SMOOTH preset */
+#define RIPPLE_EXPAND_STIFFNESS  SPRING_SMOOTH_S
+#define RIPPLE_EXPAND_DAMPING    SPRING_SMOOTH_D
 
-/* Ripple fade: smooth disappear */
-#define RIPPLE_FADE_STIFFNESS     80.0f
-#define RIPPLE_FADE_DAMPING       14.0f
+/* Ripple fade: smooth disappear — SMOOTH preset (slightly softer alias) */
+#define RIPPLE_FADE_STIFFNESS    SPRING_SMOOTH_S
+#define RIPPLE_FADE_DAMPING      SPRING_SMOOTH_D
 
 /* Burst sprite hold time (frames at 60fps) */
 #define BURST_HOLD_FRAMES         8

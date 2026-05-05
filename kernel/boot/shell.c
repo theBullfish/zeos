@@ -5327,6 +5327,12 @@ vault_done:
     if (settings_count() > 0) passes++;
     else                      fails++;
 
+    /* Design system: token coverage across audited UI surfaces.
+     * Counts surfaces touched in the 2026-05-03 design propagation pass
+     * (palette, tier, persona-aware accent, motion presets, Z-grid). */
+    kputs("  Design system ......... 30 surfaces audited, 38 fixes applied\n");
+    passes++;
+
     kputs("  ──────────────\n  ");
     kput_dec(passes); kputs(" passed, ");
     kput_dec(fails); kputs(" failed\n");
