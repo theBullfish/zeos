@@ -30,7 +30,7 @@ lands; don't add. End is the end.
 9. · Calendar/clock app — uses tod, alarm, world clocks
 10. · Activity Monitor — chain/CPU/memory/network/per-process visibility
 11. · Firewall — CHAIN_FIREWALL gating CHAIN_NET_TX/RX with rule table
-12. · Disk encryption — LUKS-shape on FAT32 + NVMe, keys via CFA
+12. · Disk encryption — CFA-native (not LUKS-shaped). Keys are CFA SOVEREIGN handles, blocks are CFA-addressed, MasQ records every encrypted-region access. The Linux shape (LUKS) is the wrong primitive — we already have the right one.
 13. · Multi-user accounts — CFA-tier per-user, login flow extends lockscreen
 14. · USB UVC webcams — iso transfers in xHCI + new chain
 15. · Print spooler — IPP + SMB to network printer
