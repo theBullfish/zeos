@@ -202,6 +202,145 @@ The philosophy: **compat first, native when it matters.** Developers start in fa
 
 ---
 
+## 12. Linux Compatibility Layer
+
+*Origin: 2026-05-04. The infrastructure that lets every COMPAT-flagged
+entry in sections 1–11 actually run.*
+
+POSIX is sequential and blocking. Zeos signal chains are chord-resolved
+and fastest-N. The compat layer's job is to bridge those execution models
+without observable behavior loss for unmodified Linux binaries — `read()`
+that blocks until data arrives is, underneath, "subscribe to {data, EOF,
+error} signal ports; resolve fastest-N=1 with timeout."
+
+**Two-track strategy:**
+
+- **Translator track (P0)** — covers ~90% of binaries. Translate Linux
+  syscalls into Zeos signal chain operations. Where the chord-vs-sequential
+  performance story shows up. Reference implementations to study or fork:
+  gVisor (Go, userspace), FreeBSD's Linuxulator (in-kernel),
+  WSL1 (NT subsystem).
+- **Guest-VM track (P1, escape hatch)** — long-tail binaries
+  (kernel modules, eBPF programs, anything walking arbitrary `/sys`
+  deeply). Hosted Linux kernel under KVM microVM, file sharing via
+  virtiofs or 9P. Slow but correct — Linux behaves like Linux because
+  it IS Linux. References: WSL2, Firecracker, Kata Containers.
+
+**Status legend (this section only):** `BUILD` (native impl), `PORT`
+(port existing project into Zeos), `SHIM` (thin wrapper presenting Linux
+surface over Zeos primitives), `GUEST` (delegated to the hosted Linux
+kernel under KVM).
+
+### 12.1 ABI surface
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **ELF64 loader** | BUILD | Native | Loads ELF64 binaries, resolves `PT_INTERP`, sets up auxv + initial stack. The base of everything. P0. |
+| **Dynamic linker (`/lib64/ld-linux-x86-64.so.2`)** | PORT | Compat tree | `PT_INTERP` paths are baked into binaries — the linker MUST exist at the canonical path. Tied to the libc version. P0. |
+| **Syscall translator** | BUILD or PORT | Native, or fork of gVisor `runsc` | The bridge. Linux syscall # → Zeos signal chain operation. ~400 syscalls; the top ~80 carry 99% of usage. The hard part isn't the count, it's corner-case correctness. P0. |
+| **vDSO** | BUILD | Native | Page-mapped fast path for `gettimeofday`, `clock_gettime`, `getcpu`, `time`. Programs call into vDSO without trapping. P0. |
+| **`AT_SYSINFO` / auxv** | BUILD | Native | Initial stack auxiliary vector — programs read it for HWCAPs, page size, random bytes, executable path. Trivial to populate, easy to forget. P0. |
+
+### 12.2 Filesystem layout & runtime libraries
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **FHS hierarchy** | BUILD | Native mountpoints | `/usr`, `/etc`, `/var`, `/tmp`, `/home`, `/root`, `/proc`, `/sys`, `/dev`, `/run`. Universally assumed. P0. |
+| **glibc** | PORT | Compat tree | Wider real-world binary compatibility. ~50 MB. Version-locked to the dynamic linker. P0. |
+| **musl libc** | PORT | Alt compat tree | Smaller, simpler, Alpine ecosystem. Some glibc-only binaries won't link. Ship as opt-in alternate root. P1. |
+| **`/proc` (procfs)** | BUILD | SHIM over signal graph | Universal introspection surface. The hot paths: `/proc/self/{maps,exe,fd,cmdline,status}`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/uptime`. P0. |
+| **`/sys` (sysfs)** | BUILD | SHIM over signal graph | Hardware enumeration. Programs touch a handful of well-known paths (`/sys/class/net`, `/sys/devices/system/cpu`). P1. |
+| **`/dev` (devtmpfs)** | BUILD | Native | `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`, `/dev/console`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`. P0. |
+| **terminfo (`/usr/share/terminfo`)** | SHIM | Compat tree | Every TUI program (vim, less, htop, top, tmux) needs it. Ship the standard ncurses terminfo database. P0. |
+| **timezone (`/usr/share/zoneinfo`)** | SHIM | Compat tree | Without it, all timestamps are UTC. Ship IANA tzdata. P1. |
+| **locale (`/usr/share/locale`)** | SHIM | Compat tree | Most CLI tools degrade gracefully without locale; a few break. Ship at least `en_US.UTF-8`. P1. |
+| **`/etc/{passwd,group,hosts,resolv.conf,nsswitch.conf}`** | BUILD | Native (auto-generated) | Tiny files, load-bearing. Generate from Zeos identity + network primitives. P0. |
+| **`/etc/ssl/certs` (CA bundle)** | SHIM | Compat tree | Every TLS-using program. Ship Mozilla CA bundle, refresh on update. P0. |
+| **`/etc/services`, `/etc/protocols`** | SHIM | Compat tree | Static files. P1. |
+
+### 12.3 POSIX runtime semantics
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **File descriptors** | BUILD | SHIM over typed signal ports | Every POSIX I/O op flows through fds. Each fd backs onto a typed signal port. Foundation. P0. |
+| **pthread + futex** | BUILD | Native (chord-aware) | Threading primitives. Native form: MasQ-protected access via signal chains. Compat form: `futex(FUTEX_WAIT)` translates to chord-resolved wait on a value-change signal with timeout. P0. |
+| **POSIX signals** (SIGINT, SIGTERM, SIGSEGV, …) | BUILD | Native (chord-natural) | Multiple signal sources (kernel, `kill()`, self) compete to deliver — fastest resolves. Translator delivers at syscall boundaries. P0. |
+| **PTY layer (`/dev/pts/*`, `posix_openpt`, `unlockpt`)** | BUILD | Native | Every shell, every tmux, every SSH session, every terminal multiplexer. P0. |
+| **`/dev/random`, `/dev/urandom`, `getrandom()`** | BUILD | Native | Every TLS-using program. Wire to a hardware entropy source via the signal graph. P0. |
+| **inotify / fanotify** | BUILD | SHIM over signal graph | File-change events naturally express as signal subscriptions. File watchers, IDEs, build systems all depend. P1. |
+| **`io_uring`** | BUILD | SHIM over signal graph | Newer high-perf programs use it. Maps cleanly — `io_uring` is already a chord-shaped API. P2 initially; P1 once perf matters. |
+| **System V IPC** (shmget, msgget, semget) | SHIM | Compat | Legacy but still used. Ship enough for `ipcs` / `ipcrm` to work. P2. |
+| **POSIX shared memory (`shm_open`)** | BUILD | Native | More common than SysV in modern code. Backs onto a signal graph node. P1. |
+| **D-Bus (system + session)** | SHIM | Compat | Ubiquitous on desktop, some daemons depend. Stub the system bus first. Full impl is multi-month. P2 (P1 if desktop apps are in scope). |
+| **`epoll`, `select`, `poll`** | BUILD | SHIM over signal graph | The classic readiness multiplex. Translates to chord-resolution over the involved fds. P0. |
+
+### 12.4 Networking compat
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **BSD sockets** (`socket`, `bind`, `listen`, `accept`, `connect`, `send`/`recv`, `sendmsg`/`recvmsg`) | BUILD | SHIM over signal graph | Sockets are signal chain endpoints. P0. |
+| **DNS resolver** | SHIM | Compat (libc) + Zeos DNS chain | `getaddrinfo()` reads `/etc/resolv.conf` + `/etc/nsswitch.conf`; native path resolves through a signal graph node. P0. |
+| **netlink** | SHIM | Native | Programs query interface state, route table, ARP table. Synthesize from Zeos network primitives. P1. |
+| **Raw sockets (`SOCK_RAW`)** | GUEST or SHIM | Compat | `tcpdump`, `ping`, `traceroute`. SHIM what's cheap; route the deep cases through the guest. P2. |
+| **iptables / nftables tooling** | GUEST or SHIM | Compat | Programs that *call* these are rare — they're config tools. Stub at first, real impl only if a workload needs it. P2. |
+
+### 12.5 Container primitives
+
+These are what Docker / Podman / containerd actually depend on. Native
+Zeos uses CFA-based isolation (see section 6); this row exposes the
+Linux-shaped surface on top so the COMPAT-flagged container runtimes work
+unmodified.
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **cgroups v2** | BUILD | SHIM over CFA + signal graph | Resource accounting + limits. v2 only — modern Docker/Podman default. P1. |
+| **Linux namespaces** (mount, pid, net, user, uts, ipc, cgroup) | BUILD | SHIM over CFA | The compat surface; CFA is the native answer. P1. |
+| **capabilities** (`setcap`, `getcap`, `CAP_*` bits) | SHIM | Native | Map to MasQ tiers. P1. |
+| **seccomp-bpf** | SHIM | Native | Syscall filtering. The translator can enforce filters at translation time, no eBPF VM needed. P2. |
+| **OverlayFS** | PORT | Native | Layered filesystem; Docker/Podman image layers depend on it. P1. |
+| **bind mounts, mount propagation** | BUILD | Native | Container runtimes use these heavily. P1. |
+
+### 12.6 Escape hatch: Linux-as-guest
+
+For binaries the translator can't handle: kernel modules, eBPF programs,
+deep `/sys` walkers, anything that wants the actual Linux scheduler /
+memory manager / network stack. Pay the VM tax once, get exact Linux
+semantics for everything inside.
+
+| Component | Status | Path | Notes |
+|-----------|--------|------|-------|
+| **KVM microVM monitor** | PORT | Firecracker or Cloud Hypervisor | Hardware-virtualized boot. Cold-start <125 ms with Firecracker. P1. |
+| **virtiofs or 9P file share** | PORT | Standard | Bidirectional file interchange between Zeos and the guest. P1. |
+| **virtio-net** | PORT | Standard | Network bridge guest ↔ Zeos signal graph. P1. |
+| **Linux kernel image** | EXTERNAL | Curated LTS | Build & ship a stripped LTS kernel for the guest. Update on the LTS cadence. P1. |
+| **Guest userland (busybox + minimal rootfs)** | PORT | Standard | Boot target for the microVM. P1. |
+
+### Decisions needed
+
+- **glibc primary, musl alt? Or musl only?** Glibc has wider real-world
+  binary compat; musl is cleaner and Alpine ecosystem is healthy. Most
+  likely: glibc primary, musl as opt-in alt root.
+- **Translator first vs guest-VM first?** Recommend translator-first —
+  it's where the chord-vs-sequential value shows. Guest-VM is the safety
+  net for the long tail. Doing guest-VM first locks in sequential
+  performance baselines.
+- **gVisor port vs from-scratch translator?** gVisor is mature, in Go,
+  ~400 syscalls implemented. Porting it to call into Zeos signal
+  primitives is faster than reimplementing. From-scratch is cleaner
+  long-term but a multi-quarter project.
+- **cgroups v1 — skip entirely?** Modern Docker/Podman default to v2.
+  Recommend v2-only.
+- **systemd — port, shim, or skip?** Many distro daemons assume systemd.
+  PID-1 emulation alone (`/run/systemd/private` socket, the dbus surface
+  desktop apps poke) covers a lot. Full systemd is a multi-year port.
+  Recommend a small `systemctl`-compatible shim that delegates to Zeos's
+  native init. P2.
+- **Static-binary preference?** Encouraging static binaries (Go, Rust
+  with `+crt-static`, distroless images) sidesteps a lot of dynamic-linker
+  complexity. Worth a recommendation in the dev guide.
+
+---
+
 ## New File Formats Required
 
 These don't exist yet. Zeos needs them.
@@ -275,8 +414,9 @@ Everything that wants to go native can. Compat layer is still there but fewer de
 | **Hardware** | Goya signal contract | Yosys (zeos-build integration) | Vivado, Quartus, OpenOCD |
 | **Packages** | zeos-pkg | — | apt, pip, npm, conda |
 | **Observability** | Zixel telemetry, MasQ timeline | — | Prometheus, Grafana |
+| **Compat layer** *(see §12)* | ELF loader, syscall translator, vDSO, fd substrate, /proc, /dev, BSD sockets shim, cgroup/namespace shim | glibc, musl, dynamic linker, gVisor (optional), KVM monitor, Linux kernel image | terminfo, zoneinfo, locale, CA bundle, /etc/services |
 
-**Total: ~12 things to build, ~10 to port/extend, ~30+ run in compat unchanged.**
+**Total: ~12 things to build, ~10 to port/extend, ~30+ run in compat unchanged**, plus the compat-layer infrastructure itself (§12 — without which none of the COMPAT entries actually run).
 
 ---
 
