@@ -21,6 +21,7 @@
 #include "vmm.h"
 #include "msix.h"
 #include "timer.h"
+#include "spinlock.h"
 
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *s, int c, unsigned long n);
@@ -105,6 +106,10 @@ static inline void ring_cq(nvme_dev_t *d, int qid, int head)
 
 static int admin_cmd(nvme_dev_t *d, nvme_cmd_t *cmd)
 {
+    /* Admin path is fully serialized: submit and wait under one lock.
+     * Used at bringup + queue create / namespace identify; never on a
+     * hot per-tick path so coarse is fine. */
+    uint64_t flags = spin_lock_irqsave(&d->admin_lock);
     nvme_cmd_t *asq = (nvme_cmd_t *)d->asq;
     cmd->command_id = d->admin_cmd_id++;
     memcpy(&asq[d->asq_tail], cmd, sizeof(nvme_cmd_t));
@@ -118,17 +123,19 @@ static int admin_cmd(nvme_dev_t *d, nvme_cmd_t *cmd)
         d->acq_head = (d->acq_head + 1) % NVME_ADMIN_QSIZE;
         if (d->acq_head == 0) d->acq_phase ^= 1;
         ring_cq(d, 0, d->acq_head);
+        spin_unlock_irqrestore(&d->admin_lock, flags);
         return (int)status;
     }
+    spin_unlock_irqrestore(&d->admin_lock, flags);
     kputs("[nvme] admin timeout\n");
     return -1;
 }
 
-/* Drain any ready CQEs on q. Returns number drained. Updates last_status /
- * last_cmd_id to the most recent completion seen. Safe to call from both
- * ISR and submitter context — the CQ phase + head are owned by the queue
- * struct, and the submitter holds the queue while waiting. */
-static int drain_cq(nvme_dev_t *d, nvme_ioq_t *q)
+/* Drain any ready CQEs on q with the cq_lock already held. Returns
+ * number drained. Updates last_status / last_cmd_id to the most recent
+ * completion seen. Caller MUST hold q->cq_lock — multiple cores draining
+ * the same CQ would corrupt cq_head / cq_phase. */
+static int drain_cq_locked(nvme_dev_t *d, nvme_ioq_t *q)
 {
     volatile nvme_cqe_t *iocq = (volatile nvme_cqe_t *)q->cq;
     int drained = 0;
@@ -147,6 +154,25 @@ static int drain_cq(nvme_dev_t *d, nvme_ioq_t *q)
     return drained;
 }
 
+/* Submitter-side drain: take the cq_lock blocking. */
+static int drain_cq(nvme_dev_t *d, nvme_ioq_t *q)
+{
+    uint64_t f = spin_lock_irqsave(&q->cq_lock);
+    int n = drain_cq_locked(d, q);
+    spin_unlock_irqrestore(&q->cq_lock, f);
+    return n;
+}
+
+/* ISR-side drain: try-lock; if a submitter is mid-drain, the next ISR
+ * (or its short-poll loop) will reclaim. */
+static int drain_cq_try(nvme_dev_t *d, nvme_ioq_t *q)
+{
+    if (!spin_trylock(&q->cq_lock)) return 0;
+    int n = drain_cq_locked(d, q);
+    spin_unlock(&q->cq_lock);
+    return n;
+}
+
 /* Per-drive ISR: walk every active I/O CQ on this drive and drain it.
  * One MSI-X vector per drive aggregates all 4 I/O CQs (all created with
  * IV=0 in CDW11), so any of them may have new entries when the vector
@@ -159,7 +185,7 @@ static void nvme_drive_isr(int drive_idx)
     for (int qi = 0; qi < d->io_queue_count; qi++) {
         nvme_ioq_t *q = &d->ioq[qi];
         if (!q->active) continue;
-        (void)drain_cq(d, q);
+        (void)drain_cq_try(d, q);
     }
 }
 
@@ -180,6 +206,11 @@ static void (*const g_drive_isr[NVME_MAX_DRIVES])(void) = {
 
 static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
 {
+    /* Critical section: descriptor copy + sq_tail bump + pending flag
+     * arm + doorbell ring. Two cores submitting concurrently to the
+     * same SQ would corrupt sq_tail and the descriptor at the colliding
+     * slot. */
+    uint64_t f = spin_lock_irqsave(&q->sq_lock);
     nvme_cmd_t *iosq = (nvme_cmd_t *)q->sq;
     cmd->command_id = q->cmd_id++;
     memcpy(&iosq[q->sq_tail], cmd, sizeof(nvme_cmd_t));
@@ -189,6 +220,7 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
      * we set to 1 (pending) here. */
     q->pending_completion = 1;
     ring_sq(d, q->qid, q->sq_tail);
+    spin_unlock_irqrestore(&q->sq_lock, f);
 
     if (d->msix_vector >= 0) {
         /* MSI-X path: the ISR is the sole drainer. Submitter only
@@ -210,9 +242,10 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
         uint64_t deadline_long = timer_read_tsc() + tsc_hz * 5ULL;
         while (timer_read_tsc() < deadline_long) {
             if (!q->pending_completion) return (int)q->last_status;
-            __asm__ volatile("cli");
+            /* drain_cq takes cq_lock with IF disabled — equivalent to
+             * the previous explicit cli/sti. ISR uses try-lock so it
+             * doesn't deadlock against us if it fires here. */
             int n = drain_cq(d, q);
-            __asm__ volatile("sti");
             if (n > 0) return (int)q->last_status;
             for (int i = 0; i < 256; i++) __asm__ volatile("pause");
         }
@@ -220,17 +253,12 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
         return -1;
     }
 
-    /* Polling fallback path. */
-    nvme_cqe_t *iocq = (nvme_cqe_t *)q->cq;
+    /* Polling fallback path: drain through the lock so multiple cores
+     * polling on different commands don't corrupt cq_head. */
     for (uint32_t i = 0; i < NVME_POLL_LIMIT; i++) {
-        nvme_cqe_t *cqe = &iocq[q->cq_head];
-        if ((cqe->status & 1) != q->cq_phase) continue;
-        uint16_t status = (cqe->status >> 1) & 0x7FFF;
-        q->cq_head = (q->cq_head + 1) % NVME_IO_QSIZE;
-        if (q->cq_head == 0) q->cq_phase ^= 1;
-        ring_cq(d, q->qid, q->cq_head);
-        q->pending_completion = 0;
-        return (int)status;
+        int n = drain_cq(d, q);
+        if (n > 0) return (int)q->last_status;
+        for (int j = 0; j < 16; j++) __asm__ volatile("pause");
     }
     kputs("[nvme] I/O timeout\n");
     return -1;

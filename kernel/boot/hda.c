@@ -30,6 +30,7 @@
 #include "chain.h"
 #include "chain_registry.h"
 #include "vault.h"
+#include "spinlock.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -154,6 +155,13 @@ static uint64_t          *rirb;
 static uint64_t           ring_phys;
 static uint16_t           rirb_rp;
 
+/* SMP — codec verb send/wait must be serialized. CORB write index +
+ * RIRB read pointer are shared global state; two cores calling
+ * codec_cmd concurrently would interleave verbs and read each other's
+ * responses. The volume_filter resolve and any audio.beep both walk
+ * through codec_cmd, so this lock is the real exposure point. */
+static zeos_spinlock_t    s_codec_lock = ZEOS_SPINLOCK_INIT;
+
 struct bdl_entry { uint32_t addr_lo, addr_hi, length, flags; };
 
 #define HDA_AUDIO_BYTES   (64 * 1024)
@@ -274,6 +282,7 @@ static uint32_t make_verb(uint8_t cad, uint16_t nid, uint16_t verb, uint16_t pay
 
 static uint32_t codec_cmd(uint8_t cad, uint16_t nid, uint16_t verb, uint16_t payload)
 {
+    uint64_t flags = spin_lock_irqsave(&s_codec_lock);
     uint32_t cmd = make_verb(cad, nid, verb, payload);
     uint16_t wp = mr16(HDA_CORBWP) & 0xFF;
     uint16_t next = (wp + 1) & 0xFF;
@@ -286,10 +295,12 @@ static uint32_t codec_cmd(uint8_t cad, uint16_t nid, uint16_t verb, uint16_t pay
         if (rwp != rirb_rp) {
             rirb_rp = (rirb_rp + 1) & 0xFF;
             uint64_t r = rirb[rirb_rp];
+            spin_unlock_irqrestore(&s_codec_lock, flags);
             return (uint32_t)(r & 0xFFFFFFFFu);
         }
         busy_pause(100);
     }
+    spin_unlock_irqrestore(&s_codec_lock, flags);
     return 0xFFFFFFFFu;
 }
 

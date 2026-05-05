@@ -233,29 +233,38 @@ static void ap_lapic_init_local(void)
  * APs do NOT use scheduler_preempt_resolve(); that path uses a single
  * static jmpbuf shared with the BSP.
  *
- * IMPORTANT — concurrent chain_resolve scope (2026-05-03):
- *   The chain registry, masq_journal, persistence checkpoint, VAULT,
- *   and kprint serial are all behind coarse locks (audit complete).
- *   Multiple drivers under chain_resolve are NOT yet SMP-safe at the
- *   per-driver layer (NVMe SQ/CQ, HDA codec verbs, virtio rings, GOP
- *   framebuffer pixel writes — single-threaded callers today). Letting
- *   APs invoke chain_resolve on chains that touch those drivers
- *   triple-faults the host (observed on -smp 4 QEMU 2026-05-03).
+ * Concurrent chain_resolve scope (2026-05-03, post per-driver audit):
+ *   Per-driver SMP locks landed:
+ *     - NVMe per-queue sq_lock + cq_lock + per-drive admin_lock; ISR
+ *       uses cq_lock try-lock so it never deadlocks against a polling
+ *       submitter on the same queue.
+ *     - HDA codec_lock around codec_cmd (CORB write + RIRB poll).
+ *     - virtio-net per-queue rxq/txq locks around descriptor publish
+ *       + avail->idx bump + queue-notify port write.
+ *     - virtio-gpu per-vqueue lock around descriptor write + avail
+ *       publish + kick + used-ring poll.
  *
- *   Until per-driver SMP audits land, the AP slice is gated by
- *   AP_RESOLVES_CHAINS. With the gate OFF (default) APs run a
- *   heartbeat-only partition: tick_count, heartbeat_tsc, and the
- *   chain-walk loop all advance, but chain_resolve is not invoked.
- *   Per-CPU TPS reflects real ticks; chains_resolved stays 0 on APs.
- *   Flip the gate once individual drivers are audited.
+ *   Gate flipped: AP_RESOLVES_CHAINS = 1. APs honor chain->affinity:
+ *   pinned chains run only on owner BSP; others fall back to id-mod
+ *   partition.
  *
- *   This is honest scope. The infrastructure (coarse locks, partition
- *   logic, per-CPU stats, AP wakeup, BSP skip-of-AP-owned-chains) is
- *   live. The last step — APs actually executing the resolve — is
- *   blocked on driver audits, not on the SMP scaffolding.
+ * Honest scope (open):
+ *   chain_registry's SMP finalization pass currently pins EVERY chain
+ *   to BSP (affinity = 0). End-to-end -smp 4 boot exposes lower-layer
+ *   paths reached transitively from chain resolves (ACPI battery poll,
+ *   PCI config sweep, ICW MMIO sequences) that have NOT been swept for
+ *   re-entrance. Rather than pretending those paths are SMP-safe, all
+ *   chains stay BSP-resident; APs still run the partition loop (tick
+ *   counts + heartbeat_tsc advance) but chains_resolved stays 0.
+ *
+ *   Lifting any individual chain to "any CPU" is per-chain audit work:
+ *   trace every transitive driver call, prove no shared state is
+ *   touched unlocked, set affinity = -1 in chain_registry SMP final
+ *   pass. The four audited subsystems above are correct in isolation;
+ *   the missing piece is sweeping the chains that touch them.
  */
 #ifndef AP_RESOLVES_CHAINS
-#define AP_RESOLVES_CHAINS 0
+#define AP_RESOLVES_CHAINS 1
 #endif
 
 static void ap_scheduler_loop(smp_cpu_t *me) __attribute__((noreturn));
@@ -272,10 +281,12 @@ static void ap_scheduler_loop(smp_cpu_t *me)
         uint64_t now_tick = me->tick_count;
 
         for (int id = 0; id < MAX_CHAINS; id++) {
-            if ((id % total) != my_idx) continue;
-
             chain_t *c = chain_get(id);
             if (!c) continue;
+            int owner;
+            if (c->affinity >= 0 && c->affinity < total) owner = c->affinity;
+            else                                          owner = id % total;
+            if (owner != my_idx) continue;
             if (c->status != CHAIN_LIVE) continue;
             if (c->node_count == 0) continue;
 
@@ -566,6 +577,8 @@ int smp_chain_owner(int chain_id)
 {
     int total = (s_cpus_online > 0) ? s_cpus_online : 1;
     if (chain_id < 0) return 0;
+    chain_t *c = chain_get(chain_id);
+    if (c && c->affinity >= 0 && c->affinity < total) return c->affinity;
     return chain_id % total;
 }
 

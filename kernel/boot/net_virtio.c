@@ -17,6 +17,7 @@
 #include "io.h"
 #include "pmm.h"
 #include "kprint.h"
+#include "spinlock.h"
 
 /* ── virtio legacy register offsets (from BAR0) ── */
 #define VIRTIO_DEV_FEATURES     0x00    /* 32-bit, device features */
@@ -86,6 +87,12 @@ static struct mac_addr dev_mac;
 static struct virtqueue rxq;        /* Queue 0: receive */
 static struct virtqueue txq;        /* Queue 1: transmit */
 static int virtio_ready = 0;
+
+/* SMP — virtqueue ring writes (avail->idx, ring slots, descriptor
+ * table) must be serialized. Concurrent virtio_net_send from two cores
+ * would corrupt avail->idx. Same for rx requeue path. */
+static zeos_spinlock_t s_rxq_lock = ZEOS_SPINLOCK_INIT;
+static zeos_spinlock_t s_txq_lock = ZEOS_SPINLOCK_INIT;
 
 /* RX/TX buffer pool */
 #define VQ_SIZE     256             /* Max queue size */
@@ -285,6 +292,8 @@ int virtio_net_send(const void *data, uint16_t len)
     if (!virtio_ready || len > NET_FRAME_MAX)
         return -1;
 
+    uint64_t f = spin_lock_irqsave(&s_txq_lock);
+
     /* Get a free TX descriptor */
     static int tx_idx = 0;
     int buf_idx = tx_idx % TX_BUFS;
@@ -313,6 +322,7 @@ int virtio_net_send(const void *data, uint16_t len)
     /* Notify device */
     vio_write16(VIRTIO_QUEUE_NOTIFY, 1);
 
+    spin_unlock_irqrestore(&s_txq_lock, f);
     return 0;
 }
 
@@ -321,9 +331,13 @@ int virtio_net_recv(void *buf, uint16_t max_len)
     if (!virtio_ready)
         return 0;
 
+    uint64_t f = spin_lock_irqsave(&s_rxq_lock);
+
     /* Check if device has returned any buffers */
-    if (rxq.last_used == rxq.used->idx)
+    if (rxq.last_used == rxq.used->idx) {
+        spin_unlock_irqrestore(&s_rxq_lock, f);
         return 0;  /* No new packets */
+    }
 
     /* Get the used element */
     uint16_t used_idx = rxq.last_used % rxq.size;
@@ -353,6 +367,8 @@ requeue:
         rxq.avail->idx++;
         vio_write16(VIRTIO_QUEUE_NOTIFY, 0);
     }
+
+    spin_unlock_irqrestore(&s_rxq_lock, f);
 
     if (total_len <= VIRTIO_NET_HDR_SIZE)
         return 0;

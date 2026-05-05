@@ -118,7 +118,15 @@ typedef struct chain {
      * so cheap chains can resolve at full speed. */
     uint32_t        resolve_interval_ticks;
     uint64_t        last_resolved_tick;
+
+    /* SMP affinity. -1 = any CPU may resolve (default; partition is by
+     * id-modulo). Otherwise pinned to a specific cpu_idx — used to keep
+     * display/compositor chains on the BSP because the GOP framebuffer
+     * blit path is single-threaded. */
+    int             affinity;
 } chain_t;
+
+#define CHAIN_AFFINITY_ANY (-1)
 
 /* ── API ─────────────────────────────────────────────────────────── */
 

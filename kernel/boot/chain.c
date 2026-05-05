@@ -117,6 +117,7 @@ void chain_init(void)
         registry[i].backoff_skip_every     = 4;
         registry[i].resolve_interval_ticks = 0;
         registry[i].last_resolved_tick     = 0;
+        registry[i].affinity               = CHAIN_AFFINITY_ANY;
         registry[i].addr.depth = 0;
         registry[i].addr.birth_tsc = 0;
         for (j = 0; j < 8; j++)
@@ -185,6 +186,7 @@ int chain_create(const char *name, int parent_id, masq_tier_t tier)
     registry[slot].backoff_skip_every     = 4;
     registry[slot].resolve_interval_ticks = 0;
     registry[slot].last_resolved_tick     = 0;
+    registry[slot].affinity               = CHAIN_AFFINITY_ANY;
 
     registry_used[slot] = 1;
     chain_total++;

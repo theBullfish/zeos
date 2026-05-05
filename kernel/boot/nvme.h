@@ -4,6 +4,7 @@
 #ifndef ZEOS_NVME_H
 #define ZEOS_NVME_H
 #include <stdint.h>
+#include "spinlock.h"
 #define NVME_MAX_DRIVES     8
 #define NVME_IO_QUEUES      4
 #define NVME_ADMIN_QSIZE    64
@@ -24,6 +25,14 @@ typedef struct {
     volatile uint32_t pending_completion;
     volatile uint16_t last_status;
     volatile uint16_t last_cmd_id;
+    /* SMP locks. sq_lock serializes ring writes (sq_tail bump + descriptor
+     * memcpy + doorbell). cq_lock serializes drain (cq_head + cq_phase +
+     * doorbell). The submitter holds sq_lock to publish a command, then
+     * releases it before waiting; drain_cq() takes cq_lock — the ISR uses
+     * a try-lock so it never blocks behind a submitter polling for its
+     * own completion. */
+    zeos_spinlock_t sq_lock;
+    zeos_spinlock_t cq_lock;
 } nvme_ioq_t;
 typedef struct {
     int slot;
@@ -54,6 +63,10 @@ typedef struct {
      * draining; -1 = polling fallback. One vector per drive aggregates
      * all I/O CQs (ISR walks every CQ on this drive). */
     int msix_vector;
+    /* Admin-queue lock — admin_cmd is serialized end-to-end (submit +
+     * wait) because the admin path is one shot at boot / config change
+     * and re-entrancy would corrupt asq_tail. */
+    zeos_spinlock_t admin_lock;
 } nvme_dev_t;
 int nvme_init(void);
 int nvme_drive_count(void);

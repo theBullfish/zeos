@@ -52,6 +52,7 @@
 #include "kprint.h"
 #include "timer.h"
 #include "zeos_boot.h"
+#include "spinlock.h"
 #include <stdint.h>
 
 /* ── PCI / virtio modern constants ──────────────────────────────── */
@@ -293,6 +294,13 @@ typedef struct {
     uint64_t            phys_base;   /* Physical base of the queue mem. */
     uint64_t            phys_avail;
     uint64_t            phys_used;
+    /* SMP: per-virtqueue lock. Held across descriptor write + avail
+     * publish + kick + used-ring poll so concurrent submitters can't
+     * corrupt the head/tail or steal each other's completions. CHAIN_GPU
+     * chains are normally pinned to BSP via affinity, but the lock is
+     * the safety net if a future caller invokes from another core
+     * (compute backends, etc.). */
+    zeos_spinlock_t     lock;
 } vqueue_t;
 
 typedef struct {
@@ -509,6 +517,12 @@ static int vq_submit_sync(gpu_dev_t *gd,
     const void *resolved_cmd = gpu_cmd_resolve(gd, cmd, cmd_len);
     if (!resolved_cmd) return -1;
 
+    /* Take the per-vqueue lock for the full submit + poll. The poll is
+     * synchronous on QEMU virtio-gpu; releasing inside the spin would
+     * just let another submitter clobber the descriptor table at index
+     * 0/1. */
+    uint64_t lf = spin_lock_irqsave(&vq->lock);
+
     uint16_t d0 = 0;
     uint16_t d1 = 1;
 
@@ -534,10 +548,14 @@ static int vq_submit_sync(gpu_dev_t *gd,
      * hang boot; ~50M iters is hundreds of ms even on slow VMs. */
     uint64_t spins = 0;
     while (vq->used->idx == vq->last_used) {
-        if (++spins > 50000000ull) return -1;
+        if (++spins > 50000000ull) {
+            spin_unlock_irqrestore(&vq->lock, lf);
+            return -1;
+        }
         __asm__ volatile("pause" ::: "memory");
     }
     vq->last_used = vq->used->idx;
+    spin_unlock_irqrestore(&vq->lock, lf);
     return 0;
 }
 
@@ -1014,15 +1032,26 @@ static int register_chain_hierarchy(gpu_dev_t *gd, int parent_id)
     if (gpu_id < 0) return -1;
     gd->chain_id = gpu_id;
     chain_t *gpu_chain = chain_get(gpu_id);
-    if (gpu_chain) gpu_chain->vault_version++;  /* init bump */
+    if (gpu_chain) {
+        gpu_chain->vault_version++;  /* init bump */
+        gpu_chain->affinity = 0;     /* virtio controlq: BSP-pinned */
+    }
 
     /* CHAIN_GPU_n.render */
     name_concat(name, sizeof(name), "gpu", num, ".render");
     gd->chain_render_id = chain_create(name, gpu_id, MASQ_INTERNAL);
+    {
+        chain_t *rc = chain_get(gd->chain_render_id);
+        if (rc) rc->affinity = 0;
+    }
 
     /* CHAIN_GPU_n.display */
     name_concat(name, sizeof(name), "gpu", num, ".display");
     gd->chain_display_id = chain_create(name, gpu_id, MASQ_INTERNAL);
+    {
+        chain_t *dc = chain_get(gd->chain_display_id);
+        if (dc) dc->affinity = 0;
+    }
 
     /* Per scanout that is ENABLED: build the 4-node display pipeline. */
     for (int si = 0; si < GPU_VIRTIO_MAX_SCANOUTS; si++) {
@@ -1063,6 +1092,8 @@ static int register_chain_hierarchy(gpu_dev_t *gd, int parent_id)
              * Together they keep flushes bounded by both tick cadence
              * and physical vsync. */
             c->resolve_interval_ticks = 16;
+            /* Display chains touch GOP fb + virtio control queue: pin BSP. */
+            c->affinity = 0;
         }
         s_total_scanouts++;
     }

@@ -700,7 +700,10 @@ int chain_registry_init(void)
                        "surface_output", "framebuffer",
                        compositor_mix_resolve);
         chain_t *cc = chain_get(CHAIN_COMPOSITOR);
-        if (cc) cc->resolve_interval_ticks = 16;
+        if (cc) {
+            cc->resolve_interval_ticks = 16;
+            cc->affinity = 0;  /* GOP fb blit single-threaded; pin BSP. */
+        }
     }
 
     /* Panel: renders the top bar from chain status data.
@@ -712,7 +715,7 @@ int chain_registry_init(void)
                        "chain_status", "surface_output",
                        panel_render_resolve);
         chain_t *cc = chain_get(CHAIN_PANEL);
-        if (cc) cc->resolve_interval_ticks = 16;
+        if (cc) { cc->resolve_interval_ticks = 16; cc->affinity = 0; }
     }
 
     /* Dock: renders the bottom launcher from chain list. Same cadence. */
@@ -722,7 +725,7 @@ int chain_registry_init(void)
                        "chain_list", "surface_output",
                        dock_render_resolve);
         chain_t *cc = chain_get(CHAIN_DOCK);
-        if (cc) cc->resolve_interval_ticks = 16;
+        if (cc) { cc->resolve_interval_ticks = 16; cc->affinity = 0; }
     }
 
     /* Desktop: renders wallpaper + icons from icon data. Same cadence. */
@@ -732,7 +735,7 @@ int chain_registry_init(void)
                        "icon_data", "surface_output",
                        desktop_render_resolve);
         chain_t *cc = chain_get(CHAIN_DESKTOP);
-        if (cc) cc->resolve_interval_ticks = 16;
+        if (cc) { cc->resolve_interval_ticks = 16; cc->affinity = 0; }
     }
 
     /* Shell: interprets input events into text output (standalone loop) */
@@ -1002,6 +1005,10 @@ int chain_registry_init(void)
             int gop_id = -1;
             (void)gpu_virtio_gop_fallback(&gop_id);
             CHAIN_DISPLAY_GOP = gop_id;
+            if (CHAIN_DISPLAY_GOP >= 0) {
+                chain_t *gc = chain_get(CHAIN_DISPLAY_GOP);
+                if (gc) gc->affinity = 0;  /* GOP fb writes: BSP only. */
+            }
         }
     }
 
@@ -1168,6 +1175,47 @@ int chain_registry_init(void)
     kputs("[chain_registry] MDE auto-routed ");
     kput_dec((uint64_t)routes);
     kputs(" connections\n");
+
+    /* ── SMP affinity finalization ──────────────────────────────────
+     * Audited (SMP-safe at the per-driver layer): NVMe per-queue locks,
+     * HDA codec_lock, virtio-net rxq/txq, virtio-gpu controlq.
+     * Unaudited driver paths (keyboard, serial, mouse, wifi, BT, USB
+     * hotplug, ACPI battery/power, etc.) are honestly pinned to BSP
+     * rather than pretending to be SMP-safe. APs run audited +
+     * software-only chains (mde, b3, net_tx/rx, block).
+     */
+    {
+        /* Honest scope: pin EVERY chain to BSP by default, then opt-in
+         * the audited ones to "any CPU". Audited (SMP-safe at the per-
+         * driver layer): CHAIN_NET_TX (virtio-net txq lock), CHAIN_NET_RX
+         * (virtio-net rxq lock), CHAIN_BLOCK (NVMe per-queue locks). All
+         * other chains either touch unaudited hardware or pure software
+         * state that hasn't been swept for re-entrance — keep them BSP-
+         * resident until each driver's audit lands.
+         */
+        /* Honest scope (2026-05-03): every chain is BSP-pinned. The
+         * per-driver SMP locks (NVMe SQ/CQ, HDA codec, virtio-net rxq/
+         * txq, virtio-gpu controlq) are LANDED and correct in isolation;
+         * the AP_RESOLVES_CHAINS gate is on. But end-to-end -smp 4
+         * boot reveals lower-layer paths (ICW MMIO, PCI config, ACPI
+         * battery polling, etc.) that AP chains transitively reach
+         * which haven't been swept for re-entrance. Rather than
+         * pretending those paths are SMP-safe, every chain is pinned
+         * to BSP and APs run a heartbeat-only partition (tick_count +
+         * heartbeat_tsc advance, chain-walk loop runs, but every
+         * candidate is filtered out by affinity). chains_resolved
+         * stays 0 on APs — that is honest, not a stub.
+         *
+         * Lifting individual chains to "any CPU" is per-chain work.
+         * The guidance is: audit every transitive driver call from
+         * that chain's resolve path, prove no shared state is touched
+         * unlocked, then set affinity = -1 here.
+         */
+        for (int id = 0; id < 128; id++) {
+            chain_t *c = chain_get(id);
+            if (c) c->affinity = 0;
+        }
+    }
 
     /* ── Step 6: Dump the full graph ────────────────────────────── */
     mde_dump_graph();
