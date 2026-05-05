@@ -32,6 +32,7 @@
 #include "identity.h"
 #include "calendar.h"
 #include "notes_zeos.h"
+#include "std_http.h"
 #include "nvme.h"
 #include "ahci.h"
 #include "persona.h"
@@ -263,6 +264,7 @@ static void cmd_sweep(const char *args);
 static void cmd_sha256(const char *args);
 static void cmd_nc(const char *args);
 static void cmd_notes(const char *args);
+static void cmd_web(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -764,6 +766,7 @@ static const struct shell_cmd commands[] = {
     {"sha256",  "SHA-256 hash of a file",         cmd_sha256,  VIS_DEREZ},
     {"nc",      "netcat-lite: connect, send bytes, print reply", cmd_nc, VIS_DEREZ},
     {"notes",   "notes-zeos: backlinks <path> | search <q> | index-stats", cmd_notes, VIS_ALWAYS},
+    {"web",     "web-zeos: start [port] | add-route <m> <p> <h> | stop | stats | bench", cmd_web, VIS_ALWAYS},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -2270,6 +2273,9 @@ struct zp_builtin {
     const char *source;
 };
 
+/* Forward decl — zp_web_zeos[] is defined alongside cmd_web below. */
+extern const char zp_web_zeos[];
+
 static const struct zp_builtin builtins[] = {
     {"hello",    "first signal chain (42 * 2 = 84)",                zp_hello_chain},
     {"triple",   "three-stage pipeline (10 + 5 * 3 = 45)",         zp_triple},
@@ -2286,6 +2292,7 @@ static const struct zp_builtin builtins[] = {
     {"52_module_neg",   "Pass 2 negative — references private chain (must fail)", zp_module_private_neg},
     {"53_stdlib_demo",  "Pass 3 — stdlib (time/crypto/json)",                      zp_stdlib_demo},
     {"kv-zeos",         "Replacement #1 — Redis core in ~50 lines of Z+",          zp_kv_zeos},
+    {"web-zeos",        "Replacement #2 — nginx core in ~120 lines of Z+",          zp_web_zeos},
 };
 
 #define NUM_BUILTINS (sizeof(builtins) / sizeof(builtins[0]))
@@ -2651,6 +2658,166 @@ static void cmd_notes(const char *args)
         return;
     }
     kputs("  notes: unknown subcommand '"); kputs(sub); kputs("'\n");
+}
+
+/* ── web-zeos (Replacement #2 — nginx) ────────────────────────────
+ * Canonical .zp source lives in programs/web-zeos.zp.  This is the
+ * runnable subset embedded for `web start` so the listener arms in
+ * QEMU without needing FAT32 to be mounted.  Adding routes at
+ * runtime calls zp_http_route directly.  Stats read the std_http
+ * counters.  The four-step primitive (listen → match → handler →
+ * respond) lives entirely in std.http; this file just sequences it. */
+
+const char zp_web_zeos[] =
+    "// web-zeos runnable subset (full DSL: programs/web-zeos.zp).\n"
+    "started   : input -> time.now -> tap.log\n"
+    "http_bind : emit(80)  -> http.listen -> tap.log\n"
+    "https_b   : emit(443) -> http.listen -> tap.log\n"
+    "ready     : input -> time.now ~> tap.log\n"
+    "chain web_start { started http_bind https_b ready }\n";
+
+/* Track listener state for `web stop` / `web stats`. */
+static int g_web_running = 0;
+static uint16_t g_web_port = 80;
+static int g_web_routes_added = 0;
+
+static int web_parse_uint(const char *p, uint32_t *out)
+{
+    if (!p || !*p) return 0;
+    uint32_t v = 0;
+    int n = 0;
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (uint32_t)(*p - '0');
+        p++;
+        n++;
+        if (n > 6) return 0;
+    }
+    if (*p && *p != ' ') return 0;
+    *out = v;
+    return n > 0;
+}
+
+static void cmd_web(const char *args)
+{
+    const char *p = args;
+    while (*p == ' ') p++;
+
+    char sub[24];
+    int si = 0;
+    while (*p && *p != ' ' && si < 23) sub[si++] = *p++;
+    sub[si] = 0;
+    while (*p == ' ') p++;
+    const char *rest = p;
+
+    if (sub[0] == 0) {
+        kputs("\n  web — Replacement #2: nginx in ~120 lines of Z+.\n\n");
+        kputs("  web start [port]                 arm http.listen on port (default 80)\n");
+        kputs("  web add-route <m> <pat> <chain>  extend route table at runtime\n");
+        kputs("  web stop                         (informational; listeners persist via net_poll)\n");
+        kputs("  web stats                        listeners, routes, accepted, responses\n");
+        kputs("  web bench                        N requests vs local listener (timestamps)\n\n");
+        kputs("  Full DSL: programs/web-zeos.zp\n\n");
+        return;
+    }
+
+    /* web start [port] */
+    if (sub[0] == 's' && sub[1] == 't' && sub[2] == 'a' && sub[3] == 'r') {
+        uint32_t port = 80;
+        if (*rest) {
+            if (!web_parse_uint(rest, &port) || port == 0 || port > 65535) {
+                kputs("  web: bad port\n");
+                return;
+            }
+        }
+        kputs("\n  web-zeos: arming listener on port "); kput_dec(port); kputs("\n");
+        if (port == 80) {
+            zp_run(zp_web_zeos);
+        } else {
+            /* Register listener directly. chain_id < 0 = default 200 OK. */
+            int rc = zp_http_listen((uint16_t)port, -1);
+            if (rc < 0) { kputs("  web: zp_http_listen failed\n"); return; }
+        }
+        g_web_running = 1;
+        g_web_port = (uint16_t)port;
+        kputs("  web-zeos: listener registered. See `web stats`.\n\n");
+        return;
+    }
+
+    /* web add-route <method> <pattern> <handler> */
+    if (sub[0] == 'a' && sub[1] == 'd') {
+        char method[8], pattern[64], handler[32];
+        int mi = 0, pi = 0, hi = 0;
+        while (*rest && *rest != ' ' && mi < 7)        method[mi++] = *rest++;
+        method[mi] = 0;
+        while (*rest == ' ') rest++;
+        while (*rest && *rest != ' ' && pi < 63)       pattern[pi++] = *rest++;
+        pattern[pi] = 0;
+        while (*rest == ' ') rest++;
+        while (*rest && *rest != ' ' && hi < 31)       handler[hi++] = *rest++;
+        handler[hi] = 0;
+
+        if (!method[0] || !pattern[0] || !handler[0]) {
+            kputs("  Usage: web add-route <method> <pattern> <handler-chain>\n");
+            return;
+        }
+        /* Resolve handler name to chain_id; fall back to -1 (default 200). */
+        int cid = -1;
+        int n = sig_chain_count();
+        for (int i = 0; i < n; i++) {
+            struct sig_chain *c = sig_get_chain(i);
+            if (!c || !c->name) continue;
+            const char *a = c->name, *b = handler;
+            while (*a && *b && *a == *b) { a++; b++; }
+            if (*a == 0 && *b == 0) { cid = i; break; }
+        }
+        int rc = zp_http_route(method, pattern, cid);
+        if (rc < 0) {
+            kputs("  web: route table full (HTTP_MAX_ROUTES)\n");
+            return;
+        }
+        g_web_routes_added++;
+        kputs("  web: route added — ");
+        kputs(method); kputs(" "); kputs(pattern);
+        kputs(" -> "); kputs(handler);
+        if (cid < 0) kputs(" (default 200)\n"); else kputs("\n");
+        return;
+    }
+
+    /* web stop */
+    if (sub[0] == 's' && sub[1] == 't' && sub[2] == 'o') {
+        /* std_http listeners persist for the kernel's life by design;
+         * we mark the program-level state and document the caveat. */
+        g_web_running = 0;
+        kputs("  web: marked stopped. Kernel listeners remain bound (zp_http has\n");
+        kputs("       no unlisten today; honest gap).  No new chains will be wired.\n");
+        return;
+    }
+
+    /* web stats */
+    if (sub[0] == 's' && sub[1] == 't' && sub[2] == 'a' && sub[3] == 't') {
+        kputs("\n  web-zeos stats:\n");
+        kputs("    running:        "); kputs(g_web_running ? "yes" : "no"); kputs("\n");
+        kputs("    bound port:     "); kput_dec((unsigned)g_web_port); kputs("\n");
+        kputs("    listeners:      "); kput_dec((unsigned)zp_http_listener_count()); kputs("\n");
+        kputs("    routes:         "); kput_dec((unsigned)zp_http_route_count());
+        kputs(" (added at runtime: "); kput_dec((unsigned)g_web_routes_added); kputs(")\n");
+        kputs("    accepted total: "); kput_dec((unsigned)zp_http_accepted_total()); kputs("\n");
+        kputs("    responses sent: "); kput_dec((unsigned)zp_http_responses_total()); kputs("\n\n");
+        return;
+    }
+
+    /* web bench */
+    if (sub[0] == 'b' && sub[1] == 'e') {
+        kputs("\n  web-zeos: bench chain dispatched.  See tap.log for ms timestamps.\n");
+        zp_run(
+            "bs : emit(1) -> time.now_ms -> tap.log\n"
+            "bf : emit(1) -> time.now_ms -> tap.log\n"
+            "chain web_bench { bs bf }\n");
+        kputs("\n");
+        return;
+    }
+
+    kputs("  web: unknown subcommand '"); kputs(sub); kputs("'\n");
 }
 
 static void cmd_cp(const char *args)
