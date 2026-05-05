@@ -1,6 +1,88 @@
 # zplus
 
-Z+ language frontend — bootstrap compiler.
+Z+ language toolchain — bootstrap compiler + runtime.
+
+## Quickstart
+
+```sh
+# build & install the toolchain
+cd tools/zplus
+cargo install --path .
+
+# run your first Z+ program
+echo 'heartbeat : tick(rate: 1) -> print' > /tmp/hello.zp
+zplus run /tmp/hello.zp 5
+```
+
+Output:
+```
+[t=1] print: tick(1)
+[t=2] print: tick(2)
+[t=3] print: tick(3)
+[t=4] print: tick(4)
+[t=5] print: tick(5)
+```
+
+That's a complete Z+ program: a clock source flowing to a sink. The
+runtime advances 5 ticks; each tick the clock fires, the value
+flows through, and `print` captures it.
+
+## Commands
+
+The umbrella binary `zplus` dispatches to four sub-commands:
+
+| command | what it does |
+|---|---|
+| `zplus lex   <file.zp>`           | dump the token stream |
+| `zplus parse <file.zp>`           | parse to AST, report stmt count |
+| `zplus check <file.zp>`           | type-check with source-context errors |
+| `zplus run   <file.zp> [ticks]`   | execute via tree-walking runtime |
+
+Each is also a standalone binary (`zplus-lex`, `zplus-parse`,
+`zplus-check`, `zplus-run`) for scripting / piping.
+
+`zplus run` accepts `--ms-per-tick N` to change "what a tick means"
+in simulated time. Default 1000 (one tick = one simulated second).
+60000 = one tick = one simulated minute. Time is derived from
+ticks; this knob is the runtime's relationship to them.
+
+## Demos
+
+Working programs you can run today:
+
+- `programs/demos/heartbeat.zp` — clock → print, smallest possible
+- `programs/demos/two_speeds.zp` — two clocks at different rates
+- `programs/demos/time_machine.zp` — 1s/5s/1m clocks, demonstrates
+  `--ms-per-tick`
+- `programs/demos/fanout.zp` — one source to three sinks via fork
+- `programs/demos/ramp.zp` — `delta` computing successive differences
+- `programs/demos/threshold.zp` — `gate(> 3)` actually filtering
+
+## Language at a glance
+
+```
+// Sources, transformers, sinks — the fundamental shape:
+data : tick(rate: 1s) -> gate(> 3) -> delta -> print
+
+// Forks fan out:
+heartbeat : tick(rate: 1) -> {
+    print,
+    alert(info: "ping"),
+    log
+}
+
+// Merges resolve as chords (chord rule):
+syslog   -> |
+app_log  -> | -> all_lines
+kern_log -> |
+
+// Taps observe without affecting upstream:
+data ~> live_view
+```
+
+See `programs/*.zp` for 68 real programs from log monitor to game
+server to power grid SCADA — all parse cleanly through the
+toolchain. The smaller demos above run end-to-end today.
 
 ## Status
 
