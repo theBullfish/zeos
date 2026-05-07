@@ -108,21 +108,63 @@ static uint32_t s_watchdog_kills;     /* post-hoc watchdog kills (defensive seco
 static uint32_t s_preempt_kills;      /* LAPIC-timer-driven mid-resolve kills (primary) */
 
 /* ── Preemption state ─────────────────────────────────────────────────
- * g_resolving_chain_id is the chain currently inside chain_resolve().
- * The LAPIC timer ISR uses this to know whom to kill on expiry.
- * -1 = no resolve in flight (timer fires here are spurious).
+ * Per-CPU. Each core that calls scheduler_preempt_resolve() writes its
+ * own checkpoint + currently-resolving chain id into its per-CPU slot
+ * on smp_cpu_t. The LAPIC timer ISR runs on whichever core actually
+ * expired and reads THAT core's slot. Single globals were a wedge:
+ * BSP and AP would overwrite each other's checkpoints, and a timer
+ * fire on either core could longjmp to the wrong core's stack.
  *
- * g_preempt_jmpbuf is the setjmp checkpoint into scheduler_preempt_resolve.
- * On timer expiry the ISR longjmps here with rc=1, abandoning the
- * interrupted handler stack; the scheduler then continues normally.
+ * Pre-SMP-init fallback: a single static slot used by the BSP before
+ * smp_init() runs. After smp_init the BSP's slot is the s_cpus[0]
+ * struct entry; we route to it via smp_cpu_by_lapic(lapic_id()).
  */
 typedef uint64_t zeos_jmpbuf_t[8];   /* rbx, rbp, r12-r15, rsp, rip */
-static volatile int g_resolving_chain_id = -1;
-static zeos_jmpbuf_t g_preempt_jmpbuf;
-static volatile uint64_t g_resolve_arm_tsc;  /* tsc when timer was armed */
-/* g_preempt_armed reserved for future stale-timer race mitigation;
- * currently the ISR relies solely on g_resolving_chain_id >= 0. */
-static volatile int g_preempt_armed = 0;
+
+/* Pre-SMP fallback (BSP only, used before smp_init runs). After SMP
+ * comes up we redirect to the per-CPU slot on smp_cpu_t. */
+static volatile int      s_pre_smp_resolving_chain_id = -1;
+static volatile uint64_t s_pre_smp_resolve_arm_tsc = 0;
+static volatile int      s_pre_smp_preempt_armed = 0;
+static zeos_jmpbuf_t     s_pre_smp_preempt_jmpbuf;
+
+/* Helpers: route to per-CPU slot if SMP is up, else the static fallback.
+ * smp_cpu_by_lapic returns NULL before smp_init has populated s_cpus[]
+ * (or if the calling LAPIC isn't enumerated). */
+struct smp_cpu;
+extern struct smp_cpu *smp_cpu_by_lapic(uint8_t lapic_id);
+extern uint32_t lapic_id(void);
+
+static inline volatile int *cpu_resolving_chain_id_ptr(void)
+{
+    struct smp_cpu *c = smp_cpu_by_lapic((uint8_t)lapic_id());
+    if (!c) return &s_pre_smp_resolving_chain_id;
+    /* Field offset hand-computed because smp.h smp_cpu_t isn't in this
+     * TU; see layout in smp.h. The accessor below resolves it cleanly. */
+    extern volatile int *smp_cpu_preempt_resolving_chain_id_ptr(struct smp_cpu *);
+    return smp_cpu_preempt_resolving_chain_id_ptr(c);
+}
+static inline volatile uint64_t *cpu_resolve_arm_tsc_ptr(void)
+{
+    struct smp_cpu *c = smp_cpu_by_lapic((uint8_t)lapic_id());
+    if (!c) return &s_pre_smp_resolve_arm_tsc;
+    extern volatile uint64_t *smp_cpu_preempt_resolve_arm_tsc_ptr(struct smp_cpu *);
+    return smp_cpu_preempt_resolve_arm_tsc_ptr(c);
+}
+static inline volatile int *cpu_preempt_armed_ptr(void)
+{
+    struct smp_cpu *c = smp_cpu_by_lapic((uint8_t)lapic_id());
+    if (!c) return &s_pre_smp_preempt_armed;
+    extern volatile int *smp_cpu_preempt_armed_ptr(struct smp_cpu *);
+    return smp_cpu_preempt_armed_ptr(c);
+}
+static inline uint64_t *cpu_preempt_jmpbuf_ptr(void)
+{
+    struct smp_cpu *c = smp_cpu_by_lapic((uint8_t)lapic_id());
+    if (!c) return (uint64_t *)s_pre_smp_preempt_jmpbuf;
+    extern uint64_t *smp_cpu_preempt_jmpbuf_ptr(struct smp_cpu *);
+    return smp_cpu_preempt_jmpbuf_ptr(c);
+}
 
 /* Minimal x86_64 setjmp / longjmp for kernel use. We're freestanding
  * so the libc versions aren't available. Save callee-saved regs + rsp
@@ -215,9 +257,10 @@ void scheduler_init(void)
     s_agg_slow_total = 0;
     s_watchdog_kills = 0;
     s_preempt_kills = 0;
-    g_resolving_chain_id = -1;
-    g_resolve_arm_tsc = 0;
-    g_preempt_armed = 0;
+    s_pre_smp_resolving_chain_id = -1;
+    s_pre_smp_resolve_arm_tsc = 0;
+    s_pre_smp_preempt_armed = 0;
+    for (int i = 0; i < 8; i++) s_pre_smp_preempt_jmpbuf[i] = 0;
     for (int i = 0; i < MAX_CHAINS; i++) {
         s_skip_phase[i] = 0;
         s_resolve_count[i] = 0;
@@ -370,10 +413,18 @@ void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err)
 {
     (void)vec; (void)err;
 
-    int id = g_resolving_chain_id;
+    /* Read THIS core's per-CPU preempt slot. Critical: every read+write
+     * here must hit the same core's slot, so call each accessor once
+     * up-front (each looks up by lapic_id) — don't stagger them. */
+    volatile int      *p_id    = cpu_resolving_chain_id_ptr();
+    volatile uint64_t *p_arm   = cpu_resolve_arm_tsc_ptr();
+    volatile int      *p_armed = cpu_preempt_armed_ptr();
+    uint64_t          *p_jmp   = cpu_preempt_jmpbuf_ptr();
+
+    int id = *p_id;
     if (id < 0) {
-        /* Spurious — timer fired after we'd already disarmed and the
-         * scheduler isn't currently inside any chain_resolve. EOI and
+        /* Spurious — timer fired after we'd already disarmed and this
+         * core isn't currently inside any chain_resolve. EOI and
          * return without longjmping. */
         lapic_timer_disarm();
         lapic_eoi();
@@ -382,16 +433,16 @@ void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err)
 
     /* Defensive: clear state BEFORE the longjmp so a re-entrant
      * timer can't double-fire through us. */
-    g_preempt_armed = 0;
-    g_resolving_chain_id = -1;
+    *p_armed = 0;
+    *p_id = -1;
     lapic_timer_disarm();
 
     chain_t *c = chain_get(id);
     uint64_t now_tsc = timer_read_tsc();
     uint64_t freq = timer_tsc_freq();
     float ran_ms = 0.0f;
-    if (freq > 0 && g_resolve_arm_tsc != 0) {
-        ran_ms = (float)(now_tsc - g_resolve_arm_tsc) * 1000.0f / (float)freq;
+    if (freq > 0 && *p_arm != 0) {
+        ran_ms = (float)(now_tsc - *p_arm) * 1000.0f / (float)freq;
     }
 
     if (c) {
@@ -420,9 +471,9 @@ void scheduler_lapic_timer_isr(uint64_t vec, uint64_t err)
     lapic_eoi();
 
     /* Bypass the rest of isr_dispatch + the assembly stub epilogue;
-     * resume directly at the setjmp checkpoint. The interrupt stack
-     * frame becomes unreachable but harmless. */
-    zeos_longjmp(g_preempt_jmpbuf, 1);
+     * resume directly at THIS core's setjmp checkpoint. The interrupt
+     * stack frame becomes unreachable but harmless. */
+    zeos_longjmp(p_jmp, 1);
 }
 
 /* Wrap a single chain_resolve(id) with LAPIC-timer-driven preemption.
@@ -449,19 +500,29 @@ int scheduler_preempt_resolve(int id)
     if (ticks64 > 0xFFFFFFFFULL) ticks64 = 0xFFFFFFFFULL;
     if (ticks64 < 1) ticks64 = 1;
 
+    /* Pull the per-CPU slot pointers ONCE for this resolve. The ISR will
+     * look these up again on its core. As long as we stay on the same
+     * core through the resolve+disarm (we do; no preempt enabled in
+     * scheduler_run), the pointers we cache here match what the ISR
+     * sees if the timer fires on this core. */
+    volatile int      *p_id    = cpu_resolving_chain_id_ptr();
+    volatile uint64_t *p_arm   = cpu_resolve_arm_tsc_ptr();
+    volatile int      *p_armed = cpu_preempt_armed_ptr();
+    uint64_t          *p_jmp   = cpu_preempt_jmpbuf_ptr();
+
     /* setjmp returns 0 on initial save, nonzero on longjmp from ISR. */
-    int rc = zeos_setjmp(g_preempt_jmpbuf);
+    int rc = zeos_setjmp(p_jmp);
     if (rc != 0) {
         /* Came back via the ISR — chain has been killed.
          * State was cleared before the longjmp; just report. */
         return -1;
     }
 
-    g_resolve_arm_tsc = timer_read_tsc();
-    g_resolving_chain_id = id;
+    *p_arm = timer_read_tsc();
+    *p_id = id;
     /* Set the armed flag last, just before the LAPIC write that
      * actually starts the countdown. */
-    g_preempt_armed = 1;
+    *p_armed = 1;
     lapic_timer_oneshot((uint32_t)ticks64, (uint8_t)SCHED_PREEMPT_VECTOR);
 
     int err = chain_resolve(id);
@@ -469,10 +530,10 @@ int scheduler_preempt_resolve(int id)
     /* Successful return — clear the armed flag FIRST so any pending
      * stale interrupt the LAPIC has queued is treated as spurious by
      * the ISR, then disarm the LVT. */
-    g_preempt_armed = 0;
+    *p_armed = 0;
     lapic_timer_disarm();
-    g_resolving_chain_id = -1;
-    g_resolve_arm_tsc = 0;
+    *p_id = -1;
+    *p_arm = 0;
     return err;
 }
 

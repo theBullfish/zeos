@@ -1371,6 +1371,33 @@ int chain_registry_init(void)
             chain_t *c = chain_get(CHAIN_MDE);
             if (c) c->affinity = -1;
         }
+
+        /* ── 2026-05-10 lifts (per-CPU jmpbuf landed) ────────────────
+         * The wedge that gated NET_TX/BLOCK/AUDIO was the LAPIC
+         * preempt path: a single global setjmp jmpbuf and a single
+         * "currently resolving" id meant BSP and AP could overwrite
+         * each other's checkpoints, so a timer fire on either core
+         * could longjmp into the wrong core's stack frame. Now per-CPU
+         * (smp_cpu_t.preempt_jmpbuf + preempt_resolving_chain_id),
+         * each core's preempt path is isolated. The per-driver locks
+         * landed in commit 7c25027 (NVMe per-queue, virtio-net rxq/txq,
+         * HDA codec_lock) plus the submit-staging locks in b19d12c
+         * already cover concurrent resolves of these three chains.
+         * Lifting now. CHAIN_NET_RX still pinned — its transitive
+         * path (arp_cache, dhcp_state, tcp_conns, dns_cache) wasn't
+         * swept in the audit pass; that's a separate lift. */
+        if (CHAIN_NET_TX >= 0) {
+            chain_t *c = chain_get(CHAIN_NET_TX);
+            if (c) c->affinity = -1;
+        }
+        if (CHAIN_BLOCK >= 0) {
+            chain_t *c = chain_get(CHAIN_BLOCK);
+            if (c) c->affinity = -1;
+        }
+        if (CHAIN_AUDIO >= 0) {
+            chain_t *c = chain_get(CHAIN_AUDIO);
+            if (c) c->affinity = -1;
+        }
     }
 
     /* ── Step 6: Dump the full graph ────────────────────────────── */

@@ -51,8 +51,21 @@ typedef struct {
     uint64_t  tlb_shootdowns_received;     /* this CPU handled this many */
     uint64_t  tlb_shootdowns_failed;       /* ack timeouts seen by BSP for this AP */
 
-    /* gdt/idt/preempt_jmpbuf live as offsets into per-CPU page; kept
-     * out of this header to avoid pulling gdt/idt internals everywhere. */
+    /* Per-CPU preempt state. Each core that calls scheduler_preempt_resolve()
+     * writes its setjmp checkpoint + currently-resolving chain id HERE so
+     * the LAPIC timer ISR — which runs on the core that actually expired —
+     * can longjmp back to that core's own checkpoint. Single-global jmpbuf
+     * was the wedge: BSP and AP would overwrite each other's checkpoints
+     * and a timer fire on either core could longjmp to the wrong core's
+     * stack address. preempt_jmpbuf is 8 uint64_t (rbx/rbp/r12-r15/rsp/rip)
+     * to match zeos_jmpbuf_t in scheduler.c. */
+    volatile int      preempt_resolving_chain_id;  /* -1 when idle */
+    volatile uint64_t preempt_resolve_arm_tsc;     /* TSC when timer was armed */
+    volatile int      preempt_armed;               /* 1 between arm and disarm */
+    uint64_t          preempt_jmpbuf[8];           /* per-CPU setjmp checkpoint */
+
+    /* gdt/idt live as offsets into per-CPU page; kept out of this
+     * header to avoid pulling gdt/idt internals everywhere. */
     void     *per_cpu_page;
 } smp_cpu_t;
 

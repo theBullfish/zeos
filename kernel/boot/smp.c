@@ -432,6 +432,10 @@ int smp_init(void)
     s_cpus[0].tlb_pending_pages = 0;
     s_cpus[0].tlb_shootdowns_received = 0;
     s_cpus[0].tlb_shootdowns_failed = 0;
+    s_cpus[0].preempt_resolving_chain_id = -1;
+    s_cpus[0].preempt_resolve_arm_tsc = 0;
+    s_cpus[0].preempt_armed = 0;
+    for (int j = 0; j < 8; j++) s_cpus[0].preempt_jmpbuf[j] = 0;
     s_cpu_count = 1;
 
     for (int i = 0; i < m->lapic_count && s_cpu_count < SMP_MAX_CPUS; i++) {
@@ -455,6 +459,10 @@ int smp_init(void)
         c->tlb_pending_pages = 0;
         c->tlb_shootdowns_received = 0;
         c->tlb_shootdowns_failed = 0;
+        c->preempt_resolving_chain_id = -1;
+        c->preempt_resolve_arm_tsc = 0;
+        c->preempt_armed = 0;
+        for (int j = 0; j < 8; j++) c->preempt_jmpbuf[j] = 0;
         s_cpu_count++;
     }
 
@@ -570,6 +578,28 @@ smp_cpu_t *smp_cpu_by_index(int idx)
 {
     if (idx < 0 || idx >= s_cpu_count) return 0;
     return &s_cpus[idx];
+}
+
+/* Per-CPU preempt slot accessors. scheduler.c can't include smp.h
+ * (header layering), so it forward-declares struct smp_cpu and uses
+ * these accessors to land its preempt state in the right per-CPU slot.
+ * This is what unblocked the wedge: each core writes its own setjmp
+ * checkpoint instead of all cores stomping a single global. */
+volatile int *smp_cpu_preempt_resolving_chain_id_ptr(smp_cpu_t *c)
+{
+    return &c->preempt_resolving_chain_id;
+}
+volatile uint64_t *smp_cpu_preempt_resolve_arm_tsc_ptr(smp_cpu_t *c)
+{
+    return &c->preempt_resolve_arm_tsc;
+}
+volatile int *smp_cpu_preempt_armed_ptr(smp_cpu_t *c)
+{
+    return &c->preempt_armed;
+}
+uint64_t *smp_cpu_preempt_jmpbuf_ptr(smp_cpu_t *c)
+{
+    return c->preempt_jmpbuf;
 }
 
 /*
@@ -785,10 +815,17 @@ static void smp_refresh_tps_sample(void)
     s_sample_tsc = now;
 }
 
-void smp_refresh_tps_sample_pub(void) { smp_refresh_tps_sample(); }
+void smp_refresh_tps_sample_pub(void) {
+    smp_refresh_tps_sample();
+}
 
 void smp_print_selftest_line(void)
 {
+    /* Direct UART probe so we see this even if kprint is wedged. */
+    {
+        const char *m = "[DBG]selftest\n";
+        while (*m) { __asm__ volatile("outb %%al, %%dx" : : "a"(*m), "d"((unsigned short)0x3F8)); m++; }
+    }
     int total = (s_cpu_count > 0) ? s_cpu_count : 1;
     int online = s_cpus_online;
     int aps_online = online - 1;
