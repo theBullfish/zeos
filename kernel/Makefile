@@ -33,7 +33,8 @@ CFLAGS   = -ffreestanding \
            -DGNU_EFI_USE_MS_ABI \
            -DHAVE_USE_MS_ABI \
            -DZEOS_VERSION='"alpha-0.2"' \
-           -DZEOS_COMMIT='"$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)"'
+           -DZEOS_COMMIT='"$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)"' \
+           $(EXTRA_CFLAGS)
 
 # Linker flags
 LDFLAGS  = -nostdlib \
@@ -436,6 +437,30 @@ $(BUILDDIR)/OVMF_VARS.fd:
 
 # Ensure OVMF vars exist before run
 run: $(BUILDDIR)/OVMF_VARS.fd
+
+# Headless multi-core run for SMP validation. Serial-only (no GTK) so
+# we sidestep the snap-shell GTK_PATH issue that pulls a stale snap
+# libpthread into qemu when -display gtk loads its GTK module. -smp 4
+# enables four cores; the per-CPU preempt slot landed in commit b6fd147
+# unblocks lifted CHAIN_NET_TX/BLOCK/AUDIO from BSP affinity.
+run-headless: $(BUILDDIR)/$(TARGET) $(VAULT_IMG) $(BUILDDIR)/OVMF_VARS.fd
+	@mkdir -p $(ESP)/EFI/BOOT
+	cp $(BUILDDIR)/$(TARGET) $(ESP)/EFI/BOOT/BOOTX64.EFI
+	env -i HOME=$$HOME PATH=/usr/bin:/bin \
+	qemu-system-x86_64 \
+		-drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+		-drive if=pflash,format=raw,file=$(BUILDDIR)/OVMF_VARS.fd \
+		-drive format=raw,file=fat:rw:$(ESP) \
+		-drive if=none,id=zeosvault,file=$(VAULT_IMG),format=raw \
+		-device nvme,drive=zeosvault,serial=ZEOSVAULT \
+		-m 512M -smp 4 \
+		-device virtio-net-pci,netdev=n0 \
+		-netdev user,id=n0 \
+		-serial stdio \
+		-display none \
+		-monitor none \
+		2>&1
+run-headless: $(BUILDDIR)/OVMF_VARS.fd
 
 # ── USB boot image (GPT + EFI System Partition) ──────────────────
 # Creates a raw disk image that can be dd'd to a USB stick.

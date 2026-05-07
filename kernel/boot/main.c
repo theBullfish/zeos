@@ -865,12 +865,16 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * bytes typed at the gate -- keyboard.c routes them straight to
      * lockscreen_input() while the overlay is active. */
     {
+#ifdef ZEOS_SMP_TEST_BYPASS_LOCKSCREEN
+        kputs("[main] SMP-test build: cold-boot lockscreen bypassed\n");
+#else
         if (cold_boot_login_required()) {
             kputs("[main] cold-boot login required\n");
             lockscreen_run_cold_boot_gate();
         } else {
             kputs("[main] cold-boot login disabled\n");
         }
+#endif
     }
 
     /* CFA-native disk encryption. After the PIN gate succeeds (or
@@ -912,10 +916,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * so the user sees the welcome before the shell prompt. Idempotent:
      * skips on subsequent boots of the same ctx. */
     {
+#ifdef ZEOS_SMP_TEST_BYPASS_LOCKSCREEN
+        kputs("[main] SMP-test build: welcome flow bypassed\n");
+#else
         extern void welcome_run_if_first_boot(void);
         extern void welcome_print_selftest_line(void);
         welcome_run_if_first_boot();
         welcome_print_selftest_line();
+#endif
     }
 
     /* Scheduler: chain resolution as the kernel main loop. Must
