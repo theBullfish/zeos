@@ -1,0 +1,220 @@
+// model_studio.zp — AI model studio for Zeos
+//
+// Like Ollama / vLLM but native to the signal chain substrate.
+// Models are chains. Layers are nodes. MDE decomposes them across
+// the device fleet (Goya HL-1000 cards, Radeon 8060S, CPU).
+// TRISA handles preprocessing (delta filtering, tokenization prep).
+// Everything flows as typed signals — no thread pools, no queues,
+// no daemons.
+//
+// Conventional equivalent: Ollama + vLLM + ray.serve
+//   ~80,000 LOC → ~120 lines of Z+
+//
+// Device tier (MDE):
+//   MASQ_SOVEREIGN  — model registry, session state
+//   MASQ_INTERNAL   — inference chains, KV cache
+//   MASQ_REFERENCE  — device backends (Goya, GPU, CPU)
+
+// ── signal types ──────────────────────────────────────────────────
+
+struct infer_req {
+    model   : str
+    prompt  : str
+    max_tok : int
+    temp    : float
+    session : str
+}
+
+struct infer_resp {
+    session : str
+    token   : str
+    done    : bool
+    latency : int
+}
+
+struct model_meta {
+    name     : str
+    layers   : int
+    head_dim : int
+    loaded   : bool
+    device   : str
+}
+
+struct kv_entry {
+    session : str
+    layer   : int
+    key_v   : str
+    val_v   : str
+}
+
+// ── model registry ─────────────────────────────────────────────────
+// Tracks which models are loaded and on which device tier.
+// vault holds model_meta keyed by model name.
+
+reg_put  : input -> vault.put
+reg_get  : input -> vault.get
+reg_list : input -> tap.log
+
+// ── KV cache ───────────────────────────────────────────────────────
+// Per-session attention KV pairs stored in btree, keyed by
+// (session, layer). Avoids re-computing prefill on follow-up turns.
+
+kv_write : input -> btree.insert
+kv_read  : input -> btree.get
+kv_clear : input -> btree.delete
+
+// ── device router ──────────────────────────────────────────────────
+// Routes inference work to the right backend based on model size
+// and what MDE reports as available.
+// Goya HL-1000: 8GB HBM each, 8 TPC — good for mid-layer compute.
+// Radeon 8060S : 96GB unified — good for large KV cache.
+// CPU fallback : always available.
+
+goya_dispatch : input -> compute.run(infer_layer, prefer_device = "goya")
+gpu_dispatch  : input -> compute.run(infer_layer, prefer_device = "gpu")
+cpu_dispatch  : input -> compute.run(infer_layer, prefer_device = "cpu")
+
+device_gate : input
+    -> gate(.device == "goya")   -> goya_dispatch
+    -> gate(.device == "gpu")    -> gpu_dispatch
+    -> gate(.device == "cpu")    -> cpu_dispatch
+
+// ── TRISA preprocessing ────────────────────────────────────────────
+// Delta filter on the token stream — avoids re-sending unchanged
+// context. TRISA's two-stage pipeline runs here: IS/ISN'T decision
+// first, then delta extraction. This is preprocessing only; TRISA
+// does not run correction (that's NTS territory).
+
+token_delta : input -> delta -> gate(> 0) -> output
+
+// ── tokenizer chain ────────────────────────────────────────────────
+// Converts raw prompt string to token IDs. str.split gives token
+// boundaries; the rest is node-local C in the resolve function.
+// Full BPE tokenizer is a kernel module; this wires it in.
+
+tokenize : input
+    -> str.split
+    -> tap.log
+    -> output
+
+detokenize : input -> tap.log -> output
+
+// ── inference layer node ───────────────────────────────────────────
+// One resolve function per transformer layer. MDE assigns each to
+// a device. The KV cache read/write flanks each layer.
+
+infer_layer : input
+    -> kv_read
+    -> compute.run(attn_forward)
+    -> compute.run(ffn_forward)
+    -> kv_write
+    -> output
+
+// ── sampler ────────────────────────────────────────────────────────
+// Temperature sampling + top-p / top-k filter on the logit signal.
+// Emits one token per resolve call.
+
+sample : input
+    -> gate(.temp > 0.0)
+    -> compute.run(top_p_sample)
+    -> output
+
+greedy : input
+    -> gate(.temp == 0.0)
+    -> compute.run(argmax)
+    -> output
+
+sampler : input -> |
+                   | -> next_token
+          greedy ->|
+
+// ── session manager ────────────────────────────────────────────────
+// Tracks active sessions, stop conditions, token budgets.
+// on_silence fires if a session goes quiet — cleans up KV cache.
+
+session_open  : input -> vault.put
+session_close : input -> kv_clear -> vault.put
+session_check : input -> gate(.done == false) -> output
+
+session_watchdog : input
+    -> on_silence(> 5m)
+    -> session_close
+
+// ── completion loop ────────────────────────────────────────────────
+// Drives autoregressive generation. Each token becomes the next
+// input. Stops when done=true or max_tok reached. Rate-limits
+// streaming output to the caller.
+
+gen_loop : input
+    -> session_check
+    -> tokenize
+    -> token_delta
+    -> infer_layer
+    -> sampler
+    -> detokenize
+    -> rate(per: 50ms)
+    -> tap.log
+    -> output
+
+// ── HTTP API ───────────────────────────────────────────────────────
+// /infer       POST — start or continue an inference session
+// /models      GET  — list loaded models from registry
+// /models/load POST — pull a model and register it
+// /sessions    GET  — active session list
+
+api : http.listen(port: 11434)   // same port as Ollama for drop-in compat
+
+api -> gate(.path == "/infer")         -> gen_loop   -> api
+api -> gate(.path == "/models")        -> reg_list   -> api
+api -> gate(.path == "/models/load")   -> reg_put    -> api
+api -> gate(.path == "/sessions")      -> session_check -> api
+
+// ── chains ─────────────────────────────────────────────────────────
+
+chain registry {
+    reg_put  reg_get  reg_list
+}
+
+chain kv_cache {
+    kv_write  kv_read  kv_clear
+}
+
+chain inference {
+    tokenize  token_delta  infer_layer  sampler  detokenize
+}
+
+chain session {
+    session_open  session_close  session_check  session_watchdog
+}
+
+chain studio {
+    api  gen_loop  device_gate  goya_dispatch  gpu_dispatch  cpu_dispatch
+}
+
+// ── FINDINGS ───────────────────────────────────────────────────────
+// WORKS:
+//   Multi-device routing via gate(.device) — reads as routing table
+//   KV cache as btree flanking the inference layer — natural
+//   TRISA delta filter on token stream — preprocessing belongs here
+//   on_silence for session GC — this is exactly where it shines
+//   Completion loop as signal cycle — autoregression = feedback edge
+//   Drop-in Ollama API port (11434)
+//
+// NEEDED:
+//   compute.run(fn, prefer_device=) — MDE device hint not in spec yet
+//   gate(.temp == 0.0) — float equality in gate condition
+//   Feedback edge in gen_loop (output -> input for autoregression)
+//     Z+ needs explicit cycle syntax: gen_loop ~> gen_loop
+//   BPE tokenizer as kernel module
+//   vLLM-style continuous batching: multiple sessions share one
+//     infer_layer call — needs batch dimension on signal type
+//
+// NEW CONSTRUCT: compute.run(fn, prefer_device = "goya")
+//   Device hint on MDE dispatch. MDE still decides; hint is advisory.
+//   Feels like it belongs in the language next to compute.run().
+//
+// NEW CONSTRUCT: feedback edge ( ~> self )
+//   Autoregressive generation is a natural signal cycle.
+//   gen_loop output feeds back to gen_loop input gated on done=false.
+//   Syntax: gen_loop -> session_check ~> gen_loop
+//   The ~> marks it as a tap-back (non-blocking feedback).
