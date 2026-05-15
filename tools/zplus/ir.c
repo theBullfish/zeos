@@ -18,12 +18,45 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+/* ── type environment: named signal → output type ───────────────── */
+#define TYPE_ENV_MAX 256
+typedef struct {
+    char name[SFG_NAME_LEN];
+    char type[SFG_NAME_LEN];
+} type_env_entry_t;
+
+typedef struct {
+    type_env_entry_t e[TYPE_ENV_MAX];
+    int n;
+} type_env_t;
+
+static void tenv_set(type_env_t *env, const char *name, const char *type) {
+    if (!name || !type || !*type || strcmp(type, "signal") == 0) return;
+    for (int i = 0; i < env->n; i++) {
+        if (strcmp(env->e[i].name, name) == 0) {
+            snprintf(env->e[i].type, SFG_NAME_LEN, "%s", type); return;
+        }
+    }
+    if (env->n >= TYPE_ENV_MAX) return;
+    snprintf(env->e[env->n].name, SFG_NAME_LEN, "%s", name);
+    snprintf(env->e[env->n].type, SFG_NAME_LEN, "%s", type);
+    env->n++;
+}
+
+static const char *tenv_get(type_env_t *env, const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < env->n; i++)
+        if (strcmp(env->e[i].name, name) == 0) return env->e[i].type;
+    return NULL;
+}
+
 /* ── context ────────────────────────────────────────────────────── */
 typedef struct {
     sfg_program_t *g;
     arena_t       *arena;
     ir_result_t   *res;
     int            cur_chain;    /* which chain we're emitting into */
+    type_env_t    *tenv;         /* named signal → type mapping     */
 } ir_ctx_t;
 
 static void ir_error(ir_ctx_t *ctx, ast_node_t *n, const char *fmt, ...) {
@@ -90,10 +123,13 @@ static void render_cond(char *buf, int bufsz, ast_node_t *expr) {
                 expr->u.binary.right->kind == AST_STR_LIT) {
                 snprintf(buf, (size_t)bufsz, "(strstr(%s, %s) != NULL)", L, R);
             } else {
-                /* numeric range: subject in L..R */
                 snprintf(buf, (size_t)bufsz, "(%s >= %s && %s <= %s)", L, R, L, R);
             }
             return;
+        case BINOP_AND:
+            snprintf(buf, (size_t)bufsz, "(%s && %s)", L, R); return;
+        case BINOP_OR:
+            snprintf(buf, (size_t)bufsz, "(%s || %s)", L, R); return;
         default: break;
         }
         /* String comparisons: use strcmp instead of == on char* */
@@ -170,6 +206,128 @@ static void render_emit_val(char *buf, int bufsz, ast_node_t *expr) {
         break;
     default: snprintf(buf, (size_t)bufsz, "0"); break;
     }
+}
+
+/* ── typed condition renderer ────────────────────────────────────── */
+/* Like render_cond but uses typed struct field access when sig_in is known. */
+static void render_cond_typed(char *buf, int bufsz, ast_node_t *expr,
+                               sfg_program_t *g, const char *sig_in);
+
+static void render_cond_typed(char *buf, int bufsz, ast_node_t *expr,
+                               sfg_program_t *g, const char *sig_in) {
+    if (!expr) { snprintf(buf, (size_t)bufsz, "1"); return; }
+
+    sfg_struct_t *st = (sig_in && *sig_in) ? sfg_find_struct(g, sig_in) : NULL;
+    int is_num = sig_in && (strcmp(sig_in, "int")  == 0 ||
+                             strcmp(sig_in, "long") == 0 ||
+                             strcmp(sig_in, "float")== 0 ||
+                             strcmp(sig_in, "double")== 0);
+
+    switch (expr->kind) {
+    case AST_BINARY: {
+        char L[128], R[128];
+        render_cond_typed(L, sizeof(L), expr->u.binary.left,  g, sig_in);
+        render_cond_typed(R, sizeof(R), expr->u.binary.right, g, sig_in);
+        switch (expr->u.binary.op) {
+        case BINOP_RANGE:
+            if (expr->u.binary.right && expr->u.binary.right->kind == AST_STR_LIT)
+                snprintf(buf, (size_t)bufsz, "(strstr(%s, %s) != NULL)", L, R);
+            else
+                snprintf(buf, (size_t)bufsz, "(%s >= %s && %s <= %s)", L, R, L, R);
+            return;
+        case BINOP_AND: snprintf(buf,(size_t)bufsz,"(%s && %s)",L,R); return;
+        case BINOP_OR:  snprintf(buf,(size_t)bufsz,"(%s || %s)",L,R); return;
+        default: break;
+        }
+        const char *op = "==";
+        switch (expr->u.binary.op) {
+        case BINOP_EQ:  op="=="; break; case BINOP_NEQ: op="!="; break;
+        case BINOP_LT:  op="<";  break; case BINOP_GT:  op=">";  break;
+        case BINOP_LE:  op="<="; break; case BINOP_GE:  op=">="; break;
+        case BINOP_ADD: op="+";  break; case BINOP_SUB: op="-";  break;
+        default: break;
+        }
+        if (expr->u.binary.right && expr->u.binary.right->kind == AST_STR_LIT) {
+            if (expr->u.binary.op == BINOP_EQ)
+                snprintf(buf,(size_t)bufsz,"(strcmp(%s, %s) == 0)",L,R);
+            else if (expr->u.binary.op == BINOP_NEQ)
+                snprintf(buf,(size_t)bufsz,"(strcmp(%s, %s) != 0)",L,R);
+            else
+                snprintf(buf,(size_t)bufsz,"(%s %s %s)",L,op,R);
+        } else {
+            snprintf(buf,(size_t)bufsz,"(%s %s %s)",L,op,R);
+        }
+        break;
+    }
+    case AST_IDENT: {
+        const char *iname = expr->u.ident.name;
+        if (strcmp(iname, "_v") == 0) {
+            /* implicit subject of bare comparison like gate(> 20) */
+            if (is_num) snprintf(buf,(size_t)bufsz,"*(long*)input");
+            else        snprintf(buf,(size_t)bufsz,"zp_signal_dbl(input)");
+        } else if (st) {
+            /* typed struct field access */
+            snprintf(buf,(size_t)bufsz,"((%s*)input)->%s", sig_in, iname);
+        } else {
+            snprintf(buf,(size_t)bufsz,"zp_field_str(input, \"%s\")", iname);
+        }
+        break;
+    }
+    case AST_FIELD_ACCESS: {
+        const char *fname = expr->u.fld.field ? expr->u.fld.field : "field";
+        if (st) snprintf(buf,(size_t)bufsz,"((%s*)input)->%s", sig_in, fname);
+        else    snprintf(buf,(size_t)bufsz,"zp_field_str(input, \"%s\")", fname);
+        break;
+    }
+    case AST_INT_LIT:      snprintf(buf,(size_t)bufsz,"%ld",  expr->u.ival.ival); break;
+    case AST_FLOAT_LIT:    snprintf(buf,(size_t)bufsz,"%g",   expr->u.fval.fval); break;
+    case AST_STR_LIT:      snprintf(buf,(size_t)bufsz,"\"%s\"",
+                                    expr->u.sval.s ? expr->u.sval.s : ""); break;
+    case AST_DURATION_LIT: snprintf(buf,(size_t)bufsz,"%ldLL",expr->u.ival.ival); break;
+    case AST_UNARY:
+        if (expr->u.unary.op == UNOP_NOT) {
+            char inner[128];
+            render_cond_typed(inner,sizeof(inner),expr->u.unary.operand,g,sig_in);
+            snprintf(buf,(size_t)bufsz,"(!(%s))",inner);
+        }
+        break;
+    default:
+        snprintf(buf,(size_t)bufsz,"1 /*unsupported cond*/");
+        break;
+    }
+}
+
+/* ── infer output type for parse() call ─────────────────────────── */
+/* Match labeled arg names against declared struct field names.
+ * Returns struct name if majority of args match a struct, else "signal". */
+static const char *infer_parse_type(sfg_program_t *g, ast_node_t *call) {
+    if (g->nstructs == 0) return "signal";
+    char arg_names[32][SFG_NAME_LEN];
+    int nargs = 0;
+    ast_node_t *a = call->u.call.args;
+    while (a && nargs < 32) {
+        if (a->kind == AST_ARG) {
+            /* labeled: level: ... */
+            if (a->u.arg.label && a->u.arg.label[0])
+                snprintf(arg_names[nargs++], SFG_NAME_LEN, "%s", a->u.arg.label);
+            /* unlabeled with ident value: timestamp (field name is the ident) */
+            else if (a->u.arg.val && a->u.arg.val->kind == AST_IDENT)
+                snprintf(arg_names[nargs++], SFG_NAME_LEN, "%s", a->u.arg.val->u.ident.name);
+        }
+        a = a->next;
+    }
+    if (nargs == 0) return "signal";
+    for (int si = 0; si < g->nstructs; si++) {
+        sfg_struct_t *s = &g->structs[si];
+        int matched = 0;
+        for (int ai = 0; ai < nargs; ai++) {
+            for (sfg_struct_field_t *f = s->fields; f; f = f->next)
+                if (strcmp(f->name, arg_names[ai]) == 0) { matched++; break; }
+        }
+        if (matched > 0 && matched >= nargs / 2 + (nargs & 1))
+            return s->name;
+    }
+    return "signal";
 }
 
 /* ── is the right-hand side of a comparison a string literal? ─────── */
@@ -287,8 +445,11 @@ static int lower_stage(ir_ctx_t *ctx, ast_node_t *stage,
             return sfg_add_node(g, ctx->cur_chain, SFG_SOURCE, "input", "signal", "signal");
         if (strcmp(s, "output") == 0)
             return sfg_add_node(g, ctx->cur_chain, SFG_SINK, "output", "signal", "void");
-        /* other idents: named signal reference — processor */
+        /* look up named signal type in the type environment */
+        const char *known = tenv_get(ctx->tenv, s);
         char sname[SFG_NAME_LEN]; sanitize(sname, s, SFG_NAME_LEN);
+        if (known)
+            return sfg_add_node(g, ctx->cur_chain, SFG_PROCESSOR, sname, known, known);
         return sfg_add_node(g, ctx->cur_chain, SFG_PROCESSOR, sname, "signal", "signal");
     }
 
@@ -317,8 +478,12 @@ static int lower_stage(ir_ctx_t *ctx, ast_node_t *stage,
         node_to_str(stage->u.call.func, fname, SFG_NAME_LEN);
         char safe[SFG_NAME_LEN]; sanitize(safe, fname, SFG_NAME_LEN);
         stdlib_kind_t sk = classify_stdlib(fname);
-        sfg_node_kind_t nk = SFG_PROCESSOR;
-        int nid = sfg_add_node(g, ctx->cur_chain, nk, safe, "signal", "signal");
+        /* parse() output type: match labeled args against declared structs */
+        const char *out_type = "signal";
+        if (strcmp(fname, "parse") == 0)
+            out_type = infer_parse_type(g, stage);
+        int nid = sfg_add_node(g, ctx->cur_chain, SFG_PROCESSOR, safe,
+                               "signal", out_type);
         if (nid >= 0) {
             sfg_node_t *n = sfg_get_node(g, nid);
             if (n && sk != STDLIB_UNKNOWN)
@@ -330,14 +495,17 @@ static int lower_stage(ir_ctx_t *ctx, ast_node_t *stage,
 
     /* ── gate ────────────────────────────────────────────────────── */
     case AST_GATE: {
+        /* Store AST for the fixup pass that re-renders with typed access.
+         * Initial body uses stub accessors; fixup replaces it once sig_in
+         * is resolved by type propagation. */
         char cond[256] = "1";
         if (stage->u.op.expr) render_cond(cond, sizeof(cond), stage->u.op.expr);
         int nid = sfg_add_node(g, ctx->cur_chain, SFG_GATE, nname, "signal", "signal");
         if (nid >= 0) {
             sfg_node_t *n = sfg_get_node(g, nid);
             if (n) {
+                n->gate_cond_ast = stage;
                 n->gate_cond = (char*)arena_strdup(ctx->arena, cond, (int)strlen(cond));
-                /* handler: pass if cond, else stop chain propagation */
                 char body[512];
                 snprintf(body, sizeof(body),
                     "    if (!(%s)) { *(void**)output = NULL; return; }\n"
@@ -352,7 +520,12 @@ static int lower_stage(ir_ctx_t *ctx, ast_node_t *stage,
     case AST_EMIT: {
         char val[256] = "0";
         if (stage->u.op.expr) render_emit_val(val, sizeof(val), stage->u.op.expr);
-        int nid = sfg_add_node(g, ctx->cur_chain, SFG_SOURCE, nname, "void", "signal");
+        /* sig_out = struct type name when emitting a struct, else "signal" */
+        const char *emit_out = "signal";
+        if (stage->u.op.expr && stage->u.op.expr->kind == AST_STRUCT_INIT &&
+            stage->u.op.expr->u.sinit.type_name)
+            emit_out = stage->u.op.expr->u.sinit.type_name;
+        int nid = sfg_add_node(g, ctx->cur_chain, SFG_SOURCE, nname, "void", emit_out);
         if (nid >= 0) {
             sfg_node_t *n = sfg_get_node(g, nid);
             if (n) {
@@ -510,7 +683,7 @@ static int lower_stage(ir_ctx_t *ctx, ast_node_t *stage,
     /* ── struct init / int/float/str literals → source nodes ─────── */
     case AST_STRUCT_INIT: {
         const char *tname = stage->u.sinit.type_name ? stage->u.sinit.type_name : "void";
-        int nid = sfg_add_node(g, ctx->cur_chain, SFG_SOURCE, nname, "void", "signal");
+        int nid = sfg_add_node(g, ctx->cur_chain, SFG_SOURCE, nname, "void", tname);
         if (nid >= 0) {
             sfg_node_t *n = sfg_get_node(g, nid);
             if (n) {
@@ -591,6 +764,15 @@ static node_range_t lower_pipeline(ir_ctx_t *ctx, ast_node_t *pipe,
             default:            ek = SFG_EDGE_FLOW;      break;
             }
             sfg_add_edge(ctx->g, ek, prev_nid, nid, "signal");
+            /* propagate type from upstream to downstream */
+            sfg_node_t *prev_n = sfg_get_node(ctx->g, prev_nid);
+            sfg_node_t *cur_n  = sfg_get_node(ctx->g, nid);
+            if (prev_n && cur_n && strcmp(prev_n->sig_out, "signal") != 0) {
+                if (strcmp(cur_n->sig_in,  "signal") == 0)
+                    snprintf(cur_n->sig_in,  SFG_NAME_LEN, "%s", prev_n->sig_out);
+                if (cur_n->kind != SFG_SINK && strcmp(cur_n->sig_out, "signal") == 0)
+                    snprintf(cur_n->sig_out, SFG_NAME_LEN, "%s", prev_n->sig_out);
+            }
         }
         prev_nid  = nid;
         prev_edge = (i < pipe->u.pipeline.count-1) ? pipe->u.pipeline.edges[i] : EDGE_FLOW;
@@ -670,28 +852,43 @@ sfg_program_t *ir_lower(ast_node_t *program, arena_t *arena,
     snprintf(init_name, SFG_NAME_LEN, "zp_%s_init", stem);
     g->init_fn_name = (char*)arena_strdup(arena, init_name, (int)strlen(init_name));
 
-    ir_ctx_t ctx = {g, arena, res, -1};
+    type_env_t tenv; memset(&tenv, 0, sizeof(tenv));
+    ir_ctx_t ctx = {g, arena, res, -1, &tenv};
 
     /* implicit "main" chain for top-level signal decls */
     int main_chain = sfg_add_chain(g, "main", SFG_MASQ_REFERENCE, -1);
     ctx.cur_chain = main_chain;
 
+    /* Two-pass lowering: structs first so parse() type inference can see them. */
+
+    /* Pass 1: lower struct declarations */
     ast_node_t *decl = program->u.list.items;
+    while (decl) {
+        if (decl->kind == AST_STRUCT) lower_struct(&ctx, decl);
+        decl = decl->next;
+    }
+
+    /* Pass 2: lower everything else */
+    decl = program->u.list.items;
     while (decl) {
         switch (decl->kind) {
         case AST_IMPORT:
-            /* imports are informational — recorded as comments in codegen */
             break;
         case AST_STRUCT:
-            lower_struct(&ctx, decl);
-            break;
+            break; /* already done */
         case AST_CHAIN:
             lower_chain(&ctx, decl);
             break;
         case AST_SIGNAL_DECL: {
             const char *nm = decl->u.sig_decl.name ? decl->u.sig_decl.name : "sig";
             ctx.cur_chain = main_chain;
-            lower_pipeline(&ctx, decl->u.sig_decl.rhs, "main", nm);
+            node_range_t nr = lower_pipeline(&ctx, decl->u.sig_decl.rhs, "main", nm);
+            /* record output type so downstream references can use it */
+            if (nr.last >= 0) {
+                sfg_node_t *last_n = sfg_get_node(g, nr.last);
+                if (last_n && strcmp(last_n->sig_out, "signal") != 0)
+                    tenv_set(&tenv, nm, last_n->sig_out);
+            }
             break;
         }
         case AST_PIPELINE:
@@ -704,10 +901,59 @@ sfg_program_t *ir_lower(ast_node_t *program, arena_t *arena,
         decl = decl->next;
     }
 
-    /* remove the implicit main chain if it has no nodes */
-    sfg_chain_t *mc = sfg_get_chain(g, main_chain);
-    if (mc && mc->nnodes == 0) {
-        /* compact: just leave it — codegen skips empty chains */
+    /* ── type propagation pass (3 iterations covers most chains) ── */
+    for (int pass = 0; pass < 3; pass++) {
+        for (int ei = 0; ei < g->nedges; ei++) {
+            sfg_edge_t *e = &g->edges[ei];
+            if (e->kind != SFG_EDGE_FLOW && e->kind != SFG_EDGE_TAP) continue;
+            sfg_node_t *from = sfg_get_node(g, e->from_node);
+            sfg_node_t *to   = sfg_get_node(g, e->to_node);
+            if (!from || !to) continue;
+            if (strcmp(from->sig_out, "signal") == 0) continue;
+            if (strcmp(to->sig_in, "signal") == 0)
+                snprintf(to->sig_in, SFG_NAME_LEN, "%s", from->sig_out);
+            if (to->kind != SFG_SINK && strcmp(to->sig_out, "signal") == 0)
+                snprintf(to->sig_out, SFG_NAME_LEN, "%s", from->sig_out);
+        }
+    }
+
+    /* ── gate body fixup: re-render with typed field access ──────── */
+    for (int i = 0; i < g->nnodes; i++) {
+        sfg_node_t *n = &g->nodes[i];
+        if (n->kind != SFG_GATE || !n->gate_cond_ast) continue;
+
+        /* If sig_in is still unresolved, scan same-chain peers for a known
+         * struct type (handles the case where a named signal uses 'input'
+         * as its source and the type flows in via the connecting pipeline). */
+        if (strcmp(n->sig_in, "signal") == 0) {
+            sfg_chain_t *ch = sfg_get_chain(g, n->chain_id);
+            if (ch) {
+                for (int j = 0; j < ch->nnodes; j++) {
+                    sfg_node_t *peer = sfg_get_node(g, ch->node_ids[j]);
+                    if (!peer || peer->id == n->id) continue;
+                    if (strcmp(peer->sig_in, "signal") != 0 &&
+                        sfg_find_struct(g, peer->sig_in)) {
+                        snprintf(n->sig_in, SFG_NAME_LEN, "%s", peer->sig_in);
+                        break;
+                    }
+                }
+            }
+        }
+        if (strcmp(n->sig_in, "signal") == 0) continue; /* still unknown */
+
+        ast_node_t *gate_ast = (ast_node_t*)n->gate_cond_ast;
+        ast_node_t *cond_expr = gate_ast->u.op.expr;
+
+        char cond[512] = "1";
+        if (cond_expr)
+            render_cond_typed(cond, sizeof(cond), cond_expr, g, n->sig_in);
+
+        n->gate_cond = (char*)arena_strdup(arena, cond, (int)strlen(cond));
+        char body[640];
+        snprintf(body, sizeof(body),
+            "    if (!(%s)) { *(void**)output = NULL; return; }\n"
+            "    *(void**)output = input;\n", cond);
+        n->handler_body = (char*)arena_strdup(arena, body, (int)strlen(body));
     }
 
     return g;

@@ -66,6 +66,11 @@ typedef struct sfg_node {
     /* node-private state struct name, if any */
     char            *state_type;
 
+    /* original gate condition AST node (cast to void* to avoid header dep).
+     * Set by ir.c for GATE nodes so the type-propagation pass can re-render
+     * the condition with typed field access once sig_in is resolved. */
+    void            *gate_cond_ast;
+
     int              chain_id;   /* which SFG chain owns this node */
     int              seq;        /* position within the chain (0-based) */
 } sfg_node_t;
@@ -134,7 +139,8 @@ int  sfg_add_node (sfg_program_t *g, int chain_id, sfg_node_kind_t kind,
 int  sfg_add_edge (sfg_program_t *g, sfg_edge_kind_t kind,
                    int from_node, int to_node, const char *sig_type);
 
-sfg_chain_t *sfg_get_chain(sfg_program_t *g, int id);
-sfg_node_t  *sfg_get_node (sfg_program_t *g, int id);
+sfg_chain_t  *sfg_get_chain  (sfg_program_t *g, int id);
+sfg_node_t   *sfg_get_node   (sfg_program_t *g, int id);
+sfg_struct_t *sfg_find_struct(sfg_program_t *g, const char *name);
 
 void sfg_dump(sfg_program_t *g);

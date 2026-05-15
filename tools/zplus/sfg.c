@@ -28,7 +28,7 @@ int sfg_add_node(sfg_program_t *g, int chain_id, sfg_node_kind_t kind,
     snprintf(n->sig_in,  SFG_NAME_LEN, "%s", sig_in  ? sig_in  : "signal");
     snprintf(n->sig_out, SFG_NAME_LEN, "%s", sig_out ? sig_out : "signal");
     n->handler_body = NULL; n->gate_cond = NULL;
-    n->emit_value = NULL;   n->state_type = NULL;
+    n->emit_value = NULL;   n->state_type = NULL; n->gate_cond_ast = NULL;
 
     /* attach to chain */
     sfg_chain_t *c = sfg_get_chain(g, chain_id);
@@ -57,6 +57,14 @@ sfg_chain_t *sfg_get_chain(sfg_program_t *g, int id) {
 sfg_node_t *sfg_get_node(sfg_program_t *g, int id) {
     if (id < 0 || id >= g->nnodes) return NULL;
     return &g->nodes[id];
+}
+
+sfg_struct_t *sfg_find_struct(sfg_program_t *g, const char *name) {
+    if (!name || !*name) return NULL;
+    for (int i = 0; i < g->nstructs; i++)
+        if (strcmp(g->structs[i].name, name) == 0)
+            return &g->structs[i];
+    return NULL;
 }
 
 static const char *node_kind_name(sfg_node_kind_t k) {
