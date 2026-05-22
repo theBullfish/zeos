@@ -1,0 +1,9 @@
+// heartbeat.zp — the smallest Z+ program that runs.
+//
+// `tick(rate: 1)` is a clock source; `print` is a sink. The heartbeat
+// wire connects them.
+//
+// Run:   cd tools/zplus && cargo run --quiet --bin zplus-run -- ../../programs/demos/heartbeat.zp 5
+// Expect: five lines, one per tick.
+
+heartbeat : tick(rate: 1) -> print

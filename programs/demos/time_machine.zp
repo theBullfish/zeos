@@ -1,0 +1,25 @@
+// time_machine.zp — three clocks at simulated-time durations.
+//
+// At default config (1 tick = 1 simulated second):
+//   `every_sec` fires every tick (1s = 1 tick).
+//   `every_5s`  fires every 5 ticks.
+//   `every_min` fires every 60 ticks.
+//
+// Change our relationship to ticks via `--ms-per-tick`:
+//   --ms-per-tick 1000   (default) one tick = one simulated second
+//   --ms-per-tick 60000             one tick = one simulated minute
+//                                   → every_min fires every tick
+//                                   → every_5s and every_sec fire every tick too
+//   --ms-per-tick 1                 one tick = one simulated millisecond
+//                                   → every_sec fires every 1000 ticks
+//
+// The wall-clock-vs-simulated-time decoupling is the runtime's
+// fundamental shape: ticks are atomic, time is derived.
+//
+// Run:
+//   zplus-run programs/demos/time_machine.zp 65
+//   zplus-run programs/demos/time_machine.zp 5 --ms-per-tick 60000
+
+every_sec : tick(rate: 1s)  -> alert(info: "1s")
+every_5s  : tick(rate: 5s)  -> alert(info: "5s")
+every_min : tick(rate: 1m)  -> alert(info: "1m")

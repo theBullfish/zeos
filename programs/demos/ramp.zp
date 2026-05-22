@@ -1,0 +1,13 @@
+// ramp.zp — show real `delta` semantics.
+//
+// `tick -> delta -> print` emits the difference between consecutive
+// tick values. Result: 0, 1, 1, 1, ... (first tick has no previous).
+//
+// Run:   zplus-run programs/demos/ramp.zp 5
+// Expect: [t=1] print: 0
+//         [t=2] print: 1
+//         [t=3] print: 1
+//         [t=4] print: 1
+//         [t=5] print: 1
+
+ramp : tick(rate: 1) -> delta -> print

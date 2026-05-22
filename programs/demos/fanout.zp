@@ -1,0 +1,14 @@
+// fanout.zp — one source, three sinks via fork.
+//
+// `tick -> { sink_a, sink_b, sink_c }` fans the same value to all
+// three branches. Each branch sees the upstream tick value and emits
+// independently.
+//
+// Run:   zplus-run programs/demos/fanout.zp 3
+// Expect: 9 emissions per run (3 ticks × 3 fork branches).
+
+heartbeat : tick(rate: 1) -> {
+    print,
+    alert(info: "ping"),
+    log
+}

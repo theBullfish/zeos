@@ -1,0 +1,36 @@
+[package]
+name = "zplus"
+version = "0.0.1"
+edition = "2021"
+description = "Z+ language compiler — bootstrap frontend"
+publish = false
+
+[lib]
+name = "zplus"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zplus-lex"
+path = "src/bin/zplus_lex.rs"
+
+[[bin]]
+name = "zplus-parse"
+path = "src/bin/zplus_parse.rs"
+
+[[bin]]
+name = "zplus-check"
+path = "src/bin/zplus_check.rs"
+
+[[bin]]
+name = "zplus-run"
+path = "src/bin/zplus_run.rs"
+
+[[bin]]
+name = "zplus-tune"
+path = "src/bin/zplus_tune.rs"
+
+[[bin]]
+name = "zplus"
+path = "src/bin/zplus.rs"
+
+[dev-dependencies]
