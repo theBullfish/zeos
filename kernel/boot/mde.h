@@ -18,7 +18,7 @@
 
 /* ── Limits ─────────────────────────────────────────────────────── */
 
-#define MDE_MAX_ROUTES  256
+#define MDE_MAX_ROUTES  16384
 #define MDE_MAX_FUSE    16      /* Max chains in a single fuse operation */
 
 /* ── Route ──────────────────────────────────────────────────────── */
