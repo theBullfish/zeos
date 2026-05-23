@@ -101,6 +101,15 @@ pub enum Chain<'src> {
     /// `a ~> b` — read-only tap. Distinct from Flow because tap MUST NOT
     /// affect upstream resolution. Same syntax, different runtime contract.
     Tap(Box<Chain<'src>>, Box<Chain<'src>>, Span),
+    /// `a <~ b` — feedback edge. The RHS produces a signal that is fed
+    /// back to the LHS at the *next* tick. Required for autoregressive
+    /// composition (LLM token loops, control systems, recurrence). The
+    /// runtime contract: feedback is sampled, not chained — it does not
+    /// participate in chord resolution within the current tick, only as
+    /// an input to the next tick's chord. Symmetric with `Tap`: Tap is
+    /// forward-observe (no upstream effect), Feedback is backward-state
+    /// (no current-tick effect).
+    Feedback(Box<Chain<'src>>, Box<Chain<'src>>, Span),
     /// `a -x> b` — sever / unfollow / disconnect.
     Sever(Box<Chain<'src>>, Box<Chain<'src>>, Span),
     /// `a <- b` — actuator binding. Used in declarations:

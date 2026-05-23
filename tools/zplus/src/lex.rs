@@ -40,6 +40,10 @@ pub enum TokenKind {
     Sever,       // -x>
     Flow,        // ->
     Tap,         // ~>
+    Feedback,    // <~ — backward feedback edge (autoregressive composition).
+                  // Symmetric with Tap: Tap observes forward, Feedback
+                  // returns observed-state to an upstream node. Per
+                  // primitive-lab L1.07 fork resolution F2 (2026-05-22).
     Bidir,       // <->
     BindLeft,    // <-
 
@@ -204,6 +208,10 @@ impl<'a> Lexer<'a> {
             if self.peek_at(1) == Some(b'-') {
                 self.pos += 2;
                 return Some(self.tok(TokenKind::BindLeft, start));
+            }
+            if self.peek_at(1) == Some(b'~') {
+                self.pos += 2;
+                return Some(self.tok(TokenKind::Feedback, start));
             }
             if self.peek_at(1) == Some(b'=') {
                 self.pos += 2;
@@ -592,6 +600,8 @@ mod tests {
             vec![(TokenKind::Ident, "a"), (TokenKind::BindLeft, "<-"), (TokenKind::Ident, "b")]);
         assert_eq!(non_trivia("a ~> b"),
             vec![(TokenKind::Ident, "a"), (TokenKind::Tap, "~>"), (TokenKind::Ident, "b")]);
+        assert_eq!(non_trivia("a <~ b"),
+            vec![(TokenKind::Ident, "a"), (TokenKind::Feedback, "<~"), (TokenKind::Ident, "b")]);
     }
 
     /// Taxonomy §14.2 — number+suffix tokens must be one lexeme.

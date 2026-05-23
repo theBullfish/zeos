@@ -381,6 +381,20 @@ impl<'src> Runtime<'src> {
                 let _ = self.eval_chain(b, val.clone())?;
                 Ok(val)
             }
+            Chain::Feedback(a, b, _) => {
+                // Feedback `a <~ b`: at the current tick, the value
+                // flowing out of `a` is returned unchanged — feedback
+                // is sampled by the *next* tick, not chained into
+                // the current chord. This v1 runtime is single-tick;
+                // we evaluate `b` for side-effects only (so any state
+                // it builds up is reachable on the next invocation),
+                // but `a`'s value is what the rest of the chain sees.
+                // Full autoregressive semantics require a tick scheduler
+                // (queued as a successor; see primitive-lab L2.04a).
+                let val = self.eval_chain(a, upstream)?;
+                let _ = self.eval_chain(b, val.clone())?;
+                Ok(val)
+            }
             Chain::Sever(_, _, _) => Ok(None),
             Chain::Bind(a, _, _) => self.eval_chain(a, upstream),
             Chain::Fork(branches, _) => {

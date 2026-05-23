@@ -197,7 +197,7 @@ pub fn check_flow_connectivity(m: &Module<'_>, env: &TypeEnv) -> Vec<TypeError> 
 
 fn walk_flows<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
     match c {
-        Chain::Flow(a, b, span) | Chain::Tap(a, b, span) => {
+        Chain::Flow(a, b, span) | Chain::Tap(a, b, span) | Chain::Feedback(a, b, span) => {
             walk_flows(a, env, errors);
             walk_flows(b, env, errors);
             let out_a = infer_chain(a, env);
@@ -299,7 +299,7 @@ fn check_chain(c: &Chain<'_>, errors: &mut Vec<TypeError>) {
                 }
             }
         }
-        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
+        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Feedback(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
             check_chain(a, errors);
             check_chain(b, errors);
         }
@@ -424,6 +424,10 @@ pub fn infer_chain(c: &Chain<'_>, env: &TypeEnv) -> Type {
         }
         Chain::Flow(_, b, _) => infer_chain(b, env),
         Chain::Tap(a, _, _) => infer_chain(a, env),
+        // Feedback: the LHS receives the RHS's signal at next tick. The
+        // expression's type at the current tick is the LHS type (the
+        // downstream-of-feedback continues from the LHS shape).
+        Chain::Feedback(a, _, _) => infer_chain(a, env),
         Chain::Sever(_, _, _) => Type::Nominal("unit".into(), span),
         Chain::Bind(a, _, _) => infer_chain(a, env),
         Chain::Fork(_, _) => Type::Unknown(span),
@@ -592,7 +596,7 @@ fn walk_calls<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
             }
         }
         Chain::Atom(_) => {}
-        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
+        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Feedback(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
             walk_calls(a, env, errors);
             walk_calls(b, env, errors);
         }

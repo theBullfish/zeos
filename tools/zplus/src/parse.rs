@@ -297,7 +297,7 @@ impl<'src> Parser<'src> {
     }
 
     /// Chain := Term (ChainOp Term)*
-    /// ChainOp := -> | ~> | -x> | <-
+    /// ChainOp := -> | ~> | <~ | -x> | <-
     ///
     /// Multi-line chains are supported: if the next non-newline token is a
     /// chain op, newlines between the prior term and the op are skipped.
@@ -351,6 +351,7 @@ impl<'src> Parser<'src> {
             let op = match self.kind_at(probe) {
                 Some(TokenKind::Flow) => Some(TokenKind::Flow),
                 Some(TokenKind::Tap) => Some(TokenKind::Tap),
+                Some(TokenKind::Feedback) => Some(TokenKind::Feedback),
                 Some(TokenKind::Sever) => Some(TokenKind::Sever),
                 Some(TokenKind::BindLeft) => Some(TokenKind::BindLeft),
                 // `then` keyword acts as Flow with temporal sequencing
@@ -424,6 +425,7 @@ impl<'src> Parser<'src> {
             left = match op_kind {
                 TokenKind::Flow => Chain::Flow(Box::new(left), Box::new(right), span),
                 TokenKind::Tap => Chain::Tap(Box::new(left), Box::new(right), span),
+                TokenKind::Feedback => Chain::Feedback(Box::new(left), Box::new(right), span),
                 TokenKind::Sever => Chain::Sever(Box::new(left), Box::new(right), span),
                 TokenKind::BindLeft => Chain::Bind(Box::new(left), Box::new(right), span),
                 _ => unreachable!(),
@@ -1716,6 +1718,7 @@ impl<'src> Parser<'src> {
             Chain::Call(c) => c.span,
             Chain::Flow(_, _, s)
             | Chain::Tap(_, _, s)
+            | Chain::Feedback(_, _, s)
             | Chain::Sever(_, _, s)
             | Chain::Bind(_, _, s) => *s,
             Chain::Fork(_, s) => *s,
@@ -1883,6 +1886,32 @@ kern_log -> |
         let m = module("error_rate ~> live_rate_view");
         let Stmt::Connect(Chain::Tap(_, _, _)) = &m.stmts[0] else {
             panic!("expected Tap, got {:?}", m.stmts[0]);
+        };
+    }
+
+    /// Feedback edge `<~` — autoregressive composition. Symmetric with
+    /// Tap: same syntactic shape, opposite semantic direction. Required
+    /// for LLM token loops and other recurrence.
+    #[test]
+    fn feedback_arrow_parses() {
+        let m = module("logits <~ next_token");
+        let Stmt::Connect(Chain::Feedback(_, _, _)) = &m.stmts[0] else {
+            panic!("expected Feedback, got {:?}", m.stmts[0]);
+        };
+    }
+
+    /// Feedback can chain through a flow: `prompt -> model -> token <~ embed`.
+    /// This is the minimal autoregressive loop referenced by primitive-lab L2.04.
+    #[test]
+    fn feedback_in_minimal_autoregressive_loop() {
+        let m = module("prompt -> model -> token <~ embed");
+        // Feedback is left-associative same as other chain ops, so the
+        // full parse is Feedback(Flow(Flow(prompt, model), token), embed).
+        let Stmt::Connect(Chain::Feedback(lhs, _rhs, _)) = &m.stmts[0] else {
+            panic!("expected Feedback at root, got {:?}", m.stmts[0]);
+        };
+        let Chain::Flow(_, _, _) = lhs.as_ref() else {
+            panic!("expected Flow on Feedback LHS, got {:?}", lhs);
         };
     }
 

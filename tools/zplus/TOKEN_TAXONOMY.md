@@ -22,6 +22,7 @@ Frequency tiers:
 |---|---|---|---|---|
 | `FLOW` | `->` | `programs/02_log_monitor.zp:8` | ubiquitous | the wire |
 | `TAP` | `~>` | `programs/02_log_monitor.zp:67` | ubiquitous | read-only telemetry |
+| `FEEDBACK` | `<~` | *(added 2026-05-22 — primitive-lab L2.04, no corpus citation yet)* | rare | backward feedback edge — autoregressive composition. Symmetric with `TAP`: tap observes forward without affecting upstream; feedback returns observed-state to upstream at *next* tick. v1 runtime evaluates RHS for side-effects and passes through LHS at current tick; full multi-tick semantics queued. |
 | `SEVER` | `-x>` | `programs/chirp.zp:31` | rare | unfollow / disconnect |
 | `BIND_LEFT` | `<-` | `programs/16_scada_industrial.zp:25` | common | **actuator input binding**, e.g. `valve_inlet : plant.actuator(...) <- position @ percent`. Used in `11_home_automation.zp:27-33`, `22_precision_agriculture.zp:105`, `16_scada_industrial.zp:25-30`. |
 
