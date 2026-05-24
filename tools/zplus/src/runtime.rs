@@ -256,6 +256,12 @@ pub struct Runtime<'src> {
     /// baseline's mean, etc.). Keyed by call span start so each
     /// syntactic occurrence keeps its own state.
     call_state: HashMap<usize, CallState>,
+    /// Per-Feedback-edge buffer. Keyed by the Feedback chain's span
+    /// start. Holds the RHS's emission from the *previous* tick so
+    /// the LHS can see it on the next tick. Survives across tick
+    /// boundaries (NOT reset like `wires`). Empty if the Feedback
+    /// edge hasn't fired yet or its RHS hasn't emitted.
+    feedback_buffers: HashMap<usize, Value>,
     /// Emissions captured this run. Sinks append; `run()` returns them.
     emissions: Vec<Emission>,
     /// Observer to notify on runtime events. Defaults to no-op.
@@ -284,9 +290,27 @@ impl<'src> Runtime<'src> {
             wires: HashMap::new(),
             merge_pending: HashMap::new(),
             call_state: HashMap::new(),
+            feedback_buffers: HashMap::new(),
             emissions: Vec::new(),
             observer: Box::new(NullObserver),
         }
+    }
+
+    /// Read the current value buffered for a Feedback edge. Keyed by
+    /// the Feedback chain's span start (the same key the runtime uses
+    /// internally). Returns `None` if the edge hasn't fired yet.
+    /// Exposed for tests + future introspection tools.
+    pub fn feedback_buffer(&self, span_start: usize) -> Option<&Value> {
+        self.feedback_buffers.get(&span_start)
+    }
+
+    /// Snapshot every Feedback buffer's (span_start, value) pair.
+    /// Useful for tests that don't want to chase span offsets.
+    pub fn feedback_buffer_snapshot(&self) -> Vec<(usize, Value)> {
+        self.feedback_buffers
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
     }
 
     /// Install an observer to receive runtime events. Replaces any
@@ -381,18 +405,32 @@ impl<'src> Runtime<'src> {
                 let _ = self.eval_chain(b, val.clone())?;
                 Ok(val)
             }
-            Chain::Feedback(a, b, _) => {
-                // Feedback `a <~ b`: at the current tick, the value
-                // flowing out of `a` is returned unchanged — feedback
-                // is sampled by the *next* tick, not chained into
-                // the current chord. This v1 runtime is single-tick;
-                // we evaluate `b` for side-effects only (so any state
-                // it builds up is reachable on the next invocation),
-                // but `a`'s value is what the rest of the chain sees.
-                // Full autoregressive semantics require a tick scheduler
-                // (queued as a successor; see primitive-lab L2.04a).
-                let val = self.eval_chain(a, upstream)?;
-                let _ = self.eval_chain(b, val.clone())?;
+            Chain::Feedback(a, b, span) => {
+                // Feedback `a <~ b` — multi-tick semantics.
+                //
+                // On each tick:
+                //   1. The buffer at `span.start` holds b's emission
+                //      from the *previous* tick (None on tick 1).
+                //   2. If `a` has no upstream from a parent stage, the
+                //      buffered value is injected as a's upstream —
+                //      this is the autoregressive feedback path.
+                //   3. `a` evaluates. Its output is the chain's output.
+                //   4. `b` evaluates with a's value; b's emission is
+                //      stored in the buffer for *next* tick.
+                //
+                // This keeps the chord rule (a never sees b's same-tick
+                // value, only the previous tick's), and gives us a real
+                // tick-shifted edge with no scheduler rewrite needed.
+                let injected = if upstream.is_none() {
+                    self.feedback_buffers.get(&span.start).cloned()
+                } else {
+                    upstream
+                };
+                let val = self.eval_chain(a, injected)?;
+                let b_emission = self.eval_chain(b, val.clone())?;
+                if let Some(v) = b_emission {
+                    self.feedback_buffers.insert(span.start, v);
+                }
                 Ok(val)
             }
             Chain::Sever(_, _, _) => Ok(None),
@@ -1197,6 +1235,75 @@ mod tests {
                 assert!(*passed, "All-policy with both inputs firing should pass");
             }
         }
+    }
+
+    // ── feedback edges (<~) ─────────────────────────────────────
+
+    #[test]
+    fn feedback_buffer_advances_across_ticks() {
+        // `tick(rate: 1) <~ tick(rate: 1)`: the LHS still emits a fresh
+        // Tick(N) each step (it has its own upstream from the source);
+        // the RHS also emits Tick(N) each step and that value gets
+        // stashed in the feedback buffer for the *next* tick to read.
+        //
+        // We can't directly observe "LHS saw the buffered value" without
+        // a sink between them, but we CAN observe that the buffer
+        // updates tick-over-tick — which is the multi-tick semantic.
+        let src = "loop : tick(rate: 1) <~ tick(rate: 1)";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+
+        // Tick 1: buffer empty at start, populated to Tick(1) at end.
+        rt.step().expect("step 1");
+        let snap1 = rt.feedback_buffer_snapshot();
+        assert_eq!(snap1.len(), 1, "expected one feedback buffer entry");
+        let (span_key, v1) = snap1[0].clone();
+        assert_eq!(v1, Value::Tick(1));
+
+        // Tick 2: buffer should advance to Tick(2).
+        rt.step().expect("step 2");
+        let v2 = rt.feedback_buffer(span_key).cloned();
+        assert_eq!(v2, Some(Value::Tick(2)));
+
+        // Tick 3: buffer should advance to Tick(3).
+        rt.step().expect("step 3");
+        let v3 = rt.feedback_buffer(span_key).cloned();
+        assert_eq!(v3, Some(Value::Tick(3)));
+    }
+
+    #[test]
+    fn feedback_value_visible_to_lhs_on_next_tick() {
+        // When the LHS has no upstream of its own, it sees the buffered
+        // value from the previous tick. We assert this by routing the
+        // feedback chain into a sink and checking what the sink saw on
+        // each tick.
+        //
+        // Chain: `loop : sink_wire <~ tick(rate: 1)`
+        // Then a flow that consumes `loop` and prints it.
+        //
+        // On tick 1: RHS emits Tick(1), buffer = Tick(1).
+        //            LHS (named wire `sink_wire`) has no value yet → None.
+        //            Chain output is None — print doesn't fire.
+        // On tick 2: buffer has Tick(1) from prev tick. LHS still has
+        //            no upstream (the wire wasn't assigned), so the
+        //            buffered Tick(1) is injected → LHS evaluates to
+        //            Tick(1). Print fires with Tick(1).
+        //            RHS emits Tick(2); buffer becomes Tick(2).
+        // On tick 3: buffer Tick(2) injected → print fires with Tick(2).
+        let src = "loop : sink_wire <~ tick(rate: 1) -> print";
+        let module = parse(src).expect("parse");
+        let mut rt = Runtime::new(module);
+        rt.run(3).expect("run");
+        // First tick has nothing to print; ticks 2 and 3 print the
+        // tick-shifted value.
+        let prints: Vec<&Emission> = rt
+            .emissions
+            .iter()
+            .filter(|e| e.sink == "print")
+            .collect();
+        assert_eq!(prints.len(), 2, "expected 2 prints, got {}", prints.len());
+        assert_eq!(prints[0].value, Value::Tick(1));
+        assert_eq!(prints[1].value, Value::Tick(2));
     }
 
     #[test]
