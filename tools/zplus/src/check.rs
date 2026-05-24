@@ -624,6 +624,123 @@ fn walk_calls<'a>(c: &Chain<'a>, env: &TypeEnv, errors: &mut Vec<TypeError>) {
     }
 }
 
+/// Ratchet 5 — feedback edge sanity. For every `Chain::Feedback(a, b)`:
+///   * RHS must not terminate in a sink (sinks return Unit; a feedback
+///     edge whose buffer is always Unit is silently broken).
+///   * RHS must not be a bare literal (constant feedback is a no-op
+///     dressed up as a tick-shifted edge; either the author meant a
+///     wire reference or the edge should be deleted).
+///   * LHS/RHS types must be compatible (already enforced by
+///     `check_flow_connectivity` for the generic Flow/Tap/Feedback arm;
+///     this pass adds the feedback-specific shape checks on top).
+pub fn check_feedback_edges(m: &Module<'_>, _env: &TypeEnv) -> Vec<TypeError> {
+    let mut errors = Vec::new();
+    for stmt in &m.stmts {
+        let chain = match stmt {
+            Stmt::Wire(w) => &w.chain,
+            Stmt::Connect(c) => c,
+        };
+        walk_feedback(chain, &mut errors);
+    }
+    errors
+}
+
+fn walk_feedback<'a>(c: &Chain<'a>, errors: &mut Vec<TypeError>) {
+    match c {
+        Chain::Feedback(a, b, span) => {
+            walk_feedback(a, errors);
+            walk_feedback(b, errors);
+            // RHS must produce a value to buffer.
+            if let Some(sink_name) = rhs_terminates_in_sink(b) {
+                errors.push(TypeError {
+                    message: format!(
+                        "feedback edge `<~` rhs terminates in sink `{}`; \
+                         sinks emit no value and the feedback buffer would \
+                         always be unit",
+                        sink_name
+                    ),
+                    span: *span,
+                });
+            }
+            if matches!(b.as_ref(), Chain::Atom(Atom::Literal(_))) {
+                errors.push(TypeError {
+                    message:
+                        "feedback edge `<~` rhs is a bare literal; the \
+                         buffered value would never change — use a wire \
+                         reference or a transformer chain instead"
+                            .into(),
+                    span: *span,
+                });
+            }
+        }
+        Chain::Flow(a, b, _) | Chain::Tap(a, b, _) | Chain::Sever(a, b, _) | Chain::Bind(a, b, _) => {
+            walk_feedback(a, errors);
+            walk_feedback(b, errors);
+        }
+        Chain::Atom(_) => {}
+        Chain::Call(call) => {
+            for arg in &call.args {
+                let child = match arg {
+                    Arg::Positional(c) => c,
+                    Arg::Named { value, .. } => value,
+                };
+                walk_feedback(child, errors);
+            }
+        }
+        Chain::Fork(branches, _) => {
+            for branch in branches {
+                if let Some(label) = &branch.label {
+                    walk_feedback(label, errors);
+                }
+                walk_feedback(&branch.body, errors);
+            }
+        }
+        Chain::Merge(merge) => {
+            for input in &merge.inputs {
+                walk_feedback(input, errors);
+            }
+            if let Some(d) = &merge.downstream {
+                walk_feedback(d, errors);
+            }
+        }
+        Chain::BinExpr { lhs, rhs, .. } => {
+            walk_feedback(lhs, errors);
+            walk_feedback(rhs, errors);
+        }
+        Chain::UnaryCmp { rhs, .. } => walk_feedback(rhs, errors),
+    }
+}
+
+/// Returns the sink name if the chain's rightmost call is a known sink
+/// (matches the runtime's sink dispatch list). Conservative: only
+/// catches direct-call termination, not deeply-nested cases.
+fn rhs_terminates_in_sink(c: &Chain<'_>) -> Option<String> {
+    match c {
+        Chain::Flow(_, b, _) | Chain::Tap(_, b, _) => rhs_terminates_in_sink(b),
+        Chain::Call(call) => {
+            let name = call.callee.joined();
+            if matches!(
+                name.as_str(),
+                "print" | "log" | "alert" | "respond" | "notify" | "flag"
+                | "vault.store" | "vault.append" | "vault.write"
+            ) {
+                Some(name)
+            } else {
+                None
+            }
+        }
+        Chain::Atom(Atom::Path(p)) => {
+            let name = p.joined();
+            if matches!(name.as_str(), "print" | "log") {
+                Some(name)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Assign a `Type` to a literal per `SEMANTIC_CONTRACTS.md`.
 pub fn type_of_literal(lit: &Literal<'_>) -> Type {
     let span = match lit {
@@ -1289,6 +1406,62 @@ mod tests {
             span,
         };
         let errors = check_calls(&module, &env);
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // ── ratchet 5: feedback edges ──────────────────────────────────
+
+    fn parse_src(src: &str) -> Module<'_> {
+        crate::parse(src).expect("parse failed")
+    }
+
+    #[test]
+    fn feedback_rhs_to_print_is_error() {
+        let m = parse_src("loop : x <~ print");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].message.contains("terminates in sink"));
+        assert!(errors[0].message.contains("print"));
+    }
+
+    #[test]
+    fn feedback_rhs_to_alert_call_is_error() {
+        let m = parse_src("loop : x <~ alert(info: \"hi\")");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("alert"));
+    }
+
+    #[test]
+    fn feedback_left_associative_with_flow_no_false_positive() {
+        // `x <~ y -> log` parses left-assoc as `(x <~ y) -> log` —
+        // log is OUTSIDE the feedback edge. The feedback edge's RHS
+        // is just `y`, which is fine. Document this with an assertion
+        // so future precedence changes surface as a test break.
+        let m = parse_src("loop : x <~ y -> log");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn feedback_rhs_bare_literal_is_error() {
+        let m = parse_src("loop : x <~ 42");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].message.contains("bare literal"));
+    }
+
+    #[test]
+    fn feedback_rhs_with_real_transformer_is_ok() {
+        let m = parse_src("loop : x <~ tick(rate: 1)");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn feedback_rhs_to_wire_reference_is_ok() {
+        let m = parse_src("loop : x <~ y");
+        let errors = check_feedback_edges(&m, &TypeEnv::default_with_builtins());
         assert!(errors.is_empty(), "{:?}", errors);
     }
 }
