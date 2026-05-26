@@ -163,12 +163,12 @@ The philosophy: **compat first, native when it matters.** Developers start in fa
 | **Vivado / Quartus** | COMPAT | POSIX layer | FPGA synthesis. Heavy, proprietary. Compat only path. P1. |
 | **Yosys + nextpnr** | COMPAT → INTEGRATE | POSIX layer → zeos-build pipeline | Open-source FPGA toolchain. Integrate into zeos-build for Z+ → bitstream compilation. P1. |
 | **OpenOCD** | COMPAT | POSIX layer | Hardware debugging. P2. |
-| **Habana SynapseAI** | **BYPASS → NATIVE** | None | Intel removed Goya from SynapseAI's graph compiler. The silicon, kernel driver, and packet ABI are unchanged. Zeos drives the MME and TPCs directly through `kernel/boot/gpu_goya.c` + `kernel/boot/gpu_goya_mme.c`. No SynapseAI runtime in the path. See `docs/GOYA_BYPASS.md`. **P0, done in principle, proof ladder gates correctness on real silicon.** |
+| **Habana SynapseAI** | **BYPASS → NATIVE** | None | Intel removed Goya from SynapseAI's graph compiler. The silicon, kernel driver, and packet ABI are unchanged. Zeos drives the MME and TPCs directly through `kernel/boot/gpu_goya.c` + `kernel/boot/gpu_goya_mme.c`. No SynapseAI runtime in the path. See `habana/GOYA_BYPASS.md`. **P0, done in principle, proof ladder gates correctness on real silicon.** |
 | **PCB FORGE** | COMPAT → NATIVE | Own repo | AI-native EDA. Should eventually be a Zeos-native tool. P2. |
 
 ### Decisions needed:
 - Z+ → FPGA bitstream: through Yosys, or custom synthesis?
-- ~~Goya signal contract: what's the interface between MDE and SynapseAI?~~ **Resolved:** no SynapseAI in the path. MDE submits MME descriptors directly via `gpu_goya_mme.c`; see `docs/GOYA_BYPASS.md` for the architectural choice and the smoke/roof/real proof ladder.
+- ~~Goya signal contract: what's the interface between MDE and SynapseAI?~~ **Resolved:** no SynapseAI in the path. MDE submits MME descriptors directly via `kernel/boot/gpu_goya_mme.c`; see `habana/GOYA_BYPASS.md` for the architectural choice and the smoke/roof/real proof ladder.
 
 ---
 

@@ -15,4 +15,4 @@ __pycache__/
 # Auto-generated header dependencies (-MMD -MP)
 kernel/boot/*.d
 kernel/lib/mbedtls/library/*.d
-linux/habana_proof/habana_proof
+habana/linux/habana_proof
