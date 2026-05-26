@@ -43,6 +43,7 @@
  */
 
 #include "gpu_goya.h"
+#include "gpu_goya_mme.h"
 #include "gpu_compute.h"
 #include "chain.h"
 #include "chain_registry.h"
@@ -614,6 +615,12 @@ int gpu_goya_init(int parent_id)
         kputs(" fw=");
         kputs(s_fw_present_global ? "embedded" : "absent");
         kputc('\n');
+
+        /* Fire the MME proof ladder: smoke -> roof -> real. Each
+         * card prints its own pass/fail/skipped lines. If smoke
+         * fails on every card the architectural claim is suspect
+         * and the next selftest line tells you. */
+        (void)goya_mme_run_ladder_all();
     }
     return s_dev_count;
 }
@@ -719,4 +726,65 @@ void gpu_goya_print_selftest_line(void)
     kput_dec((uint64_t)s_dev_count);
     kputs(" card(s) -- fw=loaded compute=");
     kputs(any_compute ? "ready\n" : "pending\n");
+}
+
+/* ── MME accessor surface ─────────────────────────────────────────
+ * gpu_goya_mme.c is independent of goya_dev_t's layout; these
+ * accessors give it the live pointers it needs without exposing the
+ * struct. Bounds checks here so the MME source can pass through
+ * without re-validating. */
+
+uint8_t *goya_dev_tpc_ring(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].tpc_ring : 0;
+}
+
+uint32_t *goya_dev_tpc_head(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? &s_devs[idx].tpc_head : 0;
+}
+
+volatile uint32_t *goya_dev_fence_reg(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].fence_reg : 0;
+}
+
+volatile uint8_t *goya_dev_bar0(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].bar0 : 0;
+}
+
+volatile uint8_t *goya_dev_bar2(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].bar2 : 0;
+}
+
+volatile uint8_t *goya_dev_bar4(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].bar4 : 0;
+}
+
+int goya_dev_compute_ready(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].pub.compute_ready : 0;
+}
+
+uint64_t goya_dev_bar2_len(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return 0;
+    return s_devs[idx].in_use ? s_devs[idx].pub.bar2_len : 0;
+}
+
+void goya_dev_kick_doorbell(int idx)
+{
+    if (idx < 0 || idx >= s_dev_count) return;
+    if (!s_devs[idx].in_use || !s_devs[idx].bar4) return;
+    goya_w32(s_devs[idx].bar4, GOYA_MBX_DOORBELL_OFF, GOYA_MBX_KICK_MAGIC);
 }

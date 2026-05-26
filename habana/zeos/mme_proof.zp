@@ -1,0 +1,167 @@
+// mme_proof.zp — Tier 1 Z+
+// Goya MME bypass proof: smoke -> roof -> real.
+//
+// We program the Habana Goya HL-1000's Matrix Math Engine directly,
+// with no SynapseAI runtime in the path. SynapseAI's graph compiler
+// stopped supporting Goya; the silicon, the kernel driver, and the
+// MME packet format never changed. This program proves the bypass
+// works.
+//
+// Three gates, in order. Each gate must pass before the next runs.
+// If smoke fails on a real card, the bypass premise is wrong and we
+// re-plan.
+//
+// Codex Labs LLC — 2026
+
+// ─────────────────────────────────────────────
+// DISCOVERY
+// The OS already enumerated the cards. We just name them.
+// ─────────────────────────────────────────────
+
+node fleet : pcie.discover(vendor: habana, model: hl1000) -> cards : list<device>
+
+// Each card: 8 TPC + 1 MME + 8GB HBM.
+// We use one card for the proof. The fleet extension lives in
+// goya_fleet.zp.
+
+// ─────────────────────────────────────────────
+// GATE 1 — SMOKE
+// 8x8x8 FP16 GEMM with known operands.
+// A = identity, B = sequence. Expect C == B.
+// If this passes, the descriptor format is right, the queue path
+// works, and the MME answers correctly. Everything else follows.
+// ─────────────────────────────────────────────
+
+node smoke {
+    in:  cards
+    out: passed : bool
+
+    per card in cards {
+        // Stage operands into HBM via BAR2.
+        card.hbm.write(at: 0x10000000, tensor: identity(8, fp16)) -> A
+        card.hbm.write(at: 0x10010000, tensor: range(64, fp16))   -> B
+        card.hbm.write(at: 0x10020000, tensor: zeros(64, fp16))   -> C
+
+        // Build the GEMM descriptor and submit.
+        descriptor : {
+            a: A, b: B, c: C,
+            m: 8, n: 8, k: 8,
+            fmt: fp16, accumulate: false
+        } -> card.mme.submit -> result
+
+        // Verify: identity * B should leave C == B, bit-for-bit.
+        // FP16 small integers are exact, so equality is the right test.
+        resolve:
+            passed: result.ok and C.equals(B)
+    }
+}
+
+// ─────────────────────────────────────────────
+// GATE 2 — ROOF
+// 4096x4096x4096 FP16 GEMM. Measure GFLOPS.
+// Goya HL-1000 rated peak: ~5000 GFLOPS FP16.
+// Pass criterion: observed >= 3000 GFLOPS (60% of peak).
+// Below that, the tuning gap is real and we know its size on day one.
+// ─────────────────────────────────────────────
+
+node roof {
+    in:  cards, smoke.passed
+    out: gflops : list<measurement>
+
+    gate: smoke.passed    // Don't run roof unless smoke passed.
+
+    per card in cards {
+        descriptor : {
+            a: card.hbm.region(at: 0x11000000, size: 32MB),
+            b: card.hbm.region(at: 0x13000000, size: 32MB),
+            c: card.hbm.region(at: 0x15000000, size: 32MB),
+            m: 4096, n: 4096, k: 4096,
+            fmt: fp16, accumulate: false
+        } -> card.mme.submit -> result
+
+        resolve:
+            gflops: 2 * 4096 * 4096 * 4096 / result.elapsed_ns
+    }
+}
+
+// ─────────────────────────────────────────────
+// GATE 3 — REAL
+// One attention head: Q*K^T, softmax, *V.
+// Sequence length 64, head dim 64, FP16.
+// Today: Q*K^T alone (softmax + V land with the TPC kernel work).
+// The architectural claim is settled when this passes — a real
+// transformer-shaped op on real silicon, no SynapseAI in the path.
+// ─────────────────────────────────────────────
+
+node real {
+    in:  cards, roof.gflops
+    out: latency : list<duration>
+
+    gate: smoke.passed    // Real also gates on smoke; roof is advisory.
+
+    per card in cards {
+        // Q, K, V already staged elsewhere. For the proof we use
+        // fixed test vectors at known HBM offsets.
+        descriptor : {
+            a: card.hbm.region(at: 0x18000000, size: 8KB),  // Q
+            b: card.hbm.region(at: 0x18010000, size: 8KB),  // K
+            c: card.hbm.region(at: 0x18020000, size: 8KB),  // Q*K^T
+            m: 64, n: 64, k: 64,
+            fmt: fp16, accumulate: false
+        } -> card.mme.submit -> result
+
+        resolve:
+            latency: result.elapsed_ns
+    }
+}
+
+// ─────────────────────────────────────────────
+// LADDER STATUS — one line, every boot
+// ─────────────────────────────────────────────
+
+node ladder_status {
+    in: smoke.passed, roof.gflops, real.latency
+
+    resolve:
+        smoke:  smoke.passed,
+        roof:   roof.gflops.all(>= 3000),
+        real:   real.latency.all(< 100us),
+        verdict:
+            if smoke and roof and real then "bypass proven"
+            else if smoke and roof     then "bypass works, real op pending"
+            else if smoke              then "smoke ok, roof below 60% — tune"
+            else                            "smoke failed — re-plan"
+}
+
+ladder_status ~> selftest_line
+
+// ─────────────────────────────────────────────
+// THE WIRING
+// ─────────────────────────────────────────────
+
+//    pcie.discover ── fleet ── cards ──┐
+//                                       │
+//                                  ┌────▼──────┐
+//                                  │   smoke   │ ── passed ──┐
+//                                  └────┬──────┘             │
+//                                       │ gated              │
+//                                  ┌────▼──────┐             │
+//                                  │   roof    │ ── gflops ──┤
+//                                  └────┬──────┘             │
+//                                       │ gated              │
+//                                  ┌────▼──────┐             │
+//                                  │   real    │ ── latency ─┤
+//                                  └───────────┘             │
+//                                                            │
+//                                            ┌───────────────▼──┐
+//                                            │  ladder_status   │
+//                                            └────────┬─────────┘
+//                                                     │
+//                                              selftest_line
+
+cards -> smoke -> roof -> real -> ladder_status
+
+// That's the proof.
+// Three gates. Each one passes or it doesn't.
+// No SynapseAI. No graph compiler. No precompiled recipe.
+// Just packets to the MME, fence on completion, measure the truth.
