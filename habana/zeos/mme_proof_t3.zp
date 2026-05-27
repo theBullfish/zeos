@@ -1,0 +1,38 @@
+// mme_proof_t3.zp — Tier 3 Z+
+// Codex Labs LLC — 2026
+
+// ── DISCOVERY ──────────────────────────────
+
+fleet : pcie(vendor: habana, model: hl1000) -> cards
+
+// ── SMOKE ──────────────────────────────────
+
+cards.hbm <- { A: identity(8,fp16), B: range(64,fp16), C: zeros(64,fp16) }
+{ a: A, b: B, c: C, m: 8, n: 8, k: 8, fmt: fp16 } -> cards.mme -> smoke
+smoke.ok and C == B -> smoke_passed
+
+// ── ROOF ───────────────────────────────────
+
+gate(smoke_passed) ->
+    { a: 0x11000000, b: 0x13000000, c: 0x15000000,
+      m: 4096, n: 4096, k: 4096, fmt: fp16 } -> cards.mme -> roof
+roof.elapsed -> gflops : 2 * 4096^3 / elapsed_ns
+gflops -> gate(>= 3000) -> roof_passed
+
+// ── REAL ───────────────────────────────────
+
+gate(smoke_passed) ->
+    { a: 0x18000000, b: 0x18010000, c: 0x18020000,
+      m: 64, n: 64, k: 64, fmt: fp16 } -> cards.mme -> qkt
+qkt.elapsed -> gate(< 100us) -> real_passed
+
+// ── VERDICT ────────────────────────────────
+
+{ smoke_passed, roof_passed, real_passed } -> verdict : {
+    proven:  smoke and roof and real,
+    ok:      smoke and roof,
+    tuning:  smoke and not roof,
+    broken:  not smoke
+}
+
+verdict ~> selftest_line

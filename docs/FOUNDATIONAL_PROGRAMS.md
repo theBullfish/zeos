@@ -170,6 +170,42 @@ The philosophy: **compat first, native when it matters.** Developers start in fa
 - Z+ → FPGA bitstream: through Yosys, or custom synthesis?
 - Goya signal contract: what's the interface between MDE and SynapseAI?
 
+### Revision 2026-05-26 — Habana SynapseAI: bypass path opened
+
+Origin: cloud-Claude session opened `claude/synapse-open-source-B3HRQ` proposing a
+direct silicon path that does NOT require SynapseAI. Intel removed Goya from
+SynapseAI's graph compiler; the silicon, the in-tree Linux habanalabs driver,
+the packet ABI, and the firmware path did not change. SynapseAI was a one-shot
+graph compiler between application and a fixed-function descriptor bus; Zeos's
+signal graph occupies the same role natively and does not need it.
+
+Bypass artefacts (committed under `habana/`):
+- `habana/linux/habana_proof.c` — single Linux binary that discovers
+  `/dev/accel/*` + `/dev/hl*` and runs an MME proof ladder (smoke / roof / real)
+  via stock `HL_IOCTL_INFO / CB / CS / WAIT_CS / MEMORY`.
+- `habana/zeos/mme_proof.zp` + `_t3.zp` — same ladder in Z+ at two granularity tiers.
+- `habana/GOYA_BYPASS.md` — architectural choice and proof ladder design.
+
+Status:
+- The original COMPAT → NATIVE DRIVER row above is preserved as the path of
+  record for SDK 1.7.1-85 (the patched driver currently powering Goya on
+  Temple, with custom `HL_IOCTL_PROGRAM_MME_SHADOW0`, `HL_IOCTL_MME_DBG`,
+  `HL_IOCTL_MME_RREG`, `HL_IOCTL_QM_RREG`). That work is the present route
+  to MME silicon (see Goya MME arc L0–L7.18).
+- The bypass artefacts are **shipped as a parallel measurement instrument**,
+  not as a replacement. The intent: if both paths (our patched driver +
+  the cloud-Claude stock-UAPI binary) stall at the same silicon wall
+  (CB MCMD not firing on ioctl trigger, per L7.18), that triple-confirms
+  the wall is silicon-side. If the bypass fires where ours doesn't, our
+  driver patch broke something we can now diff against.
+- Doctrine flip from COMPAT → NATIVE DRIVER to BYPASS → NATIVE is **deferred**
+  until HW evidence resolves which path is correct. Premature flip would
+  erase 7 layers of L7 debugging history.
+
+Open question: which path Zeos commits to long-term depends on L8.05 (run
+binary on Temple Goya) + L8.06 (diff vs L7.18). Until then, both rows are
+valid; this revision documents both for future readers.
+
 ---
 
 ## 10. Package Management

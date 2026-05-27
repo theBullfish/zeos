@@ -16,3 +16,5 @@ __pycache__/
 kernel/boot/*.d
 kernel/lib/mbedtls/library/*.d
 kernel/lib/lodepng/*.d
+
+habana/linux/habana_proof
