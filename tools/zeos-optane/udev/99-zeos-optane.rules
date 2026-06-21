@@ -1,0 +1,27 @@
+# zeos-optane: hot-plug detection trigger.
+#
+# When a block device matching an Intel Optane model string is added, log a
+# message via systemd-cat so administrators see "an Optane drive appeared, run
+# zeos-optane configure" in the journal. We deliberately do NOT auto-run
+# configure here — it's interactive and could format a disk; the journal
+# message is the prompt.
+#
+# Patterns mirror OPTANE_MODEL_PATTERNS in zeos_optane/detect.py.
+
+ACTION!="add", GOTO="zeos_optane_end"
+SUBSYSTEM!="block", GOTO="zeos_optane_end"
+
+# NVMe Optane SSDs (P/M/H series)
+ENV{ID_MODEL}=="*OPTANE*",        RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL SSDPED*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL SSDPEK*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL SSDPEL*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL SSDPF21Q*", RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL MEMPEK*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL MEMPEL*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+ENV{ID_MODEL}=="INTEL HBRPEK*",   RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} ($env{ID_MODEL}); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+
+# Optane Persistent Memory (DIMM-form), exposed as /dev/pmem*
+KERNEL=="pmem[0-9]*", RUN+="/bin/sh -c 'echo zeos-optane: detected $env{DEVNAME} (PMem); run: sudo zeos-optane configure | systemd-cat -t zeos-optane -p notice'"
+
+LABEL="zeos_optane_end"

@@ -1,0 +1,25 @@
+[Unit]
+Description=Zeos Optane device detection (boot-time check)
+Documentation=file:///usr/local/lib/zeos-optane/zeos_optane/
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/zeos-optane check
+StandardOutput=journal
+StandardError=journal
+# Detection is read-only; no network, no privileged ops.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/etc/zeos
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

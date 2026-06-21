@@ -1,0 +1,16 @@
+{
+  "blockdevices": [
+    {
+      "name": "nvme0n1",
+      "model": "Samsung SSD 980 PRO 1TB",
+      "serial": "S5GXNX0R000001",
+      "size": 1000204886016,
+      "tran": "nvme",
+      "fstype": "ext4",
+      "mountpoint": "/",
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "label": "root",
+      "wwn": "eui.0025385701400001"
+    }
+  ]
+}
