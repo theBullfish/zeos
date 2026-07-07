@@ -26,6 +26,10 @@ name = "zplus-run"
 path = "src/bin/zplus_run.rs"
 
 [[bin]]
+name = "zplus-emit"
+path = "src/bin/zplus_emit.rs"
+
+[[bin]]
 name = "zplus-tune"
 path = "src/bin/zplus_tune.rs"
 

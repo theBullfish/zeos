@@ -14,6 +14,7 @@
 #include "parser.h"
 #include "ir.h"
 #include "codegen.h"
+#include "sfg_serialize.h"
 
 /* ── read file ───────────────────────────────────────────────────── */
 static char *read_file(const char *path, int *len_out) {
@@ -74,12 +75,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int dump_ast = 0, dump_sfg = 0, to_stdout = 0;
+    int dump_ast = 0, dump_sfg = 0, to_stdout = 0, emit_zir = 0;
     const char *input_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if      (strcmp(argv[i], "--dump-ast") == 0) dump_ast   = 1;
         else if (strcmp(argv[i], "--dump-sfg") == 0) dump_sfg   = 1;
+        else if (strcmp(argv[i], "--emit-zir") == 0) emit_zir   = 1;
         else if (strcmp(argv[i], "--stdout")   == 0) to_stdout  = 1;
         else if (argv[i][0] != '-')                   input_path = argv[i];
     }
@@ -129,6 +131,11 @@ int main(int argc, char **argv) {
 
     if (dump_sfg) {
         sfg_dump(g);
+        parser_free(&parser); free(src); return 0;
+    }
+
+    if (emit_zir) {
+        sfg_to_zir(g, stdout);
         parser_free(&parser); free(src); return 0;
     }
 

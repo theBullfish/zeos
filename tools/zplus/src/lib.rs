@@ -18,6 +18,7 @@ pub mod report;
 pub mod runtime;
 pub mod tune;
 pub mod ty;
+pub mod zir;
 
 pub use check::{
     check_calls, check_flow_connectivity, check_module, infer_chain,
@@ -28,3 +29,4 @@ pub use parse::{parse, ParseError};
 pub use runtime::{
     Emission, Observer, Runtime, RuntimeConfig, RuntimeError, RuntimeEvent, Value, VecObserver,
 };
+pub use zir::{Zir, ZIR_VERSION};

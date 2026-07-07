@@ -53,7 +53,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/panic.c boot/gdt.c boot/idt.c \
            boot/acpi.c boot/aml.c boot/lapic.c boot/ioapic.c \
            boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c \
-           boot/timer.c boot/timeofday.c boot/signal.c boot/zplus.c boot/zp_runtime.c \
+           boot/timer.c boot/timeofday.c boot/signal.c boot/zplus.c boot/zplus_zir.c boot/zp_runtime.c \
            boot/std_btree.c boot/std_json.c boot/std_regex.c boot/std_http.c boot/std_tls_server.c \
            boot/sigviz.c boot/vault.c \
            boot/net.c boot/net_chain.c boot/net_virtio.c boot/net_e1000.c boot/net_rtl8169.c boot/net_rtl8139.c boot/net_arp.c boot/net_ip.c \

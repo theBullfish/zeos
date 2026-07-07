@@ -6,12 +6,12 @@ CC      := gcc
 CFLAGS  := -std=c99 -Wall -Wextra -Wpedantic -g -O2
 LDFLAGS :=
 
-SRCS := zplus.c lexer.c parser.c ast.c sfg.c ir.c codegen.c
-HDRS := arena.h lexer.h ast.h parser.h sfg.h ir.h codegen.h zp_runtime.h
+SRCS := zplus.c lexer.c parser.c ast.c sfg.c ir.c codegen.c sfg_serialize.c
+HDRS := arena.h lexer.h ast.h parser.h sfg.h ir.h codegen.h zp_runtime.h sfg_serialize.h
 OBJS := $(SRCS:.c=.o)
 BIN  := zplus
 
-.PHONY: all clean test test-lex test-ast test-sfg test-smoke
+.PHONY: all clean test test-lex test-ast test-sfg test-smoke test-zir
 
 all: $(BIN)
 
@@ -24,7 +24,7 @@ $(BIN): $(OBJS)
 # ── tests ─────────────────────────────────────────────────────────
 PROGRAMS := ../../programs
 
-test: test-lex test-ast test-sfg test-smoke
+test: test-lex test-ast test-sfg test-smoke test-zir
 	@echo "ALL TESTS PASSED"
 
 # Lex the three smallest programs — must produce no errors
@@ -66,5 +66,17 @@ test-smoke: $(BIN)
 	@./$(BIN) --stdout $(PROGRAMS)/02_log_monitor.zp > /tmp/zp_smoke_02.c && \
 		$(CC) -std=c99 -w -c -x c -I. -o /tmp/zp_smoke_02.o /tmp/zp_smoke_02.c && echo "  OK"
 
+# Emit ZIR and load it through the kernel's ZIR loader (host build of the same
+# translation unit) — proves the C front-end and kernel back-end agree on the
+# interchange format. See ZIR.md.
+ZIRDIR := ../../kernel/boot
+test-zir: $(BIN)
+	@echo "--- zir: 02_log_monitor.zp emits valid ZIR"
+	@./$(BIN) --emit-zir $(PROGRAMS)/02_log_monitor.zp | grep -q '"zir": 1' && echo "  OK (versioned)"
+	@echo "--- zir: kernel loader consumes C front-end ZIR"
+	@$(CC) -std=c99 -w -I$(ZIRDIR) $(ZIRDIR)/zplus_zir.c $(ZIRDIR)/zplus_zir_test.c -o /tmp/zir_loader_test
+	@./$(BIN) --emit-zir $(PROGRAMS)/02_log_monitor.zp > /tmp/zp_cfe.zir.json
+	@/tmp/zir_loader_test /tmp/zp_cfe.zir.json > /dev/null && echo "  OK (loaded)"
+
 clean:
-	rm -f $(OBJS) $(BIN) /tmp/zp_smoke_*.c
+	rm -f $(OBJS) $(BIN) /tmp/zp_smoke_*.c /tmp/zir_loader_test /tmp/zp_cfe.zir.json
