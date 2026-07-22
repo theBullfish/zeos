@@ -31,6 +31,10 @@ at_el1:
     msr     vbar_el1, x0
     isb
 
+    mov     x0, #(3 << 20)           // CPACR_EL1.FPEN=0b11 -> FP/SIMD usable at EL1
+    msr     cpacr_el1, x0
+    isb
+
     ldr     x1, =__bss_start
     ldr     x2, =__bss_end
 1:  cmp     x1, x2

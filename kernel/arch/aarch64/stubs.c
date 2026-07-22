@@ -7,16 +7,9 @@
 int CHAIN_AUDIO, CHAIN_BLOCK, CHAIN_FS_EVENT, CHAIN_MDE, CHAIN_NET_RX, CHAIN_NET_TX;
 
 /* signal/chain runtime (efi.h + float-coupled in the x86 tree; stubbed here) */
-long sig_chain_create(void) { return -1; }
-long sig_edge_add(void)     { return -1; }
-long sig_get_chain(void)    { return -1; }
-long sig_inject(void)       { return -1; }
-long sig_node_add(void)     { return -1; }
-long sig_resolve(void)      { return -1; }
 long chain_count(void)      { return 0; }
 long chain_dump(void)       { return 0; }
 long chain_get(void)        { return 0; }
-long zp_runtime_register_chain(void) { return -1; }
 
 /* hardware backends (no drivers on the ARM port yet) */
 long block_chain_submit(void)        { return -1; }
@@ -57,3 +50,9 @@ long zp_json_parse_str(void){return -1;}
 long zp_regex_find_str(void){return -1;}
 long zp_regex_match_str(void){return -1;}
 long zp_regex_replace_str(void){return -1;}
+
+/* auto round2 */
+long chain_add_node(void){return -1;}
+int CHAIN_CPU;
+long chain_create(void){return -1;}
+long chain_destroy(void){return -1;}

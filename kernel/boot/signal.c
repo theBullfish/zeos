@@ -20,12 +20,18 @@
 static struct sig_chain chains[SIG_MAX_CHAINS];
 static int chain_count;
 
-/* Read TSC */
+/* Read the cycle/tick counter (arch-portable). */
 static inline uint64_t read_tsc(void)
 {
+#if defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
+    return v;
+#else
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
+#endif
 }
 
 /* Copy signal data */

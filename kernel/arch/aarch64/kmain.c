@@ -75,6 +75,6 @@ void kmain_aarch64(void)
     kputs("[M4] launching the Z+ engine (zplus.c, 4535 LOC) on aarch64...\n");
     int fired = zp_run("heartbeat : tick(rate: 1) -> print\n");
     kputs("[M4] zp_run() returned="); kput_dec((uint64_t)(int64_t)fired);
-    kputs("  -- Zeos's LANGUAGE executed on bare-metal aarch64.\n");
+    kputs("  -- Z+ interpreter + signal-chain runtime executed on bare-metal aarch64.\n");
     kputs("================================================\n");
 }
