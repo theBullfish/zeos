@@ -22,7 +22,7 @@ extern volatile int g_sec_online;
 extern size_t strlen(const char *);
 extern char *strcpy(char *, const char *);
 extern int strcmp(const char *, const char *);
-extern int zp_run(const char *);
+
 
 static inline void irq_enable(void) { __asm__ volatile("msr daifclr, #2"); }
 
@@ -72,9 +72,17 @@ void kmain_aarch64(void)
     kputs("[M4] runtime LIVE -- portable Zeos code can now build on this base.\n");
 
     /* M4.1 -- Zeos's own language engine, on bare-metal ARM. */
-    kputs("[M4] launching the Z+ engine (zplus.c, 4535 LOC) on aarch64...\n");
-    int fired = zp_run("heartbeat : tick(rate: 1) -> print\n");
-    kputs("[M4] zp_run() returned="); kput_dec((uint64_t)(int64_t)fired);
-    kputs("  -- Z+ interpreter + signal-chain runtime executed on bare-metal aarch64.\n");
+    /* Z+ engine (zplus.c) + signal runtime (signal.c/zp_runtime.c) COMPILE and LINK
+     * on this base, and executed the full parse->compile->resolve pipeline once
+     * (returned 0). Left disabled here: it depends on chain.c's chain_create(),
+     * currently STUBBED to return -1, which is used as an index -> layout-dependent
+     * hang. Next grind: port chain.c so the Z+ path is stable, then wire node
+     * handlers so programs fire. Enable with -DZPLUS_WIP once chain.c is real. */
+#ifdef ZPLUS_WIP
+    extern int zp_run(const char *);
+    kputs("[M4] launching Z+ engine...\n");
+    zp_run("heartbeat : tick(rate: 1) -> print\n");
+#endif
+    kputs("[M4] Z+ engine links on this base; stable exec pending chain.c port.\n");
     kputs("================================================\n");
 }
