@@ -146,11 +146,11 @@ typedef struct {
 } wm_state_t;
 
 /* ── Sizing constants ── */
-#define WM_TITLEBAR_HEIGHT  32
+#define WM_TITLEBAR_HEIGHT  40
 #define WM_BORDER_WIDTH      1
-#define WM_CONTROL_SIZE     16        /* Window control button size */
-#define WM_CONTROL_SPACING   8
-#define WM_CONTROL_MARGIN    8
+#define WM_CONTROL_SIZE     22        /* Window control button size */
+#define WM_CONTROL_SPACING  10
+#define WM_CONTROL_MARGIN   14
 #define WM_SNAP_ZONE        32        /* Edge activation area in pixels */
 #define WM_MIN_SURFACE_W   200
 #define WM_MIN_SURFACE_H   150

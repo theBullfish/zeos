@@ -301,11 +301,12 @@ void fb_circle(int cx, int cy, int r, uint32_t color)
 
 void fb_circle_filled(int cx, int cy, int r, uint32_t color)
 {
-    /* Fill by drawing horizontal lines for each row */
+    /* Fill by drawing horizontal lines for each row. The "+ r" bias rounds
+     * the poles so small-radius dots read as smooth circles instead of
+     * having a 1px point/spur at top and bottom. */
     for (int dy = -r; dy <= r; dy++) {
-        /* Width at this row: sqrt(r^2 - dy^2) using integer math */
         int dx = 0;
-        while (dx * dx + dy * dy <= r * r)
+        while (dx * dx + dy * dy <= r * r + r)
             dx++;
         dx--;
         fb_hline(cx - dx, cy + dy, 2 * dx + 1, color);

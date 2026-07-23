@@ -71,6 +71,8 @@ void dock_update(void);
 
 /* Spring-animate the dock into view. */
 void dock_show(void);
+/* Force the dock fully open (skip slide animation) for synchronous paints. */
+void dock_force_open(void);
 
 /* Spring-animate the dock off screen. */
 void dock_hide(void);

@@ -1009,8 +1009,6 @@ void wm_draw_chrome(chain_surface_t *s) {
         s->signal == SIGNAL_ERROR ? COLOR_DANGER : COLOR_ON_SURFACE_4
     };
 
-    char ctrl_chars[4] = { 'x', '-', '+', '!' };
-
     for (int b = 0; b < 4; b++) {
         int btn_x, btn_y;
         btn_y = s->y + (WM_TITLEBAR_HEIGHT - WM_CONTROL_SIZE) / 2;
@@ -1023,15 +1021,33 @@ void wm_draw_chrome(chain_surface_t *s) {
                     (4 - b) * (WM_CONTROL_SIZE + WM_CONTROL_SPACING);
         }
 
-        /* Button circle */
-        fb_circle_filled(btn_x + WM_CONTROL_SIZE / 2,
-                        btn_y + WM_CONTROL_SIZE / 2,
-                        WM_CONTROL_SIZE / 2 - 1,
-                        ctrl_colors[b]);
+        int ccx = btn_x + WM_CONTROL_SIZE / 2;
+        int ccy = btn_y + WM_CONTROL_SIZE / 2;
+        int cr  = WM_CONTROL_SIZE / 2 - 1;
 
-        /* Button label (tiny) */
-        char label[2] = { ctrl_chars[b], 0 };
-        fb_text(btn_x + 4, btn_y + 2, label, COLOR_SURFACE);
+        /* Button dot */
+        fb_circle_filled(ccx, ccy, cr, ctrl_colors[b]);
+
+        /* Crisp vector glyph, dark on the colored dot. */
+        uint32_t gc = COLOR_SURFACE;
+        int g = cr - 3;                       /* glyph half-extent */
+        switch (b) {
+        case 0: /* close — X (2px strokes) */
+            fb_line(ccx - g, ccy - g, ccx + g, ccy + g, gc);
+            fb_line(ccx - g + 1, ccy - g, ccx + g + 1, ccy + g, gc);
+            fb_line(ccx + g, ccy - g, ccx - g, ccy + g, gc);
+            fb_line(ccx + g - 1, ccy - g, ccx - g - 1, ccy + g, gc);
+            break;
+        case 1: /* minimize — horizontal bar */
+            fb_rect(ccx - g, ccy - 1, 2 * g + 1, 2, gc);
+            break;
+        case 2: /* maximize — square outline */
+            fb_rect_outline(ccx - g, ccy - g, 2 * g + 1, 2 * g + 1, gc, 2);
+            break;
+        default: /* signal — center dot */
+            fb_circle_filled(ccx, ccy, 2, gc);
+            break;
+        }
     }
 
     /* Title text */

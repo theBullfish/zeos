@@ -98,7 +98,7 @@ int compositor_init_ex(int screen_w, int screen_h, int wire_registry) {
     g_comp.screen_h = screen_h;
     g_comp.panel_h = TOOLBAR_HEIGHT;
     g_comp.panel_visible = 1;
-    g_comp.dock_h = 48;
+    g_comp.dock_h = 88;   /* matches DOCK_HEIGHT (dock.c) */
     g_comp.dock_visible = 0;  /* Auto-hidden by default */
     g_comp.dock_auto_hide = 1;
     g_comp.wallpaper_color = COLOR_SURFACE;

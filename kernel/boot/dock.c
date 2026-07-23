@@ -27,14 +27,14 @@ static int      s_rc_idx  = -1;
 
 /* ── Constants ── */
 /* All metrics snap to the Z* spacing scale (theme.h). */
-#define DOCK_ITEM_SIZE    (Z8 + Z2)     /* 40px — Z8 + Z2 */
-#define DOCK_ITEM_PAD      Z1           /* 4px  — Z1 */
-#define DOCK_MARGIN        Z3           /* 12px — Z3 */
+#define DOCK_ITEM_SIZE    (Z12 + Z3)    /* 60px — bigger icons */
+#define DOCK_ITEM_PAD      Z2           /* 8px */
+#define DOCK_MARGIN        Z6           /* 24px */
 #define DOCK_DIVIDER_W     1            /* 1px hairline (separator thickness) */
 #define DOCK_DIVIDER_GAP   Z2           /* 8px — Z2 */
 #define DOCK_DOT_RADIUS    3            /* 3px state dot */
 #define DOCK_CORNER_R      Z2           /* 8px corner radius — BORDER_RADIUS */
-#define DOCK_HEIGHT       (Z12 + Z2)    /* 56px — Z12 + Z2 */
+#define DOCK_HEIGHT       (Z16 + Z6)    /* 88px — taller, more prominent */
 
 static dock_state_t g_dock;
 
@@ -175,6 +175,15 @@ void dock_show(void) {
                                       SPRING_SMOOTH_S, SPRING_SMOOTH_D,
                                       dock_slide_cb, 0);
 
+    g_dock.visible = 1;
+    compositor_show_dock(1);
+}
+
+/* Force the dock to its fully-slid-in state (skip the slide animation), for
+ * synchronous paints before the anim tick loop is live. */
+void dock_force_open(void) {
+    g_dock.dock_w = compute_dock_width();
+    g_dock.slide_y = 1.0f;
     g_dock.visible = 1;
     compositor_show_dock(1);
 }

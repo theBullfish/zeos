@@ -978,6 +978,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern void dock_init(int);
         extern int  dock_pin(const char *, int);
         extern void dock_show(void);
+        extern void dock_force_open(void);
         extern void panel_set_persona(int);
         extern uint32_t fb_width(void);
         extern uint32_t fb_height(void);
@@ -991,6 +992,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         dock_pin("Settings",   -1);
         dock_pin("Calculator", -1);
         dock_show();
+        dock_force_open();                     /* settle slide-in for a static paint */
         panel_set_persona(2);                  /* PERSONA_FULL */
 
         /* Open a couple of app windows so the desktop reads as a desktop:
