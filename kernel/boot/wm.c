@@ -1189,12 +1189,22 @@ void wm_draw_all(void) {
         if (alpha < 0) alpha = 0;
         if (alpha > 255) alpha = 255;
 
-        /* Shadow (focused windows get stronger shadow) */
+        /* Shadow (focused windows get stronger shadow). The shadow rect is offset
+         * `off` into the window, so for an OPAQUE window only the L-shaped sliver
+         * past the right+bottom edges is ever visible — the interior is overdrawn
+         * by the window body. Blend just that sliver: identical pixels, ~99% fewer
+         * stores. A translucent (animating) window lets the shadow show through, so
+         * blend it in full there. */
         shadow_t shadow = s->focused ? SHADOW_L2 : SHADOW_L1;
         int so = (int)shadow.opacity * alpha / 255;
         uint32_t shadow_color = (uint32_t)so << 24;
-        fb_rect_blend(rx + shadow.offset_y, ry + shadow.offset_y,
-                      rw, rh, shadow_color);
+        int soff = shadow.offset_y;
+        if (alpha >= 255 && soff > 0 && soff < rw && soff < rh) {
+            fb_rect_blend(rx + rw,   ry + soff, soff,       rh,   shadow_color); /* right + corner */
+            fb_rect_blend(rx + soff, ry + rh,   rw - soff,  soff, shadow_color); /* bottom, no corner */
+        } else {
+            fb_rect_blend(rx + soff, ry + soff, rw, rh, shadow_color);           /* full */
+        }
 
         /* Chrome — use rendered geometry */
         /* Temporarily swap geometry for chrome drawing */
