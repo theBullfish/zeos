@@ -226,16 +226,14 @@ uint64_t pmm_alloc(void)
 {
     for (uint64_t i = 0; i < total_frames / 64; i++) {
         if (bitmap[i] != ~0ULL) {
-            /* There's a free bit in this word */
-            for (int bit = 0; bit < 64; bit++) {
-                if (!(bitmap[i] & (1ULL << bit))) {
-                    uint64_t frame = i * 64 + bit;
-                    if (frame < total_frames) {
-                        bitmap_set(frame);
-                        used_frames++;
-                        return frame * PAGE_SIZE;
-                    }
-                }
+            /* First zero bit = first free frame, in one instruction (find-first-set
+             * on the inverted word) instead of a 0..63 branch loop. */
+            int bit = __builtin_ctzll(~bitmap[i]);
+            uint64_t frame = i * 64 + bit;
+            if (frame < total_frames) {
+                bitmap_set(frame);
+                used_frames++;
+                return frame * PAGE_SIZE;
             }
         }
     }

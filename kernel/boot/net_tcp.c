@@ -879,14 +879,16 @@ void tcp_process(const void *frame, uint16_t len)
                 if (cb) cb((tcp_handle_t)slot_idx);
             }
 
-            /* Same-segment piggybacked data */
+            /* Same-segment piggybacked data — in-order only (see ESTABLISHED note) */
             if (data_len > 0) {
-                uint16_t space = TCP_RX_BUF_SIZE - conn->rx_len;
-                uint16_t to_copy = data_len > space ? space : data_len;
-                for (uint16_t i = 0; i < to_copy; i++)
-                    conn->rx_buf[conn->rx_len + i] = data[i];
-                conn->rx_len += to_copy;
-                conn->ack = seg_seq + data_len;
+                if (seg_seq == conn->ack) {
+                    uint16_t space = TCP_RX_BUF_SIZE - conn->rx_len;
+                    uint16_t to_copy = data_len > space ? space : data_len;
+                    for (uint16_t i = 0; i < to_copy; i++)
+                        conn->rx_buf[conn->rx_len + i] = data[i];
+                    conn->rx_len += to_copy;
+                    conn->ack = seg_seq + to_copy;
+                }
                 tcp_send_segment(conn, TCP_ACK, 0, 0);
             }
 
@@ -904,14 +906,20 @@ void tcp_process(const void *frame, uint16_t len)
         break;
 
     case TCP_ESTABLISHED:
-        /* ACK incoming data */
+        /* Accept IN-ORDER data only (RFC 793 receive-sequence check). A duplicate
+         * or out-of-order segment (seg_seq != rcv_nxt) must NOT be buffered — doing
+         * so silently corrupted the stream (double-append on the peer's retransmit,
+         * or data landing at the wrong offset). Re-ACK our current rcv_nxt either
+         * way so the peer resends exactly the byte we expect. */
         if (data_len > 0) {
-            uint16_t space = TCP_RX_BUF_SIZE - conn->rx_len;
-            uint16_t to_copy = data_len > space ? space : data_len;
-            for (uint16_t i = 0; i < to_copy; i++)
-                conn->rx_buf[conn->rx_len + i] = data[i];
-            conn->rx_len += to_copy;
-            conn->ack = seg_seq + data_len;
+            if (seg_seq == conn->ack) {
+                uint16_t space = TCP_RX_BUF_SIZE - conn->rx_len;
+                uint16_t to_copy = data_len > space ? space : data_len;
+                for (uint16_t i = 0; i < to_copy; i++)
+                    conn->rx_buf[conn->rx_len + i] = data[i];
+                conn->rx_len += to_copy;
+                conn->ack = seg_seq + to_copy;   /* ACK only bytes actually buffered */
+            }
             tcp_send_segment(conn, TCP_ACK, 0, 0);
         }
         /* FIN from remote */

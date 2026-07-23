@@ -38,7 +38,7 @@ uint64_t timer_read_tsc(void)
  * Calibrate TSC against PIT.
  * Run PIT for ~50ms (enough for reasonable accuracy) and count TSC ticks.
  */
-static void calibrate_tsc(void)
+static void calibrate_tsc(uint32_t hz)
 {
     /* Set PIT to one-shot mode, channel 0 */
     /* We'll use the current periodic mode and count ticks */
@@ -60,9 +60,9 @@ static void calibrate_tsc(void)
     /* Each tick = 1/hz seconds. wait_ticks ticks = wait_ticks/hz seconds.
      * tsc_freq = elapsed_tsc * hz / wait_ticks */
 
-    /* We'll approximate: at 1000 Hz, 50 ticks = 50ms */
-    /* tsc_freq = elapsed_tsc * 1000 / 50 = elapsed_tsc * 20 */
-    tsc_freq = elapsed_tsc * 20;  /* Assumes 1000 Hz PIT rate */
+    /* tsc_freq = elapsed_tsc * hz / wait_ticks — honest, works at ANY PIT rate.
+     * (Was hardcoded elapsed_tsc*20, i.e. assumed exactly 1000 Hz.) */
+    tsc_freq = elapsed_tsc * hz / wait_ticks;
 }
 
 void timer_init(uint32_t hz)
@@ -87,7 +87,7 @@ void timer_init(uint32_t hz)
         __asm__ volatile("hlt");
 
     /* Calibrate TSC */
-    calibrate_tsc();
+    calibrate_tsc(hz);
 }
 
 uint64_t timer_ticks(void)
