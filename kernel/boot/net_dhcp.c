@@ -369,3 +369,101 @@ const struct dhcp_lease *dhcp_get_lease(void)
 {
     return &g_lease;
 }
+
+/* ── Async DHCP: non-blocking start + a state machine serviced once per
+ * scheduler tick. This replaces the blocking dhcp_discover() busy-loop on the
+ * boot path so network I/O is pumped BY the scheduler (chain-resolution) rather
+ * than blocking before it exists. ── */
+enum { DHCP_ST_IDLE = 0, DHCP_ST_DISCOVER, DHCP_ST_REQUEST, DHCP_ST_BOUND, DHCP_ST_FAILED };
+static int               g_dhcp_st = DHCP_ST_IDLE;
+static uint64_t          g_dhcp_deadline;
+static int               g_dhcp_tries;
+static struct dhcp_lease g_dhcp_offer;
+
+static uint64_t dhcp_deadline_in(uint32_t secs)
+{
+    extern uint64_t timer_read_tsc(void); extern uint64_t timer_tsc_freq(void);
+    uint64_t f = timer_tsc_freq(); if (!f) f = 2000000000ULL;
+    return timer_read_tsc() + (uint64_t)secs * f;
+}
+
+static void dhcp_apply_lease(void)
+{
+    g_net.ip      = g_lease.ip;
+    g_net.netmask = g_lease.netmask;
+    g_net.gateway = g_lease.gateway;
+    g_net.dns     = g_lease.dns;
+    kputs("DHCP: bound ");
+    kput_dec(g_net.ip.b[0]); kputs("."); kput_dec(g_net.ip.b[1]); kputs(".");
+    kput_dec(g_net.ip.b[2]); kputs("."); kput_dec(g_net.ip.b[3]);
+    kputs(" gw ");
+    kput_dec(g_net.gateway.b[0]); kputs("."); kput_dec(g_net.gateway.b[1]); kputs(".");
+    kput_dec(g_net.gateway.b[2]); kputs("."); kput_dec(g_net.gateway.b[3]);
+    kputs(" dns ");
+    kput_dec(g_net.dns.b[0]); kputs("."); kput_dec(g_net.dns.b[1]); kputs(".");
+    kput_dec(g_net.dns.b[2]); kputs("."); kput_dec(g_net.dns.b[3]);
+    kputs("\n");
+}
+
+/* Kick off DHCP without blocking: bind the receiver, send DISCOVER, return.
+ * dhcp_service() (called each scheduler tick) drives it to completion. */
+void dhcp_start(void)
+{
+    g_xid = dhcp_xid();
+    dhcp_got_offer = 0;
+    dhcp_got_ack   = 0;
+    mem_zero(&g_lease, sizeof(g_lease));
+    udp_bind(DHCP_CLIENT_PORT, dhcp_recv);
+
+    uint8_t buf[sizeof(struct dhcp_msg)];
+    int len = dhcp_build_discover(buf);
+    dhcp_send_broadcast(buf, len);
+    kputs("DHCP: discovering (async)...\n");
+    g_dhcp_st       = DHCP_ST_DISCOVER;
+    g_dhcp_tries    = 1;
+    g_dhcp_deadline = dhcp_deadline_in(2);
+}
+
+/* Advance the DHCP state machine. Call after net_poll() has fed dhcp_recv. */
+void dhcp_service(void)
+{
+    if (g_dhcp_st != DHCP_ST_DISCOVER && g_dhcp_st != DHCP_ST_REQUEST)
+        return;
+
+    extern uint64_t timer_read_tsc(void);
+    uint64_t now = timer_read_tsc();
+    uint8_t  buf[sizeof(struct dhcp_msg)];
+
+    if (g_dhcp_st == DHCP_ST_DISCOVER) {
+        if (dhcp_got_offer) {
+            dhcp_parse_lease(&dhcp_reply, &g_dhcp_offer);
+            int len = dhcp_build_request(buf, g_dhcp_offer.ip, g_dhcp_offer.server);
+            dhcp_send_broadcast(buf, len);
+            g_dhcp_st       = DHCP_ST_REQUEST;
+            g_dhcp_deadline = dhcp_deadline_in(2);
+        } else if (now >= g_dhcp_deadline) {
+            if (g_dhcp_tries >= 5) {
+                kputs("DHCP: no offer (async) -- no IP\n");
+                g_net.up = 0; g_dhcp_st = DHCP_ST_FAILED; return;
+            }
+            int len = dhcp_build_discover(buf);
+            dhcp_send_broadcast(buf, len);
+            g_dhcp_tries++;
+            g_dhcp_deadline = dhcp_deadline_in(2);
+        }
+    } else { /* DHCP_ST_REQUEST */
+        if (dhcp_got_ack) {
+            dhcp_parse_lease(&dhcp_reply, &g_lease);
+            dhcp_apply_lease();
+            g_dhcp_st = DHCP_ST_BOUND;
+        } else if (now >= g_dhcp_deadline) {
+            if (g_dhcp_tries >= 8) { g_dhcp_st = DHCP_ST_FAILED; return; }
+            int len = dhcp_build_request(buf, g_dhcp_offer.ip, g_dhcp_offer.server);
+            dhcp_send_broadcast(buf, len);
+            g_dhcp_tries++;
+            g_dhcp_deadline = dhcp_deadline_in(2);
+        }
+    }
+}
+
+int dhcp_is_bound(void) { return g_dhcp_st == DHCP_ST_BOUND; }

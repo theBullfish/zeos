@@ -90,14 +90,12 @@ int net_init(void)
 
     g_net.up = 1;
 
-    /* Try DHCP. If it fails, downstream calls (DNS, TCP, TLS) will
-     * fail cleanly because addresses are zero. The 'static-ip' shell
-     * command can be used to set things by hand for diagnostic
-     * sessions on networks without DHCP. */
-    if (dhcp_discover() < 0) {
-        kputs("NET: DHCP failed — no IP. Use 'static-ip' to configure manually.\n");
-        g_net.up = 0;  /* mark down so https_get/etc skip cleanly */
-    }
+    /* Kick DHCP off ASYNCHRONOUSLY (non-blocking). The blocking busy-loop used
+     * to run here, before scheduler_run() — but network RX is pumped BY the
+     * scheduler (net_service() each tick), so blocking here could never receive
+     * a reply and stalled boot. dhcp_start() just sends DISCOVER and returns;
+     * dhcp_service() (per tick) drives it to a bound lease. */
+    dhcp_start();
 
     kputs("NET: ");
     for (int i = 0; i < 6; i++) {
@@ -114,18 +112,12 @@ int net_init(void)
     kput_dec(g_net.ip.b[3]);
     kputs("\n");
 
-    /* Bring up the IPv6 stack: derive link-local from MAC via EUI-64,
-     * send a Router Solicitation, run SLAAC, optionally DHCPv6 if the
-     * RA's M-bit is set. The CHAIN_NET_TX/RX pipelines are shared with
-     * v4 -- the L3 dispatch in net_poll() branches on EtherType. */
-    ipv6_init();
-
-    /* Bring up TLS subsystem (mbedTLS init + PSA + DRBG seed + CA load).
-     * On failure HTTPS is unavailable; HTTP and the rest of the kernel
-     * keep working. */
-    extern int tls_init(void);
-    tls_init();
-
+    /* NOTE: ipv6_init() (Router Solicitation + SLAAC) and tls_init() (mbedTLS
+     * CA/DRBG) also block on the boot path — ipv6_init busy-waits on an RA the
+     * same way DHCP did, so it stalls boot before the scheduler exists. Deferred
+     * out of net_init for now; they need the same async-under-the-scheduler
+     * treatment as DHCP (net_late_init driven from net_service once bound).
+     * IPv4 (DHCP + UDP/TCP + NTP) works without them. */
     return 0;
 }
 
@@ -181,4 +173,17 @@ void net_poll_wait(uint32_t timeout_ms)
         net_poll();
         for (volatile int j = 0; j < 100; j++);
     }
+}
+
+/* Per-tick network service, called from the scheduler loop: receive+dispatch
+ * one batch of frames, then advance the async DHCP state machine. This is how
+ * network I/O gets pumped BY the scheduler instead of blocking before it. */
+void net_service(void)
+{
+    extern void dhcp_service(void);
+    if (!g_net.up) return;
+    net_poll();
+    net_poll();      /* drain a couple frames per tick */
+    net_poll();
+    dhcp_service();
 }

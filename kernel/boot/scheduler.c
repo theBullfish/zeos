@@ -725,7 +725,9 @@ void scheduler_run(void)
         {
             extern void usb_hid_poll(void);
             extern void compositor_advance(void);
+            extern void net_service(void);
             usb_hid_poll();
+            net_service();          /* pump RX + async DHCP under the scheduler */
             compositor_advance();
         }
 

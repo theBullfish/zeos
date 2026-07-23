@@ -87,4 +87,10 @@ int dhcp_discover(void);
 /* Get current lease info (for display/diagnostics) */
 const struct dhcp_lease *dhcp_get_lease(void);
 
+/* Async DHCP: non-blocking. dhcp_start() kicks it off; dhcp_service() advances
+ * the state machine once per scheduler tick; dhcp_is_bound() reports success. */
+void dhcp_start(void);
+void dhcp_service(void);
+int  dhcp_is_bound(void);
+
 #endif /* ZEOS_NET_DHCP_H */

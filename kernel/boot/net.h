@@ -147,4 +147,7 @@ void net_poll(void);
 /* Poll with timeout (ms). Returns when a packet arrives or timeout. */
 void net_poll_wait(uint32_t timeout_ms);
 
+/* Per-tick network service (RX dispatch + async DHCP), called by the scheduler. */
+void net_service(void);
+
 #endif /* ZEOS_NET_H */
