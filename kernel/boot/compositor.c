@@ -157,8 +157,16 @@ int compositor_init(int screen_w, int screen_h) {
     return compositor_init_ex(screen_w, screen_h, 1);
 }
 
-void compositor_frame(void) {
-    /* Calculate dt */
+/* ── Live desktop loop, split for scheduler_run epilogue calls ──
+ * compositor_advance(): pre-resolve. Advances time-based state (anim/cursor/
+ *   persona springs, overlay STATE ticks) EVERY tick, and re-arms compositing
+ *   while any spring is live. Cheap when idle.
+ * compositor_present(): post-resolve. Draws overlays + full-screen blends ONLY
+ *   on a tick that actually composited (compositor_composited_this_tick()),
+ *   then draws the cursor UNGATED on top every tick.
+ * NOTE: neither calls chain_registry_tick() -- the old compositor_frame() did
+ * (recursion trap). The scheduler drives chain_registry_tick() between these. */
+void compositor_advance(void) {
     uint64_t now = timer_read_tsc();
     uint64_t freq = timer_tsc_freq();
     if (freq > 0)
@@ -167,121 +175,66 @@ void compositor_frame(void) {
         g_comp.frame_dt = 1.0f / 60.0f;
     g_comp.last_frame_tsc = now;
 
-    /* Tick hot corners (before animations — actions may trigger anim) */
     hotcorners_tick(mouse_get_x(), mouse_get_y());
-
-    /* Tick animations */
     anim_tick(g_comp.frame_dt);
-
-    /* Tick cursor animations */
     cursor_tick(g_comp.frame_dt);
-
-    /* Tick persona transition animation */
     persona_anim_tick();
 
-    /*
-     * ── Resolve chain graph ──
-     * MDE resolves all chains in dependency order. This triggers
-     * desktop_draw(), wm_draw_all(), panel_update()+panel_draw(),
-     * dock_update()+dock_draw(), inspector_draw(), palette_draw()
-     * through their chain node resolve functions.
-     *
-     * The chain graph replaces the manual layer calls below.
-     * Layer visibility is still respected -- resolve functions
-     * check the compositor state internally.
-     */
-    chain_registry_tick();
-
-    /* ── Compose layers bottom to top ── */
-    /*
-     * NOTE: The chain graph now drives subsystem drawing via resolve
-     * functions. The direct calls below are kept as a FALLBACK for
-     * any layer that isn't yet chain-aware (cursor, snap ghost).
-     * As subsystems move fully into chains, these will disappear.
-     */
-
-    /* Layer 0: Desktop -- driven by CHAIN_DESKTOP resolve */
-    /* (desktop_draw called by chain resolution) */
-
-    /* Layer 1: Chain surfaces -- driven by CHAIN_COMPOSITOR resolve */
-    /* (wm_draw_all called by chain resolution) */
-
-    /* Layer 2: Panel -- driven by CHAIN_PANEL resolve */
-    /* (panel_update + panel_draw called by chain resolution) */
-
-    /* Layer 3: Dock -- driven by CHAIN_DOCK resolve */
-    /* (dock_update + dock_draw called by chain resolution) */
-
-    /* Layer 4: Overlays (snap ghost already drawn by WM) */
-    /* Inspector and palette are chain-driven now */
-
-    /* Layer 4b: Notifications (overlay — tick + draw) */
+    /* Overlay STATE ticks -- every tick, ungated, so toasts auto-dismiss and
+     * app timers advance even when we skip the (expensive) composite. */
     if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
         notify_tick();
-        notify_draw();
-        /* Layer 4b.5: WM snap ghost overlay — drawn AFTER notify_draw
-         * (so it sits above windows + toasts during drag) and BEFORE
-         * context_menu so a right-click menu still wins z-order. */
-        wm_draw_ghost();
-        /* Layer 4b.6: Workspaces Mission-Control overview. Tiles every
-         * workspace's windows onto one screen. Drawn over the WM/dock
-         * but under context menus so right-click still wins. */
-        workspaces_overview_draw();
-        /* Layer 4c: UI overlays (context menu, quick look, dirty modal).
-         * Drawn after notifications so a modal sits above a stale toast. */
-        context_menu_draw();
-        quick_look_draw();
-        image_viewer_draw();
-        {
-            extern int  calculator_active(void);
-            extern void calculator_draw(void);
-            if (calculator_active()) calculator_draw();
-        }
-        {
-            extern int  editor_active(void);
-            extern void editor_draw(void);
-            extern void editor_tick(void);
-            editor_tick();
-            if (editor_active()) editor_draw();
-        }
-        {
-            extern int  file_mgr_active(void);
-            extern void file_mgr_draw(void);
-            extern void file_mgr_tick(void);
-            file_mgr_tick();
-            if (file_mgr_active()) file_mgr_draw();
-        }
-        {
-            extern int  activity_active(void);
-            extern void activity_draw(void);
-            extern void activity_tick(void);
-            activity_tick();
-            if (activity_active()) activity_draw();
-        }
-        dirty_modal_draw();
+        { extern void editor_tick(void);   editor_tick();   }
+        { extern void file_mgr_tick(void); file_mgr_tick(); }
+        { extern void activity_tick(void); activity_tick(); }
     }
 
-    /* Night shift: warm tint over all rendered content, before cursor */
-    theme_apply_night_shift();
+    /* Keep compositing while any spring is live; the gate closes when settled. */
+    if (anim_active_count() > 0)
+        compositor_dirty_all();
 
-    /* Layer 5: Cursor (not yet a chain -- direct call). Suppressed
-     * while the lock screen owns the modal -- the spec calls out
-     * "cursor hidden" during LOCKED. */
+    /* Also recomposite while the left button is held -- window drag/resize
+     * mutate geometry but push no dirty of their own. */
+    {
+        extern uint8_t mouse_get_buttons(void);
+        if (mouse_get_buttons() & 0x01)   /* MOUSE_BTN_LEFT */
+            compositor_dirty_all();
+    }
+}
+
+void compositor_present(void) {
+    /* Overlay draws + full-screen blends only when the scene actually
+     * re-composited this tick (else night-shift/idle blends would stack onto a
+     * stale framebuffer and compound to black). */
+    if (compositor_composited_this_tick()) {
+        if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
+            notify_draw();
+            wm_draw_ghost();
+            workspaces_overview_draw();
+            context_menu_draw();
+            quick_look_draw();
+            image_viewer_draw();
+            { extern int calculator_active(void); extern void calculator_draw(void);
+              if (calculator_active()) calculator_draw(); }
+            { extern int editor_active(void);     extern void editor_draw(void);
+              if (editor_active()) editor_draw(); }
+            { extern int file_mgr_active(void);   extern void file_mgr_draw(void);
+              if (file_mgr_active()) file_mgr_draw(); }
+            { extern int activity_active(void);   extern void activity_draw(void);
+              if (activity_active()) activity_draw(); }
+            dirty_modal_draw();
+        }
+        theme_apply_night_shift();
+        { extern void idle_post_overlay(void); idle_post_overlay(); }
+        g_comp.fully_dirty = 0;
+    }
+
+    /* Cursor: UNGATED, drawn on top every tick (it moves without a composite). */
     {
         extern int lockscreen_active(void);
         if (g_comp.layer_visible[COMP_LAYER_CURSOR] && !lockscreen_active())
             cursor_draw();
     }
-
-    /* Layer 6: Idle/lock-on-idle post-overlay. Paints DIMMED tint or
-     * the lock screen card on top of everything else. No-op while
-     * IDLE_ACTIVE so this costs nothing in the steady state. */
-    {
-        extern void idle_post_overlay(void);
-        idle_post_overlay();
-    }
-
-    g_comp.fully_dirty = 0;
 }
 
 void compositor_dirty(int x, int y, int w, int h) {
@@ -315,9 +268,19 @@ uint32_t compositor_dirty_pushes(void)    { return s_dirty_pushes_total; }
 uint32_t compositor_composite_count(void) { return s_composite_count; }
 uint32_t compositor_composite_skips(void) { return s_composite_skips; }
 
+/* Non-consuming peek of the dirty gate. Producers (desktop/dock/panel) gate
+ * their draws on this so they don't repaint over windows on a skipped composite;
+ * only compositor_mix_resolve CONSUMES (compositor_consume_dirty). */
+int compositor_pending(void) { return (int)s_dirty_pending; }
+
+/* Set by note_composite / cleared by note_skip each tick; read by
+ * compositor_present() to decide whether overlays + full-screen blends run. */
+static int s_composited_this_tick;
+int compositor_composited_this_tick(void) { return s_composited_this_tick; }
+
 /* Counters bumped by the chain resolve in chain_registry.c. */
-void compositor_note_composite(void) { s_composite_count++; }
-void compositor_note_skip(void)      { s_composite_skips++; }
+void compositor_note_composite(void) { s_composite_count++; s_composited_this_tick = 1; }
+void compositor_note_skip(void)      { s_composite_skips++; s_composited_this_tick = 0; }
 
 void compositor_set_wallpaper(uint32_t color) {
     g_comp.wallpaper_color = color;

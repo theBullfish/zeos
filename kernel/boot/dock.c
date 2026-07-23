@@ -512,6 +512,20 @@ static void rc_activity_monitor(void *ctx) {
     (void)activity_open();
 }
 
+/* Left-click on the dock: focus/launch the item under x. Returns 1 if the
+ * click landed on the dock (consumed), so it doesn't fall through to desktop. */
+int dock_left_click(int x, int y) {
+    if (!g_dock.visible || g_dock.dock_w == 0) return 0;
+    compositor_t *comp = compositor_get_state();
+    int dx = (comp->screen_w - g_dock.dock_w) / 2;
+    int slide_offset = (int)((1.0f - g_dock.slide_y) * (float)g_dock.dock_h);
+    int dy = comp->screen_h - g_dock.dock_h + slide_offset;
+    if (y < dy || y >= dy + g_dock.dock_h) return 0;
+    if (x < dx || x >= dx + g_dock.dock_w)  return 0;
+    dock_click(x);
+    return 1;
+}
+
 int dock_right_click(int x, int y) {
     if (!g_dock.visible) return 0;
     compositor_t *comp = compositor_get_state();

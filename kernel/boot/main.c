@@ -984,6 +984,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern uint32_t fb_height(void);
 
         compositor_init_ex((int)fb_width(), (int)fb_height(), 0);
+        /* PREREQUISITE: without cursor_init(), g_cursor.scale is 0 and the
+         * cursor renders at size 0 (invisible). anim_init() readies the spring
+         * pool. Both must run before the live loop draws anything. */
+        { extern void cursor_init(void); extern void anim_init(void);
+          cursor_init(); anim_init(); }
         desktop_init(0xFF0E1626, 1);          /* deep-blue wallpaper */
         dock_init(0);                          /* 0 = always visible */
         dock_pin("Files",      -1);

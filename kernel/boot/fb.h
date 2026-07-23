@@ -71,6 +71,8 @@ void fb_text_bg(int x, int y, const char *s, uint32_t fg, uint32_t bg);
 
 /* Blit: copy a pixel buffer to framebuffer (for images/video frames) */
 void fb_blit(int x, int y, int w, int h, const uint32_t *pixels);
+/* Read a w*h rect of the framebuffer into out (row-major). Symmetric w/ fb_blit. */
+void fb_read_rect(int x, int y, int w, int h, uint32_t *out);
 
 /* Alpha blend a color onto the framebuffer */
 void fb_pixel_blend(int x, int y, uint32_t color);

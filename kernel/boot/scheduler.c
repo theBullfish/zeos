@@ -719,6 +719,16 @@ void scheduler_run(void)
          *    last tick and never cleared = hung. Mark + log. */
         watchdog_sweep(tsc_start);
 
+        /* Live desktop (outside the armed watchdog window): pump HID input and
+         * advance anim/cursor/overlay state BEFORE the resolve so springs are
+         * fresh when wm_draw_all reads window geometry this same tick. */
+        {
+            extern void usb_hid_poll(void);
+            extern void compositor_advance(void);
+            usb_hid_poll();
+            compositor_advance();
+        }
+
         /* 1. Arm watchdog deadlines for the upcoming resolve pass. */
         uint64_t freq = timer_tsc_freq();
         uint64_t cycles_per_us = (freq > 0) ? (freq / 1000000ULL) : 0;
@@ -731,6 +741,10 @@ void scheduler_run(void)
         /* 3. We made it back. Clear armed deadlines so survivors aren't
          *    falsely killed next tick. */
         watchdog_clear_completed();
+
+        /* Live desktop: draw gated overlays + the cursor (every tick) on top of
+         * the freshly-resolved frame. */
+        { extern void compositor_present(void); compositor_present(); }
 
         uint64_t tsc_end = timer_read_tsc();
 
@@ -815,8 +829,11 @@ void scheduler_run(void)
             if (dispatched >= 128) break;  /* fairness */
         }
 
-        /* 7. If nothing happened this tick, idle until an IRQ wakes us. */
-        if (dispatched == 0 && live > 0 && errors == 0 && slow == 0) {
+        /* 7. If nothing happened this tick, idle until an IRQ wakes us. Do NOT
+         *    HLT while a spring is animating -- it would freeze between IRQs. */
+        extern int anim_active_count(void);
+        if (dispatched == 0 && live > 0 && errors == 0 && slow == 0 &&
+            anim_active_count() == 0) {
             /* Quick check: is anything pending we should service first? */
             if (keyboard_chain_pending() == 0 &&
                 mouse_chain_pending()    == 0) {

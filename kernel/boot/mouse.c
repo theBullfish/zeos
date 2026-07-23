@@ -43,7 +43,14 @@ extern int  inspector_right_click(int x, int y);
 extern int  palette_right_click(int x, int y);
 extern int  desktop_right_click(int x, int y);
 
+/* While a pre-scheduler modal (welcome picker / cold-boot lock) owns input,
+ * swallow mouse clicks so a stray USB-HID mouse event can't reach wm/desktop
+ * underneath the modal. Cleared once scheduler_run owns input. */
+static int s_input_modal;
+void mouse_set_modal(int on) { s_input_modal = on ? 1 : 0; }
+
 static int mouse_ui_dispatch_down(int x, int y, int button) {
+    if (s_input_modal) return 1;   /* consume; modal owns input */
     extern int workspaces_overview_active(void);
     extern int workspaces_overview_mouse_down(int x, int y, int button);
     if (workspaces_overview_active() &&
@@ -72,6 +79,21 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
     if (image_viewer_active() && image_viewer_mouse_down(x, y, button)) return 1;
     if (quick_look_active()  && quick_look_mouse_down(x, y, button))  return 1;
     if (context_menu_active() && context_menu_mouse_down(x, y, button)) return 1;
+    if (button == 1) {
+        /* Left-click routing: panel/dock chrome, then the WM (full-frame hit
+         * test incl. titlebar/controls/resize edges -- so focus/drag/close/
+         * resize all work), then the desktop as the fall-through. */
+        extern int  panel_left_click(int x, int y);
+        extern int  dock_left_click(int x, int y);
+        extern void desktop_click(int x, int y);
+        extern void compositor_dirty_all(void);
+        compositor_dirty_all();         /* any click changes focus/state -> recomposite */
+        if (panel_left_click(x, y)) return 1;
+        if (dock_left_click(x, y))  return 1;
+        if (wm_mouse_down(x, y, 1) >= 0) return 1;
+        desktop_click(x, y);
+        return 1;
+    }
     if (button == 2) {
         /* App-level handlers first — most specific wins. */
         if (palette_right_click(x, y))   return 1;
@@ -109,6 +131,17 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
     return 0;
 }
 
+/* Shared left-release handler so PS/2 and USB drop a drag identically. */
+static void mouse_ui_dispatch_up(int x, int y, int button) {
+    if (button == 1) {
+        extern void desktop_drag_end(int x, int y);
+        extern void compositor_dirty_all(void);
+        wm_mouse_up(x, y, 1);       /* commit snap / clear ghost / stop drag */
+        desktop_drag_end(x, y);
+        compositor_dirty_all();     /* redraw the settled result */
+    }
+}
+
 static void mouse_ui_dispatch_move(int x, int y) {
     extern int workspaces_overview_active(void);
     extern int workspaces_overview_mouse_move(int x, int y);
@@ -139,6 +172,12 @@ static void mouse_ui_dispatch_move(int x, int y) {
     }
     if (image_viewer_active()) { image_viewer_mouse_move(x, y); return; }
     if (context_menu_active()) { context_menu_mouse_move(x, y); /* still hover the rest */ }
+    /* Drive window drag/resize while the left button is held (wm_mouse_move
+     * self-gates on s->dragging/s->resizing, so it's a no-op otherwise). */
+    if (mouse_get_buttons() & MOUSE_BTN_LEFT) {
+        extern void wm_mouse_move(int x, int y);
+        wm_mouse_move(x, y);
+    }
     hover_dispatch(x, y);
 }
 
@@ -504,6 +543,7 @@ static void process_packet(void)
         } else {
             if (image_viewer_active())
                 image_viewer_mouse_up(g_mouse.x, g_mouse.y, 1);
+            mouse_ui_dispatch_up(g_mouse.x, g_mouse.y, 1);
             cursor_release();
         }
     }
@@ -598,6 +638,7 @@ void mouse_inject(int dx, int dy, uint8_t buttons)
         } else {
             if (image_viewer_active())
                 image_viewer_mouse_up(g_mouse.x, g_mouse.y, 1);
+            mouse_ui_dispatch_up(g_mouse.x, g_mouse.y, 1);
             cursor_release();
         }
     }

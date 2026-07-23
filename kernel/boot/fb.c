@@ -430,6 +430,29 @@ void fb_text_bg(int x, int y, const char *s, uint32_t fg, uint32_t bg)
     }
 }
 
+/* Read a w*h rect of the framebuffer into `out` (row-major, w stride).
+ * Symmetric with fb_blit: out-of-bounds pixels are skipped in both, so a
+ * read-then-blit of the same rect round-trips the on-screen region. */
+void fb_read_rect(int x, int y, int w, int h, uint32_t *out)
+{
+    if (!g_fb || !g_fb->base || !out)
+        return;
+
+    for (int py = 0; py < h; py++) {
+        int sy = y + py;
+        uint32_t *dst = out + py * w;
+        if (sy < 0 || (uint32_t)sy >= g_fb->height)
+            continue;
+        uint32_t *src = g_fb->base + (uint32_t)sy * g_fb->pitch;
+        for (int px = 0; px < w; px++) {
+            int sx = x + px;
+            if (sx < 0 || (uint32_t)sx >= g_fb->width)
+                continue;
+            dst[px] = src[sx];
+        }
+    }
+}
+
 void fb_blit(int x, int y, int w, int h, const uint32_t *pixels)
 {
     if (!g_fb || !g_fb->base || !pixels)

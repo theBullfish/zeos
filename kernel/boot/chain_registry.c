@@ -117,41 +117,38 @@ static void compositor_mix_resolve(chain_node_t *self, void *input, void *output
         return;
     }
 
-    /* Real composite. */
-    wm_draw_all();
+    /* Full ordered scene composite, bottom -> top. The compositor sink OWNS
+     * the paint order (MDE topo order can't guarantee wallpaper-before-windows),
+     * matching the documented intent "compositor resolves last, produces the
+     * framebuffer". The other render nodes only advance state now. */
+    desktop_draw();       /* wallpaper + icons (bottom) */
+    wm_draw_all();        /* windows */
+    panel_draw();         /* top bar (over windows) */
+    dock_draw();          /* dock (over windows) */
 
     extern void compositor_note_composite(void);
     compositor_note_composite();
     if (ok) *ok = 1;
 }
 
+/* Producers are now STATE-only (every tick, cheap). Drawing is owned by
+ * compositor_mix_resolve so paint order is deterministic. */
 static void panel_render_resolve(chain_node_t *self, void *input, void *output)
 {
-    (void)self;
-    (void)input;
-    (void)output;
-
-    panel_update();
-    panel_draw();
+    (void)self; (void)input; (void)output;
+    panel_update();       /* clock detection: pushes dirty when the minute changes */
 }
 
 static void dock_render_resolve(chain_node_t *self, void *input, void *output)
 {
-    (void)self;
-    (void)input;
-    (void)output;
-
-    dock_update();
-    dock_draw();
+    (void)self; (void)input; (void)output;
+    dock_update();        /* rebuild the running list from WM surfaces */
 }
 
 static void desktop_render_resolve(chain_node_t *self, void *input, void *output)
 {
-    (void)self;
-    (void)input;
-    (void)output;
-
-    desktop_draw();
+    (void)self; (void)input; (void)output;
+    /* no state to advance; drawing owned by compositor_mix_resolve */
 }
 
 static void shell_interpret_resolve(chain_node_t *self, void *input, void *output)

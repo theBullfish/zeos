@@ -90,6 +90,7 @@ void dock_mouse_leave(void);
 void dock_click(int x);
 
 /* Right-click on a dock cell — opens a context menu. */
+int  dock_left_click(int x, int y);
 int  dock_right_click(int x, int y);
 
 /* Render the dock to the framebuffer. Called by compositor. */

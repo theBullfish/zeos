@@ -73,7 +73,14 @@ int compositor_init(int screen_w, int screen_h);
 int compositor_init_ex(int screen_w, int screen_h, int wire_registry);
 
 /* Compose a single frame: all layers → back buffer → flip to screen */
-void compositor_frame(void);
+/* Live desktop loop, driven directly from scheduler_run() around
+ * chain_registry_tick(): advance (pre-resolve) then present (post-resolve). */
+void compositor_advance(void);
+void compositor_present(void);
+/* Non-consuming dirty peek (producers gate their draws on it). */
+int  compositor_pending(void);
+/* True on a tick where the scene actually composited (present gates on it). */
+int  compositor_composited_this_tick(void);
 
 /* Mark a region as needing redraw */
 void compositor_dirty(int x, int y, int w, int h);

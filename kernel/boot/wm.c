@@ -851,15 +851,17 @@ static void ghost_rect_for(int x, int y, surface_state_t kind,
     }
 }
 
-void wm_mouse_down(int x, int y, int button) {
+/* Returns the surface id that took the click (for the mouse router to know a
+ * window -- including its chrome/resize edges -- consumed it), or -1 if none. */
+int wm_mouse_down(int x, int y, int button) {
     (void)button;
 
-    int id = hit_test(x, y);
-    if (id < 0) return;
+    int id = hit_test(x, y);       /* FULL frame incl. titlebar/controls/edges */
+    if (id < 0) return -1;
 
     wm_focus_surface(id);
     chain_surface_t *s = find_surface(id);
-    if (!s) return;
+    if (!s) return -1;
 
     /* Check window control buttons */
     int ctrl = hit_control(s, x, y);
@@ -870,7 +872,7 @@ void wm_mouse_down(int x, int y, int button) {
         case 2: wm_maximize_surface(id); break;    /* [□] maximize */
         case 3: /* [⚡] signal status — toggle pause? */ break;
         }
-        return;
+        return id;
     }
 
     /* Check resize edges */
@@ -878,7 +880,7 @@ void wm_mouse_down(int x, int y, int button) {
     if (edge) {
         s->resizing = 1;
         s->resize_edge = edge;
-        return;
+        return id;
     }
 
     /* Title bar drag */
@@ -910,6 +912,7 @@ void wm_mouse_down(int x, int y, int button) {
                                         surface_h_cb, s);
         }
     }
+    return id;
 }
 
 void wm_mouse_up(int x, int y, int button) {

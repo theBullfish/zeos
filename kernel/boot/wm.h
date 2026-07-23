@@ -221,7 +221,7 @@ void wm_move_to_workspace(int id, int workspace);
 /* ── Input handling ── */
 
 /* Mouse events — the WM handles drag, resize, button clicks */
-void wm_mouse_down(int x, int y, int button);
+int  wm_mouse_down(int x, int y, int button);   /* returns hit surface id, or -1 */
 void wm_mouse_up(int x, int y, int button);
 void wm_mouse_move(int x, int y);
 

@@ -9,6 +9,7 @@
 #include "anim.h"
 #include "fb.h"
 #include "theme.h"
+#include "cursor_sprites.h"   /* AUTO-GENERATED real cursor artwork */
 
 /* ── Global cursor state ── */
 static cursor_t g_cursor;
@@ -105,8 +106,8 @@ static void ripple_spawn(int x, int y) {
 /* ── Public API ── */
 
 void cursor_init(void) {
-    g_cursor.x = 0;
-    g_cursor.y = 0;
+    g_cursor.x = (int)fb_width() / 2;    /* start visible at center (matches mouse) */
+    g_cursor.y = (int)fb_height() / 2;
     g_cursor.state = CURSOR_DEFAULT;
     g_cursor.prev_state = CURSOR_DEFAULT;
     g_cursor.click_anim = CLICK_ANIM_SCALE;
@@ -247,37 +248,61 @@ static void draw_ripple(click_ripple_t *r) {
     fb_circle(r->x, r->y, ri - 1, color);
 }
 
+/* Software save-under: the framebuffer has no back buffer, so the cursor would
+ * smear a trail as it moves. We stash the pixels beneath the arrow, restore them
+ * next frame (unless the scene recomposited -- which already repainted them),
+ * then re-capture. Portable: plain fb read/blit, works identically on ARM. */
+#define CUR_BOX_W (CURSOR_SPR_SZ + 2)
+#define CUR_BOX_H (CURSOR_SPR_SZ + 2)
+static uint32_t s_cur_backup[CUR_BOX_W * CUR_BOX_H];
+static int s_cur_bx, s_cur_by, s_cur_saved;
+
 void cursor_draw(void) {
+    extern int  compositor_composited_this_tick(void);
+    extern void fb_read_rect(int, int, int, int, uint32_t *);
+
+    int composited = compositor_composited_this_tick();
+
+    /* Restore what was under the cursor last frame -- but NOT on a tick where
+     * the scene recomposited (the fresh frame already repainted that region;
+     * restoring stale pixels would stamp old content over it). */
+    if (s_cur_saved && !composited)
+        fb_blit(s_cur_bx, s_cur_by, CUR_BOX_W, CUR_BOX_H, s_cur_backup);
+
+    int cx = g_cursor.x;
+    int cy = g_cursor.y;
+
+    /* Pick the real sprite for the current state; position by its hotspot. */
+    int st = (int)g_cursor.state;
+    if (st < 0 || st >= (int)(sizeof(cursor_sprites) / sizeof(cursor_sprites[0])))
+        st = 0;
+    int hx = cursor_hotspot[st][0];
+    int hy = cursor_hotspot[st][1];
+    int ox = cx - hx;                      /* sprite top-left */
+    int oy = cy - hy;
+
+    /* Capture the region under the sprite (1px margin) BEFORE drawing ripples
+     * or the sprite, so the backup is clean scene pixels. */
+    s_cur_bx = ox - 1;
+    s_cur_by = oy - 1;
+    fb_read_rect(s_cur_bx, s_cur_by, CUR_BOX_W, CUR_BOX_H, s_cur_backup);
+    s_cur_saved = 1;
+
     /* Draw active ripples (behind cursor) */
     for (int i = 0; i < MAX_RIPPLES; i++) {
         if (g_cursor.ripples[i].active)
             draw_ripple(&g_cursor.ripples[i]);
     }
 
-    /*
-     * Draw cursor sprite at (x, y) with current scale.
-     *
-     * TODO: actual sprite rendering from bitmap data.
-     * For now, draw a simple arrow using the framebuffer primitives
-     * in the persona accent + outline colors.
-     */
-    int cx = g_cursor.x;
-    int cy = g_cursor.y;
-    uint32_t accent  = g_cursor.accent;
-    uint32_t outline = COLOR_SURFACE;
-
-    /* Scale factor from spring animation */
-    /* float s = g_cursor.scale; — applied to sprite dimensions when we have bitmaps */
-
-    /* Temporary: 16px arrow using lines */
-    int sz = (int)(16.0f * g_cursor.scale);
-
-    /* Filled arrow body (accent color) */
-    fb_line(cx, cy, cx, cy + sz, accent);
-    fb_line(cx, cy, cx + sz * 2 / 3, cy + sz * 2 / 3, accent);
-    fb_line(cx, cy + sz, cx + sz / 3, cy + sz * 2 / 3, accent);
-
-    /* Outline (dark) */
-    fb_line(cx - 1, cy, cx - 1, cy + sz, outline);
-    fb_line(cx + 1, cy + 1, cx + sz * 2 / 3 + 1, cy + sz * 2 / 3 + 1, outline);
+    /* Blit the real cursor sprite, alpha-blended (white core + dark outline). */
+    {
+        extern void fb_pixel_blend(int, int, uint32_t);
+        const uint32_t *spr = cursor_sprites[st];
+        for (int yy = 0; yy < CURSOR_SPR_SZ; yy++)
+            for (int xx = 0; xx < CURSOR_SPR_SZ; xx++) {
+                uint32_t p = spr[yy * CURSOR_SPR_SZ + xx];
+                if (p >> 24)                /* skip fully-transparent pixels */
+                    fb_pixel_blend(ox + xx, oy + yy, p);
+            }
+    }
 }

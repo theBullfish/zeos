@@ -7,6 +7,7 @@
 
 #include "panel.h"
 #include "fb.h"
+#include "compositor.h"
 #include "wm.h"
 #include "workspaces.h"
 #include "chain.h"
@@ -215,8 +216,33 @@ void panel_update(void) {
         uint64_t seconds = tsc / freq;
         int hours = (int)((seconds / 3600) % 24);
         int minutes = (int)((seconds / 60) % 60);
+        char prev[16];
+        str_copy_n(prev, g_panel.clock_str, sizeof(prev));
         format_clock(g_panel.clock_str, hours, minutes);
+        /* Request a composite only when the displayed time changes, so the
+         * clock stays live under the producer peek-gate without recompositing
+         * every tick. */
+        int changed = 0;
+        for (int i = 0; i < (int)sizeof(prev); i++) {
+            if (prev[i] != g_panel.clock_str[i]) { changed = 1; break; }
+            if (prev[i] == 0) break;
+        }
+        if (changed) {
+            extern void compositor_dirty(int, int, int, int);
+            compositor_dirty(0, 0, g_panel.screen_w,
+                             compositor_get_state()->panel_h);
+        }
     }
+}
+
+/* Left-click on the top panel bar: consume it (so it doesn't fall through to a
+ * window behind the bar). Status-item handlers get wired here later. */
+int panel_left_click(int x, int y) {
+    (void)x;
+    compositor_t *comp = compositor_get_state();
+    if (!comp->panel_visible) return 0;
+    if (y >= comp->panel_h)   return 0;
+    return 1;
 }
 
 void panel_draw(void) {
