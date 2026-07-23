@@ -188,7 +188,11 @@ static int tcp_send_segment(struct tcp_conn *conn, uint8_t flags,
     tcp->ack = htonl(conn->ack);
     tcp->data_off = 0x50;   /* 5 dwords = 20 bytes, no options */
     tcp->flags = flags;
-    tcp->window = htons(4096);
+    /* Advertise the TRUE free receive space, not a fixed 4096 that lies once the
+     * buffer fills (the peer would keep sending, we'd drop + our ACK-only-buffered
+     * logic would leave a hole). Real flow control. */
+    tcp->window = htons(conn->rx_len < TCP_RX_BUF_SIZE
+                        ? (uint16_t)(TCP_RX_BUF_SIZE - conn->rx_len) : 0);
     tcp->checksum = 0;
     tcp->urgent = 0;
 
