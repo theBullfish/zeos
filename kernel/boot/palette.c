@@ -137,7 +137,8 @@ static void action_switch_ws4(void *ctx) { (void)ctx; wm_switch_workspace(3); }
 static void action_inspect_chain(void *ctx)
 {
     (void)ctx;
-    /* Signal inspector will be opened by the sigviz subsystem */
+    extern int activity_open(void);   /* system/chain state inspector */
+    (void)activity_open();
 }
 
 static void action_settings(void *ctx)
