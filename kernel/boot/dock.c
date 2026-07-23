@@ -289,6 +289,23 @@ static void draw_rounded_top_rect(int x, int y, int w, int h, int r, uint32_t co
     }
 }
 
+/* Same rounded-top shape, but alpha-blended — used to build a soft glow whose
+ * corners follow the dock's rounding instead of a hard rectangular halo. */
+static void fill_rounded_top_blend(int x, int y, int w, int h, int r, uint32_t argb) {
+    if (r < 0) r = 0;
+    if (r > h) r = h;
+    fb_rect_blend(x, y + r, w, h - r, argb);         /* body */
+    fb_rect_blend(x + r, y, w - 2 * r, r, argb);     /* top strip between corners */
+    for (int ry = 0; ry < r; ry++) {                 /* rounded top corners */
+        int dy = r - ry;
+        int dx2 = r * r - dy * dy;
+        int rx = 0;
+        while ((rx + 1) * (rx + 1) <= dx2) rx++;
+        fb_rect_blend(x + (r - rx), y + ry, rx, 1, argb);   /* top-left */
+        fb_rect_blend(x + w - r,    y + ry, rx, 1, argb);   /* top-right */
+    }
+}
+
 /* Draw a state dot under an item */
 static void draw_state_dot(int cx, int cy, chain_status_t state) {
     uint32_t color;
@@ -357,12 +374,13 @@ void dock_draw(void) {
 
     int dx = (screen_w - g_dock.dock_w) / 2;
 
-    /* Soft white glow behind the dock so it lifts off the wallpaper. Layered
-     * low-alpha white rects, expanding outward -> a halo that fades. */
-    for (int i = 14; i >= 1; i--) {
-        int e = i * 2;
-        fb_rect_blend(dx - e, dy - e, g_dock.dock_w + 2 * e, full_h + e,
-                      0x08FFFFFFu);   /* ~3% white per layer, builds near edges */
+    /* Soft white glow behind the dock so it lifts off the wallpaper. Expanding
+     * rounded-top layers (corner radius grows with each ring) -> the halo is
+     * soft AND follows the dock's rounded corner instead of a boxy rectangle. */
+    for (int i = 8; i >= 1; i--) {
+        int e = i * 2;                       /* tight halo: max ~16px spread */
+        fill_rounded_top_blend(dx - e, dy - e, g_dock.dock_w + 2 * e, full_h + e,
+                               DOCK_CORNER_R + e, 0x0AFFFFFFu);
     }
 
     /* Background with rounded top corners — brighter surface for contrast. */
