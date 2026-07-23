@@ -212,6 +212,16 @@ void compositor_present(void) {
     extern void panel_update(void);  extern void panel_draw(void);
     extern void dock_update(void);   extern void dock_draw(void);
 
+    /* EXEMPT the composite from LAPIC-timer (vec 0xEF) preemption. present() runs
+     * in the scheduler_run epilogue, but the one-shot preempt timer armed by the
+     * last chain_resolve can still be counting -- if it fires here it longjmps out
+     * AFTER desktop_draw() (wallpaper) but BEFORE wm_draw_all() finishes, leaving a
+     * stable wallpaper-only frame (the windows "vanish"). Disarm it for the
+     * composite; the scheduler re-arms per resolve next tick, so nothing to restore.
+     * This is what makes the "unpreemptible" comment above actually true. */
+    extern void lapic_timer_disarm(void);
+    lapic_timer_disarm();
+
     int dirty = compositor_consume_dirty();
     if (dirty) {
         desktop_draw();       /* wallpaper + icons (bottom) */

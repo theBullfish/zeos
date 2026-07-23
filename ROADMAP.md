@@ -1,3 +1,5 @@
+> **[SUPERSEDED 2026-07-23 by `BUILD_MAP.md`]** — this tracker's checkboxes were unverified assertions. The map WE follow is `BUILD_MAP.md` (BIBLE-gated: verified base truth or no checkbox). Kept for history, not for status.
+
 # Z-OS Roadmap & Feature Tracker
 
 Status: `[ ]` planned · `[~]` in progress · `[x]` done · `[!]` blocked · `[2.0]` deferred to Zeos 2.0
