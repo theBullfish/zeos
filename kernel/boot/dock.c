@@ -289,6 +289,26 @@ static void draw_rounded_top_rect(int x, int y, int w, int h, int r, uint32_t co
     }
 }
 
+/* Fully-rounded (all four corners) alpha-blended fill. */
+static void fill_rounded_blend(int x, int y, int w, int h, int r, uint32_t argb) {
+    if (r < 0) r = 0;
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    fb_rect_blend(x, y + r, w, h - 2 * r, argb);            /* middle band */
+    fb_rect_blend(x + r, y, w - 2 * r, r, argb);            /* top strip */
+    fb_rect_blend(x + r, y + h - r, w - 2 * r, r, argb);    /* bottom strip */
+    for (int ry = 0; ry < r; ry++) {
+        int dy = r - ry;
+        int dx2 = r * r - dy * dy;
+        int rx = 0;
+        while ((rx + 1) * (rx + 1) <= dx2) rx++;
+        fb_rect_blend(x + (r - rx), y + ry,         rx, 1, argb);   /* TL */
+        fb_rect_blend(x + w - r,    y + ry,         rx, 1, argb);   /* TR */
+        fb_rect_blend(x + (r - rx), y + h - 1 - ry, rx, 1, argb);   /* BL */
+        fb_rect_blend(x + w - r,    y + h - 1 - ry, rx, 1, argb);   /* BR */
+    }
+}
+
 /* Same rounded-top shape, but alpha-blended — used to build a soft glow whose
  * corners follow the dock's rounding instead of a hard rectangular halo. */
 static void fill_rounded_top_blend(int x, int y, int w, int h, int r, uint32_t argb) {
@@ -339,21 +359,43 @@ static icon_id_t icon_for_name(const char *name) {
 }
 
 static void draw_item(int x, int y, dock_item_t *item, int is_selected) {
-    /* Selection highlight */
-    if (is_selected) {
+    /* Is this the app whose window currently has focus? */
+    int focused = (item->surface_id >= 0 && item->surface_id == wm_get_focused());
+    uint32_t accent = COLOR_PRIMARY;
+
+    /* Focus highlight: a rounded accent pad behind the cell, plus a soft
+     * accent glow ring so the active app clearly "lifts". */
+    if (focused) {
+        for (int i = 3; i >= 1; i--) {
+            int e = i * 2;
+            fill_rounded_blend(x - e, y - e, DOCK_ITEM_SIZE + 2 * e,
+                               DOCK_ITEM_SIZE + 2 * e, 12 + e,
+                               (accent & 0x00FFFFFF) | 0x14000000);
+        }
+        fill_rounded_blend(x - 4, y - 4, DOCK_ITEM_SIZE + 8, DOCK_ITEM_SIZE + 8,
+                           12, (accent & 0x00FFFFFF) | 0x33000000);   /* ~20% pad */
+    } else if (is_selected) {
         fb_rect_blend(x, y, DOCK_ITEM_SIZE, DOCK_ITEM_SIZE,
-                      (item->accent & 0x00FFFFFF) | 0x3D000000);  /* ~24% */
+                      (item->accent & 0x00FFFFFF) | 0x3D000000);
     }
 
-    /* Real vector app icon, centered in the cell. */
+    /* Real vector app icon, centered in the cell. Focused = accent-tinted. */
     int isz = (DOCK_ITEM_SIZE * 3) / 5;                 /* icon fills ~60% of cell */
     int ix = x + (DOCK_ITEM_SIZE - isz) / 2;
-    int iy = y + (DOCK_ITEM_SIZE - isz) / 2 - 4;        /* shift up for the state dot */
-    uint32_t icol = is_selected ? item->accent : COLOR_ON_SURFACE;
+    int iy = y + (DOCK_ITEM_SIZE - isz) / 2 - 4;        /* shift up for the indicator */
+    uint32_t icol = focused ? accent
+                  : is_selected ? item->accent
+                  : COLOR_ON_SURFACE;
     icon_draw(icon_for_name(item->name), ix, iy, isz, icol);
 
-    /* State dot below the icon */
-    if (item->has_state_dot) {
+    /* Active indicator: focused app gets a bright accent bar; other running
+     * apps keep the small state dot. */
+    if (focused) {
+        int bw = DOCK_ITEM_SIZE / 3;
+        int bx = x + (DOCK_ITEM_SIZE - bw) / 2;
+        int by = y + DOCK_ITEM_SIZE - 4;
+        fill_rounded_blend(bx, by, bw, 3, 1, accent);
+    } else if (item->has_state_dot) {
         int dot_cx = x + DOCK_ITEM_SIZE / 2;
         int dot_cy = y + DOCK_ITEM_SIZE - DOCK_DOT_RADIUS - 2;
         draw_state_dot(dot_cx, dot_cy, item->state);
