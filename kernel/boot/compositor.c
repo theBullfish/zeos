@@ -203,10 +203,22 @@ void compositor_advance(void) {
 }
 
 void compositor_present(void) {
-    /* Overlay draws + full-screen blends only when the scene actually
-     * re-composited this tick (else night-shift/idle blends would stack onto a
-     * stale framebuffer and compound to black). */
-    if (compositor_composited_this_tick()) {
+    /* FULL SCENE COMPOSITE, run DIRECTLY here (outside the watchdog-armed,
+     * LAPIC-preemptible chain-resolve path where the 12-31ms wm_draw_all was
+     * being longjmp-preempted mid-draw, so windows never finished and every
+     * step after it was skipped). Gated on the dirty flag; when idle, the last
+     * composited frame simply persists. Deterministic paint order, unpreemptible. */
+    extern void desktop_draw(void);
+    extern void panel_update(void);  extern void panel_draw(void);
+    extern void dock_update(void);   extern void dock_draw(void);
+
+    int dirty = compositor_consume_dirty();
+    if (dirty) {
+        desktop_draw();       /* wallpaper + icons (bottom) */
+        wm_draw_all();        /* windows */
+        panel_update(); panel_draw();
+        dock_update();  dock_draw();
+
         if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
             notify_draw();
             wm_draw_ghost();

@@ -102,33 +102,12 @@ static void compositor_mix_resolve(chain_node_t *self, void *input, void *output
     (void)self;
     (void)input;
 
-    /* Dirty-rect gate: if nothing has been pushed since the last
-     * resolve, skip the entire composite. wm_draw_all() is the
-     * 12-31ms hot spot — bypassing it when the UI is idle is what
-     * brings the scheduler tick back under budget. */
-    int dirty = compositor_consume_dirty();
-    int *ok = (int *)output;
-
-    if (dirty == 0) {
-        /* Tick the skip counter via the compositor module. */
-        extern void compositor_note_skip(void);
-        compositor_note_skip();
-        if (ok) *ok = 0;
-        return;
-    }
-
-    /* Full ordered scene composite, bottom -> top. The compositor sink OWNS
-     * the paint order (MDE topo order can't guarantee wallpaper-before-windows),
-     * matching the documented intent "compositor resolves last, produces the
-     * framebuffer". The other render nodes only advance state now. */
-    desktop_draw();       /* wallpaper + icons (bottom) */
-    wm_draw_all();        /* windows */
-    panel_draw();         /* top bar (over windows) */
-    dock_draw();          /* dock (over windows) */
-
-    extern void compositor_note_composite(void);
-    compositor_note_composite();
-    if (ok) *ok = 1;
+    /* Scene compositing moved to compositor_present() (a DIRECT scheduler_run
+     * call, outside the watchdog-armed / LAPIC-preemptible chain-resolve harness
+     * that was longjmp-cutting the 12-31ms wm_draw_all mid-frame). This node is
+     * intentionally inert now and must NOT consume the dirty flag -- present
+     * consumes it. */
+    if (output) *(int *)output = 0;
 }
 
 /* Producers are now STATE-only (every tick, cheap). Drawing is owned by
