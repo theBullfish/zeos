@@ -68,6 +68,9 @@ typedef struct {
 
 /* Initialize the compositor (allocates back buffer) */
 int compositor_init(int screen_w, int screen_h);
+/* Same as compositor_init but the chain-registry wiring is optional; pass
+ * wire_registry=0 when the boot path already ran chain_registry_init(). */
+int compositor_init_ex(int screen_w, int screen_h, int wire_registry);
 
 /* Compose a single frame: all layers → back buffer → flip to screen */
 void compositor_frame(void);

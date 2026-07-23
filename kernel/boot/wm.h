@@ -173,6 +173,8 @@ int wm_create_surface(const char *title, int chain_id,
 
 /* Close (detach) a surface — chain keeps running */
 void wm_detach_surface(int id);
+/* Force a surface to fully-open (skip open animation) for synchronous paints. */
+void wm_force_visible(int id);
 
 /* Minimize a surface */
 void wm_minimize_surface(int id);

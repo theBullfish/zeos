@@ -315,6 +315,16 @@ int wm_create_surface(const char *title, int chain_id,
     return s->id;
 }
 
+/* Force a surface to its fully-open state (skip the open animation). Useful
+ * when painting a desktop synchronously before the anim tick loop is running. */
+void wm_force_visible(int id) {
+    chain_surface_t *s = find_surface(id);
+    if (!s) return;
+    s->anim_scale = 1.0f;
+    s->anim_opacity = 255.0f;
+    s->visible = 1;
+}
+
 void wm_detach_surface(int id) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;

@@ -26,14 +26,18 @@ broken or unfinished, fix it; mark `[DONE]` only when seen working.
 ---
 
 ## PHASE 0 — Reach the live desktop & clean the boot seam
-- **L0.1** `[WIP]` Reach the live **Full** desktop from cold boot; screenshot the
-  composited desktop (wallpaper, dock, panel). **Finding 2026-07-22:** the boot
-  path ends at `shell_run(&boot_info)` (`main.c:970`), NOT the graphical desktop.
-  A bypass build (`-DZEOS_SMP_TEST_BYPASS_LOCKSCREEN`) boots straight through to
-  a **blank `COLOR_SURFACE`** — the compositor/dock/panel/wm all exist but nothing
-  in the boot path paints a populated desktop. THIS is the core unfinished seam.
-  Blocked on: wire Full-mode → desktop_init + desktop_draw + compositor + dock +
-  panel + event loop (subagents mapping the exact call sequence).
+- **L0.1** `[DONE]` (2026-07-22) Boot into a populated graphical desktop.
+  **Root cause found & fixed:** `compositor_init`/`desktop_init`/`dock_init` were
+  defined but called from NOWHERE — the desktop was built and never plugged into
+  the boot path (which ended at `shell_run`, a text shell). Fix: `compositor_init_ex`
+  (registry-optional split), then a bring-up block in `main.c` before `shell_run`
+  — compositor + desktop(wallpaper) + panel(persona/clock) + dock + two app
+  windows, painted direct-to-framebuffer + `wm_force_visible` to skip the open
+  anim for a synchronous first paint. **Evidence:** screenshot shows wallpaper,
+  top panel (Zeos identity + running-app pills + workspace dots + clock), and two
+  windows (Files, Terminal) with full chrome incl. the red **X** close button.
+  Remaining polish (own items): dock icons faint, clock static (render chains not
+  yet ticking live — L1/input), no live compositing loop yet.
 - **L0.2** `[DONE]` (2026-07-22) Kill kprint-over-framebuffer bleed: after
   `splash_dismiss()`, re-assert `kprint_set_splash_mode(1)` so late-boot
   diagnostics go serial-only. **Evidence:** welcome/PIN frames now render with

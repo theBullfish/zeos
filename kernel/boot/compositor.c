@@ -93,7 +93,7 @@ static void draw_desktop(void) {
 
 /* ── Frame composition ── */
 
-int compositor_init(int screen_w, int screen_h) {
+int compositor_init_ex(int screen_w, int screen_h, int wire_registry) {
     g_comp.screen_w = screen_w;
     g_comp.screen_h = screen_h;
     g_comp.panel_h = TOOLBAR_HEIGHT;
@@ -136,17 +136,25 @@ int compositor_init(int screen_w, int screen_h) {
     workspaces_init(screen_w, screen_h);
     panel_init(PERSONA_FULL, g_comp.panel_h);
 
-    /* Wire all subsystems into the chain/MDE graph */
-    int chains = chain_registry_init();
-    if (chains < 0)
-        kputs("COMP: WARNING -- chain registry init failed\n");
-    else {
-        kputs("COMP: chain graph wired (");
-        kput_dec((uint64_t)chains);
-        kputs(" chains)\n");
+    /* Wire all subsystems into the chain/MDE graph. Skipped when the boot
+     * path already initialized the registry (chain_registry_init resets it,
+     * so calling it twice would wipe chains built after the first call). */
+    if (wire_registry) {
+        int chains = chain_registry_init();
+        if (chains < 0)
+            kputs("COMP: WARNING -- chain registry init failed\n");
+        else {
+            kputs("COMP: chain graph wired (");
+            kput_dec((uint64_t)chains);
+            kputs(" chains)\n");
+        }
     }
 
     return 0;
+}
+
+int compositor_init(int screen_w, int screen_h) {
+    return compositor_init_ex(screen_w, screen_h, 1);
 }
 
 void compositor_frame(void) {

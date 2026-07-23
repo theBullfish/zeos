@@ -965,6 +965,59 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         tlb_print_selftest_line();
     }
 
+    /* ── Graphical desktop shell ──────────────────────────────────
+     * The compositor/desktop/dock/panel render nodes are registered by
+     * chain_registry_init() (above) and tick under scheduler_run(), but their
+     * STATE was never initialized -- which is why boot landed on a bare
+     * surface. Initialize it here so Zeos boots into a populated desktop:
+     * wallpaper + top panel (with clock) + dock. compositor_init_ex(...,0)
+     * skips the registry re-init (already done) so existing chains survive. */
+    {
+        extern int  compositor_init_ex(int, int, int);
+        extern void desktop_init(uint32_t, int);
+        extern void dock_init(int);
+        extern int  dock_pin(const char *, int);
+        extern void dock_show(void);
+        extern void panel_set_persona(int);
+        extern uint32_t fb_width(void);
+        extern uint32_t fb_height(void);
+
+        compositor_init_ex((int)fb_width(), (int)fb_height(), 0);
+        desktop_init(0xFF0E1626, 1);          /* deep-blue wallpaper */
+        dock_init(0);                          /* 0 = always visible */
+        dock_pin("Files",      -1);
+        dock_pin("Editor",     -1);
+        dock_pin("Terminal",   -1);
+        dock_pin("Settings",   -1);
+        dock_pin("Calculator", -1);
+        dock_show();
+        panel_set_persona(2);                  /* PERSONA_FULL */
+
+        /* Open a couple of app windows so the desktop reads as a desktop:
+         * real WM chrome (title bar + close X) + client area. */
+        extern int  wm_create_surface(const char *, int, int, int, int, int,
+                                      void (*)(int, int, int, int, int));
+        extern void wm_focus_surface(int);
+        extern void wm_force_visible(int);
+        int w_files = wm_create_surface("Files",     -1, 180, 200, 640, 460, 0);
+        int w_term  = wm_create_surface("Terminal",  -1, 760, 320, 780, 480, 0);
+        wm_force_visible(w_files);
+        wm_force_visible(w_term);
+        wm_focus_surface(w_term);
+
+        /* Paint the initial desktop immediately (direct-to-framebuffer), in
+         * case the render chains haven't been resolved yet this early. */
+        extern void desktop_draw(void);
+        extern void panel_update(void); extern void panel_draw(void);
+        extern void dock_update(void);  extern void dock_draw(void);
+        extern void wm_draw_all(void);
+        desktop_draw();
+        panel_update(); panel_draw();
+        dock_update();  dock_draw();
+        wm_draw_all();
+        kputs("[main] graphical desktop shell up (wallpaper + panel + dock + windows)\n");
+    }
+
     /* Enter shell — initializes shell state then hands off to
      * scheduler_run() which never returns. */
     shell_run(&boot_info);
