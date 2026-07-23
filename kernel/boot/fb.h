@@ -63,6 +63,8 @@ void fb_circle_filled(int cx, int cy, int r, uint32_t color);
 
 /* Draw text at pixel position (not character grid) */
 void fb_text(int x, int y, const char *s, uint32_t color);
+/* Boot-font text scaled by an integer factor (8*scale x 16*scale per glyph). */
+void fb_text_scaled(int x, int y, const char *s, uint32_t color, int scale);
 
 /* Draw text with background color */
 void fb_text_bg(int x, int y, const char *s, uint32_t fg, uint32_t bg);

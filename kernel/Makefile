@@ -285,7 +285,7 @@ $(1)/$(2)_$(3).o: $(1)/$(3).bin
 			$(2)_$(3).bin $(2)_$(3).o ; \
 	else \
 		echo "[fw] nvidia/$(2)/gsp/$(3).bin absent -- emitting empty stub"; \
-		printf '' > $(1)/_empty_$(2)_$(3).bin ; \
+		printf '\0' > $(1)/_empty_$(2)_$(3).bin ; \
 		cd $(1) && $$(OBJCOPY) \
 			--input-target=binary \
 			--output-target=elf64-x86-64 \

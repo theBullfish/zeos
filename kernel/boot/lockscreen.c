@@ -489,15 +489,21 @@ void lockscreen_draw(void)
 {
     if (!g_active) return;
 
+    /* 2x scale: text uses the boot font at scale S, card sized to match. */
+    const int S  = 2;
+    const int gw = 8 * S;
+    const int cw = CARD_W * S;
+    const int ch = CARD_H * S;
+
     int sw = (int)fb_width();
     int sh = (int)fb_height();
-    int cx = (sw - CARD_W) / 2;
-    int cy = (sh - CARD_H) / 2;
+    int cx = (sw - cw) / 2;
+    int cy = (sh - ch) / 2;
     if (cx < 0) cx = 0;
     if (cy < 0) cy = 0;
 
     /* Card background (surface_high, 94% opaque). */
-    fb_rect_blend(cx, cy, CARD_W, CARD_H, (COLOR_SURFACE_HIGH & 0x00FFFFFF) | 0xF0000000);
+    fb_rect_blend(cx, cy, cw, ch, (COLOR_SURFACE_HIGH & 0x00FFFFFF) | 0xF0000000);
 
     /* Border: danger while flashing, persona accent otherwise. */
     uint32_t border = COLOR_PRIMARY;
@@ -505,16 +511,16 @@ void lockscreen_draw(void)
         border = COLOR_DANGER;
         g_flash_frames--;
     }
-    fb_rect_outline(cx, cy, CARD_W, CARD_H, border, 2);
+    fb_rect_outline(cx, cy, cw, ch, border, 2 * S);
 
     /* Title varies by mode: validation vs enrollment. */
     const char *title = "ZEOS  Locked";
     if (g_enroll_phase == LOCK_ENROLL_PICK)    title = "ZEOS  Set a PIN";
     else if (g_enroll_phase == LOCK_ENROLL_CONFIRM) title = "ZEOS  Confirm PIN";
-    int title_w = ls_strlen(title) * 8;
-    int tx = cx + (CARD_W - title_w) / 2;
-    int ty = cy + 32;
-    font_draw(tx, ty, title, FONT_BOOT, 16, COLOR_ON_SURFACE);
+    int title_w = ls_strlen(title) * gw;
+    int tx = cx + (cw - title_w) / 2;
+    int ty = cy + 56;
+    fb_text_scaled(tx, ty, title, COLOR_ON_SURFACE, S);
 
     /* Prompt with masked entry. Spec asks for "[PIN: ____]". We use
      * '*' for entered digits, '_' for missing slots, fixed-width on
@@ -536,10 +542,10 @@ void lockscreen_draw(void)
     buf[bi++] = ']';
     buf[bi] = '\0';
 
-    int prompt_w = bi * 8;
-    int px = cx + (CARD_W - prompt_w) / 2;
-    int py = cy + 96;
-    font_draw(px, py, buf, FONT_BOOT, 16, COLOR_ON_SURFACE);
+    int prompt_w = bi * gw;
+    int px = cx + (cw - prompt_w) / 2;
+    int py = cy + 170;
+    fb_text_scaled(px, py, buf, COLOR_ON_SURFACE, S);
 
     /* Hint line. */
     const char *hint;
@@ -552,10 +558,10 @@ void lockscreen_draw(void)
     } else {
         hint = "Enter PIN. Press Enter to validate.";
     }
-    int hint_w = ls_strlen(hint) * 8;
-    int hx = cx + (CARD_W - hint_w) / 2;
-    int hy = cy + 144;
-    font_draw(hx, hy, hint, FONT_BOOT, 16, COLOR_ON_SURFACE_2);
+    int hint_w = ls_strlen(hint) * gw;
+    int hx = cx + (cw - hint_w) / 2;
+    int hy = cy + 260;
+    fb_text_scaled(hx, hy, hint, COLOR_ON_SURFACE_2, S);
 }
 
 /* ── Cold-boot login gate ─────────────────────────────────────── */

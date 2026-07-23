@@ -107,41 +107,75 @@ int welcome_should_seed(int ctx_id) { return !w_marker_get("seeded", ctx_id); }
 #define WELCOME_CARD_H   400
 
 static int g_pick_choice = 2;  /* default Full */
+
+/* Draw boot-font text word-wrapped within max_w px at an integer scale
+ * (glyph = 8*scale px wide), so a mode-card blurb stays inside its own box. */
+static void draw_wrapped(int x, int y, const char *text, int max_w,
+                         int scale, uint32_t color)
+{
+    int max_chars = max_w / (8 * scale);
+    if (max_chars < 1) max_chars = 1;
+    const int line_h = 16 * scale + 6;
+    char line[80];
+    int ll = 0;
+    const char *p = text;
+    while (*p) {
+        while (*p == ' ') p++;                 /* skip leading spaces */
+        const char *ws = p;
+        while (*p && *p != ' ') p++;           /* one word */
+        int wlen = (int)(p - ws);
+        if (wlen == 0) break;
+        int need = wlen + (ll ? 1 : 0);
+        if (ll + need > max_chars && ll > 0) {  /* flush current line */
+            line[ll] = 0;
+            fb_text_scaled(x, y, line, color, scale);
+            y += line_h; ll = 0;
+        }
+        if (ll && ll < (int)sizeof(line) - 1) line[ll++] = ' ';
+        for (int k = 0; k < wlen && ll < (int)sizeof(line) - 1; k++)
+            line[ll++] = ws[k];
+    }
+    if (ll) { line[ll] = 0; fb_text_scaled(x, y, line, color, scale); }
+}
 static int g_pick_done   = 0;
 
 static void welcome_draw_modal(void)
 {
+    /* 2x scale: text uses the boot font at scale S, geometry sized to match. */
+    const int S = 2;
+    const int gw = 8 * S;                        /* glyph width  at scale S */
+    const int card_pw = WELCOME_CARD_W * S;      /* panel doubled */
+    const int card_ph = WELCOME_CARD_H * S;
+
     int sw = (int)fb_width();
     int sh = (int)fb_height();
 
     fb_clear(COLOR_SURFACE);
 
-    int cx = (sw - WELCOME_CARD_W) / 2;
-    int cy = (sh - WELCOME_CARD_H) / 2;
+    int cx = (sw - card_pw) / 2;
+    int cy = (sh - card_ph) / 2;
     if (cx < 0) cx = 0;
     if (cy < 0) cy = 0;
 
     /* Card */
-    fb_rect(cx, cy, WELCOME_CARD_W, WELCOME_CARD_H, COLOR_SURFACE_HIGH);
-    fb_rect_outline(cx, cy, WELCOME_CARD_W, WELCOME_CARD_H, COLOR_PRIMARY, 2);
+    fb_rect(cx, cy, card_pw, card_ph, COLOR_SURFACE_HIGH);
+    fb_rect_outline(cx, cy, card_pw, card_ph, COLOR_PRIMARY, 2 * S);
 
     /* Wordmark */
     const char *title = "Welcome to Zeos";
-    int title_w = w_strlen(title) * 8;
-    font_draw(cx + (WELCOME_CARD_W - title_w) / 2, cy + 32,
-              title, FONT_BOOT, 16, COLOR_ON_SURFACE);
+    int title_w = w_strlen(title) * gw;
+    fb_text_scaled(cx + (card_pw - title_w) / 2, cy + 48, title, COLOR_ON_SURFACE, S);
 
     /* Sub */
     const char *sub = "An OS where the kernel is a typed signal graph, not a poll loop.";
-    int sub_w = w_strlen(sub) * 8;
-    font_draw(cx + (WELCOME_CARD_W - sub_w) / 2, cy + 64,
-              sub, FONT_BOOT, 16, COLOR_ON_SURFACE_2);
+    int sub_w = w_strlen(sub) * gw;
+    fb_text_scaled(cx + (card_pw - sub_w) / 2, cy + 100, sub, COLOR_ON_SURFACE_2, S);
 
     /* Three persona cards */
-    int card_w = (WELCOME_CARD_W - 80) / 3;
-    int card_h = 180;
-    int card_y = cy + 120;
-    int gap = 20;
+    int gap = 24;
+    int card_w = (card_pw - 40 - 2 * gap) / 3;
+    int card_h = 320;
+    int card_y = cy + 180;
 
     struct {
         const char *key;
@@ -163,25 +197,25 @@ static void welcome_draw_modal(void)
         fb_rect_outline(x, card_y, card_w, card_h, border, thickness);
 
         /* Persona accent strip */
-        fb_rect(x, card_y, card_w, 4, cards[i].accent);
+        fb_rect(x, card_y, card_w, 6, cards[i].accent);
 
         /* Number key hint */
         char keylbl[6]; keylbl[0] = '['; keylbl[1] = cards[i].key[0]; keylbl[2] = ']';
         keylbl[3] = 0;
-        font_draw(x + 12, card_y + 14, keylbl, FONT_BOOT, 16, cards[i].accent);
+        fb_text_scaled(x + 20, card_y + 28, keylbl, cards[i].accent, S);
 
         /* Name */
-        font_draw(x + 12, card_y + 50, cards[i].name, FONT_BOOT, 16, COLOR_ON_SURFACE);
+        fb_text_scaled(x + 20, card_y + 84, cards[i].name, COLOR_ON_SURFACE, S);
 
-        /* Blurb */
-        font_draw(x + 12, card_y + 90, cards[i].blurb, FONT_BOOT, 16, COLOR_ON_SURFACE_2);
+        /* Blurb -- word-wrapped so it stays inside this card's box */
+        draw_wrapped(x + 20, card_y + 150, cards[i].blurb, card_w - 40,
+                     S, COLOR_ON_SURFACE_2);
     }
 
     /* Footer: Continue hint */
     const char *foot = "Press 1, 2, or 3 to choose. Enter to continue.";
-    int fw = w_strlen(foot) * 8;
-    font_draw(cx + (WELCOME_CARD_W - fw) / 2, cy + WELCOME_CARD_H - 32,
-              foot, FONT_BOOT, 16, COLOR_ON_SURFACE_3);
+    int fw = w_strlen(foot) * gw;
+    fb_text_scaled(cx + (card_pw - fw) / 2, cy + card_ph - 52, foot, COLOR_ON_SURFACE_3, S);
 }
 
 static void welcome_modal_input(char c)

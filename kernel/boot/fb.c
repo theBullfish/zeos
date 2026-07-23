@@ -337,6 +337,46 @@ static void draw_glyph_at(int px, int py, uint8_t ch, uint32_t fg)
     }
 }
 
+/* Draw an 8x16 glyph scaled by an integer factor (each source pixel becomes a
+ * scale x scale block). scale=1 is identical to draw_glyph_at. Transparent bg. */
+static void draw_glyph_scaled(int px, int py, uint8_t ch, uint32_t fg, int scale)
+{
+    if (!g_fb || !g_fb->base || scale < 1)
+        return;
+    const uint8_t *glyph = font8x16 + (uint32_t)ch * 16;
+    for (int row = 0; row < 16; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (!(bits & (0x80 >> col)))
+                continue;
+            for (int sy = 0; sy < scale; sy++) {
+                int y = py + row * scale + sy;
+                if (y < 0 || (uint32_t)y >= g_fb->height)
+                    continue;
+                uint32_t *prow = g_fb->base + (uint32_t)y * g_fb->pitch;
+                for (int sx = 0; sx < scale; sx++) {
+                    int x = px + col * scale + sx;
+                    if (x < 0 || (uint32_t)x >= g_fb->width)
+                        continue;
+                    prow[x] = fg;
+                }
+            }
+        }
+    }
+}
+
+/* Public: scaled boot-font text. Advance = 8*scale per glyph, 16*scale per line. */
+void fb_text_scaled(int x, int y, const char *s, uint32_t color, int scale)
+{
+    if (scale < 1) scale = 1;
+    int px = x;
+    while (*s) {
+        if (*s == '\n') { px = x; y += 16 * scale; }
+        else { draw_glyph_scaled(px, y, (uint8_t)*s, color, scale); px += 8 * scale; }
+        s++;
+    }
+}
+
 static void draw_glyph_bg(int px, int py, uint8_t ch, uint32_t fg, uint32_t bg)
 {
     if (!g_fb || !g_fb->base)
