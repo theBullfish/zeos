@@ -61,8 +61,9 @@ static void action_tl(void)
 
 static void action_tr(void)
 {
-    /* Top-right: Notifications / Signal Status (placeholder) */
-    kputs("HC: notifications panel (TODO)\n");
+    /* Top-right: toggle the Notifications / Signal Status panel. */
+    extern void notify_show_all(void);
+    notify_show_all();
 }
 
 static void action_bl(void)

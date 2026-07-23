@@ -378,7 +378,7 @@ void keybinds_execute(action_id_t action)
         break;
 
     case ACTION_COMMAND_PALETTE:
-        /* TODO: open command palette overlay */
+        { extern void palette_toggle(void); palette_toggle(); }
         break;
 
     case ACTION_SHOW_DOCK:
