@@ -13,6 +13,7 @@
 #include "firstboot.h"
 #include "fb.h"
 #include "theme.h"
+#include "vault.h"   /* persist "system/firstboot_complete" (N.3) */
 #include "keyboard.h"
 #include "timer.h"
 #include "io.h"
@@ -557,15 +558,20 @@ static void screen_done(void)
 
 int firstboot_should_run(void)
 {
-    /* TODO: Check VAULT flag "system/firstboot_complete".
-     * For Alpha 0.1, use a static bool. */
-    return !fb_completed;
+    if (fb_completed) return 0;
+    /* Persisted flag survives reboots so first-run only shows once. */
+    uint8_t done = 0;
+    if (vault_load_config("system/firstboot_complete", &done, (uint32_t)sizeof(done))
+            == (int)sizeof(done) && done)
+        return 0;
+    return 1;
 }
 
 void firstboot_mark_complete(void)
 {
     fb_completed = 1;
-    /* TODO: Write VAULT flag "system/firstboot_complete" = 1 */
+    uint8_t done = 1;
+    vault_save_config("system/firstboot_complete", &done, (uint32_t)sizeof(done));
 }
 
 struct firstboot_config firstboot_run(void)
