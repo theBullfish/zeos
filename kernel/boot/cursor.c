@@ -13,6 +13,8 @@
 
 /* ── Global cursor state ── */
 static cursor_t g_cursor;
+static int s_confirm_frames = 0;   /* E.4: countdown to revert the confirm cursor */
+#define CONFIRM_HOLD_FRAMES 18
 
 /* ── Persona colorway table ── */
 typedef struct {
@@ -206,7 +208,7 @@ void cursor_confirm(void) {
     /* Briefly flash checkmark cursor */
     g_cursor.prev_state = g_cursor.state;
     g_cursor.state = CURSOR_CLICK_CONFIRM;
-    /* TODO: timer to revert after BURST_HOLD_FRAMES */
+    s_confirm_frames = CONFIRM_HOLD_FRAMES;   /* cursor_tick reverts it */
 }
 
 void cursor_set_click_anim(click_anim_type_t type) {
@@ -225,6 +227,10 @@ void cursor_tick(float dt) {
         g_cursor.scale = SCALE_NORMAL;
         g_cursor.anim_scale = -1;
     }
+
+    /* E.4: revert the confirm (checkmark) cursor after a brief hold. */
+    if (s_confirm_frames > 0 && --s_confirm_frames == 0)
+        g_cursor.state = g_cursor.prev_state;
 }
 
 /* ── Drawing ── */
