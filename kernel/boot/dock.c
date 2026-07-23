@@ -377,10 +377,10 @@ void dock_draw(void) {
     /* Soft white glow behind the dock so it lifts off the wallpaper. Expanding
      * rounded-top layers (corner radius grows with each ring) -> the halo is
      * soft AND follows the dock's rounded corner instead of a boxy rectangle. */
-    for (int i = 8; i >= 1; i--) {
-        int e = i * 2;                       /* tight halo: max ~16px spread */
+    for (int i = 10; i >= 1; i--) {
+        int e = i;                           /* short halo: ~10px, 1px steps */
         fill_rounded_top_blend(dx - e, dy - e, g_dock.dock_w + 2 * e, full_h + e,
-                               DOCK_CORNER_R + e, 0x0AFFFFFFu);
+                               DOCK_CORNER_R + e, 0x06FFFFFFu);  /* softer */
     }
 
     /* Background with rounded top corners — brighter surface for contrast. */
