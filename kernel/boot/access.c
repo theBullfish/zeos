@@ -194,6 +194,12 @@ void access_set_density(density_mode_t mode)
 
     g_access.density = mode;
 
+    /* Re-layout to the new density: panel height (48/40/32) live. */
+    { extern void panel_set_height(int); extern void compositor_set_panel_h(int);
+      int ph = access_get_panel_height();
+      panel_set_height(ph);
+      compositor_set_panel_h(ph); }
+
     /* Mark everything dirty — control sizes change globally */
     compositor_dirty_all();
     access_save();

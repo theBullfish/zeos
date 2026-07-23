@@ -158,6 +158,8 @@ int compositor_init(int screen_w, int screen_h) {
     return compositor_init_ex(screen_w, screen_h, 1);
 }
 
+void compositor_set_panel_h(int h) { if (h >= 16) g_comp.panel_h = h; }
+
 /* ── Live desktop loop, split for scheduler_run epilogue calls ──
  * compositor_advance(): pre-resolve. Advances time-based state (anim/cursor/
  *   persona springs, overlay STATE ticks) EVERY tick, and re-arms compositing

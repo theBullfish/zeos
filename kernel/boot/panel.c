@@ -149,6 +149,8 @@ static void format_int(char *buf, int val) {
 
 /* ── API ── */
 
+void panel_set_height(int h) { if (h < 16) h = 16; g_panel.height = h; }
+
 void panel_init(int persona, int height) {
     g_panel.height = height;
     g_panel.visible = 1;
