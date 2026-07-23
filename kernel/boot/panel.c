@@ -209,13 +209,22 @@ void panel_update(void) {
     g_panel.chain_live = live;
     g_panel.chain_error = err;
 
-    /* ── Update clock from TSC ── */
-    uint64_t tsc = timer_read_tsc();
-    uint64_t freq = timer_tsc_freq();
-    if (freq > 0) {
-        uint64_t seconds = tsc / freq;
-        int hours = (int)((seconds / 3600) % 24);
-        int minutes = (int)((seconds / 60) % 60);
+    /* ── Update clock: REAL wall-clock (tod / CMOS RTC via tod_init) when
+     *    available, else fall back to TSC uptime so the field is never dead. ── */
+    {
+        extern uint64_t tod_now_unix(void);   /* Unix epoch secs; 0 if tod not ready */
+        int hours, minutes;
+        uint64_t epoch = tod_now_unix();
+        if (epoch > 0) {
+            uint64_t sod = epoch % 86400ULL;          /* seconds into the UTC day */
+            hours   = (int)(sod / 3600);
+            minutes = (int)((sod / 60) % 60);
+        } else {
+            uint64_t freq = timer_tsc_freq();
+            uint64_t seconds = freq ? (timer_read_tsc() / freq) : 0;
+            hours   = (int)((seconds / 3600) % 24);
+            minutes = (int)((seconds / 60) % 60);
+        }
         char prev[16];
         str_copy_n(prev, g_panel.clock_str, sizeof(prev));
         format_clock(g_panel.clock_str, hours, minutes);
