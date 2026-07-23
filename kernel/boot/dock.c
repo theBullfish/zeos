@@ -383,7 +383,9 @@ static void draw_item(int x, int y, dock_item_t *item, int is_selected) {
     int isz = (DOCK_ITEM_SIZE * 3) / 5;                 /* icon fills ~60% of cell */
     int ix = x + (DOCK_ITEM_SIZE - isz) / 2;
     int iy = y + (DOCK_ITEM_SIZE - isz) / 2 - 4;        /* shift up for the indicator */
-    uint32_t icol = focused ? accent
+    /* Focused icon is bright white so it POPS against the accent pad instead
+     * of blending into it (accent-on-accent read as "lost"). */
+    uint32_t icol = focused ? 0xFFFFFFFFu
                   : is_selected ? item->accent
                   : COLOR_ON_SURFACE;
     icon_draw(icon_for_name(item->name), ix, iy, isz, icol);
