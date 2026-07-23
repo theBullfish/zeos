@@ -48,7 +48,9 @@ void kmain_aarch64(void)
     kputs("[M3] PSCI CPU_ON -> secondary core 1...\n");
     int64_t r = psci_cpu_on(1, (uint64_t)secondary_entry);
     kputs("[M3] PSCI returned="); kput_hex((uint64_t)r); kputs("\n");
-    for (volatile long i = 0; i < 200000000 && !g_sec_online; i++) { }
+    /* bounded wait: the secondary does SEV after setting the flag, and the
+     * 100Hz timer also wakes us; cap the spin so a slow/absent core can't stall boot. */
+    for (int t = 0; t < 2000000 && !g_sec_online; t++) __asm__ volatile("");
     if (g_sec_online) {
         kputs("[M3] secondary ONLINE, mpidr="); kput_dec(g_sec_mpidr);
         kputs("  -- SMP alive.\n");
