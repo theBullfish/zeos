@@ -733,6 +733,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern void persistence_init(void);
         shell_vault_init();
         persistence_init();
+
+        /* Accessibility config: set sane defaults + load persisted prefs. Was
+         * NEVER called, so the whole a11y config sat zero-initialized
+         * (anim_speed=0) and no consumer could honor it. Must run before the
+         * compositor/anim loop reads it. */
+        extern void access_init(void);
+        access_init();
     }
 
     /* Wire all subsystems into the chain/MDE graph (CPU, memory, GPU,

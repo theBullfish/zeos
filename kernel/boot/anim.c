@@ -15,6 +15,7 @@
 
 #include "anim.h"
 #include "theme.h"
+#include "access.h"   /* reduced_motion / anim_speed accessibility consumers */
 
 /* No math.h in bare-metal — inline fabs */
 static inline float fabsf_z(float x) { return x < 0 ? -x : x; }
@@ -92,6 +93,27 @@ void anim_tick(float dt)
         dt = 0.1f;
     if (dt <= 0.0f)
         return;
+
+    /* ── Accessibility consumers (M.1 reduced-motion, M.2 anim-speed) ──
+     * reduced-motion OR 0x speed => INSTANT: snap every active spring to its
+     * target this tick (no motion). Otherwise treat anim_speed as a duration
+     * multiplier (0.5x = twice as fast, 2.0x = half speed) by scaling dt. */
+    {
+        access_config_t *acc = access_get();
+        if (acc->reduced_motion || acc->anim_speed <= 0.01f) {
+            for (int i = 0; i < MAX_ANIMS; i++) {
+                spring_anim_t *a = &anims[i];
+                if (!a->active) continue;
+                a->position = a->target;
+                a->velocity = 0.0f;
+                a->active   = 0;
+                anim_count--;
+                if (a->on_update) a->on_update(i, a->position, a->ctx);
+            }
+            return;
+        }
+        dt /= acc->anim_speed;   /* 0.5 => faster, 2.0 => slower */
+    }
 
     for (int i = 0; i < MAX_ANIMS; i++) {
         spring_anim_t *a = &anims[i];
