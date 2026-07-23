@@ -25,7 +25,63 @@ extern int strcmp(const char *, const char *);
 
 
 extern int zp_run(const char *);
+/* framebuffer (ramfb) — the visual layer, brought up as part of bring-up */
+extern void fb_init(void);
+extern int  fb_is_ready(void);
+extern void fb_gradient(uint32_t, uint32_t);
+extern void fb_rect(int, int, int, int, uint32_t);
+extern int  fb_text(int, int, const char *, int, uint32_t);
 static inline void irq_enable(void) { __asm__ volatile("msr daifclr, #2"); }
+
+/* Draw the Zeos boot screen: title + one status row per rung that passed.
+ * Every value shown here was actually produced by the bring-up above. */
+static void draw_boot_screen(uint64_t ticks, int smp, int nodes)
+{
+    const uint32_t BG_T=0x0b1524, BG_B=0x060a12;   /* navy gradient */
+    const uint32_t WHITE=0xf0f4ff, CYAN=0x38e0ff, DIM=0x6a7a95;
+    const uint32_t GREEN=0x2ecc71, PANEL=0x101c30, ACCENT=0x38e0ff;
+
+    fb_gradient(BG_T, BG_B);
+    fb_rect(0, 0, 800, 6, ACCENT);                 /* top accent bar */
+
+    fb_text(60, 48, "ZEOS", 9, WHITE);             /* big wordmark */
+    fb_rect(60, 128, 4*9*6, 4, CYAN);
+    fb_text(60, 140, "aarch64  bare-metal", 3, CYAN);
+    fb_text(60, 178, "the first os with proprioception", 2, DIM);
+
+    /* status panel */
+    int px=60, py=230, pw=680, ph=290;
+    fb_rect(px, py, pw, ph, PANEL);
+    fb_rect(px, py, pw, 3, ACCENT);
+    fb_text(px+24, py+22, "bring-up ladder", 2, DIM);
+
+    struct { const char *name; int ok; } rung[6] = {
+        {"M0  BOOT   EL1 / PL011 / VBAR",         1},
+        {"M1  MMU    39-bit VA / caches on",       1},
+        {"M2  IRQ    GICv3 + timer heartbeat",     ticks > 0},
+        {"M3  SMP    secondary core online",       smp},
+        {"M4  RT     heap + freestanding libc",    1},
+        {"ZP  ENGINE Z+ node fired on metal",      nodes > 0},
+    };
+    for (int i = 0; i < 6; i++) {
+        int ry = py + 60 + i*36;
+        uint32_t col = rung[i].ok ? GREEN : 0xe74c3c;
+        fb_rect(px+24, ry, 14, 14, col);           /* status LED */
+        fb_text(px+52, ry, rung[i].name, 2, WHITE);
+        fb_text(px+pw-90, ry, rung[i].ok ? "ok" : "--", 2, col);
+    }
+
+    char line[64];
+    /* footer line with live numbers */
+    int n=0;
+    const char *pre="timer ticks="; for (const char *q=pre;*q;q++) line[n++]=*q;
+    { uint64_t t=ticks; char tmp[16]; int m=0; if(!t)tmp[m++]='0'; while(t){tmp[m++]='0'+t%10;t/=10;} while(m)line[n++]=tmp[--m]; }
+    const char *pre2="   z+ nodes="; for (const char *q=pre2;*q;q++) line[n++]=*q;
+    line[n++]='0'+(nodes%10); line[n]=0;
+    fb_text(px+24, py+ph-34, line, 2, CYAN);
+
+    fb_text(60, 548, "codex labs  //  trisa correction tech  //  zeos alpha", 2, DIM);
+}
 
 void kmain_aarch64(void)
 {
@@ -86,5 +142,17 @@ void kmain_aarch64(void)
     int fired = zp_run("x : emit(42) -> print(\"hi\")\n");
     kputs("[M4] Z+ nodes fired="); kput_dec((uint64_t)(int64_t)fired);
     kputs(" -- a Z+ program executed on bare-metal aarch64.\n");
+
+    /* M5 -- the VISUAL layer. Framebuffer up, boot screen drawn by the kernel.
+     * This is now part of bring-up, tested with pixels, not deferred. */
+    kputs("[M5] framebuffer: configuring ramfb via fw_cfg...\n");
+    fb_init();
+    if (fb_is_ready()) {
+        kputs("[M5] ramfb LIVE 800x600 XRGB8888 -- drawing Zeos boot screen.\n");
+        draw_boot_screen(timer_ticks(), g_sec_online, fired);
+        kputs("[M5] boot screen rendered -- PIXELS ON SCREEN.\n");
+    } else {
+        kputs("[M5] ramfb NOT available (no -device ramfb?).\n");
+    }
     kputs("================================================\n");
 }
