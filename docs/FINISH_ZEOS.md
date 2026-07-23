@@ -26,15 +26,22 @@ broken or unfinished, fix it; mark `[DONE]` only when seen working.
 ---
 
 ## PHASE 0 — Reach the live desktop & clean the boot seam
-- **L0.1** `[TODO]` Reach the live **Full** desktop from cold boot in the headless
-  harness; screenshot the actual desktop (wallpaper, dock, panel). DoD: a frame
-  showing the composited desktop, no picker.
-- **L0.2** `[TODO]` Kill kprint-over-framebuffer bleed: after `splash_dismiss()`,
-  diagnostics go to **serial only**, never painted over the compositor. DoD:
-  clean desktop frame, zero log text on screen.
-- **L0.3** `[TODO]` Deterministic visual-regression rig: scripted cold-boot →
-  enroll → Full → desktop → drive input, emitting a labeled screenshot set each
-  run. This rig verifies every item below.
+- **L0.1** `[WIP]` Reach the live **Full** desktop from cold boot; screenshot the
+  composited desktop (wallpaper, dock, panel). **Finding 2026-07-22:** the boot
+  path ends at `shell_run(&boot_info)` (`main.c:970`), NOT the graphical desktop.
+  A bypass build (`-DZEOS_SMP_TEST_BYPASS_LOCKSCREEN`) boots straight through to
+  a **blank `COLOR_SURFACE`** — the compositor/dock/panel/wm all exist but nothing
+  in the boot path paints a populated desktop. THIS is the core unfinished seam.
+  Blocked on: wire Full-mode → desktop_init + desktop_draw + compositor + dock +
+  panel + event loop (subagents mapping the exact call sequence).
+- **L0.2** `[DONE]` (2026-07-22) Kill kprint-over-framebuffer bleed: after
+  `splash_dismiss()`, re-assert `kprint_set_splash_mode(1)` so late-boot
+  diagnostics go serial-only. **Evidence:** welcome/PIN frames now render with
+  zero log text over them (was: NOTIFY/scheduler/e1000/DHCP bleeding top-left).
+- **L0.3** `[WIP]` Deterministic headless rig: `xshot.py` (cold-boot → enroll →
+  Full) + `bshot.py` (bypass → desktop), USB-HID keyboard/tablet (no PS/2, matches
+  the ARM target), QMP PNG capture. Remaining: welcome-picker input not advancing
+  under the rig (subagent tracing the PS/2-vs-overlay input difference).
 
 ## PHASE 1 — Input & the feel (cursor, click, drag)
 - **L1.1** `[TODO]` Mouse cursor renders and tracks pointer motion on the desktop.

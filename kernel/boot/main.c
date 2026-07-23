@@ -749,6 +749,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * scheduler-driven shell takes over the framebuffer. */
     splash_dismiss();
 
+    /* The GUI now owns the framebuffer (lockscreen -> welcome -> desktop,
+     * all drawing via fb_* directly). Keep kprint serial-only so late-boot
+     * diagnostics (net/DHCP/scheduler/etc.) don't bleed over the UI. */
+    kprint_set_splash_mode(1);
+
     /* With the registry built, replay the persisted snapshot onto the
      * live chains (B3 priors, vault_version, watchdog/backoff
      * tunables). No-op on first boot. */

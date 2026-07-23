@@ -83,13 +83,12 @@ def mouse_jiggle(dx=40, dy=25):
 key("1","2","3","4"); key("ret"); time.sleep(1.2)
 key("1","2","3","4"); key("ret"); time.sleep(3.0)
 shot("welcome")                                    # mode picker
-# choose [3] Full -- everything, curtain raised
-key("3"); time.sleep(0.5); key("ret"); time.sleep(2.5)
 
-# poll frames while nudging input, to catch the desktop repaint
-for i in range(12):
+# choose [3] Full and advance to the desktop. The welcome may still be drawing
+# when we first send keys, so re-assert the choice across the poll loop.
+for i in range(14):
+    key("3"); key("ret")                           # pick Full + continue
     mouse_jiggle(37 if i % 2 == 0 else -37, 21)
-    if i % 4 == 1: key("esc")
     time.sleep(1.3)
     shot(f"F{i:02d}")
 
