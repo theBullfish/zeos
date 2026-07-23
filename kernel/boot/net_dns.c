@@ -7,6 +7,7 @@
 #include "net_dns.h"
 #include "net_udp.h"
 #include "kprint.h"
+#include "timer.h"
 
 /* DNS cache */
 #define DNS_CACHE_SIZE 8
@@ -14,7 +15,13 @@ static struct {
     char             hostname[64];
     struct ipv4_addr ip;
     int              valid;
+    uint64_t         expires;   /* TSC tick after which this entry is stale */
 } dns_cache[DNS_CACHE_SIZE];
+
+/* TTL of the last answer (seconds), and the transaction id of the outstanding
+ * query — responses whose id doesn't match are ignored (RFC 5452 anti-spoof). */
+static volatile uint32_t dns_reply_ttl;
+static volatile uint16_t dns_query_id;
 
 /* DNS response state (set by callback) */
 static volatile int dns_got_reply = 0;
@@ -99,6 +106,7 @@ static void dns_recv_callback(struct ipv4_addr src, uint16_t src_port,
     if (!(flags & 0x8000))  return;  /* Not a response */
     if (flags & 0x000F)     return;  /* Error code */
     if (ancount == 0)       return;  /* No answers */
+    if (ntohs(hdr->id) != dns_query_id) return;  /* not our query (anti-spoof) */
 
     /* Skip question section */
     const uint8_t *p = (const uint8_t *)data + sizeof(struct dns_hdr);
@@ -127,7 +135,8 @@ past_qname:
 
         uint16_t rtype = ((uint16_t)p[0] << 8) | p[1];
         /* uint16_t rclass = ((uint16_t)p[2] << 8) | p[3]; */
-        /* uint32_t ttl = ...; */
+        uint32_t rttl = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) |
+                        ((uint32_t)p[6] << 8)  |  (uint32_t)p[7];
         uint16_t rdlength = ((uint16_t)p[8] << 8) | p[9];
         p += 10;
 
@@ -137,6 +146,7 @@ past_qname:
             dns_reply_ip.b[1] = p[1];
             dns_reply_ip.b[2] = p[2];
             dns_reply_ip.b[3] = p[3];
+            dns_reply_ttl = rttl;
             dns_got_reply = 1;
             return;
         }
@@ -155,11 +165,16 @@ static int dns_registered = 0;
 
 int dns_resolve(const char *hostname, struct ipv4_addr *out)
 {
-    /* Check cache */
+    /* Check cache — honor TTL: skip and evict stale entries instead of serving
+     * them forever (RFC 1035). */
+    uint64_t now = timer_read_tsc();
     for (int i = 0; i < DNS_CACHE_SIZE; i++) {
         if (dns_cache[i].valid && str_eq(dns_cache[i].hostname, hostname)) {
-            *out = dns_cache[i].ip;
-            return 0;
+            if (dns_cache[i].expires > now) {
+                *out = dns_cache[i].ip;
+                return 0;
+            }
+            dns_cache[i].valid = 0;   /* stale -> re-resolve */
         }
     }
 
@@ -172,7 +187,9 @@ int dns_resolve(const char *hostname, struct ipv4_addr *out)
     /* Build DNS query */
     uint8_t query[256];
     struct dns_hdr *hdr = (struct dns_hdr *)query;
-    hdr->id = htons(0x1234);
+    dns_query_id = (uint16_t)(timer_read_tsc() & 0xFFFF);
+    if (dns_query_id == 0) dns_query_id = 1;
+    hdr->id = htons(dns_query_id);
     hdr->flags = htons(0x0100);  /* Standard query, recursion desired */
     hdr->qdcount = htons(1);
     hdr->ancount = 0;
@@ -202,13 +219,20 @@ int dns_resolve(const char *hostname, struct ipv4_addr *out)
 
     *out = dns_reply_ip;
 
-    /* Add to cache */
-    for (int i = 0; i < DNS_CACHE_SIZE; i++) {
-        if (!dns_cache[i].valid) {
-            str_cpy(dns_cache[i].hostname, hostname, 64);
-            dns_cache[i].ip = dns_reply_ip;
-            dns_cache[i].valid = 1;
-            break;
+    /* Add to cache with a TTL-bounded lifetime (clamped to [10s, 1 day]). */
+    {
+        uint32_t ttl = dns_reply_ttl;
+        if (ttl < 10)    ttl = 10;
+        if (ttl > 86400) ttl = 86400;
+        uint64_t life = (uint64_t)ttl * timer_tsc_freq();
+        for (int i = 0; i < DNS_CACHE_SIZE; i++) {
+            if (!dns_cache[i].valid) {
+                str_cpy(dns_cache[i].hostname, hostname, 64);
+                dns_cache[i].ip = dns_reply_ip;
+                dns_cache[i].expires = timer_read_tsc() + life;
+                dns_cache[i].valid = 1;
+                break;
+            }
         }
     }
 
@@ -230,7 +254,9 @@ int dns_resolve_aaaa(const char *hostname, struct ipv6_addr *out)
 
     uint8_t query[256];
     struct dns_hdr *hdr = (struct dns_hdr *)query;
-    hdr->id = htons(0x5678);
+    dns_query_id = (uint16_t)(timer_read_tsc() & 0xFFFF);
+    if (dns_query_id == 0) dns_query_id = 1;
+    hdr->id = htons(dns_query_id);
     hdr->flags = htons(0x0100);
     hdr->qdcount = htons(1);
     hdr->ancount = 0;
