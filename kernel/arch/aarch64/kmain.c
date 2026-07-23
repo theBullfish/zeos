@@ -81,8 +81,10 @@ void kmain_aarch64(void)
      * handlers (tick source / print sink) get their chain-registry backend ported
      * -- that's the next grind; the engine + runtime themselves are live. */
     kputs("[M4] launching Z+ engine (zplus.c 4535 LOC + real signal runtime)...\n");
-    int fired = zp_run("heartbeat : tick(rate: 1) -> print\n");
-    kputs("[M4] zp_run returned="); kput_dec((uint64_t)(int64_t)fired);
-    kputs(" -- Z+ pipeline executed on bare-metal aarch64.\n");
+    /* kernel-dialect Z+: a program that fires a node on bare-metal ARM. */
+    kputs("\n--- Z+ program: emit(42) -> print (fires + times a node) ---\n");
+    int fired = zp_run("x : emit(42) -> print(\"hi\")\n");
+    kputs("[M4] Z+ nodes fired="); kput_dec((uint64_t)(int64_t)fired);
+    kputs(" -- a Z+ program executed on bare-metal aarch64.\n");
     kputs("================================================\n");
 }
