@@ -321,9 +321,14 @@ int wm_create_surface(const char *title, int chain_id,
 void wm_force_visible(int id) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;
+    /* Cancel the open-animation springs, else their callbacks override the
+     * forced values back toward transparent/small. */
+    if (s->anim_scale_id   >= 0) { anim_cancel(s->anim_scale_id);   s->anim_scale_id   = -1; }
+    if (s->anim_opacity_id >= 0) { anim_cancel(s->anim_opacity_id); s->anim_opacity_id = -1; }
     s->anim_scale = 1.0f;
     s->anim_opacity = 255.0f;
     s->visible = 1;
+    s->workspace = g_wm.active_workspace;   /* ensure it's on the shown workspace */
 }
 
 void wm_detach_surface(int id) {
