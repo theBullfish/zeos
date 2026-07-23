@@ -143,7 +143,8 @@ static void action_inspect_chain(void *ctx)
 static void action_settings(void *ctx)
 {
     (void)ctx;
-    /* Settings placeholder */
+    extern void settings_open(void);
+    settings_open();
 }
 
 static void action_focus_chain(void *ctx)
