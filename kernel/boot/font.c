@@ -41,6 +41,7 @@ static double stbtt_pow(double x, double y) {
 /* Forward-declare heap functions so stb_truetype can use them.
  * Must match heap.h signatures (uint64_t = unsigned long on x86_64). */
 #include <stdint.h>
+#include "access.h"
 void *kmalloc(uint64_t size);
 void  kfree(void *ptr);
 #define STBTT_malloc(x,u)  kmalloc(x)
@@ -195,6 +196,8 @@ int font_draw(int x, int y, const char *text, font_id_t font,
     }
 
     int cx = x;
+    int lsp = access_get()->letter_spacing;   /* M.6: accessibility spacing */
+    int wsp = access_get()->word_spacing;
     uint8_t r = (color >> 16) & 0xFF;
     uint8_t g_c = (color >> 8) & 0xFF;
     uint8_t b = color & 0xFF;
@@ -227,7 +230,7 @@ int font_draw(int x, int y, const char *text, font_id_t font,
             }
         }
 
-        cx += glyph->advance;
+        cx += glyph->advance + lsp + (cp == ' ' ? wsp : 0);   /* M.6 spacing */
     }
 
     return cx;
