@@ -357,12 +357,22 @@ void dock_draw(void) {
 
     int dx = (screen_w - g_dock.dock_w) / 2;
 
-    /* Background with rounded top corners */
-    draw_rounded_top_rect(dx, dy, g_dock.dock_w, full_h, DOCK_CORNER_R,
-                          COLOR_SURFACE_HIGH);
+    /* Soft white glow behind the dock so it lifts off the wallpaper. Layered
+     * low-alpha white rects, expanding outward -> a halo that fades. */
+    for (int i = 14; i >= 1; i--) {
+        int e = i * 2;
+        fb_rect_blend(dx - e, dy - e, g_dock.dock_w + 2 * e, full_h + e,
+                      0x08FFFFFFu);   /* ~3% white per layer, builds near edges */
+    }
 
-    /* Top border (separator line) */
-    fb_hline(dx + DOCK_CORNER_R, dy, g_dock.dock_w - 2 * DOCK_CORNER_R,
+    /* Background with rounded top corners — brighter surface for contrast. */
+    draw_rounded_top_rect(dx, dy, g_dock.dock_w, full_h, DOCK_CORNER_R,
+                          COLOR_SURFACE_TOP);
+
+    /* Bright top edge — the "light" catching the top of the bar (blended). */
+    fb_rect_blend(dx + DOCK_CORNER_R, dy, g_dock.dock_w - 2 * DOCK_CORNER_R, 1,
+                  0x50FFFFFFu);
+    fb_hline(dx + DOCK_CORNER_R, dy + 1, g_dock.dock_w - 2 * DOCK_CORNER_R,
              COLOR_SEPARATOR);
 
     /* Refresh hover zones — every visible cell gets one. */

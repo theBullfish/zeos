@@ -273,9 +273,11 @@ void panel_draw(void) {
     for (int i = 0; i < g_panel.pill_count; i++) {
         panel_pill_t *p = &g_panel.pills[i];
 
-        /* Measure text to size the pill */
+        /* Measure text to size the pill. Width tracks the content: left pad +
+         * status dot + gap + text + right pad. (The +14 is the dot+gap the
+         * text is shifted by; without it the label runs to the pill edge.) */
         int text_w = font_measure(p->name, FONT_UI, TYPE_CAPTION);
-        int pill_w = text_w + PANEL_PILL_HPAD * 2;
+        int pill_w = text_w + PANEL_PILL_HPAD * 2 + 14;
 
         /* Overflow clip: stop if pill would exceed center zone */
         if (cx + pill_w > center_end) break;
