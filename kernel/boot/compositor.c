@@ -42,6 +42,7 @@
 #include "notify.h"
 #include "theme_runtime.h"
 #include "persona_anim.h"
+#include "access.h"   /* density -> panel height (M.3) */
 
 static compositor_t g_comp;
 
@@ -96,7 +97,7 @@ static void draw_desktop(void) {
 int compositor_init_ex(int screen_w, int screen_h, int wire_registry) {
     g_comp.screen_w = screen_w;
     g_comp.screen_h = screen_h;
-    g_comp.panel_h = TOOLBAR_HEIGHT;
+    g_comp.panel_h = access_get_panel_height();   /* M.3: density-driven (48/40/32) */
     g_comp.panel_visible = 1;
     g_comp.dock_h = 88;   /* matches DOCK_HEIGHT (dock.c) */
     g_comp.dock_visible = 0;  /* Auto-hidden by default */
