@@ -359,12 +359,17 @@ int net_chain_register(int parent_id)
     chain_add_node(CHAIN_NET_TX, "frame_request",
                    "frame_request", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_tx_request_resolve);
-    /* CHAIN_FIREWALL hook: gate egress before L2 encap finalizes. On
-     * DROP/REJECT this stamps eth_frame.error so the rest of the
-     * pipeline truncates and hardware_dma emits a "dropped" tx_completion. */
-    chain_add_node(CHAIN_NET_TX, "firewall_check_tx",
-                   "ethernet_frame", "ethernet_frame",
-                   (void (*)(chain_node_t *, void *, void *))firewall_check_tx_resolve);
+    /* NOTE: the CHAIN_FIREWALL egress hook is intentionally NOT a node in
+     * this pipeline. firewall_check_*_resolve internally runs
+     * chain_resolve(CHAIN_FIREWALL), and chain_resolve reuses the per-CPU
+     * scratch buffers (s_scratch_a/b) that the OUTER net pipeline is using
+     * to carry the in-flight ethernet_frame between nodes. A nested resolve
+     * from inside a net node therefore clobbers this pipeline's frame
+     * (len/error corrupted) and every real TX was being dropped before it
+     * reached hardware_dma. The firewall is instead invoked directly from
+     * net_chain_send() (see below) — at top level, where no net resolve
+     * holds the scratch — preserving full egress enforcement without the
+     * re-entrancy. */
     chain_add_node(CHAIN_NET_TX, "l2_encap",
                    "ethernet_frame", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_tx_l2_encap_resolve);
@@ -389,12 +394,10 @@ int net_chain_register(int parent_id)
     chain_add_node(CHAIN_NET_RX, "l2_decap",
                    "ethernet_frame", "ethernet_frame",
                    (void (*)(chain_node_t *, void *, void *))net_rx_l2_decap_resolve);
-    /* CHAIN_FIREWALL hook: gate ingress before frame_delivery hands the
-     * payload to ARP/IP/UDP/TCP. On DROP/REJECT, frame_delivery sees
-     * error=1 and emits a "dropped" delivery_status. */
-    chain_add_node(CHAIN_NET_RX, "firewall_check_rx",
-                   "ethernet_frame", "ethernet_frame",
-                   (void (*)(chain_node_t *, void *, void *))firewall_check_rx_resolve);
+    /* NOTE: the CHAIN_FIREWALL ingress hook is intentionally NOT a node in
+     * this pipeline — same nested-resolve scratch-clobber reason as the TX
+     * side above. firewall_check_rx_resolve is invoked directly from
+     * net_chain_recv() at top level once a frame has been delivered. */
     chain_add_node(CHAIN_NET_RX, "frame_delivery",
                    "ethernet_frame", "delivery_status",
                    (void (*)(chain_node_t *, void *, void *))net_rx_frame_delivery_resolve);
@@ -413,6 +416,23 @@ int net_chain_send(const void *frame, uint16_t len)
          * path is never taken. */
         if (s_hw.tx) return s_hw.tx(frame, len);
         return -1;
+    }
+
+    /* Egress firewall enforcement, run at TOP LEVEL (before we own the
+     * net TX pipeline's scratch). firewall_check_tx_resolve internally
+     * runs chain_resolve(CHAIN_FIREWALL); if that ran as a node INSIDE
+     * CHAIN_NET_TX it would clobber the per-CPU scratch buffers this
+     * pipeline uses to carry the frame (see net_chain_register). Calling
+     * it here — with local structs, outside chain_resolve — keeps the
+     * gate while dodging the re-entrancy. On DROP/REJECT: don't transmit. */
+    {
+        net_eth_frame_t fw_in;
+        net_eth_frame_t fw_out;
+        fw_in.frame = (uint8_t *)(const uint8_t *)frame;
+        fw_in.len   = len;
+        fw_in.error = 0;
+        firewall_check_tx_resolve(0, &fw_in, &fw_out);
+        if (fw_out.error) return -1;   /* firewall dropped this egress frame */
     }
 
     /* Serialize stage+resolve so two cores submitting concurrently
@@ -464,6 +484,21 @@ int net_chain_recv(void *buf, uint16_t max)
     for (int i = 0; i < n; i++) dst[i] = s_rx_frame[i];
 
     spin_unlock(&s_rx_submit_lock);
+
+    /* Ingress firewall enforcement, run at TOP LEVEL after the RX pipeline
+     * resolve has completed (so the per-CPU scratch it uses is free again).
+     * Running firewall_check_rx_resolve as a node INSIDE CHAIN_NET_RX would
+     * nest chain_resolve(CHAIN_FIREWALL) and clobber this pipeline's frame
+     * (see net_chain_register). On DROP/REJECT we deliver nothing upward. */
+    if (n >= 14) {
+        net_eth_frame_t fw_in;
+        net_eth_frame_t fw_out;
+        fw_in.frame = dst;
+        fw_in.len   = (uint16_t)n;
+        fw_in.error = 0;
+        firewall_check_rx_resolve(0, &fw_in, &fw_out);
+        if (fw_out.error) return 0;   /* firewall dropped this ingress frame */
+    }
 
     return n;
 }

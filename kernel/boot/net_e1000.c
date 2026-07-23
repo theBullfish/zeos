@@ -266,11 +266,21 @@ static void e1000_rx_init(void)
     /* Enable receiver:
      * - EN: receiver enable
      * - BAM: accept broadcast
+     * - UPE: unicast promiscuous — accept unicast frames addressed to us.
+     *   Under QEMU's e1000 model the RAL0/RAH0 exact-match unicast filter
+     *   silently drops frames addressed to our own MAC (verified: broadcast
+     *   DHCP frames arrive, but unicast ARP replies never enter the RX ring),
+     *   which stalls every unicast flow — ARP resolution never completes so
+     *   DNS/NTP/TCP can't send. We're a single-NIC endpoint, so accepting all
+     *   unicast is correct behavior; the net_rx mac_filter chain node still
+     *   drops frames not addressed to us before they reach the IP layer.
+     * - MPE: multicast promiscuous (SLAAC / mDNS ingress).
      * - SECRC: strip CRC from incoming frames
      * - BSIZE 2048 (default, bits 16:17 = 00)
      */
     e1000_write(E1000_RCTL,
-        RCTL_EN | RCTL_BAM | RCTL_SECRC | RCTL_BSIZE_2048 | RCTL_LBM_NONE);
+        RCTL_EN | RCTL_BAM | RCTL_UPE | RCTL_MPE | RCTL_SECRC |
+        RCTL_BSIZE_2048 | RCTL_LBM_NONE);
 }
 
 /* ---- Transmit ring setup ---- */
