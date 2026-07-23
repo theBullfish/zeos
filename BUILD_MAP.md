@@ -123,7 +123,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [ ] **E.5** Hot corners: 8px zones, 150ms dwell, TL palette / BL workspace / BR show-desktop — `[UNVERIFIED]` init `[observed]` serial, but ACTION fire never observed. `[source hotcorners.c:35-169]`.
 - [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.
 - [ ] **E.7** Keyboard: set-1 scancode → ASCII — `[UNVERIFIED]` `[source keyboard.c]`; no layout switching.
-- [ ] **E.8** Keybinds system (Super+arrows/1-4/T/D/Space) — `[UNVERIFIED]` `[source keybinds.c:85-156]`; actions PALETTE/TERMINAL/INSPECT/CHAIN_GRAPH stubbed (`keybinds.c:381,434,438,442`).
+- [x] **E.8** Keybinds system (Super+arrows/1-4/T/D/Space) — `[DONE 2026-07-23]` `[source keybinds.c:85-156]`; command-palette action wired (Super+Space). Terminal/inspect/chain-graph still TODO (need app entry points).
 - [ ] **E.9** Input-method framework — `[TODO]`.
 
 ## F. Typography & Icons
@@ -182,10 +182,10 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 ## M. Accessibility  (⚠ whole class: UI + VAULT persist exist, but NO CONSUMER reads them)
 - [x] **M.1** Reduced-motion mode — `[DONE 2026-07-23]` `access_init()` was never called (whole a11y config zero-init); now called at boot + `anim_tick` snaps springs instantly when reduced_motion on. Commit 38c54df.
 - [x] **M.2** Animation speed multiplier (0/0.5/1/2×) — `[DONE 2026-07-23]` `anim_tick` scales dt by anim_speed (0.5×=faster, 2×=slower, 0=instant). Commit 38c54df.
-- [ ] **‼ M.3** 3 density modes (Comfortable/Standard/Compact) — `[BROKEN/no-consumer]` query fns exist `[source access.c:232-245]`, no widget calls them.
+- [x] **M.3** 3 density modes (Comfortable/Standard/Compact) — `[DONE 2026-07-23]` panel height density-driven (48/40/32) at boot + live on access_set_density. Commits 35effb5,f7f481c. Follow-up: dock item size.
 - [ ] **‼ M.4** 3 sensory modes (Standard/Low-Stimuli/High-Contrast) — `[BROKEN/no-consumer]` only sets color_temp `[source access.c:88-93]`; accent-muting consumer unwritten.
 - [ ] **‼ M.5** 44px min touch targets — `[BROKEN/no-consumer]` constant stored, never enforced.
-- [ ] **‼ M.6** Letter/word/line spacing — `[BROKEN/no-consumer]` fields stored, no font consumer.
+- [x] **M.6** Letter/word/line spacing — `[DONE 2026-07-23]` font_draw honors letter_spacing (per-glyph advance) + word_spacing (on spaces). Commit 6d3de02. (line_spacing: no single-line consumer yet.)
 - [ ] **M.7** Focus Mode (suppress non-critical notifications) — `[UNVERIFIED]` `[source notify.c:176-179,808]` (has a real consumer, unlike M.1-M.6).
 - [ ] **M.8** CVD simulation mode — `[TODO]`.
 
