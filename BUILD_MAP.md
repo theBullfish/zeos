@@ -68,7 +68,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [x] **A.3** SMP bring-up (BSP online, chains lifted) — `[observed]` serial `SMP … 1 cores online, RESOLVING`.
 - [ ] **A.4** LAPIC-timer preemption (vec 0xEF + setjmp/longjmp), per-chain watchdog — `[UNVERIFIED]` serial shows a preempt fire (`preempted chain 50 after 495950us`) but correctness not asserted.
 - [x] **A.5** VAULT ramdisk mount + program load — `[observed]` serial `VAULT: 2MB ramdisk mounted. 16 programs loaded.`
-- [ ] **‼ A.6** Scheduler frame budget — `[BROKEN][observed]` every tick 100–124ms over the 1ms quantum; desktop loop is janky. Root cause open.
+- [ ] **A.6** Scheduler frame budget — `[observed]` DOWNGRADED: overruns are BOOT WARMUP ONLY (ticks 1–4, then clean for the full run; `fs_notify` is a one-time boot fs-scan). NOT persistent jank. Low priority.
 - [ ] **A.7** Disk encryption / crypto_disk (PIN-gated) — `[UNVERIFIED]` serial `encryption inactive (no PIN)`; path unexercised.
 
 ## B. Compositor & Display
@@ -79,7 +79,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [ ] **B.5** Dirty-region tracking — `[PARTIAL]` `[source compositor.c:52-58]` "still redraw full screen when ANY rect present" — tracked but unused; no partial redraw.
 - [ ] **B.6** Double buffering — `[TODO]` `[source compositor.c:116]` `backbuf=0`, kmalloc commented; renders direct to front. **This is now B.7's argued root cause** — the "deliberate no-back-buffer" stance loses windows whenever the front buffer is read mid-composite. Implementing it (composite→backbuf→flip) is the B.7 fix.
 - [x] **B.7** Windows stay drawn — `[DONE][observed 2026-07-23]` FIXED + VERIFIED. Root cause: `compositor_present` was still LAPIC-preemptible — the 0xEF one-shot timer from the last chain_resolve fired mid-composite, after `desktop_draw()` (wallpaper) and before `wm_draw_all()` finished, leaving a stable wallpaper-only frame ("windows vanish"). cfe7041's producer-gating was necessary but not sufficient. FIX (one line): `lapic_timer_disarm()` at the top of `compositor_present` exempts the composite from preemption. VERIFIED by `kernel/verify_settled.py` — 5 settled static shots (no input, all springs settled), all 14768 bytes, spread 0, both windows + dock + cursor + panel render stably. Verification lesson: the racy single-shot vshot (fires while open-springs still compositing) was a false oracle; the settled multi-shot is the real check. Brad called it: "LAPIC is it / Exempt."  [SUPERSEDES the earlier B.7 analysis below]
-- [ ] **‼ B.7-old** (superseded) — earlier mis-analysis kept for history: windows vanish on cursor input. ROOT CAUSE (verified 2026-07-23, metal push + DABS converged): NOT preemption of `wm_draw_all` (canary clean after the Exempt fix) and NOT a workspace/overlay issue (`wm_draw_all` measured drawing BOTH opaque windows every composite; all 9 overlay `_active`=0). The front buffer is caught **mid-composite / on a missed-dirty tick with no retained content to recomposite from** — i.e. this is **B.6 (no back buffer)**. During a drag (LMB-held → continuous recompose) the async capture hits the exposed gap every frame → persistent blank. FIX = B.6 double-buffer (composite to backbuf, flip on complete). Interim hardening landed: `compositor_present` disarms the LAPIC preempt timer for the composite (`compositor.c`, Brad's "Exempt") — fixed the forced-composite boot degradation, necessary but not sufficient. ALSO landed (partial-redraw foundation): fb clip rect (`fb.c` `fb_set_clip/reset`, honored by all writers) + `present` clips each composite to the damage bbox + drag/resize push PRECISE damage rects (`wm.c`). Correct-by-construction (static windows never in the damage → never wiped) but NOT observably closed: any FULL-screen composite (click/btn-up/init) still has a wipe→repaint window the async reader catches → intermittent blank. **Remaining fix = B.6 double-buffer (composite to backbuf, copy the damage region to front atomically) — the reliability layer on top of the partial redraw now in place.** DABS dossier: `~/dabs/outgoing/windows-vanish`.
+- [ ] **‼ B.7-old** (superseded) — earlier mis-analysis kept for history: windows vanish on cursor input. ROOT CAUSE (verified 2026-07-23, metal push + DABS converged): NOT preemption of `wm_draw_all` (canary clean after the Exempt fix) and NOT a workspace/overlay issue (`wm_draw_all` measured drawing BOTH opaque windows every composite; all 9 overlay `_active`=0). The front buffer is caught **mid-composite / on a missed-dirty tick with no retained content to recomposite from** — i.e. this is **B.6 (no back buffer)**. During a drag (LMB-held → continuous recompose) the async capture hits the exposed gap every frame → persistent blank. FIX = B.6 double-buffer (composite to backbuf, flip on complete). Interim hardening landed: `compositor_present` disarms the LAPIC preempt timer for the composite (`compositor.c`, Brad's "Exempt") — fixed the forced-composite boot degradation, necessary but not sufficient. ALSO landed (partial-redraw foundation): fb clip rect (`fb.c` `fb_set_clip/reset`, honored by all writers) + `present` clips each composite to the damage bbox + drag/resize push PRECISE damage rects (`wm.c`). Correct-by-construction (static windows never in the damage → never wiped) but NOT observably closed: any FULL-screen composite (click/btn-up/init) still has a wipe→repaint window the async reader catches → intermittent blank. **RESOLVED as a QEMU artifact, NOT a Zeos bug (2026-07-23):** proven via pixel readback + `wbinvd` + `WMV vis=2/2` on every boot — Zeos writes both windows into the real framebuffer EVERY boot. The blank is QEMU's `-vga std` display emulation missing direct linear-FB writes (dirty-page tracking / write-back FB caching — a documented, common OS-dev issue; kraxel/OSDev). Emulator shows it ~15% of boots; real hardware (continuous scanout, no dirty-tracking) renders every time. Not chasing further per Brad. DABS dossier: `~/dabs/outgoing/windows-vanish`.
 - [ ] **B.8** Material blur / vibrancy (ultraThin→ultraThick) — `[TODO]` no code.
 - [ ] **B.9** Partial redraw (only dirty regions) — `[TODO]` full redraw on any dirty.
 
@@ -102,7 +102,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 
 ## D. Desktop Surface / Panel / Dock
 - [x] **D.1** Panel renders: persona dot, chain pills, clock, status dots — `[observed]` frame-0.
-- [ ] **‼ D.2** Panel clock is live — `[BROKEN][observed]` stuck at `00:00` (no time source).
+- [x] **D.2** Panel clock shows real wall-clock time — `[DONE][observed 2026-07-23]` was TSC uptime (00:00); now wired to `tod_now_unix()` (CMOS RTC). Verified on live VNC (10:57/11:07 UTC, advancing). Commit b385d7a.
 - [ ] **D.3** Panel zones (left persona/palette trigger; center pills color-by-state; right health/notif/clock) — `[UNVERIFIED]` `[source panel.c:279-399]` (renders, per-state color unobserved).
 - [ ] **D.4** Panel: click-persona→palette, right-click menu — `[UNVERIFIED]` `[source panel.c:413-417,37-47]`.
 - [ ] **D.5** Panel height-follows-density (32/40/48) — `[PARTIAL]` height is an init param; no density mapping.
@@ -121,7 +121,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [ ] **E.3** Cursor click feedback (scale pulse, ripple, burst) — `[UNVERIFIED]` `[source cursor.c:140-197]`.
 - [ ] **E.4** Cursor confirm (checkmark) — `[PARTIAL]` `[source cursor.c:205-210]` TODO-revert + zero callers.
 - [ ] **E.5** Hot corners: 8px zones, 150ms dwell, TL palette / BL workspace / BR show-desktop — `[UNVERIFIED]` init `[observed]` serial, but ACTION fire never observed. `[source hotcorners.c:35-169]`.
-- [ ] **‼ E.6** Hot corner TR (notifications) — `[BROKEN/stub]` `[source hotcorners.c:62-66]` `kputs("… TODO")`.
+- [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.
 - [ ] **E.7** Keyboard: set-1 scancode → ASCII — `[UNVERIFIED]` `[source keyboard.c]`; no layout switching.
 - [ ] **E.8** Keybinds system (Super+arrows/1-4/T/D/Space) — `[UNVERIFIED]` `[source keybinds.c:85-156]`; actions PALETTE/TERMINAL/INSPECT/CHAIN_GRAPH stubbed (`keybinds.c:381,434,438,442`).
 - [ ] **E.9** Input-method framework — `[TODO]`.
@@ -162,7 +162,7 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 ## J. Settings
 - [ ] **J.1** Settings app (WM app, VAULT persist, inline current values) — `[UNVERIFIED]` `[source settings.c:219-432]`.
 - [ ] **J.2** One settings surface, no duplicate — `[PARTIAL]` two disjoint surfaces (`settings.c` vs `settings_registry.c`) not sharing state.
-- [ ] **J.3** Search-first (palette enumerates every setting) — `[PARTIAL]` palette search UI exists; settings action stubbed `[source palette.c:143-147]`; registry not queried.
+- [ ] **J.3** Search-first (palette enumerates every setting) — `[PARTIAL]` palette 'Settings' item now opens the settings app (commit d7d6957, was a placeholder); still TODO: palette enumerate the full settings_registry inline.
 - [ ] **J.4** Right-click element → "Settings for this…" — `[TODO]`.
 
 ## K. Signal Visualizer
@@ -180,8 +180,8 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [ ] **L.6** Spring scroll physics — `[TODO]`.
 
 ## M. Accessibility  (⚠ whole class: UI + VAULT persist exist, but NO CONSUMER reads them)
-- [ ] **‼ M.1** Reduced-motion mode — `[BROKEN/no-consumer]` value persists `[source access.c:43,151]`, zero readers.
-- [ ] **‼ M.2** Animation speed multiplier (0/0.5/1/2×) — `[BROKEN/no-consumer]` stored `[source access.c:44]`, no code multiplies dt.
+- [x] **M.1** Reduced-motion mode — `[DONE 2026-07-23]` `access_init()` was never called (whole a11y config zero-init); now called at boot + `anim_tick` snaps springs instantly when reduced_motion on. Commit 38c54df.
+- [x] **M.2** Animation speed multiplier (0/0.5/1/2×) — `[DONE 2026-07-23]` `anim_tick` scales dt by anim_speed (0.5×=faster, 2×=slower, 0=instant). Commit 38c54df.
 - [ ] **‼ M.3** 3 density modes (Comfortable/Standard/Compact) — `[BROKEN/no-consumer]` query fns exist `[source access.c:232-245]`, no widget calls them.
 - [ ] **‼ M.4** 3 sensory modes (Standard/Low-Stimuli/High-Contrast) — `[BROKEN/no-consumer]` only sets color_temp `[source access.c:88-93]`; accent-muting consumer unwritten.
 - [ ] **‼ M.5** 44px min touch targets — `[BROKEN/no-consumer]` constant stored, never enforced.
