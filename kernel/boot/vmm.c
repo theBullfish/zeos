@@ -128,6 +128,81 @@ void vmm_map_range(uint64_t virt, uint64_t phys, uint64_t count, uint64_t flags)
     tlb_shootdown_range(virt & ~0xFFFULL, count);
 }
 
+/*
+ * B.7 ROOT-CAUSE FIX — map the framebuffer WRITE-COMBINING (the field-standard
+ * framebuffer memory type: writes bypass the cache so the display sees them, but
+ * the CPU batches sequential writes into burst transactions so it stays fast).
+ *
+ * vmm_init() identity-maps the whole low 4GB write-back cached (P|W|HUGE, no cache
+ * bits => default WB), silently re-caching the FB the firmware handed us. Direct
+ * compositor writes then sit in CPU cache and the display misses them => "windows
+ * vanish". The fix everyone converges on: FB = WC, via PAT (or MTRR on old HW),
+ * plus a cached back buffer + one bulk present (B.6). Here: reprogram PAT slot 1
+ * to WC, then tag the FB's 2MB pages to select it (PWT=1, PCD=0, PAT=0 -> index 1).
+ */
+#define IA32_PAT 0x277u
+
+static inline uint64_t rd_msr(uint32_t m) {
+    uint32_t lo, hi;
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(m));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void wr_msr(uint32_t m, uint64_t v) {
+    __asm__ volatile("wrmsr" :: "c"(m), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
+}
+
+/* Set PAT entry 1 (default WT) to Write-Combining (0x01). Intel SDM 11.11.8
+ * cache-safe sequence: CD=1 + WBINVD + TLB flush around the MSR write. BSP, boot. */
+static void pat_enable_wc(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; pop %0" : "=r"(flags) :: "memory");
+    __asm__ volatile("cli");
+
+    uint64_t cr0;
+    __asm__ volatile("mov %%cr0, %0" : "=r"(cr0));
+    __asm__ volatile("mov %0, %%cr0" :: "r"((cr0 & ~(1ULL << 29)) | (1ULL << 30))); /* CD=1,NW=0 */
+    __asm__ volatile("wbinvd");
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");   /* flush TLB */
+
+    uint64_t pat = rd_msr(IA32_PAT);
+    pat = (pat & ~(0xFFULL << 8)) | (0x01ULL << 8);            /* PA1 = WC */
+    wr_msr(IA32_PAT, pat);
+
+    __asm__ volatile("wbinvd");
+    __asm__ volatile("mov %0, %%cr3" :: "r"(cr3) : "memory");
+    __asm__ volatile("mov %0, %%cr0" :: "r"(cr0));             /* restore caching */
+
+    if (flags & (1ULL << 9)) __asm__ volatile("sti");
+}
+
+void vmm_set_range_wc(uint64_t phys, uint64_t size)
+{
+    if (!pml4 || !size) return;
+    pat_enable_wc();
+
+    uint64_t start = phys & ~0x1FFFFFULL;                        /* round down 2MB */
+    uint64_t end   = (phys + size + 0x1FFFFFULL) & ~0x1FFFFFULL;  /* round up 2MB */
+
+    for (uint64_t a = start; a < end; a += 0x200000ULL) {
+        for (int half = 0; half < 2; half++) {
+            uint64_t v = a + (half ? KERNEL_VBASE : 0ULL);
+            uint64_t *pdpt = get_or_create_entry(pml4, pml4_index(v), 0);
+            if (!pdpt) continue;
+            uint64_t *pd = get_or_create_entry(pdpt, pdpt_index(v), 0);
+            if (!pd) continue;
+            uint64_t *e = &pd[pd_index(v)];
+            if (!(*e & PTE_PRESENT) || !(*e & PTE_HUGE)) continue;
+            *e |=  PTE_WRITETHROUGH;    /* PWT (bit 3) -> select PAT index 1 (WC) */
+            *e &= ~PTE_NOCACHE;         /* PCD (bit 4) = 0 */
+            *e &= ~(1ULL << 12);        /* PAT bit (huge page) = 0 */
+            __asm__ volatile("invlpg (%0)" :: "r"(v) : "memory");
+        }
+    }
+}
+
 void vmm_init(void)
 {
     /* Allocate PML4 */

@@ -28,6 +28,10 @@
 /* Higher-half kernel base — canonical upper half */
 #define KERNEL_VBASE   0xFFFF800000000000ULL
 
+/* B.7 fix: map a physical range write-combining (PAT slot 1) in the live tables —
+ * the field-standard framebuffer memory type: visible + burst-fast. See vmm.c. */
+void vmm_set_range_wc(uint64_t phys, uint64_t size);
+
 /* Initialize VMM — create kernel page tables, switch to them */
 void vmm_init(void);
 

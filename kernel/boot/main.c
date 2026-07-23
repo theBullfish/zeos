@@ -483,6 +483,19 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     vmm_init();
     kputs("done (4GB identity + higher-half).\n");
 
+    /* B.7 root-cause fix: the identity map above marked the whole low 4GB
+     * write-back cached, which re-caches the framebuffer -> compositor writes sit
+     * in CPU cache and the display misses them (the "windows vanish" scream).
+     * Remap the FB range uncached so writes reach VRAM directly. */
+    {
+        uint64_t fb_phys = fb_phys_base();
+        uint64_t fb_sz   = (uint64_t)fb_pitch_pixels() * fb_height() * 4;
+        if (fb_phys && fb_sz) {
+            vmm_set_range_wc(fb_phys, fb_sz);
+            kputs("VMM: framebuffer mapped write-combining (B.7 fix).\n");
+        }
+    }
+
     /* Initialize kernel heap */
     splash_progress("heap", 24);
     kputs("Initializing heap... ");

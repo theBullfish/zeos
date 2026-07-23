@@ -62,13 +62,59 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 
 ---
 
+## ⧉ THE LINE — three deliverables, one sort (2026-07-23)
+
+The product is **three deliverables**: ONE portable chip-agnostic OS, updated universally;
+a **Base Installer x86**; a **Base Installer ARM**. Each installer gets *only* its own
+arch-specific updates. The OS never changes across chip type.
+
+**The line between them is `O.2` — the HAL (`hal.h`).** Everything *above* the line is the
+OS (portable, one codebase). Everything *below* it is an arch backend (per-installer). The
+sort below assigns every list item to a side. The finding: **~95% of the list is the OS and
+already sits above the line** (it calls `fb`/`anim`/`chain`/`vault`, not `io.h` directly);
+the arch layer below the line is small and fully enumerable; the ARM backend **already boots
+first-light**. So ARM is not "a problem," and finishing on x86 is not lock-in — the feature
+code is portable by construction. O.2 doesn't block features; it *formalizes* a line the code
+already mostly respects and relocates the handful of direct arch calls.
+
+### DELIVERABLE 1 — The Portable OS (above the line; ships to every chip)
+The whole functional list: **A.2, A.5, A.6, A.7 · all of B · all of C · all of D (display +
+logic) · E.2–E.6, E.8, E.9 · all of F · all of G · H.2–H.6 (the stack) · all of I · all of J
+· all of K · all of L · all of M · all of N · all of P.** These are already arch-neutral.
+
+### DELIVERABLE 2 — Base Installer x86 (below the line; Intel/AMD only)
+The x86 backend that lets the OS run: x86 UEFI glue → `BOOTX64.EFI` (x86 half of A.1) · SMP
+via LAPIC/INIT-SIPI (x86 half of A.3) · **LAPIC-timer preemption (A.4)** · GDT/IDT/PIC/PIT ·
+port I/O (`io.h`) · CMOS-RTC time source (the source under D.2) · PS/2 mouse+kbd bus (driver
+under E.1/E.7) · PCI port/ECAM + IRQ for NIC drivers (bus under H.1). **= O.1 + x86 half of O.2.**
+
+### DELIVERABLE 3 — Base Installer ARM (below the line; aarch64 only) — first light EXISTS
+The aarch64 backend: ARM UEFI stub / `boot.S` · generic-timer preemption (ARM half of A.4) ·
+GICv3 + SMP via PSCI (ARM half of A.3) · PL011 MMIO UART · ramfb · aarch64 MMU/page tables ·
+ECAM PCI. **= O.3 + ARM half of O.2.** Boot/MMU/GIC/timer/SMP/ramfb/Z+ already green on
+cortex-a72.
+
+### THE ORDER WE HIT THEM
+1. **Deliverable 1 (Portable OS)** driven to VERIFIED on the x86 backend that already runs —
+   this *is* "finish x86 first." Work the functional list in order; each item earns its check.
+2. **O.2** formalizes the line (extract `hal.h`; relocate the direct arch calls). Deliverable 2
+   (x86) is then the backend already running; nothing new to build, just named below the line.
+3. **Deliverable 3 (ARM)** = the *same* OS recompiled onto the aarch64 backend that already
+   boots. A recompile against O.3, not a port.
+
+**Which side any future item lands on:** does it touch silicon (a specific timer, interrupt
+controller, bus, MMU, boot protocol)? → below the line, into an installer. Everything else →
+the OS. When in doubt it's the OS.
+
+---
+
 ## A. Foundation & Boot
 - [x] **A.1** UEFI boot (GNU-EFI, OVMF, BOOTZ.EFI → BOOTX64.EFI) reaches kernel — `[observed]` boots to shell, `vshot.py`.
 - [x] **A.2** Chain-resolution scheduler runs as the primitive — `[observed]` serial `[scheduler] entering chain-resolution main loop`.
 - [x] **A.3** SMP bring-up (BSP online, chains lifted) — `[observed]` serial `SMP … 1 cores online, RESOLVING`.
 - [ ] **A.4** LAPIC-timer preemption (vec 0xEF + setjmp/longjmp), per-chain watchdog — `[UNVERIFIED]` serial shows a preempt fire (`preempted chain 50 after 495950us`) but correctness not asserted.
 - [x] **A.5** VAULT ramdisk mount + program load — `[observed]` serial `VAULT: 2MB ramdisk mounted. 16 programs loaded.`
-- [ ] **A.6** Scheduler frame budget — `[observed]` DOWNGRADED: overruns are BOOT WARMUP ONLY (ticks 1–4, then clean for the full run; `fs_notify` is a one-time boot fs-scan). NOT persistent jank. Low priority.
+- [ ] **‼ A.6** Composite IS the frame budget — `[measured 2026-07-23]` per-composite cost profiled (QEMU-TCG, emulation-inflated ~5–10×): desktop/wallpaper 22ms + wm/windows 51ms + panel 0.7ms + dock 30ms + WC flip ~16ms = **~120ms/composite**, and it's persistent per dirty composite (8 consecutive + 4 profiled frames), not just warmup. Idle = 0 (no composite when clean); interaction/animation composites every tick ⇒ slow. NOT a memory-type issue (FB is WC now) — it's **redraw-everything-every-frame** with heavy per-pixel primitives (wallpaper gradient, window shadows/gloss, dock effects recomputed from scratch). FIX = damage/partial-redraw (B.5/B.9) + per-window backing / cached static content (wallpaper, shadows computed once) per `specs/SCALE_WINDOWS_MEMORY.md`. Real-HW/KVM fps unmeasured (TCG-inflated). `[measured compositor per-phase tsc]`
 - [ ] **A.7** Disk encryption / crypto_disk (PIN-gated) — `[UNVERIFIED]` serial `encryption inactive (no PIN)`; path unexercised.
 
 ## B. Compositor & Display
@@ -77,8 +123,8 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 - [ ] **B.3** 6-layer paint order (desktop→surfaces→panel→dock→overlays→cursor) — `[UNVERIFIED]` `[source compositor.c:211-249]` order correct in code; full correctness not observed (see B.7).
 - [ ] **B.4** Frame timing from TSC — `[UNVERIFIED]` `[source compositor.c:170-176]`.
 - [ ] **B.5** Dirty-region tracking — `[PARTIAL]` `[source compositor.c:52-58]` "still redraw full screen when ANY rect present" — tracked but unused; no partial redraw.
-- [ ] **B.6** Double buffering — `[TODO]` `[source compositor.c:116]` `backbuf=0`, kmalloc commented; renders direct to front. **This is now B.7's argued root cause** — the "deliberate no-back-buffer" stance loses windows whenever the front buffer is read mid-composite. Implementing it (composite→backbuf→flip) is the B.7 fix.
-- [x] **B.7** Windows stay drawn — `[DONE][observed 2026-07-23]` FIXED + VERIFIED. Root cause: `compositor_present` was still LAPIC-preemptible — the 0xEF one-shot timer from the last chain_resolve fired mid-composite, after `desktop_draw()` (wallpaper) and before `wm_draw_all()` finished, leaving a stable wallpaper-only frame ("windows vanish"). cfe7041's producer-gating was necessary but not sufficient. FIX (one line): `lapic_timer_disarm()` at the top of `compositor_present` exempts the composite from preemption. VERIFIED by `kernel/verify_settled.py` — 5 settled static shots (no input, all springs settled), all 14768 bytes, spread 0, both windows + dock + cursor + panel render stably. Verification lesson: the racy single-shot vshot (fires while open-springs still compositing) was a false oracle; the settled multi-shot is the real check. Brad called it: "LAPIC is it / Exempt."  [SUPERSEDES the earlier B.7 analysis below]
+- [x] **B.6** Double buffering / atomic present — `[DONE][measured+observed 2026-07-23]` composite into a WB-cached back buffer, atomic flip of the whole finished scene to the WC front once per composite. `fb.c`: `fb_backbuf_init` (kmalloc pitch×height×4), `fb_present_begin` (pointer-swap `g_fb->base`→backbuf so every existing writer paints offscreen — zero writer edits), `fb_present_end` (bulk copy backbuf→front, restore). Wired in `compositor_present`; `compositor_init` logs `double buffer active`. VERIFIED: settled render STABLE (windows present, spread 0) with FB write-combining — reader never sees a half-drawn frame. Flip is a full-frame copy today; B.9 makes it damage-only, and the copy loop itself is a SIMD/`rep movs` modernization candidate (audit). `[source fb.c; compositor.c]`
+- [x] **B.7** Windows stay drawn — `[DONE][measured+observed 2026-07-23]` **REAL ROOT CAUSE FOUND + FIXED + VERIFIED.** The framebuffer was mapped **write-back cached**: `vmm_init` identity-maps the low 4GB with `PTE_PRESENT|PTE_WRITABLE|PTE_HUGE` and no cache bits (`vmm.c:160,180`) = default WB. That re-caches the FB the firmware handed us; compositor pixel writes sit in CPU cache and the display never sees them reach VRAM on the sampled timing => intermittent "windows vanish". The classic self-inflicted linear-FB caching bug. FIX: `vmm_set_range_uncached()` (`vmm.c`) remaps the FB's 2MB pages `PTE_NOCACHE` (PCD) in both the identity map and the KERNEL_VBASE mirror, INVLPG each; called from `main.c` right after `vmm_init`. VERIFIED by `kernel/verify_settled.py`: **BEFORE** 5 settled shots all `9622` bytes → `MIXED/blank`; **AFTER** 5 settled shots all `14816` bytes → `STABLE windows`. spread 0 both runs (deterministic), single-variable change. **Prior analyses were WRONG and are corrected here:** (1) "LAPIC-preemption of the composite, fixed by `lapic_timer_disarm()`" — that exempt is kept as cheap hardening but was NOT the cause; (2) "resolved as a QEMU `-vga std` display artifact, not a Zeos bug, not chasing" — flat wrong, it WAS a Zeos bug (our cache mapping). Brad steered it: the display problem is common for direct linear-FB writes *only when you cache the FB* — self-inflicted. Follow-on (perf, not correctness): UC makes direct compositor writes slow → B.6 double-buffer (composite into WB backbuf, single flip to the UC front) + upgrade UC→WC via PAT is the speed path. `[SUPERSEDES both the LAPIC close above and the QEMU-artifact analysis below]`
 - [ ] **‼ B.7-old** (superseded) — earlier mis-analysis kept for history: windows vanish on cursor input. ROOT CAUSE (verified 2026-07-23, metal push + DABS converged): NOT preemption of `wm_draw_all` (canary clean after the Exempt fix) and NOT a workspace/overlay issue (`wm_draw_all` measured drawing BOTH opaque windows every composite; all 9 overlay `_active`=0). The front buffer is caught **mid-composite / on a missed-dirty tick with no retained content to recomposite from** — i.e. this is **B.6 (no back buffer)**. During a drag (LMB-held → continuous recompose) the async capture hits the exposed gap every frame → persistent blank. FIX = B.6 double-buffer (composite to backbuf, flip on complete). Interim hardening landed: `compositor_present` disarms the LAPIC preempt timer for the composite (`compositor.c`, Brad's "Exempt") — fixed the forced-composite boot degradation, necessary but not sufficient. ALSO landed (partial-redraw foundation): fb clip rect (`fb.c` `fb_set_clip/reset`, honored by all writers) + `present` clips each composite to the damage bbox + drag/resize push PRECISE damage rects (`wm.c`). Correct-by-construction (static windows never in the damage → never wiped) but NOT observably closed: any FULL-screen composite (click/btn-up/init) still has a wipe→repaint window the async reader catches → intermittent blank. **RESOLVED as a QEMU artifact, NOT a Zeos bug (2026-07-23):** proven via pixel readback + `wbinvd` + `WMV vis=2/2` on every boot — Zeos writes both windows into the real framebuffer EVERY boot. The blank is QEMU's `-vga std` display emulation missing direct linear-FB writes (dirty-page tracking / write-back FB caching — a documented, common OS-dev issue; kraxel/OSDev). Emulator shows it ~15% of boots; real hardware (continuous scanout, no dirty-tracking) renders every time. Not chasing further per Brad. DABS dossier: `~/dabs/outgoing/windows-vanish`.
 - [ ] **B.8** Material blur / vibrancy (ultraThin→ultraThick) — `[TODO]` no code.
 - [ ] **B.9** Partial redraw (only dirty regions) — `[TODO]` full redraw on any dirty.

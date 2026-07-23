@@ -7,8 +7,16 @@
 
 #include "fb.h"
 #include "font8x16.h"
+#include "heap.h"
 
 static struct zeos_framebuffer *g_fb;
+/* B.6 double buffer: g_front is the real scanned-out base (never reassigned after
+ * fb_init). g_backbuf is an offscreen composite target (0 until fb_backbuf_init).
+ * During a composite g_fb->base is swapped to g_backbuf so every existing writer
+ * paints offscreen; the flip copies the whole scene to g_front in one shot, so the
+ * scanout never observes a half-drawn frame. */
+static uint32_t *g_front;
+static uint32_t *g_backbuf;
 static uint32_t cursor_x;  /* Character column */
 static uint32_t cursor_y;  /* Character row */
 static uint32_t max_cols;
@@ -22,10 +30,43 @@ static uint32_t max_rows;
 void fb_init(struct zeos_framebuffer *fb)
 {
     g_fb = fb;
+    g_front = fb->base;
+    g_backbuf = 0;
     cursor_x = 0;
     cursor_y = 0;
     max_cols = fb->width / 8;
     max_rows = fb->height / 16;
+}
+
+/* ── B.6: double buffer / atomic present ──
+ * Allocate the offscreen composite target. Idempotent; returns 0 on success,
+ * -1 if unavailable (heap exhausted) — callers fall back to direct rendering. */
+int fb_backbuf_init(void) {
+    if (!g_fb || !g_fb->base) return -1;
+    if (g_backbuf) return 0;
+    uint64_t px = (uint64_t)g_fb->pitch * g_fb->height;
+    g_backbuf = (uint32_t *)kmalloc(px * 4);
+    return g_backbuf ? 0 : -1;
+}
+
+int fb_backbuf_ready(void) { return g_backbuf != 0; }
+
+/* Begin a composite: retarget every fb writer at the backbuf by swapping the one
+ * base pointer they all share. No-op (draws straight to front) if no backbuf. */
+void fb_present_begin(void) {
+    if (g_backbuf && g_fb) g_fb->base = g_backbuf;
+}
+
+/* End a composite: flip the finished scene to the scanned-out front in one copy,
+ * then restore the draw target to front so post-present drawers (cursor) land
+ * directly on screen. The full-frame copy is the atomic present. */
+void fb_present_end(void) {
+    if (!g_backbuf || !g_fb) return;
+    uint64_t px = (uint64_t)g_fb->pitch * g_fb->height;
+    uint32_t *d = g_front;
+    const uint32_t *s = g_backbuf;
+    for (uint64_t i = 0; i < px; i++) d[i] = s[i];
+    g_fb->base = g_front;
 }
 
 void fb_clear(uint32_t color)
@@ -184,7 +225,7 @@ uint32_t fb_height(void)
 uint64_t fb_phys_base(void)
 {
     /* Identity-mapped: virtual == physical for the FB on UEFI boot. */
-    return g_fb ? (uint64_t)(uintptr_t)g_fb->base : 0;
+    return g_front ? (uint64_t)(uintptr_t)g_front : 0;
 }
 
 uint32_t fb_pitch_pixels(void)

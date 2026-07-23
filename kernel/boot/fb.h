@@ -37,6 +37,13 @@ uint64_t fb_phys_base(void);
 /* Pitch in pixels (>= width). */
 uint32_t fb_pitch_pixels(void);
 
+/* B.6 double buffer / atomic present: composite into a WB back buffer, flip the
+ * whole scene to the WC front in one bulk copy. */
+int  fb_backbuf_init(void);
+int  fb_backbuf_ready(void);
+void fb_present_begin(void);
+void fb_present_end(void);
+
 /* Set a single pixel (bounds-checked) */
 void fb_pixel(int x, int y, uint32_t color);
 

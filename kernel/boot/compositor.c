@@ -113,15 +113,14 @@ int compositor_init_ex(int screen_w, int screen_h, int wire_registry) {
     for (int i = 0; i < COMP_LAYER_COUNT; i++)
         g_comp.layer_visible[i] = 1;
 
-    /* Back buffer allocation (optional — direct rendering for now) */
+    /* B.6 double buffer: composite into a WB-cached back buffer (fast per-pixel
+     * work), then flip the finished scene to the WC front in one bulk copy. */
     g_comp.backbuf = 0;
     g_comp.backbuf_size = screen_w * screen_h * 4;
-
-    /*
-     * Double buffering: allocate back buffer from heap
-     * g_comp.backbuf = (uint32_t *)kmalloc(g_comp.backbuf_size);
-     * For now, render directly to framebuffer (simpler, slight tearing).
-     */
+    if (fb_backbuf_init() == 0)
+        kputs("COMP: double buffer active (composite -> WC flip)\n");
+    else
+        kputs("COMP: double buffer unavailable -- direct render\n");
 
     kputs("COMP: initialized ");
     kput_dec(screen_w);
@@ -227,6 +226,7 @@ void compositor_present(void) {
 
     int dirty = compositor_consume_dirty();
     if (dirty) {
+        fb_present_begin();   /* B.6: retarget writers to the WB back buffer */
         desktop_draw();       /* wallpaper + icons (bottom) */
         wm_draw_all();        /* windows */
         panel_update(); panel_draw();
@@ -252,6 +252,7 @@ void compositor_present(void) {
         theme_apply_night_shift();
         { extern void idle_post_overlay(void); idle_post_overlay(); }
         g_comp.fully_dirty = 0;
+        fb_present_end();     /* B.6: atomic flip of the finished scene to WC front */
     }
 
     /* Cursor: UNGATED, drawn on top every tick (it moves without a composite). */
