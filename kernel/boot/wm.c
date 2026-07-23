@@ -17,6 +17,7 @@
 #include "anim.h"
 #include "theme.h"
 #include "kprint.h"
+#include "icon_render.h"
 
 /* ── Global state ── */
 static wm_state_t g_wm;
@@ -987,6 +988,17 @@ void wm_mouse_move(int x, int y) {
 
 /* ── Rendering ── */
 
+/* Lighten (f>0, toward white) or darken (f<0) a color. */
+static uint32_t wm_shade(uint32_t c, float f) {
+    int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
+    if (f >= 0) { r += (int)((255 - r) * f); g += (int)((255 - g) * f); b += (int)((255 - b) * f); }
+    else        { r += (int)(r * f);         g += (int)(g * f);         b += (int)(b * f); }
+    if (r < 0) r = 0; if (r > 255) r = 255;
+    if (g < 0) g = 0; if (g > 255) g = 255;
+    if (b < 0) b = 0; if (b > 255) b = 255;
+    return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
 void wm_draw_chrome(chain_surface_t *s) {
     uint32_t title_bg = s->focused ? COLOR_SURFACE_HIGH : COLOR_SURFACE;
     uint32_t border = s->focused ? s->accent : COLOR_SEPARATOR;
@@ -1024,30 +1036,21 @@ void wm_draw_chrome(chain_surface_t *s) {
         int ccx = btn_x + WM_CONTROL_SIZE / 2;
         int ccy = btn_y + WM_CONTROL_SIZE / 2;
         int cr  = WM_CONTROL_SIZE / 2 - 1;
+        uint32_t base = ctrl_colors[b];
 
-        /* Button dot */
-        fb_circle_filled(ccx, ccy, cr, ctrl_colors[b]);
+        /* Glossy dot: base fill, hairline dark rim, top-left specular sheen. */
+        fb_circle_filled(ccx, ccy, cr, base);
+        fb_circle(ccx, ccy, cr, wm_shade(base, -0.40f));
+        fb_circle_filled(ccx - cr / 3, ccy - cr / 3, cr / 3, wm_shade(base, 0.55f));
 
-        /* Crisp vector glyph, dark on the colored dot. */
-        uint32_t gc = COLOR_SURFACE;
-        int g = cr - 3;                       /* glyph half-extent */
-        switch (b) {
-        case 0: /* close — X (2px strokes) */
-            fb_line(ccx - g, ccy - g, ccx + g, ccy + g, gc);
-            fb_line(ccx - g + 1, ccy - g, ccx + g + 1, ccy + g, gc);
-            fb_line(ccx + g, ccy - g, ccx - g, ccy + g, gc);
-            fb_line(ccx + g - 1, ccy - g, ccx - g - 1, ccy + g, gc);
-            break;
-        case 1: /* minimize — horizontal bar */
-            fb_rect(ccx - g, ccy - 1, 2 * g + 1, 2, gc);
-            break;
-        case 2: /* maximize — square outline */
-            fb_rect_outline(ccx - g, ccy - g, 2 * g + 1, 2 * g + 1, gc, 2);
-            break;
-        default: /* signal — center dot */
-            fb_circle_filled(ccx, ccy, 2, gc);
-            break;
-        }
+        /* Real vector icon (from icon_render.c), dark tint of the button hue. */
+        uint32_t gc = wm_shade(base, -0.62f);
+        icon_id_t ic = (b == 0) ? ICON_CLOSE
+                     : (b == 1) ? ICON_MINIMIZE
+                     : (b == 2) ? ICON_MAXIMIZE
+                                : ICON_SIGNAL;
+        int isz = 2 * (cr - 2);
+        icon_draw(ic, ccx - isz / 2, ccy - isz / 2, isz, gc);
     }
 
     /* Title text */

@@ -291,33 +291,31 @@ void panel_draw(void) {
             if (ptok) s_panel_tokens[s_panel_token_count++] = ptok;
         }
 
-        /* Pill background — accent for live, dim for paused, red for error */
-        uint32_t bg;
-        uint32_t fg;
-        if (p->status == CHAIN_LIVE) {
-            /* Accent at ~20% opacity over surface */
-            bg = (p->color & 0x00FFFFFF) | 0x33000000;
-            fg = p->color;
-        } else if (p->status == CHAIN_ERROR) {
-            bg = (COLOR_DANGER & 0x00FFFFFF) | 0x33000000;
-            fg = COLOR_DANGER;
-        } else {
-            bg = COLOR_SURFACE_TOP;
-            fg = COLOR_ON_SURFACE_3;
-        }
+        /* Pill background is a dim elevated surface so the NAME stays readable.
+         * Status is shown by a colored status dot + (when focused) an accent
+         * underline -- not by flooding the pill with the accent color, which
+         * made the same-color text invisible. */
+        chain_surface_t *surf = wm_get_surface(p->surface_id);
+        uint32_t bg = (surf && surf->focused) ? COLOR_SURFACE_TOP : COLOR_SURFACE_HIGH;
+        uint32_t fg = (p->status == CHAIN_ERROR) ? COLOR_DANGER : COLOR_ON_SURFACE;
+        uint32_t dot = (p->status == CHAIN_LIVE)  ? COLOR_SUCCESS
+                     : (p->status == CHAIN_ERROR) ? COLOR_DANGER
+                     : COLOR_ON_SURFACE_4;
 
-        /* Draw pill rounded rect */
         draw_rounded_rect(cx, pill_y, pill_w, pill_h, pill_r, bg);
 
-        /* If this surface is focused, draw accent border */
-        chain_surface_t *surf = wm_get_surface(p->surface_id);
+        /* Status dot at the left of the pill */
+        fb_circle_filled(cx + PANEL_PILL_HPAD + 3,
+                         pill_y + pill_h / 2, 3, dot);
+
+        /* Focused: accent underline */
         if (surf && surf->focused) {
-            /* Top accent line on pill */
-            fb_hline(cx + pill_r, pill_y, pill_w - 2 * pill_r, g_panel.persona_color);
+            fb_hline(cx + pill_r, pill_y + pill_h - 2,
+                     pill_w - 2 * pill_r, g_panel.persona_color);
         }
 
-        /* Pill text */
-        font_draw(cx + PANEL_PILL_HPAD,
+        /* Pill text (shifted right to clear the status dot) */
+        font_draw(cx + PANEL_PILL_HPAD + 12,
                   pill_y + (pill_h - TYPE_CAPTION) / 2,
                   p->name, FONT_UI, TYPE_CAPTION, fg);
 

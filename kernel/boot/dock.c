@@ -17,6 +17,7 @@
 #include "kprint.h"
 #include "ui_hover.h"
 #include "ui_context_menu.h"
+#include "icon_render.h"
 
 /* ── UI primitive wiring ── */
 #define DOCK_MAX_HOVERS  (DOCK_MAX_PINNED + DOCK_MAX_RUNNING)
@@ -301,6 +302,25 @@ static void draw_state_dot(int cx, int cy, chain_status_t state) {
 }
 
 /* Draw a single dock item cell */
+/* Map an app/pin name to one of the real vector icons (icon_render.c). */
+static icon_id_t icon_for_name(const char *name) {
+    if (!name) return ICON_CHAIN;
+    char c = name[0];
+    if (c >= 'a' && c <= 'z') c -= 32;
+    switch (c) {
+        case 'F': return (name[1] == 'o' || name[1] == 'O') ? ICON_FOLDER : ICON_FOLDER; /* Files/Folder */
+        case 'E': return ICON_PENCIL;      /* Editor */
+        case 'T': return (name[1] == 'r' || name[1] == 'R') ? ICON_TRASH : ICON_TERMINAL;
+        case 'S': return ICON_SETTINGS;    /* Settings */
+        case 'C': return ICON_CHAIN;       /* Calculator/Chain */
+        case 'B': return ICON_BROWSER;     /* Browser */
+        case 'N': return ICON_NETWORK;
+        case 'A': return ICON_AUDIO;
+        case 'U': return ICON_USER;
+        default:  return ICON_CHAIN;
+    }
+}
+
 static void draw_item(int x, int y, dock_item_t *item, int is_selected) {
     /* Selection highlight */
     if (is_selected) {
@@ -308,20 +328,14 @@ static void draw_item(int x, int y, dock_item_t *item, int is_selected) {
                       (item->accent & 0x00FFFFFF) | 0x3D000000);  /* ~24% */
     }
 
-    /* Icon placeholder: first letter of name, centered in cell */
-    char letter[2] = { item->name[0], 0 };
-    if (letter[0] >= 'a' && letter[0] <= 'z')
-        letter[0] -= 32;  /* Uppercase */
+    /* Real vector app icon, centered in the cell. */
+    int isz = (DOCK_ITEM_SIZE * 3) / 5;                 /* icon fills ~60% of cell */
+    int ix = x + (DOCK_ITEM_SIZE - isz) / 2;
+    int iy = y + (DOCK_ITEM_SIZE - isz) / 2 - 4;        /* shift up for the state dot */
+    uint32_t icol = is_selected ? item->accent : COLOR_ON_SURFACE;
+    icon_draw(icon_for_name(item->name), ix, iy, isz, icol);
 
-    int tw = font_measure(letter, FONT_BOOT, TYPE_HEADING);
-    int lh = font_line_height(FONT_BOOT, TYPE_HEADING);
-    int tx = x + (DOCK_ITEM_SIZE - tw) / 2;
-    int ty = y + (DOCK_ITEM_SIZE - lh) / 2 - 2;  /* Shift up slightly for dot */
-
-    uint32_t text_color = is_selected ? item->accent : COLOR_ON_SURFACE;
-    font_draw(tx, ty, letter, FONT_BOOT, TYPE_HEADING, text_color);
-
-    /* State dot below the letter */
+    /* State dot below the icon */
     if (item->has_state_dot) {
         int dot_cx = x + DOCK_ITEM_SIZE / 2;
         int dot_cy = y + DOCK_ITEM_SIZE - DOCK_DOT_RADIUS - 2;
