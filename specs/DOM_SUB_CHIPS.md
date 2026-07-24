@@ -30,7 +30,7 @@ coordination layer built entirely on infrastructure Zeos already has:
 |-------------------------------|------------------------------------------|
 | Detect a chip attaching live  | `hotplug.c` — `CHAIN_HOTPLUG_PCI`, poll-diff, `HOTPLUG_EVT_PCI_ATTACH/DETACH` |
 | Talk to the chip              | `gpu_goya.c` — BAR mapping, MSI-X completion ISR, register read/write, already multi-instance (`GOYA_MAX_DEVICES=8`) |
-| Route work to a specific chip | `chain_registry.c` / `chain_t.affinity` + `smp_chain_owner()` fallback pattern |
+| Route work to a specific chip | `chain_registry.c` / `chain_t.affinity` + `smp_chain_owner()` pattern **exists for CPU cores, not yet wired for chips** (correction below) |
 | Priority-ish scheduling       | `chain_t.watchdog_timeout_us`, `resolve_interval_ticks`, B3 belief |
 
 Dom/Sub adds: a **cohort** concept (which chips belong to the same
@@ -183,9 +183,17 @@ typedef enum {
 } dom_sub_class_t;
 ```
 
-Routing reuses the existing `chain_t.affinity` field and
-`smp_chain_owner()` fallback pattern (`smp.c:771-778`) — no new
-scheduling primitive needed:
+Routing extends the existing `chain_t.affinity` field and
+`smp_chain_owner()` fallback pattern (`smp.c:771-778`) — same mechanism as
+CPU-core chain ownership, no new scheduling *primitive* needed. **Correction
+2026-07-24** (paradigm-conformance audit, `specs/PARADIGM_CONFORMANCE_AUDIT.md`
+§4): this is currently CPU-affinity only — no code today sets `affinity` on a
+Goya chain, and `gpu_goya.c` has no CFA wrapping of its BAR/DMA handles either.
+The pattern is right to extend, but §1-7 of this spec's "already exists"
+framing for chip-level affinity was aspirational, not accurate as of tonight —
+Q.5 (below) needs to actually wire per-chip affinity into `gpu_goya.c`'s chain
+registration, not just point `chain_t.affinity` at a chip index and assume the
+rest works:
 
 - `DOM_SUB_CLASS_THINK` chains: `affinity` is pinned to the current Dom's
   chip slot. If the Dom changes mid-flight (§4), only chains created
