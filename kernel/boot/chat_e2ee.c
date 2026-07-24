@@ -2,14 +2,32 @@
  * Zeos — chat-zeos E2EE: real per-room group key derivation +
  * AES-XTS-256 body encryption.
  *
- * Real, no stubs. Each enabled room owns:
- *   - a 32-byte salt persisted to vault at SOVEREIGN tier under
- *     /chat/<room>/e2ee/salt
+ * Each enabled room owns:
+ *   - a 32-byte salt persisted to vault under /chat/<room>/e2ee/salt,
+ *     created with vault_create(path, VAULT_TIER_SOVEREIGN) -- the
+ *     SOVEREIGN tier is recorded as inode metadata only
  *   - a 32-byte K_room derived as
  *       HMAC-SHA256(salt, member_canonical || room_id)
- *   - K_room is held in memory only; non-members can't reproduce the
- *     same digest because cross-context perception of SOVEREIGN
- *     blobs is denied by cfa_resolve.
+ *   - K_room/K_tweak are held in memory only (g_rooms[], plain
+ *     uint8_t[32] fields, no persistence)
+ *
+ * CORRECTED 2026-07-24 (paradigm-conformance audit, real gap, not just a
+ * naming nitpick): this comment used to claim "non-members can't reproduce
+ * the same digest because cross-context perception of SOVEREIGN blobs is
+ * denied by cfa_resolve." That was false on two counts, both checked
+ * directly against the actual code, not assumed: (1) this file never
+ * includes cfa_handle.h or calls cfa_wrap/cfa_resolve anywhere -- K_room/
+ * K_tweak are plain struct fields, not CFA handles; (2) more seriously,
+ * vault_read()/vault_write() (vault.c) do not enforce the SOVEREIGN tier
+ * tag at all -- they read/write by path unconditionally once the vault is
+ * mounted, no MasQ perception check in that call path. So the salt's
+ * SOVEREIGN tag is currently a label, not an access gate, and this file
+ * provides NO cryptographic non-member exclusion of its own beyond
+ * whatever isolation (if any) exists elsewhere in the calling context.
+ * Tracked as bible-db R.1 (BROKEN) -- if real cross-context denial is
+ * needed here, it has to be built (either wire real CFA wrapping for
+ * K_room, or add actual tier enforcement to vault_read/vault_write), not
+ * assumed to already exist.
  *
  * Body cipher:
  *   AES-XTS-256 with the 64-byte expanded key (K_room || K_tweak).
