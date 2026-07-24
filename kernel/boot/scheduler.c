@@ -738,7 +738,11 @@ void scheduler_run(void)
         watchdog_arm_all(tsc_start, cycles_per_us);
 
         /* 2. Resolve the entire chain graph in dependency order. */
+#ifdef ZEOS_DIAG_A9_SKIP_CHAIN_TICK   /* TEMP-INSTR A.9 bisection */
+        int errors = 0;
+#else
         int errors = chain_registry_tick();
+#endif
 
         /* 3. We made it back. Clear armed deadlines so survivors aren't
          *    falsely killed next tick. */
