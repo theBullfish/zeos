@@ -290,7 +290,7 @@ static void cmd_gpu_load(const char *args);
 static void cmd_scheduler_log(const char *args);
 static void cmd_tickrate(const char *args);
 static void cmd_chain_backoff(const char *args);
-static void cmd_preempt_test(const char *args);
+void cmd_preempt_test(const char *args);
 static void cmd_cores(const char *args);
 static void cmd_persistence(const char *args);
 static void cmd_hotplug(const char *args);
@@ -629,7 +629,7 @@ static void preempt_test_hang_node(chain_node_t *self, void *in, void *out)
     }
 }
 
-static void cmd_preempt_test(const char *args)
+void cmd_preempt_test(const char *args)
 {
     (void)args;
     kputs("  preempt-test: registering hang-chain ...\n");

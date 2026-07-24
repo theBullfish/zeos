@@ -957,6 +957,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     {
         extern void scheduler_init(void);
         scheduler_init();
+
+        /* A.4 selftest: prove LAPIC-timer preemption actually rescues a
+         * hung chain_resolve (not just that the timer fires). Runs the
+         * same check as the shell's `preempt-test` command, but at boot
+         * so it's observable on serial without keyboard input. */
+        extern void cmd_preempt_test(const char *args);
+        cmd_preempt_test(0);
     }
 
     /* Now that all single-threaded init is done, release APs from
