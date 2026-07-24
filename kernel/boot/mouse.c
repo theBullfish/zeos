@@ -417,12 +417,24 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
 {
     (void)vector;
     (void)error_code;
+    extern void lapic_eoi(void);
 
     uint8_t status = inb(PS2_STATUS_PORT);
 
-    /* Verify data is from auxiliary device (mouse) */
-    if (!(status & PS2_STATUS_AUX))
+    /* Explicit EOI on every path (defensive -- isr_dispatch in idt.c ALSO
+     * auto-EOIs the 8259 for every 0x20-0x2F vector regardless of what the
+     * handler does, so 8259-level EOI was never actually missing here).
+     * lapic_eoi() added 2026-07-23 on the theory that the LAPIC's own
+     * in-service bit needs clearing too (scheduler.c's timer ISR, which
+     * fires reliably every tick, always calls it) -- NOT CONFIRMED to fix
+     * the real symptom (see BUILD_MAP/bible-db E.1: real mouse/keyboard
+     * interrupts still fire exactly once, ever, and never again, unchanged
+     * after this addition). Root cause of that is still open. */
+    if (!(status & PS2_STATUS_OBF) || !(status & PS2_STATUS_AUX)) {
+        pic_eoi(12);
+        lapic_eoi();
         return;
+    }
 
     uint8_t data = inb(PS2_DATA_PORT);
 
@@ -451,8 +463,9 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
         break;
     }
 
-    /* Send EOI to slave PIC (IRQ >= 8) then master */
+    /* Send EOI to slave PIC (IRQ >= 8) then master, then the LAPIC. */
     pic_eoi(12);
+    lapic_eoi();
 }
 
 uint32_t mouse_chain_drain(void)

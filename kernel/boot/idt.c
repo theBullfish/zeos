@@ -292,6 +292,12 @@ void pic_unmask(uint8_t irq)
     if (irq < 8) {
         port = 0x21;
     } else {
+        /* Slave IRQs (8-15) cascade through the master's IRQ2 line. Unmasking
+         * only the slave-side bit leaves that signal unable to ever reach the
+         * CPU if IRQ2 itself is still masked on the master -- which it is by
+         * default (pic_remap masks everything). Every slave IRQ is dead until
+         * this is opened; do it here so no caller has to remember it. */
+        outb(0x21, inb(0x21) & ~(1 << 2));
         port = 0xA1;
         irq -= 8;
     }

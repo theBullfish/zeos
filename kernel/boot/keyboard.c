@@ -423,10 +423,18 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
 {
     (void)vector;
     (void)error_code;
+    extern void lapic_eoi(void);
 
     uint8_t scancode = inb(KB_DATA_PORT);
     if (scancode == 0xE0) {
         e0_prefix = 1;
+        /* Explicit EOI added 2026-07-23 (was missing on every path here
+         * before this fix) -- see mouse.c's mouse_isr for the full note.
+         * isr_dispatch also auto-EOIs the 8259 for this vector regardless,
+         * so this alone was likely never the real block; lapic_eoi() is
+         * unconfirmed to fix the actual symptom either. See bible-db E.7. */
+        pic_eoi(1);
+        lapic_eoi();
         return;
     }
     int extended = e0_prefix;
@@ -435,6 +443,8 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
      * each scheduler tick. Decoding and ASCII translation happen there
      * via keyboard_inject_scancode -> process_scancode. */
     kb_sc_push(scancode, extended);
+    pic_eoi(1);
+    lapic_eoi();
 }
 
 void keyboard_inject_char(char c)
