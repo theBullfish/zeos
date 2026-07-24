@@ -168,6 +168,17 @@ void compositor_set_panel_h(int h) { if (h >= 16) g_comp.panel_h = h; }
  *   then draws the cursor UNGATED on top every tick.
  * NOTE: neither calls chain_registry_tick() -- the old compositor_frame() did
  * (recursion trap). The scheduler drives chain_registry_tick() between these. */
+/* B.4 selftest: prove frame_dt (TSC-derived) tracks real elapsed time.
+ * Sums frame_dt over a fixed window of ticks starting from the SECOND
+ * call (the first has no prior last_frame_tsc baseline, so its dt isn't
+ * meaningful), and independently measures the TSC delta over the same
+ * window. Prints once, self-contained, matches the A.4 selftest style. */
+static uint32_t s_dt_selftest_ticks = 0;
+static float    s_dt_selftest_sum = 0.0f;
+static uint64_t s_dt_selftest_start_tsc = 0;
+static int      s_dt_selftest_done = 0;
+#define DT_SELFTEST_WINDOW 3
+
 void compositor_advance(void) {
     uint64_t now = timer_read_tsc();
     uint64_t freq = timer_tsc_freq();
@@ -176,6 +187,27 @@ void compositor_advance(void) {
     else
         g_comp.frame_dt = 1.0f / 60.0f;
     g_comp.last_frame_tsc = now;
+
+    if (!s_dt_selftest_done && freq > 0) {
+        if (s_dt_selftest_start_tsc == 0) {
+            s_dt_selftest_start_tsc = now;   /* baseline: second call onward */
+        } else {
+            s_dt_selftest_sum += g_comp.frame_dt;
+            s_dt_selftest_ticks++;
+            if (s_dt_selftest_ticks == DT_SELFTEST_WINDOW) {
+                uint64_t real_us = (now - s_dt_selftest_start_tsc) * 1000000ULL / freq;
+                uint32_t sum_us = (uint32_t)(s_dt_selftest_sum * 1000000.0f);
+                kputs("[compositor] B.4 selftest: TSC-summed frame_dt=");
+                kput_dec(sum_us);
+                kputs("us over ");
+                kput_dec((uint64_t)DT_SELFTEST_WINDOW);
+                kputs(" ticks, independent TSC wall-clock delta=");
+                kput_dec(real_us);
+                kputs("us\n");
+                s_dt_selftest_done = 1;
+            }
+        }
+    }
 
     hotcorners_tick(mouse_get_x(), mouse_get_y());
     anim_tick(g_comp.frame_dt);
