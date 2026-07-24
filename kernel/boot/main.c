@@ -890,8 +890,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
      * bytes typed at the gate -- keyboard.c routes them straight to
      * lockscreen_input() while the overlay is active. */
     {
-#ifdef ZEOS_SMP_TEST_BYPASS_LOCKSCREEN
-        kputs("[main] SMP-test build: cold-boot lockscreen bypassed\n");
+#if defined(ZEOS_SMP_TEST_BYPASS_LOCKSCREEN) || defined(ZEOS_DIAG_SKIP_PIN_GATE)
+        kputs("[main] diag build: cold-boot lockscreen bypassed\n");
 #else
         if (cold_boot_login_required()) {
             kputs("[main] cold-boot login required\n");
