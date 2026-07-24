@@ -279,11 +279,25 @@ void pic_remap(void)
     (void)mask2;
 }
 
+uint32_t g_legacy_irq_fire_count = 0;  /* TEMP-INSTR A.8: bumped by mouse/keyboard ISRs */
+
 void pic_eoi(uint8_t irq)
 {
     if (irq >= 8)
         outb(0xA0, 0x20);  /* EOI to slave */
     outb(0x20, 0x20);      /* EOI to master */
+}
+
+/* TEMP-INSTR (A.8 diagnosis): OCW3 read of IRR/ISR on both PICs. Not called
+ * from anywhere by default -- wired in temporarily by scheduler.c for a
+ * bounded diagnostic poll. Remove once A.8 is resolved. */
+void pic_read_irr_isr(uint8_t *master_irr, uint8_t *master_isr,
+                       uint8_t *slave_irr, uint8_t *slave_isr)
+{
+    outb(0x20, 0x0A); *master_irr = inb(0x20);   /* OCW3: select IRR, read */
+    outb(0x20, 0x0B); *master_isr = inb(0x20);   /* OCW3: select ISR, read */
+    outb(0xA0, 0x0A); *slave_irr  = inb(0xA0);
+    outb(0xA0, 0x0B); *slave_isr  = inb(0xA0);
 }
 
 void pic_unmask(uint8_t irq)

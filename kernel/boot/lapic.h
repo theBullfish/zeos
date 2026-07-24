@@ -31,4 +31,9 @@ void     lapic_timer_oneshot(uint32_t ticks, uint8_t vector);
 /* Disarm a previously-armed timer (mask LVT, zero init count). Idempotent. */
 void     lapic_timer_disarm(void);
 
+/* TEMP-INSTR (A.8 diagnosis): read any LAPIC register by offset (the real
+ * lapic_read() is static/internal-linkage only). Remove once A.8 resolved. */
+uint32_t lapic_read_reg_diag(uint32_t reg);
+void     lapic_write_lint0_diag(uint32_t val);  /* TEMP-INSTR A.8 */
+
 #endif /* ZEOS_LAPIC_H */

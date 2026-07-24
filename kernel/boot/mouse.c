@@ -418,6 +418,7 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
     (void)vector;
     (void)error_code;
     extern void lapic_eoi(void);
+    extern uint32_t g_legacy_irq_fire_count; g_legacy_irq_fire_count++;  /* TEMP-INSTR A.8 */
 
     uint8_t status = inb(PS2_STATUS_PORT);
 
