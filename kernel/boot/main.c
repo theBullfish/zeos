@@ -691,6 +691,30 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     mouse_init();
     kputs("done.\n");
 
+    /* A.8 fix (2026-07-25): route the legacy keyboard (IRQ1) and mouse (IRQ12)
+     * interrupts through the IOAPIC to their existing IDT vectors, instead of
+     * the 8259 -> ExtINT/LINT0 virtual-wire path. That path was delivering each
+     * legacy IRQ EXACTLY ONCE then latching forever (measured: 8259 IRR bit
+     * stuck=1, ISR=0, the CPU never re-vectors -- the A.8/E.1/E.7 single-fire
+     * bug). On q35 with the LAPIC enabled the IOAPIC is the correct delivery
+     * path; ioapic_init() had initialized it but left every redirection entry
+     * masked with nothing routed. Route these two lines and mask them on the
+     * 8259 so only the IOAPIC delivers (no double-delivery). PIT/IRQ0 stays on
+     * ExtINT -- it delivers fine and the scheduler depends on it. Must run
+     * after keyboard_init/mouse_init (they pic_unmask their lines) and before
+     * sti. The ISRs already call lapic_eoi(), the correct ack for IOAPIC
+     * edge-triggered delivery. */
+    if (ioapic_count() > 0) {
+        uint8_t apic = (uint8_t)lapic_id();
+        ioapic_set_irq(1,  0x21, apic);   /* keyboard IRQ1  -> vector 0x21 */
+        ioapic_set_irq(12, 0x2C, apic);   /* mouse    IRQ12 -> vector 0x2C */
+        pic_mask(1);
+        pic_mask(12);
+        kputs("IOAPIC: routed IRQ1(kbd)+IRQ12(mouse) -> LAPIC vec, masked on 8259\n");
+    } else {
+        kputs("IOAPIC: not present -- keyboard/mouse remain on 8259 ExtINT (A.8 unfixed)\n");
+    }
+
     /* Wire COM1 RX IRQ (IRQ4 / vector 0x24). The serial UART itself
      * was configured in serial_init() earlier; this hooks the ISR
      * that drains incoming bytes into the CHAIN_SERIAL_IN ring. */
