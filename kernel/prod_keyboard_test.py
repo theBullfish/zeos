@@ -72,11 +72,28 @@ for _ in range(2):
     for d in ("1","2","3","4"): key(d)
     key("ret")
     time.sleep(0.6)
-time.sleep(2.0)
+time.sleep(1.5)
 shot("1-after-pin")
 
-# give the desktop a moment to compose
-time.sleep(2.0)
+# First-boot welcome flow: persona picker "Press 1/2/3, Enter to continue".
+# Wait for the prompt, pick persona 1, Enter.
+t0=time.time()
+while time.time()-t0<20:
+    if "welcome" in ser().lower() or "persona" in ser().lower() or "Set a PIN" not in ser()[-200:]:
+        break
+    time.sleep(0.3)
+time.sleep(1.0)
+key("1")
+time.sleep(0.3)
+key("ret")
+
+# wait for the live scheduler loop (desktop composites once it runs)
+t0=time.time(); ready=False
+while time.time()-t0<30:
+    if "chain-resolution main loop" in ser(): ready=True; break
+    time.sleep(0.3)
+print("scheduler loop up:", ready)
+time.sleep(3.0)
 shot("2-desktop")
 
 cmd("quit")
