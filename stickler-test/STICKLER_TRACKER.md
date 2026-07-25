@@ -70,11 +70,16 @@ without discussing) and one write-failure fork (04). Language-decision items sta
 
 | Program | Runs | Report | Score | Verdict | Fixed |
 |---------|------|--------|-------|---------|-------|
-| 06_message_queue    | PASS | 🔍 | 88 / B  | FIX (1×P2 partition elision) | ⬜ |
-| 07_chat_system      | PASS | 🔍 | 84 / B  | FIX (1×P1 concat, 1×P2 dangling) | ⬜ |
-| 08_cicd_pipeline    | PASS | 🔍 | 84 / B  | FIX (1×P1 concat×3, 1×P2 config) | ⬜ |
-| 09_anomaly_detector | PASS | 🔍 | 90 / A− | SHIP (2×P2) — resonance/σ exemplar | ⬜ |
-| 10_game_server      | PASS | 🔍 | 86 / B  | FIX (1×P1 `state = dead`, 1×P2) | ⬜ |
+| 06_message_queue    | PASS | 🔍 | 88 / B  | FIX (1×P2 partition elision) | ✅ no P1; P2 partition-wiring annotate pending |
+| 07_chat_system      | PASS | 🔍 | 84 / B  | FIX (1×P1, 1×P2) | ✅ P1 `"@"+name`→`mentions(user)`. P2 dangling modifiers pending |
+| 08_cicd_pipeline    | PASS | 🔍 | 84 / B  | FIX (1×P1, 1×P2) | ✅ P1 3× notify concat→templated. P2 config pending config_surface.zp |
+| 09_anomaly_detector | PASS | 🔍 | 90 / A− | SHIP (2×P2) | ✅ ship; P2 polish (`+` union, exec path) noted |
+| 10_game_server      | PASS | 🔍 | 86 / B  | FIX (1×P1, 1×P2) | ✅ P1 `state = dead`→`state -> dead`. P2 feedback-form review pending |
+
+**Batch 2 FIX phase: P1s COMPLETE & VERIFIED.** 07/08/10 re-run PASS; full-corpus regression holds
+at **83/85** (no regression). Remaining P2s are polish/config-blocked (config_surface.zp candidate).
+
+**Progress: 10/85 programs judged; batches 1–2 P1-clean. Next: B3 (11–15). Open: bare-`.` ruling → 85/85.**
 
 **Batch-2 program-level fix goals (the "then fix" phase — verify each via zplus-run):**
 - 07: `"@" + user.name` concat → signal-native mention match; attach the dangling modifiers.

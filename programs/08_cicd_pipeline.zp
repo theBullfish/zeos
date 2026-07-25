@@ -30,8 +30,8 @@ test : exec("make test") -> {
     gate(fail) -> report(fail: "test")
 }
 
-report -> gate(all_pass) -> notify(success: "tests passed on " + branch)
-report -> gate(any_fail) -> notify(fail: "pipeline failed on " + branch)
+report -> gate(all_pass) -> notify(success, branch: branch)
+report -> gate(any_fail) -> notify(fail, branch: branch)
 
 // ── DEPLOY PIPELINE ────────────────────────
 
@@ -85,7 +85,7 @@ promote : deploy(artifact, to: "production", weight: 5% ~ 100%, ramp: 10m)
 // weight ramps from 5% to 100% over 10 minutes
 // if anything goes wrong during ramp, rollback fires
 
-promote -> gate(complete) -> notify(success: "deployed " + commit.short)
+promote -> gate(complete) -> notify(success, commit: commit.short)
 
 // ── ROLLBACK ───────────────────────────────
 

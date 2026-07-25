@@ -89,7 +89,7 @@ message.reactions ~> room_stream    // reactions flow to the room
 // ── NOTIFICATIONS ──────────────────────────
 
 // mention = your name in a message
-room_stream -> gate(content ~ "@" + user.name) -> notify(mention)
+room_stream -> gate(content: mentions(user)) -> notify(mention)
 
 // DM always notifies
 private.incoming -> notify(dm)
