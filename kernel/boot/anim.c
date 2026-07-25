@@ -20,6 +20,11 @@
 /* No math.h in bare-metal — inline fabs */
 static inline float fabsf_z(float x) { return x < 0 ? -x : x; }
 
+/* Max spring-integration sub-step (~1/240s). Frame dt is split into steps no
+ * larger than this so a stiff spring stays numerically stable regardless of how
+ * long the real frame took (see the sub-step comment in anim_tick). */
+#define ANIM_SUBSTEP_MAX (1.0f / 240.0f)
+
 /* Animation pool */
 static spring_anim_t anims[MAX_ANIMS];
 static int anim_count;  /* active count cache */
@@ -121,19 +126,31 @@ void anim_tick(float dt)
             continue;
 
         /*
-         * Spring physics:
+         * Spring physics, semi-implicit Euler:
          *   F_spring  = (target - position) * stiffness
          *   F_damping = velocity * damping
          *   acceleration = (F_spring - F_damping) / mass
          *
-         * Semi-implicit Euler integration.
-         */
-        float force = (a->target - a->position) * a->stiffness;
-        float damping_force = a->velocity * a->damping;
-        float acceleration = (force - damping_force) / a->mass;
-
-        a->velocity += acceleration * dt;
-        a->position += a->velocity * dt;
+         * SUB-STEPPED (fix, 2026-07-25): a single Euler step of the full frame
+         * dt is numerically UNSTABLE for a stiff ("snappy") spring once dt gets
+         * large -- stability needs roughly dt < 2/sqrt(stiffness/mass), which a
+         * snappy spring violates at the ~100ms frame times seen under QEMU-TCG
+         * (frame_dt is real TSC-elapsed, B.4). The result was a diverging
+         * oscillation: maximize sprang a window's geometry to exploding
+         * off-screen values so it "vanished" (C.5). Integrating in fixed small
+         * sub-steps keeps every step well inside the stability region
+         * regardless of frame_dt, and also hardens real hardware against frame
+         * hitches. Max 0.1s / (1/240s) = 24 sub-steps -- cheap. */
+        float remaining = dt;
+        while (remaining > 0.0f) {
+            float h = (remaining > ANIM_SUBSTEP_MAX) ? ANIM_SUBSTEP_MAX : remaining;
+            float force = (a->target - a->position) * a->stiffness;
+            float damping_force = a->velocity * a->damping;
+            float acceleration = (force - damping_force) / a->mass;
+            a->velocity += acceleration * h;
+            a->position += a->velocity * h;
+            remaining -= h;
+        }
 
         /*
          * Settle check: if both displacement and velocity are
