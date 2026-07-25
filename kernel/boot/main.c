@@ -958,12 +958,20 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern void scheduler_init(void);
         scheduler_init();
 
-        /* A.4 selftest: prove LAPIC-timer preemption actually rescues a
-         * hung chain_resolve (not just that the timer fires). Runs the
-         * same check as the shell's `preempt-test` command, but at boot
-         * so it's observable on serial without keyboard input. */
+#ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
+        /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
+         * chain_resolve. GATED behind a diagnostic define (fleet-review
+         * finding #4, 2026-07-25): this is active STRESS scaffolding, not a
+         * passive status print -- it registers a chain that spins for(;;)pause,
+         * forces a LAPIC watchdog kill, costs ~5ms, and permanently leaves
+         * scheduler_preempt_kills()>=1. It must NOT run in the production
+         * binary. Build with -DZEOS_DIAG_A4_PREEMPT_SELFTEST to observe it, or
+         * run the `preempt-test` shell command interactively. NOTE: A.4 is
+         * PARTIAL, not VERIFIED -- this proves the mechanism in isolation only;
+         * real-build steady-state survival is open (see A.9). */
         extern void cmd_preempt_test(const char *args);
         cmd_preempt_test(0);
+#endif
     }
 
     /* Now that all single-threaded init is done, release APs from

@@ -168,16 +168,25 @@ void compositor_set_panel_h(int h) { if (h >= 16) g_comp.panel_h = h; }
  *   then draws the cursor UNGATED on top every tick.
  * NOTE: neither calls chain_registry_tick() -- the old compositor_frame() did
  * (recursion trap). The scheduler drives chain_registry_tick() between these. */
-/* B.4 selftest: prove frame_dt (TSC-derived) tracks real elapsed time.
- * Sums frame_dt over a fixed window of ticks starting from the SECOND
- * call (the first has no prior last_frame_tsc baseline, so its dt isn't
- * meaningful), and independently measures the TSC delta over the same
- * window. Prints once, self-contained, matches the A.4 selftest style. */
+/* B.4 smoke-check: confirm frame_dt is on the TSC-derived path, NOT the
+ * 1/60 hardcoded fallback. GATED out of production (fleet-review finding #5,
+ * 2026-07-25) -- it was previously unconditional AND its wording overclaimed.
+ * CORRECTED framing: this is NOT an independent measurement. Both the summed
+ * frame_dt and the "delta" below come from the SAME timer_read_tsc()/freq, so
+ * this cannot prove TSC *accuracy* vs true wall-clock -- it is arithmetically
+ * a telescoping sum. What it CAN show (real_us is computed from raw TSC
+ * regardless of which path frame_dt took): if frame_dt had silently fallen
+ * back to 1/60, the sum would be DT_SELFTEST_WINDOW*16666us and would NOT
+ * match real_us -- so a match rules out the fallback and confirms frame_dt is
+ * genuinely TSC-derived. That, and only that, is what it verifies. Build with
+ * -DZEOS_DIAG_B4_FRAMEDT_SELFTEST to observe it. */
+#ifdef ZEOS_DIAG_B4_FRAMEDT_SELFTEST
 static uint32_t s_dt_selftest_ticks = 0;
 static float    s_dt_selftest_sum = 0.0f;
 static uint64_t s_dt_selftest_start_tsc = 0;
 static int      s_dt_selftest_done = 0;
 #define DT_SELFTEST_WINDOW 3
+#endif
 
 void compositor_advance(void) {
     uint64_t now = timer_read_tsc();
@@ -188,6 +197,7 @@ void compositor_advance(void) {
         g_comp.frame_dt = 1.0f / 60.0f;
     g_comp.last_frame_tsc = now;
 
+#ifdef ZEOS_DIAG_B4_FRAMEDT_SELFTEST
     if (!s_dt_selftest_done && freq > 0) {
         if (s_dt_selftest_start_tsc == 0) {
             s_dt_selftest_start_tsc = now;   /* baseline: second call onward */
@@ -197,17 +207,20 @@ void compositor_advance(void) {
             if (s_dt_selftest_ticks == DT_SELFTEST_WINDOW) {
                 uint64_t real_us = (now - s_dt_selftest_start_tsc) * 1000000ULL / freq;
                 uint32_t sum_us = (uint32_t)(s_dt_selftest_sum * 1000000.0f);
-                kputs("[compositor] B.4 selftest: TSC-summed frame_dt=");
+                uint32_t fallback_us = DT_SELFTEST_WINDOW * 16666u;
+                kputs("[compositor] B.4 smoke-check: summed frame_dt=");
                 kput_dec(sum_us);
-                kputs("us over ");
-                kput_dec((uint64_t)DT_SELFTEST_WINDOW);
-                kputs(" ticks, independent TSC wall-clock delta=");
+                kputs("us vs raw-TSC delta=");
                 kput_dec(real_us);
-                kputs("us\n");
+                kputs("us (1/60 fallback would read ~");
+                kput_dec((uint64_t)fallback_us);
+                kputs("us) -> ");
+                kputs(sum_us == (uint32_t)real_us ? "on TSC path\n" : "MISMATCH (check fallback)\n");
                 s_dt_selftest_done = 1;
             }
         }
     }
+#endif
 
     hotcorners_tick(mouse_get_x(), mouse_get_y());
     anim_tick(g_comp.frame_dt);
