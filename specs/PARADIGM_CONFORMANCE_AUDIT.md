@@ -157,6 +157,21 @@ config/sessions), `vault.c` (base buffer + per-inode structs). `access.c`/
 `firewall.c` correctly have none — they don't hold sensitive data, so there's
 nothing to gap.
 
+**CORRECTION 2026-07-25 (fleet-review finding #7) — `vault.c`'s CFA is real
+but its per-file TIER is not enforced:** `vault.c` genuinely CFA-wraps its
+buffers, but `inode_ptr()` (vault.c:165) wraps every inode at a hardcoded
+`MASQ_INTERNAL`, ignoring `node->tier`, and `vault_read()` (582-610) never
+compares `node->tier` against any observer context. The tier set at
+create-time (vault.c:472/507) is only serialized/restored, never checked on
+read. **Consequence:** a `VAULT_TIER_SOVEREIGN` file is readable by any
+INTERNAL observer — the tier tag is a label, not a gate. This is the root
+cause that makes chat_e2ee's SOVEREIGN salt (R.1) meaningless, and it applies
+to ALL vault consumers, not just chat. Tracked as bible-db R.4-adjacent; the
+real fix is to have `inode_ptr`/`vault_read` honor `node->tier` in the
+perceive check. This audit's original "vault.c — real, correct CFA usage"
+line above is accurate about CFA *wrapping* but should not be read as "vault
+tier isolation works" — it does not.
+
 **Headline finding — `chat_e2ee.c`:** its own header comment claims
 "non-members can't reproduce the same digest because cross-context perception
 of SOVEREIGN blobs is denied by `cfa_resolve`." **That's false.** Zero
@@ -168,6 +183,10 @@ directly for AES-XTS setup. **This is a comment asserting a security property
 the code does not provide**, on session-encryption key material specifically
 — exactly the class of thing that gets trusted by a future reader (or a future
 AI session) without re-checking. Tracked as bible-db R.1, state BROKEN.
+**REMEDIATED (comment) 2026-07-25, commit 5362f17:** the false comment was
+rewritten to honestly document the gap (no CFA, and — per finding #7 above —
+no vault tier enforcement either). The underlying CODE gap (keys still
+unprotected) remains open under R.1; only the misleading comment is fixed.
 
 **Secondary, lower-severity:** `main.c`'s cold-boot PIN handoff (the exact
 path branded "CFA-native disk encryption" in its own comment) briefly holds

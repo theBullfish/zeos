@@ -255,14 +255,18 @@ Full spec: `specs/DOM_SUB_CHIPS.md`. Multiple ARM co-processor chips
 (Goya-class today) hot-plug via PCIe, recognize each other as cooperative
 teammates (not competitors), elect one Dom (gets high-priority THINK
 work) and N Subs (get background/incidental work), re-electing on
-membership change. Built entirely on existing infra: hotplug.c's
-CHAIN_HOTPLUG_PCI, gpu_goya.c's multi-device BAR/MSI-X access,
-chain_t.affinity + smp_chain_owner()'s routing pattern.
+membership change. Built on existing infra where it genuinely exists:
+hotplug.c's CHAIN_HOTPLUG_PCI (real), gpu_goya.c's multi-device BAR/MSI-X
+access (real). NOTE (corrected 2026-07-25, matches specs/DOM_SUB_CHIPS.md
+§5 + specs/PARADIGM_CONFORMANCE_AUDIT.md §4): chip-level routing does NOT
+yet exist — `chain_t.affinity` + `smp_chain_owner()` is a CPU-core-index
+pattern only, no Goya chain sets affinity today (`grep affinity gpu_goya.c`
+is empty). Q.5 must BUILD chip-affinity routing, not "reuse" it.
 - [ ] **Q.1** Chip class registration table (vendor:device allowlist, starts with Goya 0x1DA3:0x0001) — `[TODO]`.
 - [ ] **Q.2** Cohort discovery riding CHAIN_HOTPLUG_PCI attach/detach events + boot-time seeding alongside gpu_goya_init() — `[TODO]`.
 - [ ] **Q.3** Identify handshake (fw_version, dram_mb, lazily-filled bench_score via first real THINK job) — `[TODO]`.
 - [ ] **Q.4** Election (score = bench_score*1000 + dram_mb, PCI-address tiebreak, hysteresis margin to prevent Dom/Sub flapping) — `[TODO]`.
-- [ ] **Q.5** THINK vs BACKGROUND chain classification + affinity routing (reuses chain_t.affinity, no new scheduling primitive) — `[TODO]`.
+- [ ] **Q.5** THINK vs BACKGROUND chain classification + affinity routing (BUILD chip-affinity on the chain_t.affinity/smp_chain_owner pattern — it is CPU-core-only today, not yet chip-aware) — `[TODO]`.
 - [ ] **Q.6** Detach/failure handling (Sub-detach = cheap re-election; Dom-detach = immediate re-election, in-flight work inherits existing CHAIN_ERROR/watchdog path) — `[TODO]`.
 - [ ] **Q.7** Real hardware verification: 2+ Goya cards, confirm election + THINK-affinity + Dom-unplug re-election, measured via serial log — `[TODO]`.
 
