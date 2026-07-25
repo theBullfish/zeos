@@ -29,7 +29,7 @@ cd zeos/tools/zplus && for f in $(find ../../programs -name '*.zp' | sort); do \
 |-------|----------|-------|
 | **B1** | 01_file_watcher · 02_log_monitor · 03_http_server · 04_key_value_store · 05_firewall | 🔍 judging |
 | **B-P0** | chat-zeos · notes-zeos · web-zeos (the 3 failing — priority fix) | ⬜ pending |
-| B2 | 06_message_queue · 07_chat_system · 08_cicd_pipeline · 09_anomaly_detector · 10_game_server | ⬜ pending |
+| B2 | 06_message_queue · 07_chat_system · 08_cicd_pipeline · 09_anomaly_detector · 10_game_server | 🔍 judged |
 | B3 | 11_home_automation · 12_search_engine · 13_payment_processor · 14_video_streaming · 15_trading_system | ⬜ pending |
 | B4 | 16_scada_industrial · 17_ecommerce · 18_patient_monitor · 19_autonomous_vehicle · 20_power_grid | ⬜ pending |
 | B5 | 21_load_balancer · 22_precision_agriculture · 23_supply_chain · 24_lms_education · 25_election_system | ⬜ pending |
@@ -65,6 +65,23 @@ without discussing) and one write-failure fork (04). Language-decision items sta
 - 05: **fork before terminal `accept`** (l.68–73); string-concat leak → signal form; `port: any(80,443)`.
 - (02 has no program-level fix — SHIP; only config-surface P2 pending config_surface.zp.)
 - Language-gap items are NOT program fixes — they stay in the Register for the roadmap.
+
+## Batch 2 detail
+
+| Program | Runs | Report | Score | Verdict | Fixed |
+|---------|------|--------|-------|---------|-------|
+| 06_message_queue    | PASS | 🔍 | 88 / B  | FIX (1×P2 partition elision) | ⬜ |
+| 07_chat_system      | PASS | 🔍 | 84 / B  | FIX (1×P1 concat, 1×P2 dangling) | ⬜ |
+| 08_cicd_pipeline    | PASS | 🔍 | 84 / B  | FIX (1×P1 concat×3, 1×P2 config) | ⬜ |
+| 09_anomaly_detector | PASS | 🔍 | 90 / A− | SHIP (2×P2) — resonance/σ exemplar | ⬜ |
+| 10_game_server      | PASS | 🔍 | 86 / B  | FIX (1×P1 `state = dead`, 1×P2) | ⬜ |
+
+**Batch-2 program-level fix goals (the "then fix" phase — verify each via zplus-run):**
+- 07: `"@" + user.name` concat → signal-native mention match; attach the dangling modifiers.
+- 08: 3× notify string-concat → templated emit; hardcoded path → config (pending config_surface.zp).
+- 10: `target.state = dead` procedural assignment → signal transition.
+- 06: wire/annotate the elided partitions (P2).
+- 09 ships (only P2 polish: `+` channel-union clarify; exec failure path).
 
 ## Language Gap Register (shared, cross-program)
 
