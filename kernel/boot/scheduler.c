@@ -738,15 +738,18 @@ void scheduler_run(void)
         watchdog_arm_all(tsc_start, cycles_per_us);
 
         /* 2. Resolve the entire chain graph in dependency order. */
-#ifdef ZEOS_DIAG_A9_SKIP_CHAIN_TICK   /* TEMP-INSTR A.9 bisection */
-        int errors = 0;
-#else
         int errors = chain_registry_tick();
-#endif
 
         /* 3. We made it back. Clear armed deadlines so survivors aren't
          *    falsely killed next tick. */
         watchdog_clear_completed();
+
+        /* 3b. Deferred persistence checkpoint (A.9 fix): the per-resolve hook
+         *     only marks a snapshot due; the actual VAULT flush runs HERE, at
+         *     top level, outside any chain_resolve -- so its block-chain write
+         *     path isn't a re-entrant chain_resolve (which wedged the scheduler
+         *     hard at ~tick 4 the first time the checkpoint tripped). */
+        { extern void persistence_checkpoint_if_due(void); persistence_checkpoint_if_due(); }
 
         /* Live desktop: draw gated overlays + the cursor (every tick) on top of
          * the freshly-resolved frame. */

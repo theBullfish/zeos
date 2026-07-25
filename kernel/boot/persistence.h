@@ -113,9 +113,14 @@ void persistence_journal_append(uint64_t tsc, int drive_id, uint64_t lba,
 
 /* Resolve-completion checkpoint hook. Called from chain_resolve() at
  * the tail of every successful resolve. Once enough resolves have
- * accumulated since the last checkpoint, snapshots the registry to
- * VAULT. Cheap: a simple counter compare on the hot path. */
+ * accumulated since the last checkpoint, marks a snapshot DUE (does not
+ * flush here -- that would re-enter chain_resolve; see A.9). Cheap: a
+ * counter compare + flag set on the hot path. */
 void persistence_on_resolve_complete(void);
+
+/* Run a deferred checkpoint if one is due. Call from the scheduler loop at
+ * TOP LEVEL only (never inside a chain_resolve). No-op when none is due. */
+void persistence_checkpoint_if_due(void);
 
 /* Force an immediate snapshot. Returns 0 on success, -1 on error. */
 int  persistence_save_snapshot_now(void);

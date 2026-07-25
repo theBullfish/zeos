@@ -250,9 +250,6 @@ void compositor_advance(void) {
 }
 
 void compositor_present(void) {
-#ifdef ZEOS_DIAG_A9_SKIP_PRESENT_ENTIRELY   /* TEMP-INSTR A.9 bisection */
-    return;
-#endif
     /* FULL SCENE COMPOSITE, run DIRECTLY here (outside the watchdog-armed,
      * LAPIC-preemptible chain-resolve path where the 12-31ms wm_draw_all was
      * being longjmp-preempted mid-draw, so windows never finished and every
@@ -276,13 +273,10 @@ void compositor_present(void) {
     if (dirty) {
         fb_present_begin();   /* B.6: retarget writers to the WB back buffer */
         desktop_draw();       /* wallpaper + icons (bottom) */
-#ifndef ZEOS_DIAG_A9_SKIP_WM_PANEL_DOCK   /* TEMP-INSTR A.9 bisection */
         wm_draw_all();        /* windows */
         panel_update(); panel_draw();
         dock_update();  dock_draw();
-#endif
 
-#ifndef ZEOS_DIAG_A9_SKIP_OVERLAYS   /* TEMP-INSTR A.9 bisection */
         if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
             notify_draw();
             wm_draw_ghost();
@@ -300,7 +294,6 @@ void compositor_present(void) {
               if (activity_active()) activity_draw(); }
             dirty_modal_draw();
         }
-#endif
         theme_apply_night_shift();
         { extern void idle_post_overlay(void); idle_post_overlay(); }
         g_comp.fully_dirty = 0;

@@ -297,6 +297,18 @@ static void addressing_resolve(chain_node_t *self, void *input, void *output)
     }
 }
 
+/* A.9 fix: nonzero while the persistence flush is writing the vault image to
+ * disk. Journaling those writes re-enters vault_append/persistence under locks
+ * already held across the flush -> self-deadlock. Depth counter so nested/
+ * repeated flush calls are safe. */
+static volatile int s_journal_suppress_depth;
+
+void block_chain_set_journal_suppressed(int on)
+{
+    if (on) __sync_add_and_fetch(&s_journal_suppress_depth, 1);
+    else if (s_journal_suppress_depth > 0) __sync_sub_and_fetch(&s_journal_suppress_depth, 1);
+}
+
 static void masq_journal_resolve(chain_node_t *self, void *input, void *output)
 {
     (void)self;
@@ -309,6 +321,14 @@ static void masq_journal_resolve(chain_node_t *self, void *input, void *output)
 
     /* Reads pass through with no provenance change. */
     if (r->op == BLOCK_OP_READ) {
+        r->journaled = 0;
+        return;
+    }
+
+    /* Persistence-flush writes are infrastructure I/O, not application state
+     * changes -- journaling them is circular and deadlocks (A.9). Skip the
+     * journal but still perform the write (fall through past this node). */
+    if (s_journal_suppress_depth > 0) {
         r->journaled = 0;
         return;
     }

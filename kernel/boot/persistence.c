@@ -121,6 +121,19 @@ static uint64_t g_last_save_tsc;
 static uint64_t g_resolve_count;
 #define CHECKPOINT_EVERY 500ULL
 
+/* Deferred-checkpoint flag (A.9 fix, 2026-07-25). The checkpoint used to call
+ * persistence_save_snapshot_now() DIRECTLY from persistence_on_resolve_complete,
+ * which runs in chain_resolve()'s epilogue -- so the snapshot's vault_sync ->
+ * vault_persist_flush -> block_chain_submit -> chain_resolve(CHAIN_BLOCK) was a
+ * RE-ENTRANT chain_resolve from inside a chain_resolve, and it wedged the whole
+ * scheduler hard the first time the 500-resolve threshold tripped (~tick 4).
+ * Root-caused by bisection: skipping the save let the scheduler run to tick
+ * 2880+ cleanly. Fix: the hot-path hook only SETS this flag; the actual disk
+ * flush runs from the scheduler loop at top level (persistence_checkpoint_if_due),
+ * outside any chain_resolve -- the same context CHAIN_BLOCK is normally driven
+ * from, so no re-entrancy and no heavy blocking I/O on the per-resolve path. */
+static volatile int g_snapshot_due;
+
 /* Snapshot of records loaded at boot, applied later by
  * persistence_apply_snapshot() once chain_registry_init has built the
  * registry. Sized to MAX_CHAINS to match chain.h. */
@@ -531,8 +544,21 @@ void persistence_on_resolve_complete(void)
      * resolves regardless of which core hit the boundary. */
     uint64_t v = (uint64_t)__sync_add_and_fetch(&g_resolve_count, 1);
     if ((v % CHECKPOINT_EVERY) == 0) {
-        (void)persistence_save_snapshot_now();
+        /* Defer, don't flush here (A.9): this runs inside chain_resolve()'s
+         * epilogue; doing the disk flush now re-enters chain_resolve via the
+         * block chain and wedges the scheduler. Just mark it due. */
+        g_snapshot_due = 1;
     }
+}
+
+/* Run a deferred checkpoint if one is due. MUST be called from the scheduler
+ * loop at TOP LEVEL -- never from inside a chain_resolve (that's the re-entrancy
+ * the deferral exists to avoid). Cheap no-op when nothing is due. */
+void persistence_checkpoint_if_due(void)
+{
+    if (!g_ready) return;
+    if (!__sync_bool_compare_and_swap(&g_snapshot_due, 1, 0)) return;
+    (void)persistence_save_snapshot_now();
 }
 
 /* ── Test hook: pure validation pipeline over caller-provided buffer ──

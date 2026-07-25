@@ -29,4 +29,14 @@ void block_chain_dump_journal(int n);
 /* Number of journal records ever written (including evicted). */
 uint64_t block_chain_journal_total(void);
 
+/* Suppress masq journaling for block writes issued by the persistence flush
+ * itself (A.9 fix). Journaling the act of persisting the vault/journal to disk
+ * is circular: the write path's journal node (masq_journal_resolve) calls
+ * persistence_journal_append -> vault_append, which re-takes g_vault_lock /
+ * g_persist_lock already held across vault_sync -> vault_persist_flush, a hard
+ * self-deadlock (spins forever, no NVMe timeout -- this was the A.9 tick-4
+ * hang). vault_persist_flush wraps its write loop in suppress(1)/suppress(0).
+ * Nesting-safe (depth counter). */
+void block_chain_set_journal_suppressed(int on);
+
 #endif /* ZEOS_BLOCK_CHAIN_H */

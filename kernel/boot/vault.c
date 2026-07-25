@@ -15,6 +15,7 @@
 #include "kprint.h"
 #include "heap.h"
 #include "block.h"
+#include "block_chain.h"
 #include "spinlock.h"
 
 /* Coarse VAULT lock. inode_ptr resolution behind cfa_handle already
@@ -857,16 +858,23 @@ int vault_persist_flush(void)
     uint64_t lba = 0;
     uint32_t chunk_max = 8;
 
+    /* A.9: these writes ARE the persistence mechanism; journaling them via
+     * the block chain's masq node re-enters vault/persist locks held across
+     * this flush and self-deadlocks. Suppress journaling for the flush. */
+    block_chain_set_journal_suppressed(1);
+    int rc = 0;
     while (total_sectors > 0) {
         uint32_t chunk = total_sectors < chunk_max ? total_sectors : chunk_max;
         if (block_write_drive(g_persist_drive, lba, chunk, cursor) != 0) {
-            return -1;
+            rc = -1;
+            break;
         }
         cursor         += chunk * sector;
         lba            += chunk;
         total_sectors  -= chunk;
     }
-    return 0;
+    block_chain_set_journal_suppressed(0);
+    return rc;
 }
 
 void vault_sync(void)
