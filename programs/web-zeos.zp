@@ -52,8 +52,8 @@ struct http_resp {
 routes_idx : bt.new
 
 routes : [
-  route_match { method = "GET", path_pattern = "/static/*",    handler = "static_handler"      }
-  route_match { method = "GET", path_pattern = "/api/users/*", handler = "api_users_handler"  }
+  route_match { method = "GET", path_pattern = "/static/*",    handler = "static_handler"      },
+  route_match { method = "GET", path_pattern = "/api/users/*", handler = "api_users_handler"  },
   route_match { method = "*",   path_pattern = "/*",           handler = "proxy_handler"       }
 ]
 

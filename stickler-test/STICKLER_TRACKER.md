@@ -8,10 +8,10 @@ Ruler: `STICKLER_STANDARD.md`. Backlog: `CANDIDATE_PROGRAMS.md`. Reports: `repor
 `zeos/tools/zplus/target/release/zplus-run` over `zeos/programs/**.zp`:
 
 - **85 programs · 82 PASS · 3 FAIL (96%)**
-- **P0 FAILING (fix first):**
-  - `chat-zeos.zp` — parse error: unexpected token in chain term
-  - `notes-zeos.zp` — parse error: unexpected token in chain term
-  - `web-zeos.zp`  — parse error: expected RBracket, got Ident
+- **P0 status:** now **83 PASS / 2 FAIL** after B-P0.
+  - `web-zeos.zp`  — ✅ **FIXED + verified** (comma-less array-of-structs — a real program syntax slip).
+  - `chat-zeos.zp` — 🚫 **BLOCKED on parser gap** (bare `.` current-signal ref; see Language Gap Register). Decision needed, not a program hack.
+  - `notes-zeos.zp` — 🚫 **BLOCKED on parser gap** (same bare `.` idiom).
 
 Regenerate the manifest any time:
 ```
@@ -91,6 +91,7 @@ construct its whole design needs. Tally demand here; route to the language roadm
 | terminal nodes `drop` / `accept` | 05 | signals that *end*, not flow onward |
 | program-level `priority: reflex` | 05 | whole-graph wire-speed priority |
 | round-trip / bidirectional wire (`request <-> handler`) | 03 | response routes back to its source |
+| **bare `.` = current-signal reference** (`encode(.)`, `f(.)`, `bt.range(i, ., .)`) | chat-zeos, notes-zeos | **parser gap** — grammar accepts `.field` but not a lone `.`. **BLOCKS these 2 programs.** Decision needed: teach the parser bare-`.`, or ratify `input` as the canonical current-signal name. Do NOT rewrite the idiom without a ruling. |
 
 ## Log
 
