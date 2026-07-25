@@ -54,7 +54,10 @@ doc described: plain imperative C, flat pointers, zero chain/CFA/VAULT/B3.
 They reach the one real chain node only through a legacy compatibility shim
 (`net_drv_send`/`net_drv_recv`) whose own comments say it exists so "existing
 callers become chain users without touching their code" — i.e. routing, not
-conversion. **Zero VAULT, zero B3 anywhere in networking.**
+conversion. **No VAULT *persistence* (no vault_write/read calls) and zero B3
+anywhere in networking.** (Precise: a couple of net files touch the chain
+framework's in-struct `vault_version` counter, but none call the actual VAULT
+persistence API — the substantive claim holds.)
 
 `net_rtl8188eu.c` is honest about it — its own header comment admits it's
 "intentionally NOT wired into CHAIN_NET_TX/RX."
