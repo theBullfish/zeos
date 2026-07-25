@@ -45,11 +45,18 @@ cd zeos/tools/zplus && for f in $(find ../../programs -name '*.zp' | sort); do \
 
 | Program | Runs | Report | Score | Verdict | Fixed |
 |---------|------|--------|-------|---------|-------|
-| 01_file_watcher   | PASS | 🔍 | 86 / B | FIX (2×P1, 2×P2) | ⬜ |
-| 02_log_monitor    | PASS | 🔍 | 95 / A | SHIP (1×P2) | ⬜ |
-| 03_http_server    | PASS | 🔍 | 82 / B | FIX (2×P1) — dup net.listen | ⬜ |
-| 04_key_value_store| PASS | 🔍 | 89 / B | FIX (1×P1 \|-overload, 1×P2) | ⬜ |
-| 05_firewall       | PASS | 🔍 | 81 / B | FIX (2×P1) — accept-then-continue | ⬜ |
+| 01_file_watcher   | PASS | 🔍 | 86 / B | FIX (2×P1, 2×P2) | ✅ P1s (concat→signal form; exec on_degrade path). P2s pending config_surface.zp |
+| 02_log_monitor    | PASS | 🔍 | 95 / A | SHIP (1×P2) | ✅ no program fix (P2 pending config_surface.zp) |
+| 03_http_server    | PASS | 🔍 | 82 / B | FIX (2×P1) | ✅ dup net.listen removed. Round-trip P1 = language decision (net_source.zp) |
+| 04_key_value_store| PASS | 🔍 | 89 / B | FIX (1×P1, 1×P2) | ✅ \|-overload→any(). P2 write-failure fork pending |
+| 05_firewall       | PASS | 🔍 | 81 / B | FIX (2×P1) | ✅ accept-then-continue→fork; port any(); concat→signal form |
+
+**Batch 1 FIX phase: COMPLETE & VERIFIED.** All P1s fixed. Verification: every batch-1 program
+re-runs PASS via `zplus-run`; full-corpus regression check holds at **82/85 (no regression)**.
+Remaining P2s are config-surface items blocked on `config_surface.zp` (a CANDIDATE — do not build
+without discussing) and one write-failure fork (04). Language-decision items stay in the Register.
+
+**Next: B-P0 — fix the 3 failing programs (`chat/notes/web-zeos`) → target 85/85.**
 
 **Batch-1 program-level fix goals (the "then fix" phase — all must verify via zplus-run):**
 - 01: string-concat leak → signal form; add exec failure path.

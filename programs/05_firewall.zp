@@ -54,7 +54,7 @@ packets -> gate(state: new) -> group(by: source)
         -> count(distinct: port, within: 10s)
         -> gate(> 15) -> {
             blacklist.add(source, ttl: 1h),
-            alert(warn: "port scan from " + source)
+            alert(warn: port_scan, source: source)
         }
 
 // ── GEO BLOCKING ──────────────────────────
@@ -64,12 +64,15 @@ packets -> gate(source.geo: blocked_countries) -> drop
 // ── DEEP INSPECTION (optional) ─────────────
 
 // route suspicious packets through MDE for payload analysis
-packets -> gate(state: new, port: 80 | 443)
-        -> safety @ mde("payload-inspect.zdx")
-        -> gate(threat < 0.3) -> accept
-        -> gate(threat >= 0.3) -> {
-            drop,
-            alert(critical: "malicious payload blocked")
+// stickler 01: fork BEFORE terminating — `accept` ends the signal, so it can't
+// be gated further on the same wire. Branch on threat, then each branch terminates.
+packets -> gate(state: new, port: any(80, 443))
+        -> safety @ mde("payload-inspect.zdx") -> {
+            gate(threat < 0.3)  -> accept,
+            gate(threat >= 0.3) -> {
+                drop,
+                alert(critical: "malicious payload blocked")
+            }
         }
 
 // ── TELEMETRY ──────────────────────────────

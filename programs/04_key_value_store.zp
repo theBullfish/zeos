@@ -49,12 +49,12 @@ vault.entries -> gate(ttl: expired) -> vault.delete(key)
 vault.entries -> on_change -> debounce(1s) -> vault.snapshot("/var/data/store.db")
 
 // append-only log for crash recovery
-ops -> gate(command: "set" | "del") -> vault.append_log("/var/data/store.aol")
+ops -> gate(command: any("set", "del")) -> vault.append_log("/var/data/store.aol")
 
 // ── REPLICATION ────────────────────────────
 
 // replica = a tap on all write operations
-ops -> gate(command: "set" | "del") ~> replica : net.connect(peer: replica_host, port: 6380)
+ops -> gate(command: any("set", "del")) ~> replica : net.connect(peer: replica_host, port: 6380)
 
 // incoming replication
 replica.incoming -> gate(source: trusted) -> vault.apply
@@ -103,7 +103,7 @@ hit      ~> ratio(hit, hit + miss) ~> cache_hit_rate
 //   - supports scan/query operations that return signal streams
 //   Vault isn't a database. It's a signal-emitting data surface.
 //
-// NEW CONSTRUCT: gate(command: "set" | "del") — OR within a gate.
+// NEW CONSTRUCT: gate(command: any("set", "del")) — OR within a gate.
 //   the | operator is merge elsewhere. inside a gate it's OR.
 //   potential confusion. maybe: gate(command: any("set", "del"))
 //
