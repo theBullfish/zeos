@@ -28,13 +28,17 @@ modified -> gate(not: "*.pyc", "*.tmp", ".git/*") -> clean_modified
 
 // source files changed → rebuild
 clean_modified -> gate(ext: ".py", ".rs", ".zp") -> rebuild_trigger
-rebuild_trigger -> debounce(500ms) -> exec("make build")
+// stickler 01: exec now has a failure path — a build that dies must not go silent.
+rebuild_trigger -> debounce(500ms) -> exec("make build") -> {
+    gate(ok)   -> build_done,
+    on_degrade -> alert(warn: build_failed)
+}
 
 // new files → index
 clean_created -> content.index
 
 // deleted → alert if important
-deleted -> gate(ext: ".py", ".rs", ".zp") -> alert("deleted: " + path)
+deleted -> gate(ext: ".py", ".rs", ".zp") -> alert(event: deleted, path: path)
 
 // ── BURST DETECTION ────────────────────────
 

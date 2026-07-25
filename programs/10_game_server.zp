@@ -61,7 +61,7 @@ input.actions -> gate(fire) -> {
 hit_check -> gate(hit: entity) -> {
     target.hp - damage -> target.hp,
     target.hp -> gate(<= 0) -> kill(target) -> {
-        target.state = dead,
+        target.state -> dead,
         broadcast(kill_event),
         respawn(target, delay: 3s)
     }

@@ -5,7 +5,8 @@
 
 // ── LISTEN ─────────────────────────────────
 
-server : net.listen(port: 8080, proto: http) -> requests
+// the listener is defined once — with its middleware chain — under MIDDLEWARE below.
+// (stickler 01: removed a duplicate net.listen binding that also defined `requests`.)
 
 // ── ROUTE ──────────────────────────────────
 
@@ -21,7 +22,7 @@ requests -> gate(unmatched) -> respond(404, "not found")
 
 // ── MIDDLEWARE (it's just gates before the route) ──
 
-// v2: middleware as signal chain before routing
+// the one server: middleware as a signal chain before routing
 server : net.listen(port: 8080, proto: http)
     -> log_request
     -> rate_limit
