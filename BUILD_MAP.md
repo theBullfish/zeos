@@ -114,7 +114,7 @@ the OS. When in doubt it's the OS.
 - [x] **A.3** SMP bring-up (BSP online, chains lifted) — `[observed]` serial `SMP … 1 cores online, RESOLVING`.
 - [ ] **A.4** LAPIC-timer preemption (vec 0xEF + setjmp/longjmp), per-chain watchdog — `[UNVERIFIED]` serial shows a preempt fire (`preempted chain 50 after 495950us`) but correctness not asserted.
 - [x] **A.5** VAULT ramdisk mount + program load — `[observed]` serial `VAULT: 2MB ramdisk mounted. 16 programs loaded.`
-- [x] **A.6** Composite cost characterized under KVM & addressed — `[VERIFIED/production]` full composite ~17ms, clipped ~4.7ms (real KVM TSC). The earlier ~120ms was TCG emulation overhead, NOT native; the per-tick id=29(139ms) is a separate CHAIN, not the composite. Damage tracking (B.5/B.9) now implemented. bible id=320. Follow-on: identify chain id=29.
+- [x] **A.6** Composite cost characterized under KVM & addressed — `[VERIFIED/production]` full composite ~17ms, clipped ~4.7ms (real KVM TSC). The earlier ~120ms was TCG emulation overhead, NOT native; the per-tick id=29(139ms) is a separate CHAIN, not the composite. Damage tracking (B.5/B.9) implemented. bible id=320. Follow-on DONE: id=29=hotplug.pci (256-bus PCI brute-scan); amortized to 9ms (was 139ms), bible id=325.
 - [ ] **A.7** Disk encryption / crypto_disk (PIN-gated) — `[UNVERIFIED]` serial `encryption inactive (no PIN)`; path unexercised.
 
 ## B. Compositor & Display
@@ -165,7 +165,7 @@ the OS. When in doubt it's the OS.
 - [ ] **E.1** Mouse driver PS/2 + USB HID (IRQ12 / hid inject) — `[UNVERIFIED]` `[source mouse.c:354-410,608-649; usb_hid.c:235]`; motion reached the guest (vshot) but E-path correctness unproven.
 - [ ] **E.2** Cursor: 22 states, real SVG-derived sprites, hotspot table, save-under — `[UNVERIFIED]` `[source cursor.c; cursor_sprites.h]`; suspected in B.7.
 - [ ] **E.3** Cursor click feedback (scale pulse, ripple, burst) — `[UNVERIFIED]` `[source cursor.c:140-197]`.
-- [ ] **E.4** Cursor confirm (checkmark) — `[PARTIAL]` `[source cursor.c:205-210]` TODO-revert + zero callers.
+- [x] **E.4** Cursor confirm (checkmark) — `[VERIFIED/production]` wired into settings save_all (was zero callers). KVM [E4] flash=1 reverted=1 PASS. bible id=326.
 - [ ] **E.5** Hot corners: 8px zones, 150ms dwell, TL palette / BL workspace / BR show-desktop — `[UNVERIFIED]` init `[observed]` serial, but ACTION fire never observed. `[source hotcorners.c:35-169]`.
 - [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.
 - [ ] **E.7** Keyboard: set-1 scancode → ASCII — `[UNVERIFIED]` `[source keyboard.c]`; no layout switching.
@@ -208,7 +208,7 @@ the OS. When in doubt it's the OS.
 ## J. Settings
 - [ ] **J.1** Settings app (WM app, VAULT persist, inline current values) — `[UNVERIFIED]` `[source settings.c:219-432]`.
 - [ ] **J.2** One settings surface, no duplicate — `[PARTIAL]` two disjoint surfaces (`settings.c` vs `settings_registry.c`) not sharing state.
-- [ ] **J.3** Search-first (palette enumerates every setting) — `[PARTIAL]` palette 'Settings' item now opens the settings app (commit d7d6957, was a placeholder); still TODO: palette enumerate the full settings_registry inline.
+- [x] **J.3** Search-first (palette enumerates every setting) — `[VERIFIED/production]` palette_show enumerates settings_registry (42 items), bool toggles inline. KVM [J3] items=42 registry=42 PASS. PALETTE_MAX_ITEMS 64->128. bible id=336.
 - [ ] **J.4** Right-click element → "Settings for this…" — `[TODO]`.
 
 ## K. Signal Visualizer
@@ -222,7 +222,7 @@ the OS. When in doubt it's the OS.
 - [ ] **L.2** Presets snappy/smooth/bouncy/interactive — `[UNVERIFIED]` `[source theme.h:50-57]`.
 - [ ] **L.3** Compositor ticks anims per frame + re-arm while live — `[UNVERIFIED]` `[source compositor.c:179-198]`.
 - [ ] **L.4** Spring surface open/close, snap settle, dock auto-hide slide — `[UNVERIFIED]` `[source wm.c:306-354; dock.c:172-198]`.
-- [ ] **L.5** Spring menu appear/dismiss — `[PARTIAL]` toasts animate; context menus draw instant.
+- [x] **L.5** Spring menu appear/dismiss — `[VERIFIED/production]` context menus spring-scale open/dismiss; deferred teardown, no input ripple. KVM [L5] PASS. bible id=341.
 - [ ] **L.6** Spring scroll physics — `[TODO]`.
 
 ## M. Accessibility  (⚠ whole class: UI + VAULT persist exist, but NO CONSUMER reads them)
