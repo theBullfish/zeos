@@ -17,6 +17,59 @@ static struct zeos_framebuffer *g_fb;
  * scanout never observes a half-drawn frame. */
 static uint32_t *g_front;
 static uint32_t *g_backbuf;
+
+/* ── B.5/B.9: composite clip (delta correction) ──
+ *
+ * The compositor's correction pass sets this to the delta region it is
+ * correcting; every primitive then rejects pixels outside it. This is what
+ * turns a full-screen redraw into a per-delta correction: the layer draw
+ * functions still run, but pixels outside the delta cost nothing. Default off
+ * (whole screen) so all non-composite drawing is unaffected. */
+static int g_clip_on;
+static int g_clip_x0, g_clip_y0, g_clip_x1, g_clip_y1;   /* [x0,x1) x [y0,y1) */
+
+void fb_set_clip(int x, int y, int w, int h)
+{
+    g_clip_x0 = x; g_clip_y0 = y;
+    g_clip_x1 = x + w; g_clip_y1 = y + h;
+    g_clip_on = 1;
+}
+
+void fb_reset_clip(void) { g_clip_on = 0; }
+
+/* B.9 selfcheck: FNV-1a hash of the scanned-out front buffer. Used to prove a
+ * clipped (partial) composite produced the same frame a full redraw would. */
+uint64_t fb_frame_checksum(void)
+{
+    if (!g_fb || !g_front) return 0;
+    uint64_t h = 1469598103934665603ULL;   /* FNV offset basis */
+    uint32_t w = g_fb->width, ht = g_fb->height, pitch = g_fb->pitch;
+    for (uint32_t y = 0; y < ht; y++) {
+        const uint32_t *row = g_front + (uint64_t)y * pitch;
+        for (uint32_t x = 0; x < w; x++) {
+            h ^= row[x];
+            h *= 1099511628211ULL;          /* FNV prime */
+        }
+    }
+    return h;
+}
+
+/* Single-pixel accept test. */
+static inline int clip_test(int x, int y)
+{
+    return !g_clip_on ||
+           (x >= g_clip_x0 && x < g_clip_x1 && y >= g_clip_y0 && y < g_clip_y1);
+}
+
+/* Clamp a half-open rect to the active clip (no-op when clip is off). */
+static inline void clip_clamp(int *x0, int *y0, int *x1, int *y1)
+{
+    if (!g_clip_on) return;
+    if (*x0 < g_clip_x0) *x0 = g_clip_x0;
+    if (*y0 < g_clip_y0) *y0 = g_clip_y0;
+    if (*x1 > g_clip_x1) *x1 = g_clip_x1;
+    if (*y1 > g_clip_y1) *y1 = g_clip_y1;
+}
 static uint32_t cursor_x;  /* Character column */
 static uint32_t cursor_y;  /* Character row */
 static uint32_t max_cols;
@@ -74,9 +127,14 @@ void fb_clear(uint32_t color)
     if (!g_fb || !g_fb->base)
         return;
 
-    for (uint32_t y = 0; y < g_fb->height; y++) {
-        uint32_t *row = g_fb->base + y * g_fb->pitch;
-        for (uint32_t x = 0; x < g_fb->width; x++) {
+    /* B.5/B.9: honor the composite clip so a delta correction that calls
+     * fb_clear (e.g. a layer's background fill) only clears its own region. */
+    int x0 = 0, y0 = 0, x1 = (int)g_fb->width, y1 = (int)g_fb->height;
+    clip_clamp(&x0, &y0, &x1, &y1);
+
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = g_fb->base + (uint32_t)y * g_fb->pitch;
+        for (int x = x0; x < x1; x++) {
             row[x] = color;
         }
     }
@@ -239,6 +297,8 @@ void fb_pixel(int x, int y, uint32_t color)
         return;
     if (x < 0 || y < 0 || (uint32_t)x >= g_fb->width || (uint32_t)y >= g_fb->height)
         return;
+    if (!clip_test(x, y))
+        return;
     g_fb->base[(uint32_t)y * g_fb->pitch + (uint32_t)x] = color;
 }
 
@@ -254,6 +314,9 @@ void fb_rect(int x, int y, int w, int h, uint32_t color)
     int y1 = y + h;
     if (x1 > (int)g_fb->width) x1 = (int)g_fb->width;
     if (y1 > (int)g_fb->height) y1 = (int)g_fb->height;
+
+    /* B.5/B.9: intersect with the active composite clip. */
+    clip_clamp(&x0, &y0, &x1, &y1);
 
     for (int py = y0; py < y1; py++) {
         uint32_t *row = g_fb->base + (uint32_t)py * g_fb->pitch;
@@ -509,6 +572,8 @@ void fb_blit(int x, int y, int w, int h, const uint32_t *pixels)
             int sx = x + px;
             if (sx < 0 || (uint32_t)sx >= g_fb->width)
                 continue;
+            if (!clip_test(sx, sy))   /* B.5/B.9 composite clip */
+                continue;
             dst[sx] = src[px];
         }
     }
@@ -519,6 +584,8 @@ void fb_pixel_blend(int x, int y, uint32_t color)
     if (!g_fb || !g_fb->base)
         return;
     if (x < 0 || y < 0 || (uint32_t)x >= g_fb->width || (uint32_t)y >= g_fb->height)
+        return;
+    if (!clip_test(x, y))
         return;
 
     uint8_t alpha = (color >> 24) & 0xFF;

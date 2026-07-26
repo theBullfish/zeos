@@ -68,6 +68,39 @@ static uint32_t s_dirty_pending;          /* unsumed count, capped at ring size 
 static uint32_t s_dirty_pushes_total;     /* lifetime push count */
 static uint32_t s_composite_count;        /* lifetime composites that ran */
 static uint32_t s_composite_skips;        /* lifetime composites that were skipped */
+static uint32_t s_composite_clipped;      /* composites that ran clipped (partial) */
+
+/* ── B.5/B.9 delta union ──
+ *
+ * Bounding box of every region-delta pushed via compositor_dirty() since the
+ * last composite. The correction pass clips drawing to this box (unless a full
+ * redraw was requested via fully_dirty, or the box covers most of the screen,
+ * in which case a full redraw is cheaper than the clip bookkeeping). */
+static int s_delta_valid;
+static int s_delta_x0, s_delta_y0, s_delta_x1, s_delta_y1;
+
+#ifdef ZEOS_DIAG_B9_SELFCHECK
+#define B9_SELFCHECK_FRAMES 20
+static uint32_t s_b9_frames;
+static uint32_t s_b9_mismatch;
+#endif
+
+static void delta_reset(void) { s_delta_valid = 0; }
+
+static void delta_add(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    int x1 = x + w, y1 = y + h;
+    if (!s_delta_valid) {
+        s_delta_x0 = x; s_delta_y0 = y; s_delta_x1 = x1; s_delta_y1 = y1;
+        s_delta_valid = 1;
+    } else {
+        if (x  < s_delta_x0) s_delta_x0 = x;
+        if (y  < s_delta_y0) s_delta_y0 = y;
+        if (x1 > s_delta_x1) s_delta_x1 = x1;
+        if (y1 > s_delta_y1) s_delta_y1 = y1;
+    }
+}
 
 /* ── Panel drawing (delegated to panel module) ── */
 
@@ -249,6 +282,52 @@ void compositor_advance(void) {
     }
 }
 
+/* B.5/B.9: advance per-layer logic state (clock, hover, animation) WITHOUT
+ * drawing. Kept separate from composite_draw() so the self-check can re-render
+ * the identical state (draw-only) rather than advancing it a second time. */
+static void composite_update(void)
+{
+    extern void panel_update(void);
+    extern void dock_update(void);
+    panel_update();
+    dock_update();
+}
+
+/* B.5/B.9: the layer PAINT stack (no state advance), shared by the correction
+ * pass and the self-check. Honors whatever fb clip the caller set (whole screen
+ * if none). Deterministic bottom-to-top paint order. */
+static void composite_draw(void)
+{
+    extern void desktop_draw(void);
+    extern void panel_draw(void);
+    extern void dock_draw(void);
+
+    desktop_draw();       /* wallpaper + icons (bottom) */
+    wm_draw_all();        /* windows */
+    panel_draw();
+    dock_draw();
+
+    if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
+        notify_draw();
+        wm_draw_ghost();
+        workspaces_overview_draw();
+        context_menu_draw();
+        quick_look_draw();
+        image_viewer_draw();
+        { extern int calculator_active(void); extern void calculator_draw(void);
+          if (calculator_active()) calculator_draw(); }
+        { extern int editor_active(void);     extern void editor_draw(void);
+          if (editor_active()) editor_draw(); }
+        { extern int file_mgr_active(void);   extern void file_mgr_draw(void);
+          if (file_mgr_active()) file_mgr_draw(); }
+        { extern int activity_active(void);   extern void activity_draw(void);
+          if (activity_active()) activity_draw(); }
+        dirty_modal_draw();
+    }
+    theme_apply_night_shift();
+    { extern void idle_post_overlay(void); idle_post_overlay(); }
+}
+
 void compositor_present(void) {
     /* FULL SCENE COMPOSITE, run DIRECTLY here (outside the watchdog-armed,
      * LAPIC-preemptible chain-resolve path where the 12-31ms wm_draw_all was
@@ -269,35 +348,78 @@ void compositor_present(void) {
     extern void lapic_timer_disarm(void);
     lapic_timer_disarm();
 
+#ifdef ZEOS_DIAG_B9_SELFCHECK
+    /* Force a small region-delta each tick so the clip path + self-check
+     * exercise deterministically on an idle desktop (region away from edges,
+     * < 60% so use_clip engages). Validates that a clipped correction is
+     * pixel-identical to a full redraw. */
+    if (s_b9_frames < B9_SELFCHECK_FRAMES)
+        compositor_dirty(200, 200, 240, 160);
+#endif
+
     int dirty = compositor_consume_dirty();
     if (dirty) {
-        fb_present_begin();   /* B.6: retarget writers to the WB back buffer */
-        desktop_draw();       /* wallpaper + icons (bottom) */
-        wm_draw_all();        /* windows */
-        panel_update(); panel_draw();
-        dock_update();  dock_draw();
-
-        if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {
-            notify_draw();
-            wm_draw_ghost();
-            workspaces_overview_draw();
-            context_menu_draw();
-            quick_look_draw();
-            image_viewer_draw();
-            { extern int calculator_active(void); extern void calculator_draw(void);
-              if (calculator_active()) calculator_draw(); }
-            { extern int editor_active(void);     extern void editor_draw(void);
-              if (editor_active()) editor_draw(); }
-            { extern int file_mgr_active(void);   extern void file_mgr_draw(void);
-              if (file_mgr_active()) file_mgr_draw(); }
-            { extern int activity_active(void);   extern void activity_draw(void);
-              if (activity_active()) activity_draw(); }
-            dirty_modal_draw();
+        /* B.5/B.9 delta correction: clip the whole layer stack to the union of
+         * the region-deltas pushed since the last composite. The B.6 back buffer
+         * persists the last full scene, so redrawing only the delta region leaves
+         * every other pixel correct for the bulk flip. Full redraw when a caller
+         * asked for it (fully_dirty) or when the delta covers most of the screen
+         * (clip bookkeeping would not pay off). */
+        int use_clip = 0;
+        int cx0 = 0, cy0 = 0, cx1 = (int)fb_width(), cy1 = (int)fb_height();
+        if (!g_comp.fully_dirty && s_delta_valid) {
+            cx0 = s_delta_x0; cy0 = s_delta_y0;
+            cx1 = s_delta_x1; cy1 = s_delta_y1;
+            if (cx0 < 0) cx0 = 0;
+            if (cy0 < 0) cy0 = 0;
+            if (cx1 > (int)fb_width())  cx1 = (int)fb_width();
+            if (cy1 > (int)fb_height()) cy1 = (int)fb_height();
+            long area = (long)(cx1 - cx0) * (long)(cy1 - cy0);
+            long full = (long)fb_width() * (long)fb_height();
+            if (area > 0 && area < (full * 3) / 5)   /* < 60% of screen: worth clipping */
+                use_clip = 1;
         }
-        theme_apply_night_shift();
-        { extern void idle_post_overlay(void); idle_post_overlay(); }
+
+        composite_update();   /* advance layer logic once (clock/hover/anim) */
+
+        fb_present_begin();   /* B.6: retarget writers to the WB back buffer */
+        if (use_clip) {
+            fb_set_clip(cx0, cy0, cx1 - cx0, cy1 - cy0);
+            s_composite_clipped++;
+        }
+        composite_draw();
+        if (use_clip) fb_reset_clip();   /* restore full-screen drawing */
+        delta_reset();
         g_comp.fully_dirty = 0;
         fb_present_end();     /* B.6: atomic flip of the finished scene to WC front */
+
+#ifdef ZEOS_DIAG_B9_SELFCHECK
+        /* The compositor watches its own output: the clipped correction just
+         * produced F_partial. Force a full re-DRAW of the identical state (no
+         * composite_update, so nothing advances) -> F_full. Matching checksums
+         * prove the correction dropped nothing; a mismatch means partial redraw
+         * left a stale pixel. Runs for the first B9_SELFCHECK_FRAMES composites. */
+        if (use_clip && s_b9_frames < B9_SELFCHECK_FRAMES) {
+            uint64_t h_partial = fb_frame_checksum();
+            fb_present_begin();
+            composite_draw();                 /* no clip, no update -> full redraw, same state */
+            fb_present_end();
+            uint64_t h_full = fb_frame_checksum();
+            s_b9_frames++;
+            if (h_partial != h_full) {
+                s_b9_mismatch++;
+                kputs("[B9] MISMATCH frame="); kput_dec((uint64_t)s_b9_frames);
+                kputs(" partial="); kput_hex(h_partial);
+                kputs(" full=");    kput_hex(h_full); kputs("\n");
+            }
+            if (s_b9_frames == B9_SELFCHECK_FRAMES) {
+                kputs("[B9] selfcheck: frames="); kput_dec((uint64_t)s_b9_frames);
+                kputs(" clipped_total="); kput_dec((uint64_t)s_composite_clipped);
+                kputs(" mismatches="); kput_dec((uint64_t)s_b9_mismatch);
+                kputs(s_b9_mismatch == 0 ? " -> PASS\n" : " -> FAIL\n");
+            }
+        }
+#endif
     }
 
     /* Cursor: UNGATED, drawn on top every tick (it moves without a composite). */
@@ -309,7 +431,10 @@ void compositor_present(void) {
 }
 
 void compositor_dirty(int x, int y, int w, int h) {
-    g_comp.fully_dirty = 1;  /* full redraw until clipped paint lands */
+    /* B.5/B.9: accumulate the region-delta instead of forcing a full redraw.
+     * The correction pass clips to the union of these regions. Callers that
+     * genuinely change the whole screen use compositor_dirty_all(). */
+    delta_add(x, y, w, h);
 
     /* Push into ring. Bounded at COMP_DIRTY_RING so a flood doesn't
      * grow unbounded — extra pushes still bump pending so the

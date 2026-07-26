@@ -14,6 +14,16 @@ void fb_init(struct zeos_framebuffer *fb);
 /* Clear screen to a 32-bit ARGB color */
 void fb_clear(uint32_t color);
 
+/* B.5/B.9 composite clip: restrict all subsequent drawing to [x,x+w) x [y,y+h).
+ * The compositor sets this to the delta region it is correcting so a full-layer
+ * redraw only touches the changed pixels. fb_reset_clip() restores whole-screen
+ * drawing. Non-composite code never calls these, so it is unaffected. */
+void fb_set_clip(int x, int y, int w, int h);
+void fb_reset_clip(void);
+
+/* B.9 selfcheck: FNV-1a hash of the scanned-out front buffer. */
+uint64_t fb_frame_checksum(void);
+
 /* Write a single character at the current cursor position */
 void fb_putc(char c);
 
