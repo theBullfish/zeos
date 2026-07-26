@@ -80,18 +80,6 @@ void lapic_eoi(void)
     lapic_write(LAPIC_EOI, 0);
 }
 
-uint32_t lapic_read_reg_diag(uint32_t reg)  /* TEMP-INSTR A.8 */
-{
-    if (!g_ready) return 0xFFFFFFFFu;
-    return lapic_read(reg);
-}
-
-void lapic_write_lint0_diag(uint32_t val)  /* TEMP-INSTR A.8 */
-{
-    if (!g_ready) return;
-    lapic_write(LAPIC_LVT_LINT0, val);
-}
-
 int lapic_init(void)
 {
     if (g_ready) return 0;

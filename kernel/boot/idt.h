@@ -28,8 +28,6 @@ void idt_register(uint8_t vector, isr_handler_t handler);
 
 /* Send End-of-Interrupt to the legacy 8259 PIC */
 void pic_eoi(uint8_t irq);
-void pic_read_irr_isr(uint8_t *master_irr, uint8_t *master_isr,
-                       uint8_t *slave_irr, uint8_t *slave_isr);  /* TEMP-INSTR A.8 */
 
 /* Remap the 8259 PIC to vectors 0x20-0x2F */
 void pic_remap(void);
