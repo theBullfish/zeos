@@ -1054,6 +1054,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void cursor_e4_selftest(void); cursor_e4_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_J3
+        /* J.3 selftest: palette enumerates every registered setting. */
+        { extern void palette_j3_selftest(void); palette_j3_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

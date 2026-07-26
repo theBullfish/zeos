@@ -21,6 +21,8 @@
 #include "persona_filter.h"
 #include "ui_undo.h"
 #include "ui_hover.h"
+#include "settings_registry.h"   /* J.3: enumerate settings into the palette */
+#include "settings.h"            /* settings_open() */
 #include "ui_context_menu.h"
 #include "ui_states.h"
 #include "kprint.h"
@@ -375,6 +377,77 @@ void palette_init(void)
     palette_filter();
 }
 
+/* J.3: activate an enumerated setting. Bool -> toggle inline (the common quick
+ * action); anything else -> open the settings app focused on it. ctx is the
+ * statically-allocated settings_entry_t* the registry holds by reference. */
+static void action_setting_entry(void *ctx)
+{
+    const settings_entry_t *e = (const settings_entry_t *)ctx;
+    if (!e) { settings_open(); return; }
+    if (e->kind == SK_BOOL) {
+        char cur[16];
+        if (settings_get(e->name, cur, sizeof(cur)) == 0) {
+            int on = (cur[0] == '1' || cur[0] == 'o' || cur[0] == 't' ||
+                      cur[0] == 'y' || cur[0] == 'O' || cur[0] == 'T');
+            settings_set(e->name, on ? "0" : "1");
+            return;
+        }
+    }
+    settings_open();
+}
+
+/* J.3: strip stale "setting" items and re-add one per registered setting, so
+ * the palette search covers every setting. Mirrors palette_refresh_chains. */
+static int palette_add_setting_cb(const settings_entry_t *e, void *user)
+{
+    (void)user;
+    if (pal.item_count >= PALETTE_MAX_ITEMS) return 1;  /* stop: palette full */
+    const char *label = (e->desc && e->desc[0]) ? e->desc : e->name;
+    palette_add_item(label, "setting", action_setting_entry, (void *)e);
+    return 0;
+}
+
+static void palette_refresh_settings(void)
+{
+    /* Remove existing "setting" items (compact in place). */
+    int write = 0;
+    for (int i = 0; i < pal.item_count; i++) {
+        const char *cat = pal.items[i].category;
+        int is_setting = (cat[0] == 's' && cat[1] == 'e' && cat[2] == 't' &&
+                          cat[3] == 't' && cat[4] == 'i' && cat[5] == 'n' &&
+                          cat[6] == 'g' && cat[7] == '\0');
+        if (!is_setting) {
+            if (write != i) pal.items[write] = pal.items[i];
+            write++;
+        }
+    }
+    pal.item_count = write;
+
+    int before = pal.item_count;
+    settings_enumerate(palette_add_setting_cb, 0);
+    int added = pal.item_count - before;
+    if (added < settings_count())
+        kputs("[palette] NOTE: settings truncated (palette full)\n");
+}
+
+#ifdef ZEOS_DIAG_J3
+void palette_j3_selftest(void)
+{
+    palette_refresh_settings();
+    int settings_items = 0;
+    for (int i = 0; i < pal.item_count; i++) {
+        const char *c = pal.items[i].category;
+        if (c[0]=='s'&&c[1]=='e'&&c[2]=='t'&&c[3]=='t'&&c[4]=='i'&&c[5]=='n'&&c[6]=='g'&&c[7]==0)
+            settings_items++;
+    }
+    int reg = settings_count();
+    int pass = (reg > 0) && (settings_items == reg || pal.item_count >= PALETTE_MAX_ITEMS);
+    kputs("[J3] palette settings items="); kput_dec((uint64_t)settings_items);
+    kputs(" registry="); kput_dec((uint64_t)reg);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
 void palette_show(void)
 {
     pal.visible = 1;
@@ -384,6 +457,7 @@ void palette_show(void)
     pal.scroll_offset = 0;
 
     palette_refresh_chains();
+    palette_refresh_settings();   /* J.3: settings searchable in the palette */
     palette_filter();
 
     palette_ensure_undo();

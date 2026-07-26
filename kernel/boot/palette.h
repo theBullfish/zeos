@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include "keybinds.h"
 
-#define PALETTE_MAX_ITEMS  64
+#define PALETTE_MAX_ITEMS  128
 #define PALETTE_MAX_QUERY 128
 
 typedef struct {
