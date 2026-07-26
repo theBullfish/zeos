@@ -982,6 +982,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         extern void scheduler_init(void);
         scheduler_init();
 
+#ifdef ZEOS_DIAG_R1
+        { extern void vault_tier_selftest(void); vault_tier_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

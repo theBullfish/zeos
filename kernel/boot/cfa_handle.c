@@ -65,6 +65,20 @@ static int tier_can_perceive(masq_tier_t observer_tier, masq_tier_t target_tier)
     return 0;
 }
 
+/* Public MasQ perceive check against the CURRENT observer, for subsystems
+ * that gate their own storage by tier rather than wrapping every object in a
+ * CFA handle (e.g. VAULT files -- R.1). Same rule and same permissive-when-no-
+ * observer default as cfa_resolve(): boot/system context (no observer set, or
+ * observer chain destroyed) is allowed; otherwise the observing chain's tier
+ * must be able to perceive target_tier. */
+int cfa_observer_can_perceive(masq_tier_t target_tier)
+{
+    if (s_observer < 0) return 1;                 /* system/boot context */
+    chain_t *obs = chain_get(s_observer);
+    if (!obs) return 1;                           /* observer gone -> permissive */
+    return tier_can_perceive(obs->tier, target_tier);
+}
+
 cfa_handle_t cfa_wrap_cat(void *ptr, size_t len, cfa_addr_t addr,
                           masq_tier_t tier, cfa_category_t cat)
 {

@@ -451,6 +451,29 @@ int vault_mount(void *base, uint64_t size)
     return 0;
 }
 
+#ifdef ZEOS_DIAG_R1
+/* R.1 proof: a SOVEREIGN vault file must NOT be readable by an INTERNAL
+ * observer, but MUST be readable by system/no-observer. Gated diagnostic. */
+void vault_tier_selftest(void)
+{
+    extern int CHAIN_COMPOSITOR;   /* created MASQ_INTERNAL in chain_registry */
+    char buf[16];
+    cfa_set_observer(-1);                       /* system context */
+    vault_create("/r1test/secret", VAULT_TIER_SOVEREIGN);
+    vault_write("/r1test/secret", "topsecret", 9);
+    int sys_rd = vault_read("/r1test/secret", buf, sizeof(buf));
+    cfa_set_observer(CHAIN_COMPOSITOR);         /* INTERNAL-tier observer */
+    int int_rd = vault_read("/r1test/secret", buf, sizeof(buf));
+    cfa_set_observer(-1);
+    kputs("[R1] SOVEREIGN file: system-read=");
+    kput_dec((uint64_t)(uint32_t)sys_rd);
+    kputs(" internal-observer-read=");
+    kput_dec((uint64_t)(uint32_t)int_rd);
+    kputs((sys_rd == 9 && int_rd < 0) ? "  -> PASS (denied cross-tier)\n"
+                                       : "  -> FAIL\n");
+}
+#endif
+
 int vault_create(const char *path, uint32_t tier)
 {
     if (!g_vault.mounted) return -1;
@@ -539,6 +562,13 @@ int vault_write(const char *path, const void *data, uint32_t size)
         return -1;
     }
 
+    /* R.1: an observer that cannot perceive this file's tier must not overwrite
+     * it either. Permissive for boot/system (no observer). */
+    if (!cfa_observer_can_perceive((masq_tier_t)node->tier)) {
+        spin_unlock(&g_vault_lock);
+        return -1;
+    }
+
     /* If file already has data, create a new version */
     if (node->size > 0 && node->blocks > 0) {
         /* Save previous version reference */
@@ -592,6 +622,16 @@ int vault_read(const char *path, void *buf, uint32_t size)
     if (!node || node->type != VAULT_TYPE_FILE) {
         spin_unlock(&g_vault_lock);
         return -1;
+    }
+
+    /* R.1 fix: enforce the file's MasQ tier against the calling observer.
+     * Previously node->tier was stored but NEVER checked, so a SOVEREIGN file
+     * (e.g. chat_e2ee's room-key salt) was readable by any INTERNAL observer.
+     * VAULT_TIER_* == masq_tier_t numerically. Boot/system context (no observer)
+     * stays permissive, so mount/persistence/first-boot are unaffected. */
+    if (!cfa_observer_can_perceive((masq_tier_t)node->tier)) {
+        spin_unlock(&g_vault_lock);
+        return -1;   /* MasQ: observer cannot perceive this tier */
     }
 
     uint32_t to_read = node->size;
@@ -684,6 +724,12 @@ int vault_append(const char *path, const void *data, uint32_t size)
 
     struct vault_inode *node = inode_ptr((uint32_t)ino);
     if (!node || node->type != VAULT_TYPE_FILE) {
+        spin_unlock(&g_vault_lock);
+        return -1;
+    }
+
+    /* R.1: tier gate on append too (permissive for boot/system). */
+    if (!cfa_observer_can_perceive((masq_tier_t)node->tier)) {
         spin_unlock(&g_vault_lock);
         return -1;
     }

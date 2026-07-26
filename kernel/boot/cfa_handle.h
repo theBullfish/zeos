@@ -72,4 +72,9 @@ void  cfa_set_observer(int chain_id);
 /* Read the current observer (debugging). */
 int   cfa_get_observer(void);
 
+/* MasQ perceive check against the current observer for subsystems that gate
+ * their own tiered storage (e.g. VAULT). 1 = allowed. Permissive when no
+ * observer is set (boot/system). masq_tier_t values match VAULT_TIER_*. */
+int   cfa_observer_can_perceive(masq_tier_t target_tier);
+
 #endif /* ZEOS_CFA_HANDLE_H */
