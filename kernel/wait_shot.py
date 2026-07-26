@@ -3,6 +3,7 @@
 # selftests (e.g. B.4's 200-tick frame_dt sum) have time to fire under
 # TCG emulation. Reuses the exact boot sequence from vshot.py/bshot.py.
 import json, os, socket, subprocess, sys, time
+from zqemu import accel_args
 
 K=os.path.dirname(os.path.abspath(__file__)); B=os.path.join(K,"build"); ESP=os.path.join(B,"esp")
 QMP="/tmp/zeos-x86-qmp.sock"; SER="/tmp/zeos-x86-serial.txt"
@@ -17,7 +18,7 @@ for p in (QMP,SER):
     except OSError: pass
 
 qemu=subprocess.Popen([
-    "qemu-system-x86_64","-machine","q35","-m","512M",
+    "qemu-system-x86_64", *accel_args(), "-machine","q35","-m","512M",
     "-drive","if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive",f"if=pflash,format=raw,file={B}/OVMF_VARS.fd",
     "-drive",f"format=raw,file=fat:rw:{ESP}",
