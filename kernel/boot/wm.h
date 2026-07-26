@@ -251,6 +251,10 @@ int  wm_window_at(int sx, int sy);
 /* Draw all visible surfaces (called by compositor) */
 void wm_draw_all(void);
 
+/* Serial dump of all surfaces' live state (id/ws/geometry/z/state/vis/focus).
+ * Ground truth for interaction verification; called gated by ZEOS_DIAG_WM_STATE. */
+void wm_dump_state(void);
+
 /* Draw a single surface's chrome (title bar, controls, border) */
 void wm_draw_chrome(chain_surface_t *s);
 

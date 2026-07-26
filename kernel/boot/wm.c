@@ -419,6 +419,32 @@ void wm_maximize_surface(int id) {
     }
 }
 
+/* Serial dump of every surface's live WM state -- ground truth for interaction
+ * verification (z-order/focus/maximize/workspace) without pixel-guessing. Gated
+ * behind ZEOS_DIAG_WM_STATE; a test injects an action, settles, then greps the
+ * last [WM] block from serial. */
+void wm_dump_state(void) {
+    static const char *st[] = {"NORM","MAX","MIN","SNP_L","SNP_R","SNP_TL","SNP_TR",
+                               "SNP_BL","SNP_BR","L2/3","R2/3","?"};
+    kputs("[WM] active_ws="); kput_dec((uint64_t)g_wm.active_workspace);
+    kputs(" focused_id="); kput_dec((uint64_t)(uint32_t)g_wm.focused_id);
+    kputs(" count="); kput_dec((uint64_t)g_wm.surface_count); kputc('\n');
+    for (int i = 0; i < g_wm.surface_count; i++) {
+        chain_surface_t *s = &g_wm.surfaces[i];
+        int si = (s->state >= 0 && s->state < 11) ? (int)s->state : 11;
+        kputs("[WM]  id="); kput_dec((uint64_t)s->id);
+        kputs(" \""); kputs(s->title); kputs("\" ws="); kput_dec((uint64_t)(uint32_t)s->workspace);
+        kputs(" x="); kput_dec((uint64_t)(uint32_t)s->x);
+        kputs(" y="); kput_dec((uint64_t)(uint32_t)s->y);
+        kputs(" w="); kput_dec((uint64_t)(uint32_t)s->w);
+        kputs(" h="); kput_dec((uint64_t)(uint32_t)s->h);
+        kputs(" z="); kput_dec((uint64_t)(uint32_t)s->z_index);
+        kputs(" state="); kputs(st[si]);
+        kputs(" vis="); kput_dec((uint64_t)s->visible);
+        kputs(" foc="); kput_dec((uint64_t)s->focused); kputc('\n');
+    }
+}
+
 /* ── Focus ── */
 
 void wm_focus_surface(int id) {
@@ -1102,6 +1128,9 @@ static void sort_by_z(int *indices, int count) {
 }
 
 void wm_draw_all(void) {
+#ifdef ZEOS_DIAG_WM_STATE
+    wm_dump_state();   /* interaction-verification ground truth; gated diagnostic */
+#endif
     /* Periodic auto-save sweep for persisted surfaces. Cheap; no-op
      * inside the 60s window. */
     wm_persist_tick();
