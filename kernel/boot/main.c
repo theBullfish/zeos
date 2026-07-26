@@ -1059,6 +1059,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void palette_j3_selftest(void); palette_j3_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_L5
+        /* L.5 selftest: context menu spring open + deferred-teardown close. */
+        { extern void context_menu_l5_selftest(void); context_menu_l5_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review
