@@ -24,6 +24,12 @@ void fb_reset_clip(void);
 /* B.9 selfcheck: FNV-1a hash of the scanned-out front buffer. */
 uint64_t fb_frame_checksum(void);
 
+/* B.9 selfcheck: FNV-1a hash of the back buffer (cursor-free composed scene). */
+uint64_t fb_backbuf_checksum(void);
+
+/* B.5/B.9 step 2: flip only the delta region to the front (partial present). */
+void fb_present_end_rect(int x, int y, int w, int h);
+
 /* Write a single character at the current cursor position */
 void fb_putc(char c);
 

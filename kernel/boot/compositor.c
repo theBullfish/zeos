@@ -83,6 +83,8 @@ static int s_delta_x0, s_delta_y0, s_delta_x1, s_delta_y1;
 #define B9_SELFCHECK_FRAMES 20
 static uint32_t s_b9_frames;
 static uint32_t s_b9_mismatch;
+static uint64_t s_b9_clip_ticks;   /* summed TSC of clipped corrections */
+static uint64_t s_b9_full_ticks;   /* summed TSC of full redraws (same state) */
 #endif
 
 static void delta_reset(void) { s_delta_valid = 0; }
@@ -382,6 +384,9 @@ void compositor_present(void) {
 
         composite_update();   /* advance layer logic once (clock/hover/anim) */
 
+#ifdef ZEOS_DIAG_B9_SELFCHECK
+        uint64_t t_clip0 = timer_read_tsc();
+#endif
         fb_present_begin();   /* B.6: retarget writers to the WB back buffer */
         if (use_clip) {
             fb_set_clip(cx0, cy0, cx1 - cx0, cy1 - cy0);
@@ -391,7 +396,13 @@ void compositor_present(void) {
         if (use_clip) fb_reset_clip();   /* restore full-screen drawing */
         delta_reset();
         g_comp.fully_dirty = 0;
-        fb_present_end();     /* B.6: atomic flip of the finished scene to WC front */
+        if (use_clip)
+            fb_present_end_rect(cx0, cy0, cx1 - cx0, cy1 - cy0);  /* partial flip */
+        else
+            fb_present_end();     /* B.6: full atomic flip */
+#ifdef ZEOS_DIAG_B9_SELFCHECK
+        uint64_t t_clip1 = timer_read_tsc();
+#endif
 
 #ifdef ZEOS_DIAG_B9_SELFCHECK
         /* The compositor watches its own output: the clipped correction just
@@ -400,11 +411,19 @@ void compositor_present(void) {
          * prove the correction dropped nothing; a mismatch means partial redraw
          * left a stale pixel. Runs for the first B9_SELFCHECK_FRAMES composites. */
         if (use_clip && s_b9_frames < B9_SELFCHECK_FRAMES) {
-            uint64_t h_partial = fb_frame_checksum();
+            s_b9_clip_ticks += (t_clip1 - t_clip0);
+            /* Compare BACK buffers (cursor-free): the clipped draw left the delta
+             * region fresh + the rest from the last full draw; a full redraw
+             * makes the whole backbuf fresh. Equal => the clipped correction
+             * produced the same composed scene as a full redraw. */
+            uint64_t h_partial = fb_backbuf_checksum();
+            uint64_t t_full0 = timer_read_tsc();
             fb_present_begin();
             composite_draw();                 /* no clip, no update -> full redraw, same state */
             fb_present_end();
-            uint64_t h_full = fb_frame_checksum();
+            uint64_t t_full1 = timer_read_tsc();
+            uint64_t h_full = fb_backbuf_checksum();
+            s_b9_full_ticks += (t_full1 - t_full0);
             s_b9_frames++;
             if (h_partial != h_full) {
                 s_b9_mismatch++;
@@ -413,10 +432,16 @@ void compositor_present(void) {
                 kputs(" full=");    kput_hex(h_full); kputs("\n");
             }
             if (s_b9_frames == B9_SELFCHECK_FRAMES) {
+                uint64_t freq = timer_tsc_freq();
+                uint64_t clip_us = freq ? (s_b9_clip_ticks * 1000000ULL) / freq / s_b9_frames : 0;
+                uint64_t full_us = freq ? (s_b9_full_ticks * 1000000ULL) / freq / s_b9_frames : 0;
                 kputs("[B9] selfcheck: frames="); kput_dec((uint64_t)s_b9_frames);
                 kputs(" clipped_total="); kput_dec((uint64_t)s_composite_clipped);
                 kputs(" mismatches="); kput_dec((uint64_t)s_b9_mismatch);
-                kputs(s_b9_mismatch == 0 ? " -> PASS\n" : " -> FAIL\n");
+                kputs(s_b9_mismatch == 0 ? " -> PASS" : " -> FAIL");
+                kputs(" | avg clip="); kput_dec(clip_us);
+                kputs("us full="); kput_dec(full_us);
+                kputs("us (delta=240x160)\n");
             }
         }
 #endif

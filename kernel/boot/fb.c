@@ -122,6 +122,44 @@ void fb_present_end(void) {
     g_fb->base = g_front;
 }
 
+/* B.9 selfcheck: FNV-1a hash of the BACK buffer (the composed scene, cursor-
+ * free -- the cursor is only ever drawn on the front). This validates the
+ * clipped DRAW independently of the ungated cursor and of full-vs-partial flip. */
+uint64_t fb_backbuf_checksum(void)
+{
+    if (!g_fb || !g_backbuf) return 0;
+    uint64_t h = 1469598103934665603ULL;
+    uint32_t w = g_fb->width, ht = g_fb->height, pitch = g_fb->pitch;
+    for (uint32_t y = 0; y < ht; y++) {
+        const uint32_t *row = g_backbuf + (uint64_t)y * pitch;
+        for (uint32_t x = 0; x < w; x++) { h ^= row[x]; h *= 1099511628211ULL; }
+    }
+    return h;
+}
+
+/* B.5/B.9 step 2: partial flip. Copy only the delta region [x,x+w) x [y,y+h)
+ * from the back buffer to the scanned-out front, instead of the whole frame.
+ * The rest of the front already holds the correct prior scene (the back buffer
+ * persists it), so a correction that touched only the delta region needs only
+ * that region flipped -- cutting the ~full-frame copy cost proportionally.
+ * Clamps to screen bounds. */
+void fb_present_end_rect(int x, int y, int w, int h) {
+    if (!g_backbuf || !g_fb) { g_fb->base = g_front; return; }
+    int x0 = x < 0 ? 0 : x;
+    int y0 = y < 0 ? 0 : y;
+    int x1 = x + w, y1 = y + h;
+    if (x1 > (int)g_fb->width)  x1 = (int)g_fb->width;
+    if (y1 > (int)g_fb->height) y1 = (int)g_fb->height;
+    uint32_t pitch = g_fb->pitch;
+    for (int row = y0; row < y1; row++) {
+        uint32_t off = (uint32_t)row * pitch;
+        uint32_t *d = g_front + off;
+        const uint32_t *s = g_backbuf + off;
+        for (int col = x0; col < x1; col++) d[col] = s[col];
+    }
+    g_fb->base = g_front;
+}
+
 void fb_clear(uint32_t color)
 {
     if (!g_fb || !g_fb->base)
