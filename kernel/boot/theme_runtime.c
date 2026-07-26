@@ -70,7 +70,9 @@ uint32_t theme_surface_top(void)
 
 uint32_t theme_on_surface(void)
 {
-    return is_light_active() ? COLOR_LIGHT_ON_SURFACE : COLOR_ON_SURFACE;
+    /* M.4: HIGH_CONTRAST forces pure white primary text. */
+    return access_text_color(is_light_active() ? COLOR_LIGHT_ON_SURFACE
+                                               : COLOR_ON_SURFACE);
 }
 
 uint32_t theme_on_surface_2(void)
@@ -97,22 +99,27 @@ uint32_t theme_separator(void)
 
 uint32_t theme_active_accent(void)
 {
+    uint32_t c;
     switch (persona_get_active()) {
-    case PERSONA_ZEROS: return COLOR_ZEROS_ACCENT;
-    case PERSONA_DEREZ: return COLOR_DEREZ_ACCENT;
-    case PERSONA_FULL:  return COLOR_FULL_ACCENT;
+    case PERSONA_ZEROS: c = COLOR_ZEROS_ACCENT; break;
+    case PERSONA_DEREZ: c = COLOR_DEREZ_ACCENT; break;
+    case PERSONA_FULL:  c = COLOR_FULL_ACCENT;  break;
+    default:            c = COLOR_FULL_ACCENT;  break;
     }
-    return COLOR_FULL_ACCENT;
+    /* M.4: mute (LOW_STIMULI) / boost (HIGH_CONTRAST) per sensory mode. */
+    return access_apply_sensory(c);
 }
 
 uint32_t theme_active_accent_dim(void)
 {
+    uint32_t c;
     switch (persona_get_active()) {
-    case PERSONA_ZEROS: return COLOR_ZEROS_DIM;
-    case PERSONA_DEREZ: return COLOR_DEREZ_DIM;
-    case PERSONA_FULL:  return COLOR_FULL_DIM;
+    case PERSONA_ZEROS: c = COLOR_ZEROS_DIM; break;
+    case PERSONA_DEREZ: c = COLOR_DEREZ_DIM; break;
+    case PERSONA_FULL:  c = COLOR_FULL_DIM;  break;
+    default:            c = COLOR_FULL_DIM;  break;
     }
-    return COLOR_FULL_DIM;
+    return access_apply_sensory(c);
 }
 
 /* ── Scheme control ── */

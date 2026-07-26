@@ -141,10 +141,13 @@ void anim_tick(float dt)
          * sub-steps keeps every step well inside the stability region
          * regardless of frame_dt, and also hardens real hardware against frame
          * hitches. Max 0.1s / (1/240s) = 24 sub-steps -- cheap. */
+        /* M.4: LOW_STIMULI softens spring stiffness (0.5x) for gentler motion. */
+        float k = a->stiffness * access_spring_stiffness_scale();
+
         float remaining = dt;
         while (remaining > 0.0f) {
             float h = (remaining > ANIM_SUBSTEP_MAX) ? ANIM_SUBSTEP_MAX : remaining;
-            float force = (a->target - a->position) * a->stiffness;
+            float force = (a->target - a->position) * k;
             float damping_force = a->velocity * a->damping;
             float acceleration = (force - damping_force) / a->mass;
             a->velocity += acceleration * h;

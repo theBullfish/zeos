@@ -986,6 +986,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void vault_tier_selftest(void); vault_tier_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_M4
+        /* M.4 sensory-mode consumer selftest: accent muting/boost + border/
+         * decorative-anim queries. Passive (no state mutation persists). */
+        { extern void access_m4_selftest(void); access_m4_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

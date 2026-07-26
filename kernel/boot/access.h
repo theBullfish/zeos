@@ -132,4 +132,27 @@ int access_get_panel_height(void);
  */
 int access_get_icon_size(void);
 
+/* ── Sensory-mode runtime transforms (M.4 consumer layer) ──
+ *
+ * The theme palette is compile-time, so sensory modes are applied by piping
+ * colors/geometry through these at the source. Callers that draw accents or
+ * text run their color through access_apply_sensory()/access_text_color();
+ * callers that draw borders or drive springs read the width/scale queries. */
+
+/* Transform an accent/decorative color for the active sensory mode.
+ * STANDARD: unchanged. LOW_STIMULI: 50% desaturated. HIGH_CONTRAST: +sat. */
+uint32_t access_apply_sensory(uint32_t argb);
+
+/* Text color for the active mode: pure white under HIGH_CONTRAST, else normal. */
+uint32_t access_text_color(uint32_t normal);
+
+/* Border/separator width: 2px under HIGH_CONTRAST, else 1px. */
+int access_border_width(void);
+
+/* 0 when decorative animations should be suppressed (LOW_STIMULI), else 1. */
+int access_decorative_anims_enabled(void);
+
+/* Spring stiffness multiplier: 0.5x under LOW_STIMULI (gentler), else 1.0x. */
+float access_spring_stiffness_scale(void);
+
 #endif /* ZEOS_ACCESS_H */

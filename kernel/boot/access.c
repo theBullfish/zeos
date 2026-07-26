@@ -117,6 +117,50 @@ static void apply_sensory_mode(sensory_mode_t mode)
     compositor_dirty_all();
 }
 
+#ifdef ZEOS_DIAG_M4
+#include "kprint.h"
+/*
+ * M.4 selftest: prove the sensory-mode consumer layer actually transforms a
+ * known accent color and the geometry queries respond, across all three modes.
+ * Measured (real access_apply_sensory over the real COLOR_FULL_ACCENT constant)
+ * and printed to serial so the transform is observable against a stable
+ * baseline (the STANDARD passthrough must equal the input).
+ */
+void access_m4_selftest(void)
+{
+    sensory_mode_t saved = g_access.sensory;
+    uint32_t in = COLOR_FULL_ACCENT;
+
+    g_access.sensory = SENSORY_STANDARD;
+    uint32_t std  = access_apply_sensory(in);
+    g_access.sensory = SENSORY_LOW_STIMULI;
+    uint32_t low  = access_apply_sensory(in);
+    int      low_border = access_border_width();
+    int      low_deco   = access_decorative_anims_enabled();
+    g_access.sensory = SENSORY_HIGH_CONTRAST;
+    uint32_t high = access_apply_sensory(in);
+    uint32_t htxt = access_text_color(0x00223344u);
+    int      high_border = access_border_width();
+
+    g_access.sensory = saved;
+
+    /* STANDARD must be a pure passthrough (the stable baseline). LOW_STIMULI
+     * must actually change the color (muted). HIGH_CONTRAST text must be white. */
+    int pass = (std == in) && (low != in) && (htxt == 0xFFFFFFFFu) &&
+               (low_border == 1) && (high_border == 2) && (low_deco == 0);
+
+    kputs("[M4] accent in=");        kput_hex(in);
+    kputs(" std=");                  kput_hex(std);
+    kputs(" low=");                  kput_hex(low);
+    kputs(" high=");                 kput_hex(high);
+    kputs(" htext=");                kput_hex(htxt);
+    kputs(" border(low/high)=");     kput_dec((uint64_t)low_border);
+    kputs("/");                      kput_dec((uint64_t)high_border);
+    kputs(" deco(low)=");            kput_dec((uint64_t)low_deco);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif /* ZEOS_DIAG_M4 */
+
 /* ── Init ── */
 
 void access_init(void)
@@ -154,6 +198,15 @@ void access_init(void)
     g_access.night_shift    = g_access.night_shift ? 1 : 0;
     g_access.min_touch_target = clamp_int(g_access.min_touch_target, 32, 64);
 
+#ifdef ZEOS_DIAG_M4_FORCE_LOW
+    /* M.4 render observation: force LOW_STIMULI so the panel accent renders
+     * muted for a screenshot diff vs STANDARD. Not persisted. */
+    g_access.sensory = SENSORY_LOW_STIMULI;
+#endif
+#ifdef ZEOS_DIAG_M4_FORCE_HIGH
+    g_access.sensory = SENSORY_HIGH_CONTRAST;
+#endif
+
     /* Apply sensory mode side-effects */
     apply_sensory_mode(g_access.sensory);
 
@@ -173,6 +226,96 @@ void access_save(void)
 access_config_t *access_get(void)
 {
     return &g_access;
+}
+
+/* ── Sensory-mode runtime color/geometry transforms (M.4 consumers) ──
+ *
+ * The theme palette is compile-time (theme.h COLOR_* constants), so the
+ * sensory modes are applied by running these transforms at the color source
+ * (accent getters, text getters) and geometry source (border width, spring
+ * stiffness). This is the consumer layer the design in apply_sensory_mode()
+ * referred to — centralised here so callers just pipe their color through.
+ *
+ * ARGB byte order is 0xAARRGGBB; alpha is preserved by every transform. */
+
+static int clamp_byte(int v)
+{
+    if (v < 0)   return 0;
+    if (v > 255) return 255;
+    return v;
+}
+
+/* Rec.601-ish luminance, integer (r*0.30 + g*0.59 + b*0.11). */
+static uint32_t luma601(uint32_t r, uint32_t g, uint32_t b)
+{
+    return (r * 77u + g * 150u + b * 29u) >> 8;
+}
+
+/*
+ * Apply the active sensory mode to an accent/decorative color.
+ *   STANDARD:      unchanged.
+ *   LOW_STIMULI:   mix 50% toward luminance -> 50% saturation (muted).
+ *   HIGH_CONTRAST: push away from luminance (~1.4x sat) so accents read
+ *                  hard against the ground.
+ */
+uint32_t access_apply_sensory(uint32_t argb)
+{
+    uint32_t a = (argb >> 24) & 0xFFu;
+    int r = (int)((argb >> 16) & 0xFFu);
+    int g = (int)((argb >>  8) & 0xFFu);
+    int b = (int)( argb        & 0xFFu);
+
+    switch (g_access.sensory) {
+    case SENSORY_LOW_STIMULI: {
+        int l = (int)luma601((uint32_t)r, (uint32_t)g, (uint32_t)b);
+        r = (r + l) >> 1;
+        g = (g + l) >> 1;
+        b = (b + l) >> 1;
+        break;
+    }
+    case SENSORY_HIGH_CONTRAST: {
+        int l = (int)luma601((uint32_t)r, (uint32_t)g, (uint32_t)b);
+        r = clamp_byte(l + ((r - l) * 7) / 5);
+        g = clamp_byte(l + ((g - l) * 7) / 5);
+        b = clamp_byte(l + ((b - l) * 7) / 5);
+        break;
+    }
+    case SENSORY_STANDARD:
+    default:
+        return argb;
+    }
+
+    return (a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+}
+
+/*
+ * Text color under the active sensory mode. HIGH_CONTRAST forces pure white
+ * (opaque) for maximum legibility; other modes return the caller's color
+ * unchanged.
+ */
+uint32_t access_text_color(uint32_t normal)
+{
+    if (g_access.sensory == SENSORY_HIGH_CONTRAST)
+        return 0xFFFFFFFFu;
+    return normal;
+}
+
+/* Border/separator width: 2px under HIGH_CONTRAST, 1px otherwise. */
+int access_border_width(void)
+{
+    return (g_access.sensory == SENSORY_HIGH_CONTRAST) ? 2 : 1;
+}
+
+/* Decorative (non-essential) animations are suppressed under LOW_STIMULI. */
+int access_decorative_anims_enabled(void)
+{
+    return (g_access.sensory == SENSORY_LOW_STIMULI) ? 0 : 1;
+}
+
+/* Spring stiffness multiplier: gentler (0.5x) motion under LOW_STIMULI. */
+float access_spring_stiffness_scale(void)
+{
+    return (g_access.sensory == SENSORY_LOW_STIMULI) ? 0.5f : 1.0f;
 }
 
 /* ── Setters ── */

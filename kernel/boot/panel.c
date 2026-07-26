@@ -14,6 +14,7 @@
 #include "font.h"
 #include "theme.h"
 #include "persona.h"
+#include "access.h"
 #include "timer.h"
 #include "palette.h"
 #include "kprint.h"
@@ -61,11 +62,14 @@ static void str_copy_n(char *d, const char *s, int max) {
 }
 
 static uint32_t persona_accent(int persona) {
+    uint32_t c;
     switch (persona) {
-    case PERSONA_ZEROS: return COLOR_ZEROS_ACCENT;
-    case PERSONA_DEREZ: return COLOR_DEREZ_ACCENT;
-    default:            return COLOR_FULL_ACCENT;
+    case PERSONA_ZEROS: c = COLOR_ZEROS_ACCENT; break;
+    case PERSONA_DEREZ: c = COLOR_DEREZ_ACCENT; break;
+    default:            c = COLOR_FULL_ACCENT;  break;
     }
+    /* M.4: mute (LOW_STIMULI) / boost (HIGH_CONTRAST) per active sensory mode. */
+    return access_apply_sensory(c);
 }
 
 static const char *persona_name(int persona) {
