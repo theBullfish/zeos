@@ -1064,6 +1064,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void context_menu_l5_selftest(void); context_menu_l5_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_J2
+        /* J.2 selftest: settings GUI mutates the one real access config. */
+        { extern void settings_j2_selftest(void); settings_j2_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

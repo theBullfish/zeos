@@ -30,12 +30,8 @@ extern uint32_t theme_accent_dim(void);
 #define LABEL_X           (SIDEBAR_W + Z6)
 #define VALUE_RIGHT_PAD   Z6
 
-/* ── Color scheme ── */
-typedef enum {
-    SCHEME_DARK,
-    SCHEME_LIGHT,
-    SCHEME_AUTO,
-} color_scheme_t;
+/* J.2: color_scheme_t (SCHEME_DARK/LIGHT/AUTO) comes from access.h now (was a
+ * duplicate here). Same values, one definition. */
 
 /* ── Static state ── */
 static settings_state_t g_settings;
@@ -50,15 +46,19 @@ static uint32_t        g_wallpaper     = COLOR_SURFACE;
 static int             g_mouse_speed   = 5;   /* 1-10 */
 static int             g_key_repeat    = 30;  /* ms between repeats */
 
-static access_config_t g_access = {
-    .sensory        = SENSORY_STANDARD,
-    .density        = DENSITY_STANDARD,
-    .reduced_motion = 0,
-    .anim_speed     = ANIM_SPEED_1X,
-    .letter_spacing = 0,
-    .focus_mode     = 0,
-    .night_shift    = 0,
-};
+/* J.2: no private access copy -- the settings GUI operates on the REAL access
+ * config (access_get()) and mutates it through access_set_* so changes apply
+ * live and persist via access.c. access.h maps anim_speed as a float, so the UI
+ * maps its 4 speed steps to/from {0.0, 0.5, 1.0, 2.0}. */
+static const float ANIM_SPEED_STEPS[4] = { 0.0f, 0.5f, 1.0f, 2.0f };
+
+static int anim_speed_to_idx(float s)
+{
+    if (s < 0.25f) return 0;
+    if (s < 0.75f) return 1;
+    if (s < 1.5f)  return 2;
+    return 3;
+}
 
 /* ── Page names ── */
 static const char *page_names[SETTINGS_PAGE_COUNT] = {
@@ -224,7 +224,8 @@ static void save_all(void)
     vault_save_config(VKEY_WALLPAPER, &g_wallpaper, sizeof(g_wallpaper));
     vault_save_config(VKEY_MOUSE_SPEED, &g_mouse_speed, sizeof(g_mouse_speed));
     vault_save_config(VKEY_KEY_REPEAT, &g_key_repeat, sizeof(g_key_repeat));
-    vault_save_config(VKEY_ACCESS, &g_access, sizeof(g_access));
+    /* J.2: access config is owned + persisted by access.c (access_set_* ->
+     * access_save); the settings GUI no longer keeps or saves a private copy. */
 
     /* E.4: flash the cursor confirm checkmark on a committed settings change. */
     { extern void cursor_confirm(void); cursor_confirm(); }
@@ -238,7 +239,7 @@ static void load_all(void)
     vault_load_config(VKEY_WALLPAPER, &g_wallpaper, sizeof(g_wallpaper));
     vault_load_config(VKEY_MOUSE_SPEED, &g_mouse_speed, sizeof(g_mouse_speed));
     vault_load_config(VKEY_KEY_REPEAT, &g_key_repeat, sizeof(g_key_repeat));
-    vault_load_config(VKEY_ACCESS, &g_access, sizeof(g_access));
+    /* J.2: access config loaded by access_init() from its own VAULT key. */
 }
 
 /* ── Apply changes to live subsystems ── */
@@ -299,32 +300,33 @@ static void draw_page_accessibility(int x, int y, int w, int h)
 {
     (void)h;
     int sel = g_settings.selected_item;
+    const access_config_t *acc = access_get();   /* J.2: the REAL live config */
 
     /* Row 0: Sensory Mode */
     static const char *sensory[] = { "Standard", "Low Stimuli", "High Contrast" };
-    draw_row_radio(x, y, w, 0, "Sensory Mode", sensory, 3, (int)g_access.sensory, sel == 0);
+    draw_row_radio(x, y, w, 0, "Sensory Mode", sensory, 3, (int)acc->sensory, sel == 0);
 
     /* Row 1: Density */
     static const char *density[] = { "Comfortable", "Standard", "Compact" };
-    draw_row_radio(x, y, w, 1, "Density", density, 3, (int)g_access.density, sel == 1);
+    draw_row_radio(x, y, w, 1, "Density", density, 3, (int)acc->density, sel == 1);
 
     /* Row 2: Reduced Motion */
     static const char *onoff[] = { "Off", "On" };
-    draw_row_radio(x, y, w, 2, "Reduced Motion", onoff, 2, g_access.reduced_motion, sel == 2);
+    draw_row_radio(x, y, w, 2, "Reduced Motion", onoff, 2, acc->reduced_motion, sel == 2);
 
-    /* Row 3: Animation Speed */
+    /* Row 3: Animation Speed (access stores a float; map to the 4 UI steps) */
     static const char *speeds[] = { "0x", "0.5x", "1x", "2x" };
-    draw_row_radio(x, y, w, 3, "Animation Speed", speeds, 4, (int)g_access.anim_speed, sel == 3);
+    draw_row_radio(x, y, w, 3, "Animation Speed", speeds, 4, anim_speed_to_idx(acc->anim_speed), sel == 3);
 
     /* Row 4: Letter Spacing */
     static const char *spacing[] = { "0", "1", "2", "3", "4" };
-    draw_row_radio(x, y, w, 4, "Letter Spacing", spacing, 5, g_access.letter_spacing, sel == 4);
+    draw_row_radio(x, y, w, 4, "Letter Spacing", spacing, 5, acc->letter_spacing, sel == 4);
 
     /* Row 5: Focus Mode */
-    draw_row_radio(x, y, w, 5, "Focus Mode", onoff, 2, g_access.focus_mode, sel == 5);
+    draw_row_radio(x, y, w, 5, "Focus Mode", onoff, 2, acc->focus_mode, sel == 5);
 
     /* Row 6: Night Shift */
-    draw_row_radio(x, y, w, 6, "Night Shift", onoff, 2, g_access.night_shift, sel == 6);
+    draw_row_radio(x, y, w, 6, "Night Shift", onoff, 2, acc->night_shift, sel == 6);
 }
 
 static void draw_page_network(int x, int y, int w, int h)
@@ -519,26 +521,32 @@ static void cycle_value(int direction)
 
     case SETTINGS_PAGE_ACCESSIBILITY:
         switch (item) {
+        /* J.2: route through access_set_* so changes apply live to the M.4
+         * consumers and persist via access.c -- no private copy. */
         case 0: /* Sensory */
-            g_access.sensory = (sensory_mode_t)((g_access.sensory + direction + 3) % 3);
+            access_set_sensory((sensory_mode_t)((access_get()->sensory + direction + 3) % 3));
             break;
         case 1: /* Density */
-            g_access.density = (density_t)((g_access.density + direction + 3) % 3);
+            access_set_density((density_mode_t)((access_get()->density + direction + 3) % 3));
             break;
         case 2: /* Reduced motion */
-            g_access.reduced_motion = !g_access.reduced_motion;
+            access_set_reduced_motion(!access_get()->reduced_motion);
             break;
-        case 3: /* Anim speed */
-            g_access.anim_speed = (anim_speed_t)((g_access.anim_speed + direction + 4) % 4);
+        case 3: /* Anim speed (4 UI steps -> float) */
+            access_set_anim_speed(
+                ANIM_SPEED_STEPS[(anim_speed_to_idx(access_get()->anim_speed) + direction + 4) % 4]);
             break;
-        case 4: /* Letter spacing */
-            g_access.letter_spacing = clamp(g_access.letter_spacing + direction, 0, 4);
+        case 4: /* Letter spacing (no dedicated setter -> write + persist) */
+            access_get()->letter_spacing = clamp(access_get()->letter_spacing + direction, 0, 4);
+            access_save();
             break;
         case 5: /* Focus mode */
-            g_access.focus_mode = !g_access.focus_mode;
+            access_set_focus_mode(!access_get()->focus_mode);
             break;
-        case 6: /* Night shift */
-            g_access.night_shift = !g_access.night_shift;
+        case 6: /* Night shift (no dedicated setter -> write + persist + redraw) */
+            access_get()->night_shift = !access_get()->night_shift;
+            access_save();
+            { extern void compositor_dirty_all(void); compositor_dirty_all(); }
             break;
         }
         break;
@@ -677,5 +685,39 @@ void settings_close(void)
 
 const access_config_t *settings_get_access(void)
 {
-    return &g_access;
+    /* J.2: single source of truth -- the live access subsystem config. */
+    return access_get();
 }
+
+#ifdef ZEOS_DIAG_J2
+#include "kprint.h"
+/* J.2 selftest: prove the settings GUI now mutates the ONE real access config
+ * (access_get()) rather than a private duplicate. Drive the accessibility page's
+ * cycle_value and confirm the live subsystem reflects each change. Also confirm
+ * settings_get_access() IS access_get() (same pointer = same state). */
+void settings_j2_selftest(void)
+{
+    int shared_ptr = (settings_get_access() == access_get());
+
+    g_settings.page = SETTINGS_PAGE_ACCESSIBILITY;
+
+    int s0 = (int)access_get()->sensory;
+    g_settings.selected_item = 0; cycle_value(1);
+    int sensory_live = ((int)access_get()->sensory == (s0 + 1) % 3);
+
+    int r0 = access_get()->reduced_motion;
+    g_settings.selected_item = 2; cycle_value(1);
+    int rm_live = (access_get()->reduced_motion == !r0);
+
+    int f0 = access_get()->focus_mode;
+    g_settings.selected_item = 5; cycle_value(1);
+    int focus_live = (access_get()->focus_mode == !f0);
+
+    int pass = shared_ptr && sensory_live && rm_live && focus_live;
+    kputs("[J2] shared_ptr="); kput_dec((uint64_t)shared_ptr);
+    kputs(" sensory_live="); kput_dec((uint64_t)sensory_live);
+    kputs(" reduced_motion_live="); kput_dec((uint64_t)rm_live);
+    kputs(" focus_live="); kput_dec((uint64_t)focus_live);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

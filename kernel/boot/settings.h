@@ -14,6 +14,12 @@
 #define ZEOS_SETTINGS_H
 
 #include <stdint.h>
+#include "access.h"   /* J.2: single source of truth for accessibility config
+                       * (sensory_mode_t, density_mode_t, access_config_t).
+                       * settings.h used to define DUPLICATE copies of these,
+                       * so the settings GUI mutated a private struct that never
+                       * reached the live access subsystem -- changing Sensory
+                       * Mode etc. did nothing. Now both use access.h's config. */
 
 /* ── Settings pages ── */
 typedef enum {
@@ -24,36 +30,6 @@ typedef enum {
     SETTINGS_PAGE_ABOUT,
     SETTINGS_PAGE_COUNT
 } settings_page_t;
-
-/* ── Accessibility configuration ── */
-typedef enum {
-    SENSORY_STANDARD,
-    SENSORY_LOW_STIMULI,
-    SENSORY_HIGH_CONTRAST,
-} sensory_mode_t;
-
-typedef enum {
-    DENSITY_COMFORTABLE,
-    DENSITY_STANDARD,
-    DENSITY_COMPACT,
-} density_t;
-
-typedef enum {
-    ANIM_SPEED_0X,       /* No animation */
-    ANIM_SPEED_HALF,     /* 0.5x */
-    ANIM_SPEED_1X,       /* Normal */
-    ANIM_SPEED_2X,       /* Fast */
-} anim_speed_t;
-
-typedef struct {
-    sensory_mode_t sensory;
-    density_t      density;
-    int            reduced_motion;   /* 0 = off, 1 = on */
-    anim_speed_t   anim_speed;
-    int            letter_spacing;   /* 0-4 px extra */
-    int            focus_mode;       /* 0 = off, 1 = on */
-    int            night_shift;      /* 0 = off, 1 = on */
-} access_config_t;
 
 /* ── Settings state ── */
 typedef struct {
