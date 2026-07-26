@@ -155,7 +155,7 @@ the OS. When in doubt it's the OS.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
 - [ ] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[UNVERIFIED]` `[source desktop.c:457-540]`; ships empty (0 icons, by design) so unexercised at boot.
-- [ ] **D.9** Desktop icons are persona-tinted SVGs — `[PARTIAL]` `[source desktop.c:386-405]` draws initials + accent tint, not SVGs.
+- [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
 - [ ] **D.10** Wallpaper image load from VAULT — `[TODO]` solid color only.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
 - [ ] **D.12** Dock: centered, pinned|divider|running, state dots, auto-hide, empty-at-boot — `[UNVERIFIED]` `[source dock.c:407-483,330-339,192-218,97-99]`.
