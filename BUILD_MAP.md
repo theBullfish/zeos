@@ -207,7 +207,7 @@ the OS. When in doubt it's the OS.
 
 ## J. Settings
 - [ ] **J.1** Settings app (WM app, VAULT persist, inline current values) — `[UNVERIFIED]` `[source settings.c:219-432]`.
-- [ ] **J.2** One settings surface, no duplicate — `[PARTIAL]` two disjoint surfaces (`settings.c` vs `settings_registry.c`) not sharing state.
+- [x] **J.2** One settings surface, no duplicate — `[VERIFIED/production]` settings.h dropped its name-colliding duplicate types (access_config_t/color_scheme_t/etc.), includes access.h; settings GUI operates on the ONE real config via access_get()/access_set_*. KVM [J2] shared_ptr=1 sensory/reduced_motion/focus live=1 PASS. Also fixed latent bug: accessibility changes now actually apply. bible id=395.
 - [x] **J.3** Search-first (palette enumerates every setting) — `[VERIFIED/production]` palette_show enumerates settings_registry (42 items), bool toggles inline. KVM [J3] items=42 registry=42 PASS. PALETTE_MAX_ITEMS 64->128. bible id=336.
 - [ ] **J.4** Right-click element → "Settings for this…" — `[TODO]`.
 
