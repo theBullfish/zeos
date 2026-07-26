@@ -15,6 +15,7 @@
 #include "theme.h"
 #include "vault.h"
 #include "chain.h"
+#include "icon_svg.h"   /* D.9: persona-tinted desktop icons */
 #include "wm.h"
 #include "compositor.h"
 #include "kprint.h"
@@ -238,10 +239,11 @@ static int icon_at(int px, int py) {
     compositor_t *comp = compositor_get_state();
     int panel_h = comp->panel_h;
 
+    int margin = 16;   /* D.9: must match the draw grid inset in desktop_draw */
     for (int i = 0; i < g_desktop.icon_count; i++) {
         desktop_icon_t *ic = &g_desktop.icons[i];
-        int ix = ic->grid_x * g_desktop.grid_spacing;
-        int iy = ic->grid_y * g_desktop.grid_spacing + panel_h;
+        int ix = margin + ic->grid_x * g_desktop.grid_spacing;
+        int iy = panel_h + margin + ic->grid_y * g_desktop.grid_spacing;
         int total_h = g_desktop.icon_size + TYPE_CAPTION + 4;
 
         if (px >= ix && px < ix + g_desktop.icon_size &&
@@ -298,6 +300,18 @@ void desktop_init(uint32_t wallpaper_color, int density) {
 
     /* Try to load saved icons from VAULT */
     desktop_load();
+
+    /* D.9: seed default launcher icons when nothing was persisted (the desktop
+     * was otherwise empty -- desktop_add_icon had no callers). Names map to
+     * persona-tinted icons via icon_svg_for_name (Files->folder, Terminal->code,
+     * Settings->gear). */
+    if (g_desktop.icon_count == 0) {
+        /* Every 2 grid cells vertically: the 32px grid unit is smaller than a
+         * 48px icon + caption, so 1-apart would overlap. */
+        desktop_add_icon("Files",    "files",    0, 0);
+        desktop_add_icon("Terminal", "terminal", 0, 2);
+        desktop_add_icon("Settings", "settings", 0, 4);
+    }
 
     kputs("DESK: initialized, ");
     kput_dec(g_desktop.icon_count);
@@ -368,8 +382,11 @@ void desktop_draw(void) {
             ix = g_desktop.drag_x - g_desktop.icon_size / 2;
             iy = g_desktop.drag_y - g_desktop.icon_size / 2;
         } else {
-            ix = ic->grid_x * g_desktop.grid_spacing;
-            iy = ic->grid_y * g_desktop.grid_spacing + panel_h;
+            /* D.9: inset the grid so icons + their captions don't clip the
+             * left/top edges (captions are centered under a square at x=0). */
+            int margin = 16;
+            ix = margin + ic->grid_x * g_desktop.grid_spacing;
+            iy = panel_h + margin + ic->grid_y * g_desktop.grid_spacing;
         }
 
         int sz = g_desktop.icon_size;
@@ -383,17 +400,28 @@ void desktop_draw(void) {
             fb_rect_outline(ix, iy, sz, sz, ic->accent, 2);
         }
 
-        /* First two letters centered in the square */
-        char initials[3] = { 0, 0, 0 };
-        initials[0] = ic->name[0];
-        if (ic->name[0] && ic->name[1])
-            initials[1] = ic->name[1];
+        /* D.9: draw the real persona-tinted icon when we have one; otherwise
+         * fall back to the first-two-letters initials. */
+        unsigned long ilen = 0;
+        const unsigned char *ipng = icon_svg_for_name(ic->name, &ilen);
+        if (ipng) {
+            int ipx = sz - 12;              /* inset the glyph within the square */
+            if (ipx < 8) ipx = sz;
+            int gx = ix + (sz - ipx) / 2;
+            int gy = iy + (sz - ipx) / 2;
+            icon_svg_draw(ipng, ilen, gx, gy, ipx, ic->accent);
+        } else {
+            char initials[3] = { 0, 0, 0 };
+            initials[0] = ic->name[0];
+            if (ic->name[0] && ic->name[1])
+                initials[1] = ic->name[1];
 
-        int text_w = font_measure(initials, FONT_BOOT, TYPE_BODY);
-        int text_h = font_line_height(FONT_BOOT, TYPE_BODY);
-        int tx = ix + (sz - text_w) / 2;
-        int ty = iy + (sz - text_h) / 2;
-        font_draw(tx, ty, initials, FONT_BOOT, TYPE_BODY, COLOR_ON_SURFACE);
+            int text_w = font_measure(initials, FONT_BOOT, TYPE_BODY);
+            int text_h = font_line_height(FONT_BOOT, TYPE_BODY);
+            int tx = ix + (sz - text_w) / 2;
+            int ty = iy + (sz - text_h) / 2;
+            font_draw(tx, ty, initials, FONT_BOOT, TYPE_BODY, COLOR_ON_SURFACE);
+        }
 
         /* Name caption below the icon */
         int name_w = font_measure(ic->name, FONT_BOOT, TYPE_CAPTION);

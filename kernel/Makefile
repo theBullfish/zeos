@@ -49,6 +49,7 @@ LIBS     = -lefi -lgnuefi
 
 # Source files
 SRCS     = lib/lodepng/lodepng.c \
+           boot/icon_svg.c \
            boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/splash.c \
            boot/panic.c boot/gdt.c boot/idt.c \
            boot/acpi.c boot/aml.c boot/lapic.c boot/ioapic.c \
@@ -57,7 +58,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/std_btree.c boot/std_json.c boot/std_regex.c boot/std_http.c boot/std_tls_server.c \
            boot/sigviz.c boot/vault.c \
            boot/net.c boot/net_chain.c boot/net_virtio.c boot/net_e1000.c boot/net_rtl8169.c boot/net_rtl8139.c boot/net_arp.c boot/net_ip.c \
-           boot/net_udp.c boot/net_tcp.c boot/net_tcp6.c boot/net_dns.c boot/net_http.c \
+           boot/net_udp.c boot/net_tcp.c boot/net_tcp6.c boot/net_dns.c boot/net_http.c boot/net_ntp.c \
            boot/net_ipv6.c boot/net_dhcpv6.c \
            boot/shell.c boot/anim.c boot/ui.c boot/cursor.c boot/net_dhcp.c boot/net_tls.c boot/browser.c \
            boot/mbedtls_platform.c boot/font.c boot/wm.c boot/compositor.c \
@@ -184,6 +185,40 @@ FW_OBJS      = lib/firmware/rtl8188eufw.o \
 
 # AP bring-up trampoline (assembled flat binary embedded as ELF object).
 SMP_OBJS    = boot/smp_trampoline.o
+
+# ── D.9: desktop icons (SVG -> 48x48 RGBA PNG at build time -> ELF via objcopy) ──
+# rsvg-convert rasterizes; objcopy embeds; icon_svg.c decodes (lodepng) + tints.
+ICON_SVG_DIR = ../assets/icons
+ICON_OBJS    = boot/icon_folder.o boot/icon_code.o boot/icon_gear.o
+
+# D.9 icons: rasterize the SVG to 48x48 RGBA PNG, then objcopy-embed it with a
+# clean symbol name (_binary_icon_<name>_png_{start,end,size}).
+boot/icon_folder.o: $(ICON_SVG_DIR)/ui-basic/Folder.svg
+	@mkdir -p build/icons
+	rsvg-convert -w 48 -h 48 $< -o build/icons/icon_folder.png
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary_build_icons_icon_folder_png_start=_binary_icon_folder_png_start \
+		--redefine-sym _binary_build_icons_icon_folder_png_end=_binary_icon_folder_png_end \
+		--redefine-sym _binary_build_icons_icon_folder_png_size=_binary_icon_folder_png_size \
+		build/icons/icon_folder.png $@
+
+boot/icon_code.o: $(ICON_SVG_DIR)/ui-basic/Code.svg
+	@mkdir -p build/icons
+	rsvg-convert -w 48 -h 48 $< -o build/icons/icon_code.png
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary_build_icons_icon_code_png_start=_binary_icon_code_png_start \
+		--redefine-sym _binary_build_icons_icon_code_png_end=_binary_icon_code_png_end \
+		--redefine-sym _binary_build_icons_icon_code_png_size=_binary_icon_code_png_size \
+		build/icons/icon_code.png $@
+
+boot/icon_gear.o: $(ICON_SVG_DIR)/ui-basic/Gear.svg
+	@mkdir -p build/icons
+	rsvg-convert -w 48 -h 48 $< -o build/icons/icon_gear.png
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary_build_icons_icon_gear_png_start=_binary_icon_gear_png_start \
+		--redefine-sym _binary_build_icons_icon_gear_png_end=_binary_icon_gear_png_end \
+		--redefine-sym _binary_build_icons_icon_gear_png_size=_binary_icon_gear_png_size \
+		build/icons/icon_gear.png $@
 
 boot/font_inter.o: $(FONT_INTER)
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
@@ -362,9 +397,9 @@ lib/lodepng/lodepng.o: lib/lodepng/lodepng.c
 -include $(OBJS:.o=.d)
 
 # Link to shared object (includes embedded font and firmware blobs)
-$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS)
+$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) -o $@ $(LIBS)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so
