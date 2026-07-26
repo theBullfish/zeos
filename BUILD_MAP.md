@@ -151,7 +151,7 @@ the OS. When in doubt it's the OS.
 - [x] **D.2** Panel clock shows real wall-clock time — `[DONE][observed 2026-07-23]` was TSC uptime (00:00); now wired to `tod_now_unix()` (CMOS RTC). Verified on live VNC (10:57/11:07 UTC, advancing). Commit b385d7a.
 - [ ] **D.3** Panel zones (left persona/palette trigger; center pills color-by-state; right health/notif/clock) — `[UNVERIFIED]` `[source panel.c:279-399]` (renders, per-state color unobserved).
 - [ ] **D.4** Panel: click-persona→palette, right-click menu — `[UNVERIFIED]` `[source panel.c:413-417,37-47]`.
-- [ ] **D.5** Panel height-follows-density (32/40/48) — `[PARTIAL]` height is an init param; no density mapping.
+- [x] **D.5** Panel height-follows-density (48/40/32) — `[VERIFIED/production]` access_set_density applies access_get_panel_height() live to panel+compositor; selftest [D5] d=0:48 d=1:40 d=2:32 PASS (KVM). bible id=308.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
 - [ ] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[UNVERIFIED]` `[source desktop.c:457-540]`; ships empty (0 icons, by design) so unexercised at boot.
@@ -229,16 +229,16 @@ the OS. When in doubt it's the OS.
 - [x] **M.1** Reduced-motion mode — `[DONE 2026-07-23]` `access_init()` was never called (whole a11y config zero-init); now called at boot + `anim_tick` snaps springs instantly when reduced_motion on. Commit 38c54df.
 - [x] **M.2** Animation speed multiplier (0/0.5/1/2×) — `[DONE 2026-07-23]` `anim_tick` scales dt by anim_speed (0.5×=faster, 2×=slower, 0=instant). Commit 38c54df.
 - [x] **M.3** 3 density modes (Comfortable/Standard/Compact) — `[DONE 2026-07-23]` panel height density-driven (48/40/32) at boot + live on access_set_density. Commits 35effb5,f7f481c. Follow-up: dock item size.
-- [ ] **‼ M.4** 3 sensory modes (Standard/Low-Stimuli/High-Contrast) — `[BROKEN/no-consumer]` only sets color_temp `[source access.c:88-93]`; accent-muting consumer unwritten.
-- [ ] **‼ M.5** 44px min touch targets — `[BROKEN/no-consumer]` constant stored, never enforced.
+- [x] **M.4** 3 sensory modes (Standard/Low-Stimuli/High-Contrast) — `[VERIFIED/production]` runtime sensory transform (access_apply_sensory/text_color/border/anims/stiffness) wired into panel+theme+anim; KVM: STANDARD/LOW/HIGH panel-dot rgb matches transform (sat 125/63/175). bible id=300.
+- [x] **M.5** 44px min touch targets — `[VERIFIED/production]` wm hit_control catch-zone expanded toward min_touch_target (nearest-center + full-titlebar); KVM [M5] glyph/hslop/vslop hit, beyond/offbar miss, PASS. bible id=301.
 - [x] **M.6** Letter/word/line spacing — `[DONE 2026-07-23]` font_draw honors letter_spacing (per-glyph advance) + word_spacing (on spaces). Commit 6d3de02. (line_spacing: no single-line consumer yet.)
 - [ ] **M.7** Focus Mode (suppress non-critical notifications) — `[UNVERIFIED]` `[source notify.c:176-179,808]` (has a real consumer, unlike M.1-M.6).
 - [ ] **M.8** CVD simulation mode — `[TODO]`.
 
 ## N. First-Boot Experience
-- [ ] **‼ N.1** 5-screen first-run flow (welcome/persona/controls/appearance/done) — `[BROKEN/dead-code]` fully coded `[source firstboot.c:571-598]` but **never called**; no verified base truth.
-- [ ] **N.2** Real boot path = `welcome.c` single persona modal — `[UNVERIFIED]` `[source main.c:929; welcome.c:104-347]` (this session bypassed it via SMP-test flag).
-- [ ] **N.3** Reconcile: one first-run flow, wired and observed — `[TODO]` decide firstboot.c-vs-welcome.c, wire ONE, verify by boot.
+- [x] **N.1** 5-screen first-run flow (welcome/persona/controls/appearance/done) — `[VERIFIED/production]` firstboot_run() wired canonical; KVM drove all 5 screens, applied persona=0 controls=1 theme=0 density=2 (all != defaults); idempotent 2nd boot skip. Found+fixed kbd-IRQ-vs-poll bug. bible id=304.
+- [x] **N.2** Real boot path = firstboot 5-screen wizard — `[VERIFIED/production]` welcome.c single modal RETIRED from boot path (kept in-tree for revert). bible id=306.
+- [x] **N.3** Reconcile: one first-run flow, wired and observed — `[VERIFIED/production]` reconciled to firstboot 5-screen wizard; welcome_run_if_first_boot() no longer on boot path (one-call revert documented). bible id=305.
 
 ## O. Hardware Targets
 - [ ] **O.1** x86-64 target (current) — `[x]` `[observed]` boots + runs.
