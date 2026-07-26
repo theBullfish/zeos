@@ -225,6 +225,9 @@ static void save_all(void)
     vault_save_config(VKEY_MOUSE_SPEED, &g_mouse_speed, sizeof(g_mouse_speed));
     vault_save_config(VKEY_KEY_REPEAT, &g_key_repeat, sizeof(g_key_repeat));
     vault_save_config(VKEY_ACCESS, &g_access, sizeof(g_access));
+
+    /* E.4: flash the cursor confirm checkmark on a committed settings change. */
+    { extern void cursor_confirm(void); cursor_confirm(); }
 }
 
 static void load_all(void)

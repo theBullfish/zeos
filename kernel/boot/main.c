@@ -929,11 +929,20 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #endif
     }
 
-    /* CFA-native disk encryption. After the PIN gate succeeds (or
-     * enrollment completed), derive the master AES-XTS-256 key from
-     * the PIN, wrap it in a SOVEREIGN CFA handle, and arm the
-     * crypto_transform node in CHAIN_BLOCK. From here, accesses to
-     * registered encrypted regions are transparently encrypted. */
+    /* Disk encryption. After the PIN gate succeeds (or enrollment completed),
+     * derive the master AES-XTS-256 key from the PIN and arm the
+     * crypto_transform node in CHAIN_BLOCK; from here accesses to registered
+     * encrypted regions are transparently encrypted.
+     *
+     * R.2 scope note (2026-07-25): the CFA-native protection is on the DERIVED
+     * KEY -- crypto_disk_init() wraps the master key in a SOVEREIGN CFA handle
+     * (see crypto_disk.c). The raw PIN itself necessarily transits a plain
+     * stack buffer here: a KDF needs the plaintext PIN bytes in memory, so this
+     * frame is NOT CFA-backed. The buffer is volatile-wiped immediately after
+     * key derivation (below). A guard-paged/CFA-transient PIN path would be a
+     * large change with marginal payoff on bare metal (no swap, immediate wipe),
+     * so it is deliberately not done -- the honest boundary is: key = CFA/SOVEREIGN,
+     * PIN input = transient plaintext, zeroed on the spot. */
     {
         extern void lockscreen_init(void);
         extern int  lockscreen_pin_copy(char *out, int max);
@@ -946,7 +955,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         } else {
             kputs("[main] crypto_disk: no PIN, encryption inactive\n");
         }
-        /* Wipe PIN bytes from stack ASAP. */
+        /* Wipe PIN bytes from stack ASAP (R.2: PIN is transient plaintext). */
         for (uint32_t _i = 0; _i < sizeof(pin_buf); _i++)
             ((volatile char *)pin_buf)[_i] = 0;
         crypto_disk_print_selftest_line();
@@ -1038,6 +1047,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         /* D.5 selftest: panel height follows density (48/40/32) live.
          * Restores original density. */
         { extern void access_d5_selftest(void); access_d5_selftest(); }
+#endif
+
+#ifdef ZEOS_DIAG_E4
+        /* E.4 selftest: cursor_confirm flashes + reverts. */
+        { extern void cursor_e4_selftest(void); cursor_e4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST

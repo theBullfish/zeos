@@ -172,18 +172,25 @@ static int pci_known_add(uint8_t bus, uint8_t dev, uint8_t func,
 
 /* Bus walk that reads vendor/device IDs only — does NOT touch the
  * boot-time `devices[]` cache in pci.c. Returns -1 if pci is absent. */
+/* id=29 fix (2026-07-25): a full 256-bus config-space walk is ~8192 port-I/O
+ * probes, each a VM-exit under QEMU -> ~139ms in ONE resolve, which blew the
+ * scheduler budget every time this chain fired (it was the top-slow chain by
+ * far -- confirmed id=29=hotplug.pci from the boot log). Zeos fix: AMORTIZE the
+ * scan across resolves -- probe a window of HOTPLUG_BUSES_PER_FIRE buses per
+ * fire, advancing a cursor, so each resolve costs ~window/256 of the old spike
+ * with NO loss of coverage. The detach sweep (a device is gone if it wasn't
+ * seen) must run against a FULL scan, so `visited` is accumulated across the
+ * whole cycle and the sweep + seed flag only run when the cursor wraps. */
+#define HOTPLUG_BUSES_PER_FIRE 16
+static uint8_t s_cycle_visited[MAX_PCI_KNOWN];
+static int     s_scan_bus;   /* next bus to probe this cycle [0,256) */
+
 static void pci_walk_and_diff(int *touched_count)
 {
-    static uint8_t  visited[MAX_PCI_KNOWN];
-    memset(visited, 0, sizeof(visited));
+    int bus_end = s_scan_bus + HOTPLUG_BUSES_PER_FIRE;
+    if (bus_end > 256) bus_end = 256;
 
-    /* Walk every bus/dev/func. Our budget here is the cost of probing
-     * a non-existent device: 1 config-space read returns 0xFFFFFFFF.
-     * 256*32*8 = 65536 reads is too much per tick — but the diff pump
-     * runs every 4 ticks, and the scheduler tolerates that. Production
-     * could narrow to known buses; for QEMU + typical x86 we just walk
-     * all 256 buses. */
-    for (int bus = 0; bus < 256; bus++) {
+    for (int bus = s_scan_bus; bus < bus_end; bus++) {
         for (int dev = 0; dev < 32; dev++) {
             uint32_t id0 = pci_config_read32((uint8_t)bus, (uint8_t)dev, 0, 0x00);
             if ((id0 & 0xFFFF) == 0xFFFF) continue;
@@ -212,8 +219,8 @@ static void pci_walk_and_diff(int *touched_count)
                     int ki = pci_known_add((uint8_t)bus, (uint8_t)dev,
                                            (uint8_t)func, vid, did,
                                            cc, sc, pi);
-                    if (ki >= 0 && ki < (int)sizeof(visited))
-                        visited[ki] = 1;
+                    if (ki >= 0 && ki < (int)sizeof(s_cycle_visited))
+                        s_cycle_visited[ki] = 1;
                     if (s_pci_seeded) {
                         hotplug_event_t e;
                         memset(&e, 0, sizeof(e));
@@ -228,8 +235,8 @@ static void pci_walk_and_diff(int *touched_count)
                     }
                     if (touched_count) (*touched_count)++;
                 } else {
-                    if (known_idx < (int)sizeof(visited))
-                        visited[known_idx] = 1;
+                    if (known_idx < (int)sizeof(s_cycle_visited))
+                        s_cycle_visited[known_idx] = 1;
                     /* Identity changed at same (b,d,f) -- treat as
                      * detach + attach. Vanishingly rare on real HW
                      * but cheap to handle. */
@@ -262,10 +269,17 @@ static void pci_walk_and_diff(int *touched_count)
         }
     }
 
-    /* Anything we didn't touch is gone -> emit detach + reclaim slot. */
+    /* Advance the scan cursor. The detach sweep + seed flag only run when a
+     * FULL cycle (all 256 buses) has been probed, so a device on a bus not yet
+     * reached this cycle is never falsely detached. */
+    s_scan_bus = bus_end;
+    if (s_scan_bus < 256)
+        return;   /* cycle not complete yet -- defer detach sweep */
+
+    /* Full cycle done: anything not seen anywhere this cycle is gone. */
     for (int i = 0; i < MAX_PCI_KNOWN; i++) {
         if (!s_pci_known[i].in_use) continue;
-        if (i < (int)sizeof(visited) && visited[i]) continue;
+        if (i < (int)sizeof(s_cycle_visited) && s_cycle_visited[i]) continue;
         if (s_pci_seeded) {
             hotplug_event_t e;
             memset(&e, 0, sizeof(e));
@@ -282,6 +296,12 @@ static void pci_walk_and_diff(int *touched_count)
         s_pci_known[i].in_use = 0;
         if (touched_count) (*touched_count)++;
     }
+
+    /* Reset for the next cycle. Seed flag flips only after the first FULL
+     * cycle, so initial devices are recorded silently (no spurious attach). */
+    memset(s_cycle_visited, 0, sizeof(s_cycle_visited));
+    s_scan_bus = 0;
+    if (!s_pci_seeded) s_pci_seeded = 1;
 }
 
 static void pci_pump_resolve(chain_node_t *self, void *input, void *output)
@@ -289,7 +309,7 @@ static void pci_pump_resolve(chain_node_t *self, void *input, void *output)
     (void)self; (void)input;
     int touched = 0;
     pci_walk_and_diff(&touched);
-    if (!s_pci_seeded) s_pci_seeded = 1;
+    /* seed flag is now managed inside pci_walk_and_diff at cycle completion */
     if (output) *(int *)output = touched;
 }
 

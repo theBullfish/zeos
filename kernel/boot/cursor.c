@@ -233,6 +233,24 @@ void cursor_tick(float dt) {
         g_cursor.state = g_cursor.prev_state;
 }
 
+#ifdef ZEOS_DIAG_E4
+#include "kprint.h"
+/* E.4 selftest: prove cursor_confirm() flashes the checkmark cursor and that
+ * cursor_tick reverts it after the hold. (The wiring into settings save_all is
+ * source-verifiable.) */
+void cursor_e4_selftest(void)
+{
+    cursor_state_t before = g_cursor.state;
+    cursor_confirm();
+    int flashed = (g_cursor.state == CURSOR_CLICK_CONFIRM);
+    for (int i = 0; i < CONFIRM_HOLD_FRAMES; i++) cursor_tick(0.016f);
+    int reverted = (g_cursor.state == before);
+    kputs("[E4] cursor_confirm flash="); kput_dec((uint64_t)flashed);
+    kputs(" reverted="); kput_dec((uint64_t)reverted);
+    kputs((flashed && reverted) ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
 /* ── Drawing ── */
 
 /*
