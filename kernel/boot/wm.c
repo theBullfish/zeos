@@ -17,6 +17,7 @@
 #include "anim.h"
 #include "theme.h"
 #include "kprint.h"
+#include "access.h"
 #include "icon_render.h"
 
 /* ── Global state ── */
@@ -777,13 +778,22 @@ static int hit_test(int x, int y) {
     return best_id;
 }
 
-/* Check if click is on a window control button. Returns 0-3 or -1. */
+/* Check if click is on a window control button. Returns 0-3 or -1.
+ *
+ * M.5: the control glyph is WM_CONTROL_SIZE (22px) but the *clickable* catch-
+ * zone is expanded toward access_min_touch_target() (default 44px) so the small
+ * buttons stay easy to hit. Vertically the whole titlebar row is accepted (the
+ * natural chrome bound). Horizontally each button gets a catch half-width of
+ * max(WM_CONTROL_SIZE/2, min_touch_target/2), and overlaps between adjacent
+ * expanded zones are resolved to the NEAREST button center. */
 static int hit_control(chain_surface_t *s, int x, int y) {
     if (y < s->y || y >= s->y + WM_TITLEBAR_HEIGHT) return -1;
 
-    int btn_y = s->y + (WM_TITLEBAR_HEIGHT - WM_CONTROL_SIZE) / 2;
-    if (y < btn_y || y >= btn_y + WM_CONTROL_SIZE) return -1;
+    int mtt = access_min_touch_target();
+    int catch_half = WM_CONTROL_SIZE / 2;
+    if (mtt / 2 > catch_half) catch_half = mtt / 2;
 
+    int best = -1, best_dx = catch_half + 1;
     for (int b = 0; b < 4; b++) {
         int btn_x;
         if (g_wm.controls_side == WM_CONTROLS_LEFT) {
@@ -792,11 +802,60 @@ static int hit_control(chain_surface_t *s, int x, int y) {
             btn_x = s->x + s->w - WM_CONTROL_MARGIN -
                     (4 - b) * (WM_CONTROL_SIZE + WM_CONTROL_SPACING);
         }
-        if (x >= btn_x && x < btn_x + WM_CONTROL_SIZE)
-            return b;
+        int center = btn_x + WM_CONTROL_SIZE / 2;
+        int dx = x - center;
+        if (dx < 0) dx = -dx;
+        if (dx <= catch_half && dx < best_dx) {
+            best_dx = dx;
+            best = b;
+        }
     }
-    return -1;
+    return best;
 }
+
+#ifdef ZEOS_DIAG_M5
+/*
+ * M.5 selftest: prove the touch-target hit-slop actually widens a control's
+ * clickable zone beyond its 22px glyph toward min_touch_target (44px). Drives
+ * the real (static) hit_control() against a synthetic surface. Measured, and
+ * printed to serial so it is observable on a real boot. Baseline: a click on
+ * the bare glyph still hits; the discriminating cases are clicks that MISS the
+ * 22px glyph but land inside the 44px target (must now hit) and a click beyond
+ * the target (must still miss).
+ */
+void wm_m5_selftest(void) {
+    int saved_side = g_wm.controls_side;
+    g_wm.controls_side = WM_CONTROLS_RIGHT;
+
+    chain_surface_t s;
+    for (unsigned i = 0; i < sizeof(s); i++) ((volatile char *)&s)[i] = 0;
+    s.x = 100; s.y = 100; s.w = 400; s.h = 300;
+
+    /* Rightmost button (b=3) glyph: btn_x=454..476, center=465. Titlebar
+     * row is y in [100,140). Old code accepted only x in [454,476) and y in
+     * [109,131). */
+    int mtt = access_min_touch_target();
+
+    int c_glyph   = hit_control(&s, 465, 118);  /* dead-center glyph -> 3 */
+    int c_hslop   = hit_control(&s, 483, 118);  /* 7px right of glyph edge, inside 44px target -> 3 */
+    int c_vslop   = hit_control(&s, 465, 103);  /* titlebar top band, outside old 22px band -> 3 */
+    int c_beyond  = hit_control(&s, 495, 118);  /* 19px past glyph edge, beyond target -> -1 */
+    int c_offbar  = hit_control(&s, 465, 145);  /* below titlebar entirely -> -1 */
+
+    g_wm.controls_side = saved_side;
+
+    int pass = (c_glyph == 3) && (c_hslop == 3) && (c_vslop == 3) &&
+               (c_beyond == -1) && (c_offbar == -1) && (mtt >= 44);
+
+    kputs("[M5] min_touch_target="); kput_dec((uint64_t)mtt);
+    kputs(" glyph="); kput_dec((uint64_t)(uint32_t)c_glyph);
+    kputs(" hslop@+7="); kput_dec((uint64_t)(uint32_t)c_hslop);
+    kputs(" vslop(top)="); kput_dec((uint64_t)(uint32_t)c_vslop);
+    kputs(" beyond@+19="); kputs(c_beyond == -1 ? "miss" : "HIT");
+    kputs(" offbar="); kputs(c_offbar == -1 ? "miss" : "HIT");
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif /* ZEOS_DIAG_M5 */
 
 /* Check if click is on a resize edge. Returns edge bitmask. */
 static int hit_resize_edge(chain_surface_t *s, int x, int y) {

@@ -992,6 +992,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void access_m4_selftest(void); access_m4_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_M5
+        /* M.5 touch-target selftest: hit_control catch-zone widened to 44px.
+         * Passive (restores controls_side; drives a synthetic surface). */
+        { extern void wm_m5_selftest(void); wm_m5_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

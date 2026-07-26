@@ -155,4 +155,9 @@ int access_decorative_anims_enabled(void);
 /* Spring stiffness multiplier: 0.5x under LOW_STIMULI (gentler), else 1.0x. */
 float access_spring_stiffness_scale(void);
 
+/* Minimum interactive touch-target size in px (default 44, clamped 32..64).
+ * Hit-testing consumers expand a control's clickable catch-zone toward this
+ * so small glyphs stay easy to hit (M.5). */
+int access_min_touch_target(void);
+
 #endif /* ZEOS_ACCESS_H */

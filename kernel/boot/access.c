@@ -392,3 +392,11 @@ int access_get_icon_size(void)
 {
     return density_icon_size[g_access.density];
 }
+
+/* Minimum interactive touch-target size (px). Hit-testing consumers expand a
+ * control's clickable catch-zone toward this so small glyphs stay easy to hit
+ * (M.5). Clamped 32..64 at load. */
+int access_min_touch_target(void)
+{
+    return g_access.min_touch_target;
+}
