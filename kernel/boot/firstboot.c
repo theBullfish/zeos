@@ -17,6 +17,7 @@
 #include "keyboard.h"
 #include "timer.h"
 #include "io.h"
+#include "kprint.h"
 
 /* ── State ── */
 
@@ -582,23 +583,58 @@ struct firstboot_config firstboot_run(void)
     cfg.theme         = 1;  /* Dark */
     cfg.density       = 1;  /* Standard */
 
+    /* N.1 integration fix (2026-07-25): this wizard reads the keyboard with a
+     * raw polled fb_getkey (inb 0x60). Since the A.8 interrupt fix the legacy
+     * keyboard IRQ is routed through the IOAPIC and the keyboard ISR drains the
+     * whole 8042 output buffer on each IRQ -- which starves the poll (bytes are
+     * consumed by the ISR before fb_getkey sees them, so screens never advance).
+     * Mask keyboard IRQ delivery so the poll owns the 8042 for the duration of
+     * the wizard, then restore interrupt-driven delivery before returning. */
+    extern int      ioapic_count(void);
+    extern void     ioapic_mask(uint8_t legacy_irq);
+    extern void     ioapic_set_irq(uint8_t legacy_irq, uint8_t vector, uint8_t lapic_id);
+    extern uint32_t lapic_id(void);
+    int kbd_irq_owned = (ioapic_count() > 0);
+    if (kbd_irq_owned)
+        ioapic_mask(1);
+
     /* Screen 1: Welcome */
+#ifdef ZEOS_DIAG_N1
+    kputs("[N1] screen 1/5 welcome\n");
+#endif
     screen_welcome();
 
     /* Screen 2: Persona */
+#ifdef ZEOS_DIAG_N1
+    kputs("[N1] screen 2/5 persona\n");
+#endif
     cfg.persona = (uint8_t)screen_persona();
 
     /* Screen 3: Window Controls */
+#ifdef ZEOS_DIAG_N1
+    kputs("[N1] screen 3/5 controls\n");
+#endif
     cfg.controls_side = (uint8_t)screen_controls();
 
     /* Screen 4: Appearance */
+#ifdef ZEOS_DIAG_N1
+    kputs("[N1] screen 4/5 appearance\n");
+#endif
     screen_appearance(&cfg);
 
     /* Screen 5: Done */
+#ifdef ZEOS_DIAG_N1
+    kputs("[N1] screen 5/5 done\n");
+#endif
     screen_done();
 
     /* Mark complete so it doesn't run again */
     firstboot_mark_complete();
+
+    /* Restore interrupt-driven keyboard delivery (vector 0x21, matches the
+     * A.8 routing in main.c). */
+    if (kbd_irq_owned)
+        ioapic_set_irq(1, 0x21, (uint8_t)lapic_id());
 
     return cfg;
 }

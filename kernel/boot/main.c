@@ -48,6 +48,9 @@
 #include "fat32.h"
 #include "net_rtl8188eu.h"
 #include "lockscreen.h"
+#include "firstboot.h"
+#include "access.h"
+#include "wm.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
@@ -960,18 +963,51 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         identity_print_selftest_line();
     }
 
-    /* First-boot welcome flow. Per identity context. After identity_init
-     * so we know which ctx to scope the markers to; before scheduler_run
-     * so the user sees the welcome before the shell prompt. Idempotent:
-     * skips on subsequent boots of the same ctx. */
+    /* First-run flow. After identity_init (so ctx is known) and before
+     * scheduler_run (so the user is onboarded before the shell prompt).
+     *
+     * N.1/N.3 (2026-07-25): reconciled the two competing first-run flows to
+     * ONE. The canonical flow is firstboot.c's 5-screen wizard
+     * (welcome -> persona -> controls -> appearance -> done): it is the
+     * complete, structured onboarding that configures all four onboarding
+     * settings and persists a completion flag, vs welcome.c's single persona
+     * modal (now retired from the boot path). firstboot_run() returns the
+     * chosen config; the caller applies it here. Idempotent via
+     * firstboot_should_run() (persisted "system/firstboot_complete").
+     *
+     * To revert the reconciliation decision, restore welcome_run_if_first_boot()
+     * in place of this block -- it is a single-call swap. */
     {
-#ifdef ZEOS_SMP_TEST_BYPASS_LOCKSCREEN
-        kputs("[main] SMP-test build: welcome flow bypassed\n");
+#if defined(ZEOS_SMP_TEST_BYPASS_LOCKSCREEN) && !defined(ZEOS_DIAG_N1)
+        kputs("[main] SMP-test build: first-run flow bypassed\n");
 #else
-        extern void welcome_run_if_first_boot(void);
-        extern void welcome_print_selftest_line(void);
-        welcome_run_if_first_boot();
-        welcome_print_selftest_line();
+        if (firstboot_should_run()) {
+            struct firstboot_config cfg = firstboot_run();
+
+            /* Apply chosen config to the live system. */
+            extern void shell_set_persona(int);
+            shell_set_persona((int)cfg.persona);   /* 0=Zeros 1=DereZ 2=Full == PERSONA_* */
+
+            wm_set_controls_side(cfg.controls_side ? WM_CONTROLS_RIGHT
+                                                   : WM_CONTROLS_LEFT);
+
+            /* cfg.theme 0=light 1=dark 2=auto -> SCHEME_* (enum order differs) */
+            {
+                color_scheme_t sch = (cfg.theme == 0) ? SCHEME_LIGHT
+                                   : (cfg.theme == 2) ? SCHEME_AUTO
+                                                      : SCHEME_DARK;
+                access_set_scheme(sch);
+            }
+            access_set_density((density_mode_t)cfg.density);  /* 0/1/2 == DENSITY_* */
+
+            kputs("[N1] first-run applied: persona=");   kput_dec((uint64_t)cfg.persona);
+            kputs(" controls=");                          kput_dec((uint64_t)cfg.controls_side);
+            kputs(" theme=");                             kput_dec((uint64_t)cfg.theme);
+            kputs(" density=");                           kput_dec((uint64_t)cfg.density);
+            kputs("\n");
+        } else {
+            kputs("[main] first-run: already complete, skipped\n");
+        }
 #endif
     }
 
