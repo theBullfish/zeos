@@ -1034,6 +1034,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void wm_m5_selftest(void); wm_m5_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_D5
+        /* D.5 selftest: panel height follows density (48/40/32) live.
+         * Restores original density. */
+        { extern void access_d5_selftest(void); access_d5_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review
