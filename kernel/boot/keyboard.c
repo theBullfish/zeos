@@ -425,24 +425,30 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
     (void)error_code;
     extern void lapic_eoi(void);
 
-    uint8_t scancode = inb(KB_DATA_PORT);
-    if (scancode == 0xE0) {
-        e0_prefix = 1;
-        /* Explicit EOI added 2026-07-23 (was missing on every path here
-         * before this fix) -- see mouse.c's mouse_isr for the full note.
-         * isr_dispatch also auto-EOIs the 8259 for this vector regardless,
-         * so this alone was likely never the real block; lapic_eoi() is
-         * unconfirmed to fix the actual symptom either. See bible-db E.7. */
-        pic_eoi(1);
-        lapic_eoi();
-        return;
+    /* DRAIN all queued keyboard bytes this IRQ (fix, 2026-07-25). The IOAPIC
+     * delivers IRQ1 edge-triggered: one edge per rising transition. If a burst
+     * queues several scancodes in the 8042 output buffer (fast typing, or a
+     * multi-key chord like Super+Ctrl+N -- which under KVM's fast input dropped
+     * the middle Ctrl scancode, degrading the chord to Super+N and breaking
+     * workspace switching, C.6), reading only ONE byte per IRQ loses the rest:
+     * no new edge fires for bytes already sitting in the buffer. Loop while the
+     * 8042 has a KEYBOARD byte (status OBF=bit0 set, AUX=bit5 clear -- leave
+     * mouse bytes for mouse_isr). Bounded to avoid a wedge on stuck hardware. */
+    for (int guard = 0; guard < 32; guard++) {
+        uint8_t status = inb(KB_STATUS_PORT);
+        if (!(status & 0x01) || (status & 0x20))   /* no data, or it's a mouse byte */
+            break;
+        uint8_t scancode = inb(KB_DATA_PORT);
+        if (scancode == 0xE0) {
+            e0_prefix = 1;
+            continue;
+        }
+        int extended = e0_prefix;
+        e0_prefix = 0;
+        /* Push to the scancode ring; CHAIN_KEYBOARD's resolve drains it each
+         * scheduler tick via keyboard_inject_scancode -> process_scancode. */
+        kb_sc_push(scancode, extended);
     }
-    int extended = e0_prefix;
-    e0_prefix = 0;
-    /* Push to the scancode ring; CHAIN_KEYBOARD's resolve drains it
-     * each scheduler tick. Decoding and ASCII translation happen there
-     * via keyboard_inject_scancode -> process_scancode. */
-    kb_sc_push(scancode, extended);
     pic_eoi(1);
     lapic_eoi();
 }

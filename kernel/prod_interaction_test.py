@@ -92,9 +92,9 @@ chord(["meta_l"],"up"); time.sleep(0.6)
 print("--- after Super+Up (C.5) ---"); print(last_wm())
 
 # C.6 workspace switch to ws2 then back
-chord(["meta_l","ctrl_l"],"2"); time.sleep(0.6)
+chord(["meta_l","ctrl"],"2"); time.sleep(0.6)
 print("--- after Super+Ctrl+2 (C.6 -> ws2) ---"); print(last_wm())
-chord(["meta_l","ctrl_l"],"1"); time.sleep(0.6)
+chord(["meta_l","ctrl"],"1"); time.sleep(0.6)
 print("--- after Super+Ctrl+1 (C.6 -> ws1) ---"); print(last_wm())
 
 cmd("quit")

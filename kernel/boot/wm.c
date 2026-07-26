@@ -420,9 +420,11 @@ void wm_maximize_surface(int id) {
 }
 
 /* Serial dump of every surface's live WM state -- ground truth for interaction
- * verification (z-order/focus/maximize/workspace) without pixel-guessing. Gated
- * behind ZEOS_DIAG_WM_STATE; a test injects an action, settles, then greps the
- * last [WM] block from serial. */
+ * verification (z-order/focus/maximize/workspace) without pixel-guessing. The
+ * whole function is compiled only under ZEOS_DIAG_WM_STATE so no strings or code
+ * land in the production binary; a test injects an action, settles, then greps
+ * the last [WM] block from serial. */
+#ifdef ZEOS_DIAG_WM_STATE
 void wm_dump_state(void) {
     static const char *st[] = {"NORM","MAX","MIN","SNP_L","SNP_R","SNP_TL","SNP_TR",
                                "SNP_BL","SNP_BR","L2/3","R2/3","?"};
@@ -444,6 +446,7 @@ void wm_dump_state(void) {
         kputs(" foc="); kput_dec((uint64_t)s->focused); kputc('\n');
     }
 }
+#endif /* ZEOS_DIAG_WM_STATE */
 
 /* ── Focus ── */
 

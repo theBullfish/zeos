@@ -60,10 +60,10 @@ while time.time()-t0<30:
 print("scheduler loop up:", ready)
 time.sleep(2)
 shot("0-boot")           # workspace 1: Files + Terminal
-chord2("meta_l","ctrl_l","2")   # Super+Ctrl+2 -> switch to workspace 2 (empty)
+chord2("meta_l","ctrl","2")   # Super+Ctrl+2 -> switch to workspace 2 (empty)
 time.sleep(0.8)
 shot("1-ws2")           # should be empty (windows are on ws1)
-chord2("meta_l","ctrl_l","1")   # Super+Ctrl+1 -> back to workspace 1
+chord2("meta_l","ctrl","1")   # Super+Ctrl+1 -> back to workspace 1
 time.sleep(0.8)
 shot("2-ws1-back")      # windows should return
 cmd("quit")
