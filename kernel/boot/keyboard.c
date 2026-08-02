@@ -204,12 +204,18 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int file_mgr_key(int);
         extern int activity_active(void);
         extern int activity_key(int);
+        extern int  palette_is_visible(void);
+        extern void palette_type(char);
+        extern void palette_backspace(void);
+        extern void palette_execute(void);
+        extern void palette_hide(void);
 
         uint8_t mods_now = keybinds_get_modifiers();
         int sh = (mods_now & MOD_SHIFT) ? 1 : 0;
 
         /* Esc (scancode 0x01) closes overlays before anything else. */
         if (scancode == 0x01) {
+            if (palette_is_visible())  { palette_hide();       return; }
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
             if (calculator_active())   { calculator_key(27);   return; }
             if (editor_active())       { editor_key(27);       return; }
@@ -218,6 +224,21 @@ static void process_scancode(uint8_t scancode, int extended)
             if (image_viewer_active()) { image_viewer_key(27); return; }
             if (quick_look_active())   { quick_look_key(27);   return; }
             if (context_menu_active()) { context_menu_key(27); return; }
+        }
+
+        /* Command palette owns text input while visible. Route printable chars,
+         * backspace and enter into it, BEFORE the space/quick-look handler below
+         * (so typing a space searches, not opens Quick Look). Skip when
+         * Super/Ctrl/Alt is held so the Super+Space toggle + other shortcuts
+         * still reach keybinds_process. palette_type() had NO caller before this
+         * -- the search box could render but never receive input. */
+        if (palette_is_visible() &&
+            !(mods_now & (MOD_SUPER | MOD_CTRL | MOD_ALT))) {
+            if (scancode == 0x0E) { palette_backspace(); return; }  /* backspace */
+            if (scancode == 0x1C) { palette_execute();   return; }  /* enter */
+            char pch = sh ? scancode_to_ascii_shift[scancode]
+                          : scancode_to_ascii[scancode];
+            if (pch >= 32 && pch < 127) { palette_type(pch); return; }  /* printable */
         }
 
         /* Calculator: Ctrl+1/2/3 mode switch (uses the same scancodes for
@@ -304,6 +325,13 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int file_mgr_key_arrow(int dir);
         extern int activity_active(void);
         extern int activity_key_arrow(int dir);
+        extern int  palette_is_visible(void);
+        extern void palette_up(void);
+        extern void palette_down(void);
+        if (palette_is_visible()) {
+            if (scancode == 0x48) { palette_up();   return; }  /* up */
+            if (scancode == 0x50) { palette_down(); return; }  /* down */
+        }
         if (calculator_active()) {
             if (scancode == 0x4B) { calculator_key_arrow(0); return; }
             if (scancode == 0x4D) { calculator_key_arrow(1); return; }

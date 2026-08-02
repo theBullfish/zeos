@@ -230,7 +230,7 @@ the OS. When in doubt it's the OS.
 - [x] **E.4** Cursor confirm (checkmark) — `[VERIFIED/production]` wired into settings save_all (was zero callers). KVM [E4] flash=1 reverted=1 PASS. bible id=326.
 - [x] **E.5** Hot corners: 8px zones, 150ms dwell, TL palette / BL workspace / BR show-desktop — `[VERIFIED/harness]` all 4 fire after dwell (isolated per-corner USB-mouse test): serial [HC] TL->palette, TR->notify, BL->workspace 0->1, BR->show-desktop + observed effects. bible id=420. `[source hotcorners.c:35-169]`.
 - [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.
-- [ ] **E.7** Keyboard: set-1 scancode → ASCII — `[UNVERIFIED]` `[source keyboard.c]`; no layout switching.
+- [x] **E.7** Keyboard: set-1 scancode → ASCII — `[VERIFIED/harness]` typed keys decode correctly: h/e/l/l/o SCRAW + typing "chains" echoed to shell serial in-order. No layout switching (single set-1 map). bible id=422. `[source keyboard.c scancode_to_ascii]`.
 - [x] **E.8** Keybinds system (Super+arrows/1-4/T/D/Space) — `[DONE 2026-07-23]` `[source keybinds.c:85-156]`; command-palette action wired (Super+Space). Terminal/inspect/chain-graph still TODO (need app entry points).
 - [ ] **E.9** Input-method framework — `[TODO]`.
 
