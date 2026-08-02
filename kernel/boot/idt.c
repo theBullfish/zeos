@@ -419,3 +419,12 @@ void idt_init(void)
     idtr.base  = (uint64_t)&idt;
     __asm__ volatile("lidt %0" : : "m"(idtr));
 }
+
+/* Load the (already-built) shared IDT on the current CPU. Called by each AP
+ * in ap_main — without this an AP has NO IDT, so its first exception/IPI
+ * triple-faults and resets the machine. idt_init() (BSP) must run first to
+ * populate `idtr` + the gates; APs share the same physical table. */
+void idt_load_ap(void)
+{
+    __asm__ volatile("lidt %0" : : "m"(idtr));
+}

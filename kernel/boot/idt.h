@@ -23,6 +23,10 @@ typedef void (*isr_handler_t)(uint64_t vector, uint64_t error_code);
 /* Initialize the IDT and load it via LIDT */
 void idt_init(void);
 
+/* Load the shared IDT on the current (AP) CPU. Must be called on each AP before
+ * it enables interrupts, or its first exception triple-faults. */
+void idt_load_ap(void);
+
 /* Register a handler for a specific interrupt vector */
 void idt_register(uint8_t vector, isr_handler_t handler);
 

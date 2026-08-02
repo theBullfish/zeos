@@ -49,6 +49,7 @@
 #include "kprint.h"
 #include "io.h"
 #include "spinlock.h"
+#include "idt.h"
 #include "chain.h"
 
 /* LAPIC register offsets we need for ICR. Other LAPIC regs live in lapic.c
@@ -347,6 +348,11 @@ void ap_main(uint64_t cpu_idx)
         kputs(buf);
     }
     kputc('\n');
+
+    /* Load the shared IDT on THIS CPU before enabling interrupts. Without it
+     * an AP has no exception/interrupt handlers, so the first fault or IPI
+     * triple-faults and resets the machine (the SMP reset-loop, A.3). */
+    idt_load_ap();
 
     ap_lapic_init_local();
 
