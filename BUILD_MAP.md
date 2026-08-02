@@ -251,9 +251,9 @@ the OS. When in doubt it's the OS.
 - [ ] **G.5** Per-persona dock/launcher defaults — `[TODO]`.
 
 ## H. Networking
-- [ ] **H.1** virtio-net / e1000(i219) / rtl drivers — `[UNVERIFIED]` `[source net_virtio.c:220; net_e1000.c:351-552]`; at boot `NET: no network device found` (QEMU `-net none`), so UNTESTED live.
-- [ ] **H.2** ARP / IPv4+ICMP / UDP / TCP(16-conn, state machine) — `[UNVERIFIED]` `[source net_arp.c; net_ip.c; net_udp.c; net_tcp.c:284-301]`.
-- [ ] **H.3** DNS(8-cache) / DHCP(DORA) / HTTP1.1 GET — `[UNVERIFIED]` `[source net_dns.c; net_dhcp.c; net_http.c:157-278]`.
+- [x] **H.1** virtio-net driver — `[observed 2026-08-02]` net-enabled boot detects the NIC (`chain 4: nic:1af4:1000 [Ethernet]`), binds `[net_chain] hw backend = virtio-net`, and passes real DHCP traffic (H.3). `[source net_virtio.c:220]`. e1000/rtl NICs still untested (need those device models).
+- [ ] **H.2** ARP / IPv4+ICMP / UDP / TCP(16-conn, state machine) — `[partially exercised 2026-08-02]` a bound DHCP lease (H.3) requires working IPv4 + UDP tx/rx (and ARP for the gateway), so those layers ran successfully; ICMP (ping) and the TCP state machine are NOT yet directly observed. `[source net_arp.c; net_ip.c; net_udp.c; net_tcp.c:284-301]`.
+- [x] **H.3** DHCP (DORA) — `[observed 2026-08-02]` full lease obtained: serial `DHCP: discovering (async)...` → `DHCP: bound 10.0.2.15 gw 10.0.2.2 dns 10.0.2.3` (QEMU user-net). `[source net_dhcp.c]`. DNS lookup + HTTP GET still need an actual query to verify.
 - [ ] **H.4** TLS via mbedTLS 1.3 + Mozilla CA bundle (145 certs) — `[UNVERIFIED]` `[source net_tls.c:353-583; ca_bundle.h]`.
 - [ ] **H.5** TCP retransmission — `[PARTIAL]` retransmit built `[source net_tcp.c:493]`; congestion control (cwnd/ssthresh) absent.
 - [ ] **H.6** WebSocket — `[TODO]`.
