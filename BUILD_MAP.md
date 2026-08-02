@@ -259,7 +259,8 @@ the OS. When in doubt it's the OS.
 - [ ] **H.6** WebSocket — `[TODO]`.
 
 ## I. Web Browser
-- [ ] **I.1** HTML parser (tags/attrs/comments/void/script-skip), 2048-node DOM — `[UNVERIFIED]` `[source browser.c:208-264,130]`.
+> **‼ BLOCKER for all of I [observed 2026-08-02]:** `browser.c` is NOT wired to a launcher or a WM surface — grep finds no `wm_create_surface` for the browser, no dock/palette/keybind that opens it, and no launch call outside `browser.c` (only a static `s_rc_browser`). The browser is **dormant code**: it can't be opened from the running desktop, so none of I.1–I.6 is reachable to verify. FIRST STEP for section I is to WIRE the browser as an openable app (create a browser surface + `draw_content` + input routing + a dock/palette launcher); only then can navigation/parse/render be verified (the net + TLS stack it needs are now green — H.1/H.2/H.3/H.4).
+- [ ] **I.1** HTML parser (tags/attrs/comments/void/script-skip), 2048-node DOM — `[UNVERIFIED — unreachable, browser not wired]` `[source browser.c:208-264,130]`.
 - [ ] **I.2** CSS per-tag defaults + inline `style=` + persona-accent links — `[UNVERIFIED]` `[source browser.c:597,749-751]`.
 - [ ] **I.3** Block layout + framebuffer render (clip/scroll/bg/HR) + TTF text — `[UNVERIFIED]` `[source browser.c:1155-1707]`.
 - [ ] **I.4** Navigation: URL parse, 32-history, back/fwd/refresh/home — `[UNVERIFIED]` `[source browser.c:1349-1544]`.
