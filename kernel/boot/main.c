@@ -1132,6 +1132,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void font_f4_selftest(void); font_f4_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_C4
+        /* C.4 selftest: resize edge/corner hit-detection (8px band). */
+        { extern void wm_c4_selftest(void); wm_c4_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review

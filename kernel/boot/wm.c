@@ -860,7 +860,8 @@ void wm_m5_selftest(void) {
 /* Check if click is on a resize edge. Returns edge bitmask. */
 static int hit_resize_edge(chain_surface_t *s, int x, int y) {
     int edge = 0;
-    int bw = 4;  /* Resize grab area */
+    int bw = 8;  /* C.4: resize grab band (widened 4->8px -- 4px was too thin to
+                  * reliably hit an edge/corner). */
 
     if (y >= s->y + s->h - bw && y < s->y + s->h) edge |= 4;  /* bottom */
     if (x >= s->x + s->w - bw && x < s->x + s->w) edge |= 2;  /* right */
@@ -869,6 +870,34 @@ static int hit_resize_edge(chain_surface_t *s, int x, int y) {
 
     return edge;
 }
+
+#ifdef ZEOS_DIAG_C4
+/* C.4 selftest: resize edge/corner hit-detection with the widened 8px grab band.
+ * Deterministic (drives the real static hit_resize_edge) since pixel-precise
+ * mouse-to-corner is unreliable. bitmask: top=1, right=2, bottom=4, left=8. */
+void wm_c4_selftest(void)
+{
+    chain_surface_t s;
+    for (unsigned i = 0; i < sizeof(s); i++) ((volatile char *)&s)[i] = 0;
+    s.x = 100; s.y = 100; s.w = 400; s.h = 300;
+
+    int br  = hit_resize_edge(&s, s.x + s.w - 3, s.y + s.h - 3);  /* corner -> 4|2 = 6 */
+    int r   = hit_resize_edge(&s, s.x + s.w - 3, s.y + s.h / 2);  /* right  -> 2 */
+    int l   = hit_resize_edge(&s, s.x + 2,       s.y + s.h / 2);  /* left   -> 8 */
+    int t   = hit_resize_edge(&s, s.x + s.w / 2, s.y + 2);        /* top    -> 1 */
+    int mid = hit_resize_edge(&s, s.x + s.w / 2, s.y + s.h / 2);  /* center -> 0 */
+    int in12= hit_resize_edge(&s, s.x + s.w - 12, s.y + s.h - 12);/* 12px in, outside 8px band -> 0 */
+
+    int pass = (br == 6) && (r == 2) && (l == 8) && (t == 1) && (mid == 0) && (in12 == 0);
+    kputs("[C4] corner="); kput_dec((uint64_t)(uint32_t)br);
+    kputs(" right="); kput_dec((uint64_t)(uint32_t)r);
+    kputs(" left="); kput_dec((uint64_t)(uint32_t)l);
+    kputs(" top="); kput_dec((uint64_t)(uint32_t)t);
+    kputs(" center="); kput_dec((uint64_t)(uint32_t)mid);
+    kputs(" in12="); kput_dec((uint64_t)(uint32_t)in12);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
 
 /* Detect snap zone from cursor position. Display-aware: zones are
  * relative to the display containing the cursor. */
