@@ -92,6 +92,24 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
         if (panel_click(x, y)) return 1;   /* D.4: was panel_left_click (dead consume-only) */
         if (dock_left_click(x, y))  return 1;
         if (wm_mouse_down(x, y, 1) >= 0) return 1;
+        /* D.8: double-click a desktop icon -> launch it (TSC-timed, ~400ms,
+         * within 8px of the previous click). */
+        {
+            extern uint64_t timer_read_tsc(void);
+            extern uint64_t timer_tsc_freq(void);
+            extern void desktop_double_click(int, int);
+            static uint64_t s_last_tsc = 0;
+            static int s_lx = -9999, s_ly = -9999;
+            uint64_t now = timer_read_tsc(), freq = timer_tsc_freq();
+            int dbl = 0;
+            if (freq) {
+                uint64_t dt_ms = (now - s_last_tsc) * 1000ULL / freq;
+                int dx = x - s_lx, dy = y - s_ly;
+                if (dt_ms < 400 && dx > -8 && dx < 8 && dy > -8 && dy < 8) dbl = 1;
+            }
+            s_last_tsc = now; s_lx = x; s_ly = y;
+            if (dbl) { desktop_double_click(x, y); return 1; }
+        }
         desktop_drag_start(x, y);   /* D.8: arm drag if an icon is under the cursor */
         desktop_click(x, y);
         return 1;

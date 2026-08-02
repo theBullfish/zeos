@@ -209,6 +209,11 @@ typedef struct {
 
 #define DESKTOP_SAVE_MAGIC  0x44534B4E  /* 'DSKN' */
 
+/* Grid inset (px) so icons + captions don't clip the top-left edges. MUST be
+ * used identically by the draw, hit-test (icon_at), and drag-snap (desktop_drag_end)
+ * -- otherwise a plain click on an icon snaps it to the wrong cell (D.8 bug). */
+#define DESKTOP_GRID_MARGIN 16
+
 /* ── Helpers ── */
 
 static int str_len(const char *s) {
@@ -239,7 +244,7 @@ static int icon_at(int px, int py) {
     compositor_t *comp = compositor_get_state();
     int panel_h = comp->panel_h;
 
-    int margin = 16;   /* D.9: must match the draw grid inset in desktop_draw */
+    int margin = DESKTOP_GRID_MARGIN;
     for (int i = 0; i < g_desktop.icon_count; i++) {
         desktop_icon_t *ic = &g_desktop.icons[i];
         int ix = margin + ic->grid_x * g_desktop.grid_spacing;
@@ -384,7 +389,7 @@ void desktop_draw(void) {
         } else {
             /* D.9: inset the grid so icons + their captions don't clip the
              * left/top edges (captions are centered under a square at x=0). */
-            int margin = 16;
+            int margin = DESKTOP_GRID_MARGIN;
             ix = margin + ic->grid_x * g_desktop.grid_spacing;
             iy = panel_h + margin + ic->grid_y * g_desktop.grid_spacing;
         }
@@ -511,9 +516,11 @@ void desktop_drag_end(int x, int y) {
     int idx = g_desktop.drag_icon;
 
     if (idx >= 0 && idx < g_desktop.icon_count) {
-        /* Snap to grid */
-        int gx = x / g_desktop.grid_spacing;
-        int gy = (y - panel_h) / g_desktop.grid_spacing;
+        /* Snap to grid. Must use the same DESKTOP_GRID_MARGIN inset as the draw
+         * and icon_at, or a click (which arms a drag) snaps the icon to the
+         * wrong cell and moves it (D.8 bug). */
+        int gx = (x - DESKTOP_GRID_MARGIN) / g_desktop.grid_spacing;
+        int gy = (y - panel_h - DESKTOP_GRID_MARGIN) / g_desktop.grid_spacing;
 
         /* Clamp to valid range */
         if (gx < 0) gx = 0;
