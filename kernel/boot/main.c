@@ -1137,6 +1137,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void wm_c4_selftest(void); wm_c4_selftest(); }
 #endif
 
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review
@@ -1225,6 +1226,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         wm_force_visible(w_files);
         wm_force_visible(w_term);
         wm_focus_surface(w_term);
+
+#ifdef ZEOS_DIAG_C9
+        /* C.9: force controls side LEFT (AFTER wm_init, which defaults RIGHT) so
+         * a screenshot shows the window control buttons on the left. */
+        wm_set_controls_side(WM_CONTROLS_LEFT);
+        kputs("[C9] controls_side="); kput_dec((uint64_t)wm_get_controls_side()); kputs("\n");
+#endif
 
         /* Paint the initial desktop immediately (direct-to-framebuffer), in
          * case the render chains haven't been resolved yet this early. */
