@@ -1892,3 +1892,51 @@ void browser_draw_status(browser_t *b) {
 
     font_draw(sx + 8, sy + 4, status, FONT_UI, TYPE_CAPTION, COLOR_ON_SURFACE_3);
 }
+
+/* ── Browser as a WM app ─────────────────────────────────────────────
+ * The browser was dormant (parser/layout/render existed but nothing
+ * opened it). Wire it into an openable desktop surface + a `browse <url>`
+ * shell command so section I of the BUILD_MAP is reachable/verifiable.
+ * The draw_content callback points the browser's viewport at the WM
+ * content rect and renders into it each composite. */
+extern int  wm_create_surface(const char *, int, int, int, int, int,
+                              void (*)(int, int, int, int, int));
+extern void wm_force_visible(int);
+extern void wm_focus_surface(int);
+
+static browser_t g_browser_app;
+static int       g_browser_surface = -1;
+static int       g_browser_active  = 0;
+
+static void browser_app_draw_content(int id, int x, int y, int w, int h)
+{
+    (void)id;
+    g_browser_app.surface_x = x;
+    g_browser_app.surface_y = y;
+    g_browser_app.surface_w = w;
+    g_browser_app.surface_h = h;
+    browser_draw(&g_browser_app);
+    browser_draw_toolbar(&g_browser_app);
+    browser_draw_status(&g_browser_app);
+}
+
+int browser_app_active(void) { return g_browser_active; }
+
+/* Open (or focus) the browser app and navigate to url. Returns
+ * browser_navigate()'s result (0 = ok), or -1 if the surface won't create. */
+int browser_app_open(const char *url)
+{
+    if (!g_browser_active) {
+        browser_init(&g_browser_app);
+        g_browser_surface = wm_create_surface("Browser", -1,
+                                              120, 120, 1000, 680,
+                                              browser_app_draw_content);
+        if (g_browser_surface < 0) return -1;
+        g_browser_active = 1;
+    }
+    int rc = 0;
+    if (url && url[0]) rc = browser_navigate(&g_browser_app, url);
+    wm_force_visible(g_browser_surface);
+    wm_focus_surface(g_browser_surface);
+    return rc;
+}

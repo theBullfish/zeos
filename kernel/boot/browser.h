@@ -170,6 +170,10 @@ typedef struct {
 /* Initialize browser */
 void browser_init(browser_t *b);
 
+/* Browser-as-app: open (or focus) the browser surface + navigate. */
+int  browser_app_open(const char *url);
+int  browser_app_active(void);
+
 /* Navigate to URL */
 int browser_navigate(browser_t *b, const char *url);
 

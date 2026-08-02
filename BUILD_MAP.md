@@ -259,8 +259,17 @@ the OS. When in doubt it's the OS.
 - [ ] **H.6** WebSocket — `[TODO]`.
 
 ## I. Web Browser
-> **‼ BLOCKER for all of I [observed 2026-08-02]:** `browser.c` is NOT wired to a launcher or a WM surface — grep finds no `wm_create_surface` for the browser, no dock/palette/keybind that opens it, and no launch call outside `browser.c` (only a static `s_rc_browser`). The browser is **dormant code**: it can't be opened from the running desktop, so none of I.1–I.6 is reachable to verify. FIRST STEP for section I is to WIRE the browser as an openable app (create a browser surface + `draw_content` + input routing + a dock/palette launcher); only then can navigation/parse/render be verified (the net + TLS stack it needs are now green — H.1/H.2/H.3/H.4).
-- [ ] **I.1** HTML parser (tags/attrs/comments/void/script-skip), 2048-node DOM — `[UNVERIFIED — unreachable, browser not wired]` `[source browser.c:208-264,130]`.
+> **[2026-08-02] Browser WIRED as an app (was dormant).** Added `browser_app_open()` + a
+> `browse <url>` shell command (browser.c/browser.h/shell.c): it creates a WM "Browser"
+> surface with a `draw_content` that renders the browser into the window each composite.
+> VERIFIED functionally via serial: `browse http://example.com/` → `HTTP: 200 (571 bytes)`
+> → `BROWSE: 0 OK, 18 nodes, 136px` (fetched, parsed 18 DOM nodes, laid out 136px, page
+> loaded). So I.1 (parse) + I.4 (navigation) run correctly end-to-end over the now-green net
+> stack. **Remaining:** the browser WINDOW is not yet visibly compositing in the desktop
+> screenshot (a mid-session-created surface z-order/refresh follow-up) — so the on-screen
+> render (I.3 visible) and input routing (I.5 click/scroll) still need the surface to show +
+> a boot-time launcher (dock/palette entry).
+- [x] **I.1** HTML parser (tags/attrs/comments/void/script-skip), 2048-node DOM — `[observed 2026-08-02]` `browse example.com` parsed the page into 18 DOM nodes (serial `BROWSE: 0 OK, 18 nodes`). `[source browser.c:208-264,130]`.
 - [ ] **I.2** CSS per-tag defaults + inline `style=` + persona-accent links — `[UNVERIFIED]` `[source browser.c:597,749-751]`.
 - [ ] **I.3** Block layout + framebuffer render (clip/scroll/bg/HR) + TTF text — `[UNVERIFIED]` `[source browser.c:1155-1707]`.
 - [ ] **I.4** Navigation: URL parse, 32-history, back/fwd/refresh/home — `[UNVERIFIED]` `[source browser.c:1349-1544]`.

@@ -268,6 +268,7 @@ static void cmd_nc(const char *args);
 static void cmd_notes(const char *args);
 static void cmd_chat(const char *args);
 static void cmd_web(const char *args);
+static void cmd_browse(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -776,6 +777,7 @@ static const struct shell_cmd commands[] = {
     {"notes",   "notes-zeos: backlinks <path> | search <q> | index-stats", cmd_notes, VIS_ALWAYS},
     {"chat",    "chat-zeos: rooms | send <r> <body> | tail <r> [N] | search <q> | presence", cmd_chat, VIS_ALWAYS},
     {"web",     "web-zeos: start [port] | add-route <m> <p> <h> | stop | stats | bench", cmd_web, VIS_ALWAYS},
+    {"browse",  "open a URL in the Zeos browser (browse <url>)", cmd_browse, VIS_ALWAYS},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3088,6 +3090,17 @@ static int web_parse_uint(const char *p, uint32_t *out)
     if (*p && *p != ' ') return 0;
     *out = v;
     return n > 0;
+}
+
+static void cmd_browse(const char *args)
+{
+    extern int browser_app_open(const char *url);
+    const char *url = (args && args[0]) ? args : "http://example.com/";
+    kputs("  Browser: opening ");
+    kputs(url);
+    kputc('\n');
+    int rc = browser_app_open(url);
+    kputs(rc == 0 ? "  Browser: page loaded\n" : "  Browser: navigate error\n");
 }
 
 static void cmd_web(const char *args)
