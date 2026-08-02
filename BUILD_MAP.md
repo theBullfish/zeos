@@ -199,7 +199,7 @@ the OS. When in doubt it's the OS.
 - [x] **C.5** maximize / restore — `[observed 2026-08-02]` Super+Up MAXIMIZES the focused Terminal to fill the screen (content intact); Super+Down restores it. Verified after correcting TWO harness confounds (my first "non-acting" verdict was WRONG): (1) the modal palette was left open and ate all subsequent keys; (2) Super+2 is snap-TR, not workspace. A `kbd-diag` trace confirmed `sc=48 ext=1 mod=8` (Super+Up, extended, SUPER) reaches the matcher and fires ACTION_MAXIMIZE. Extended-scancode path is FINE. Minimize/detach still unexercised. `[source wm.c:374-435; keybinds.c:95-96]`.
 - [x] **C.6** Workspaces (switch) — `[observed 2026-08-02]` Super+F2 switches to an EMPTY workspace (both windows gone; panel ws-dot turns yellow), Super+F1 returns them; serial `WS: switch 0 -> 1` / `1 -> 0`; shots 32661→14621(empty)→32357(back). `[source wm.c:734-748; keybinds.c:125-126]`. "move surfaces to workspace" not yet exercised.
 - [ ] **C.7** Shadow rendering (L1 unfocused / L2 focused) — `[UNVERIFIED]` `[source wm.c:1192-1197]`.
-- [ ] **C.8** Snap/tile: edge zones, ghost preview, geometry restore, auto-tiling — `[UNVERIFIED]` `[source wm.c:787-815,963-972,544-548,650-700]`.
+- [x] **C.8** Snap to quadrant — `[observed 2026-08-02]` Super+2 (ACTION_SNAP_TR) snaps the focused Terminal cleanly into the top-right quadrant. `[source wm.c:787-815; keybinds.c:100]`. Edge-zone DRAG snap, ghost preview, and auto-tiling still unexercised.
 - [ ] **C.9** Controls side L/R configurable + live toggle — `[UNVERIFIED]` `[source wm.c:228,247-252; settings.c:266-268,494-496]`.
 - [ ] **C.10** Sheets (modal, slide from titlebar) — `[TODO]`.
 - [ ] **C.11** Popovers (non-modal, attached) — `[TODO]`.
