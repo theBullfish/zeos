@@ -727,7 +727,17 @@ void scheduler_run(void)
             extern void usb_hid_poll(void);
             extern void compositor_advance(void);
             extern void net_service(void);
+            extern uint32_t keyboard_chain_drain(void);
             usb_hid_poll();
+            /* Drain the keyboard scancode ring HERE, in the unconditional
+             * pre-resolve pump, not only via CHAIN_KEYBOARD's resolve. The
+             * chain resolve can be starved when a heavy/preempted chain (e.g.
+             * an open command palette eating a ~496ms preempt slice) sits ahead
+             * of CHAIN_KEYBOARD in the graph -- typed keys then never drain and
+             * modal text input (palette search) is dead. Draining every tick
+             * here makes input immune to chain-resolve preemption. Idempotent:
+             * the later chain resolve just finds the ring already empty. */
+            keyboard_chain_drain();
             net_service();          /* pump RX + async DHCP under the scheduler */
             uint64_t _ca = timer_read_tsc();
             compositor_advance();
