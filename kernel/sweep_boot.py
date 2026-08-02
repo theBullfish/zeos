@@ -103,14 +103,14 @@ def combo(mods, k):
     for m in reversed(mods): cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":m}}}])
     time.sleep(0.4)
 combo(["meta_l"], "spc"); time.sleep(0.6); shot("palette"); key("esc"); time.sleep(0.3)
-# Workspace switch Super+2 then Super+1 (C.6)
-combo(["meta_l"], "2"); time.sleep(0.6); shot("workspace-2")
-combo(["meta_l"], "1"); time.sleep(0.4)
-# Titlebar drag of the focused (Terminal) window (C.3): grab near its titlebar, drag
-rel(300,-250); time.sleep(0.2)            # move toward a titlebar region
-btn(True); rel(-150,120); btn(False); shot("after-drag")
-# Maximize via Super+Up (E.8 / C.5)
-combo(["meta_l"], "up"); time.sleep(0.5); shot("maximize")
+# Maximize focused window: Super+Up (ACTION_MAXIMIZE, keybinds.c:95), then restore Super+Down
+combo(["meta_l"], "up");   time.sleep(0.6); shot("maximize")
+combo(["meta_l"], "down"); time.sleep(0.6); shot("restore")
+# Snap top-right: Super+2 (ACTION_SNAP_TR, keybinds.c:100)
+combo(["meta_l"], "2");    time.sleep(0.6); shot("snap-tr")
+# Workspace switch: Super+F2 (ACTION_WORKSPACE_2, keybinds.c:126) then Super+F1
+combo(["meta_l"], "f2");   time.sleep(0.6); shot("workspace-2")
+combo(["meta_l"], "f1");   time.sleep(0.4)
 
 cmd("quit")
 try: qemu.wait(timeout=5)

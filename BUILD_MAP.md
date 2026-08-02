@@ -196,7 +196,7 @@ the OS. When in doubt it's the OS.
 - [x] **C.2** Stacking / z-order + focus mgmt (render) — `[observed 2026-08-02]` Terminal occludes Files at a distinct z-level with focused-border+bright-titlebar vs dimmed unfocused; panel pill highlight matches. `[source wm.c:763-778]`. Dynamic focus-CHANGE (click-to-raise) not yet exercised.
 - [ ] **C.3** Titlebar drag with snap-zone detection — `[UNVERIFIED]` `[source wm.c:923-972]`; vshot drag hit nothing (windows already gone, B.7) so unproven.
 - [ ] **C.4** Resize from any edge/corner with minimums — `[UNVERIFIED]` `[source wm.c:772-783,451]`.
-- [ ] **C.5** Minimize / maximize / restore / detach — `[UNVERIFIED]` `[source wm.c:374-435,334-372]`.
+- [ ] **C.5** Minimize / maximize / restore / detach — `[‼ observed non-acting 2026-08-02]` Super+Up (ACTION_MAXIMIZE, keybinds.c:95, extended-arrow scancode) does NOT maximize the focused window (boot shot: Terminal unchanged). ROOT CAUSE candidate: Super+Space (SC_SPACE, non-extended) DOES fire the palette, but Super+arrow (E0-extended `SC_EXT_*`) binds don't — extended (E0-prefixed) scancodes aren't reaching the keybind matcher. This breaks ALL arrow keybinds (snap L/R/up/down maximize/restore, C.3/C.8 too). Fix in the keyboard→keybind extended-scancode path (E.7). `[source wm.c:374-435; keybinds.c:93-96]`.
 - [ ] **C.6** Workspaces (8 max, switch, move surfaces) — `[UNVERIFIED]` `[source wm.c:237,704,724-727]`; 4 initialized (serial), switching unobserved.
 - [ ] **C.7** Shadow rendering (L1 unfocused / L2 focused) — `[UNVERIFIED]` `[source wm.c:1192-1197]`.
 - [ ] **C.8** Snap/tile: edge zones, ghost preview, geometry restore, auto-tiling — `[UNVERIFIED]` `[source wm.c:787-815,963-972,544-548,650-700]`.
