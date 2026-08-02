@@ -102,7 +102,7 @@ def combo(mods, k):
     cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":k}}}])
     for m in reversed(mods): cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":m}}}])
     time.sleep(0.4)
-combo(["meta_l"], "spc"); time.sleep(0.6); shot("palette"); key("esc"); time.sleep(0.3)
+# Window-management keybinds FIRST (before the palette, which is modal and eats keys).
 # Maximize focused window: Super+Up (ACTION_MAXIMIZE, keybinds.c:95), then restore Super+Down
 combo(["meta_l"], "up");   time.sleep(0.6); shot("maximize")
 combo(["meta_l"], "down"); time.sleep(0.6); shot("restore")
@@ -111,6 +111,8 @@ combo(["meta_l"], "2");    time.sleep(0.6); shot("snap-tr")
 # Workspace switch: Super+F2 (ACTION_WORKSPACE_2, keybinds.c:126) then Super+F1
 combo(["meta_l"], "f2");   time.sleep(0.6); shot("workspace-2")
 combo(["meta_l"], "f1");   time.sleep(0.4)
+# Palette LAST (modal): Super+Space
+combo(["meta_l"], "spc"); time.sleep(0.6); shot("palette"); key("esc"); time.sleep(0.3)
 
 cmd("quit")
 try: qemu.wait(timeout=5)
