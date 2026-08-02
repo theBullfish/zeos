@@ -56,12 +56,14 @@ static corner_id_t detect_corner(int mx, int my)
 static void action_tl(void)
 {
     /* Top-left: Command Palette */
+    kputs("[HC] TL fire -> palette_toggle\n");
     palette_toggle();
 }
 
 static void action_tr(void)
 {
     /* Top-right: toggle the Notifications / Signal Status panel. */
+    kputs("[HC] TR fire -> notify_show_all\n");
     extern void notify_show_all(void);
     notify_show_all();
 }
@@ -71,12 +73,15 @@ static void action_bl(void)
     /* Bottom-left: Cycle to next workspace */
     int current = wm_get_workspace();
     int next = (current + 1) % WM_MAX_WORKSPACES;
+    kputs("[HC] BL fire -> workspace "); kput_dec((uint64_t)current);
+    kputs(" -> "); kput_dec((uint64_t)next); kputs("\n");
     wm_switch_workspace(next);
 }
 
 static void action_br(void)
 {
     /* Bottom-right: Show Desktop — minimize all visible surfaces */
+    kputs("[HC] BR fire -> show desktop\n");
     int count = wm_surface_count();
     for (int i = 0; i < count; i++) {
         chain_surface_t *s = wm_get_surface_by_index(i);
