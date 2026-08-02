@@ -484,6 +484,16 @@ void palette_toggle(void)
         palette_show();
 }
 
+/* Repaint after any state change. The result list grows/shrinks with the query,
+ * so the region a shrinking list vacates must be recomposited too -- dirty the
+ * whole screen (matches palette_show/hide). Without this the overlay shows a
+ * stale frame after typing even though the query/filter updated. */
+static void palette_repaint(void)
+{
+    extern void compositor_dirty_all(void);
+    compositor_dirty_all();
+}
+
 void palette_type(char c)
 {
     if (!pal.visible) return;
@@ -496,6 +506,7 @@ void palette_type(char c)
     pal.query[pal.query_len++] = c;
     pal.query[pal.query_len] = '\0';
     palette_filter();
+    palette_repaint();
 }
 
 void palette_backspace(void)
@@ -510,6 +521,7 @@ void palette_backspace(void)
     pal.query_len--;
     pal.query[pal.query_len] = '\0';
     palette_filter();
+    palette_repaint();
 }
 
 void palette_up(void)
@@ -520,6 +532,7 @@ void palette_up(void)
         if (pal.selected < pal.scroll_offset)
             pal.scroll_offset = pal.selected;
     }
+    palette_repaint();
 }
 
 void palette_down(void)
@@ -530,6 +543,7 @@ void palette_down(void)
         if (pal.selected >= pal.scroll_offset + PAL_VISIBLE_ITEMS)
             pal.scroll_offset = pal.selected - PAL_VISIBLE_ITEMS + 1;
     }
+    palette_repaint();
 }
 
 void palette_execute(void)

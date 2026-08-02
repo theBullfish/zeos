@@ -210,6 +210,15 @@ void zeos_longjmp(zeos_jmpbuf_t buf, int rc)
         "jnz 1f\n"
         "movl $1, %%eax\n"             /* longjmp(0) -> return 1 */
         "1:\n"
+        /* Re-enable interrupts before resuming. When longjmp is invoked from the
+         * preempt timer ISR (entered via an interrupt gate, which cleared IF),
+         * it bypasses the IRET that would have restored IF=1 from the saved
+         * FLAGS -- so without this, interrupts stay DISABLED after the first
+         * preempt and NO further hardware IRQs (keyboard/mouse) are delivered.
+         * zeos_longjmp only ever resumes the scheduler main loop, which always
+         * runs with interrupts enabled, so unconditional sti is correct here.
+         * (sti's 1-instruction delay covers the following jmp.) */
+        "sti\n"
         "jmp *%%rdx\n"
         ::: "memory");
 }
