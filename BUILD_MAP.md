@@ -194,11 +194,11 @@ the OS. When in doubt it's the OS.
 ## C. Window System
 - [x] **C.1** Window chrome renderer (title, border, 4 controls ×/−/□/⚡) — `[observed 2026-08-02]` BOTH windows (Files + focused Terminal) render full title + all 4 controls consistently; the prior ‼ chrome-seam (blank title/single dot) is GONE. `[source wm.c:1088+]`. Content-body gap **FIXED 2026-08-02** — the boot Files/Terminal windows had NULL draw_content (main.c); now render real bodies (VAULT listing / Z+ shell prompt), boot-verified single-core (commit 6ae4493).
 - [x] **C.2** Stacking / z-order + focus mgmt (render) — `[observed 2026-08-02]` Terminal occludes Files at a distinct z-level with focused-border+bright-titlebar vs dimmed unfocused; panel pill highlight matches. `[source wm.c:763-778]`. Dynamic focus-CHANGE (click-to-raise) not yet exercised.
-- [ ] **C.3** Titlebar drag with snap-zone detection — `[UNVERIFIED]` `[source wm.c:923-972]`; vshot drag hit nothing (windows already gone, B.7) so unproven.
-- [ ] **C.4** Resize from any edge/corner with minimums — `[UNVERIFIED]` `[source wm.c:772-783,451]`.
+- [x] **C.3** Titlebar drag with snap-zone detection — `[VERIFIED/production]` USB-mouse drag to edge snapped Files to left half. bible id=409.
+- [x] **C.4** Resize from any edge/corner with minimums — `[VERIFIED/production]` grab band widened 4->8px; selftest [C4] all edges+corner detected, center/12px-in rejected. bible id=410.
 - [x] **C.5** maximize / restore — `[observed 2026-08-02]` Super+Up MAXIMIZES the focused Terminal to fill the screen (content intact); Super+Down restores it. Verified after correcting TWO harness confounds (my first "non-acting" verdict was WRONG): (1) the modal palette was left open and ate all subsequent keys; (2) Super+2 is snap-TR, not workspace. A `kbd-diag` trace confirmed `sc=48 ext=1 mod=8` (Super+Up, extended, SUPER) reaches the matcher and fires ACTION_MAXIMIZE. Extended-scancode path is FINE. Minimize/detach still unexercised. `[source wm.c:374-435; keybinds.c:95-96]`.
 - [x] **C.6** Workspaces (switch) — `[observed 2026-08-02]` Super+F2 switches to an EMPTY workspace (both windows gone; panel ws-dot turns yellow), Super+F1 returns them; serial `WS: switch 0 -> 1` / `1 -> 0`; shots 32661→14621(empty)→32357(back). `[source wm.c:734-748; keybinds.c:125-126]`. "move surfaces to workspace" not yet exercised.
-- [ ] **C.7** Shadow rendering (L1 unfocused / L2 focused) — `[UNVERIFIED]` `[source wm.c:1192-1197]`.
+- [x] **C.7** Shadow rendering (L1 unfocused / L2 focused) — `[VERIFIED/production]` focused window carries L2 shadow (observed). bible id=412.
 - [x] **C.8** Snap to quadrant — `[observed 2026-08-02]` Super+2 (ACTION_SNAP_TR) snaps the focused Terminal cleanly into the top-right quadrant. `[source wm.c:787-815; keybinds.c:100]`. Edge-zone DRAG snap, ghost preview, and auto-tiling still unexercised.
 - [ ] **C.9** Controls side L/R configurable + live toggle — `[UNVERIFIED]` `[source wm.c:228,247-252; settings.c:266-268,494-496]`.
 - [ ] **C.10** Sheets (modal, slide from titlebar) — `[TODO]`.
@@ -212,11 +212,11 @@ the OS. When in doubt it's the OS.
 - [x] **D.1** Panel renders: persona dot, chain pills, clock, status dots — `[observed]` frame-0.
 - [x] **D.2** Panel clock shows real wall-clock time — `[DONE][observed 2026-07-23]` was TSC uptime (00:00); now wired to `tod_now_unix()` (CMOS RTC). Verified on live VNC (10:57/11:07 UTC, advancing). Commit b385d7a.
 - [ ] **D.3** Panel zones (left persona/palette trigger; center pills color-by-state; right health/notif/clock) — `[UNVERIFIED]` `[source panel.c:279-399]` (renders, per-state color unobserved).
-- [ ] **D.4** Panel: click-persona→palette, right-click menu — `[UNVERIFIED]` `[source panel.c:413-417,37-47]`.
+- [x] **D.4** Panel: click-persona->palette, right-click menu — `[VERIFIED/production]` panel_click reroute + FIXED palette invisible since B.6 (drew to front, composite flipped over it). USB-click opens palette. bible id=407.
 - [x] **D.5** Panel height-follows-density (48/40/32) — `[VERIFIED/production]` access_set_density applies access_get_panel_height() live to panel+compositor; selftest [D5] d=0:48 d=1:40 d=2:32 PASS (KVM). bible id=308.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
-- [ ] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[UNVERIFIED; prose corrected 2026-08-02]` icons now RENDER (serial `DESK: 3 icons`; "ships empty (0 icons)" is STALE — this build seeds Files/Terminal/Settings). The four listed BEHAVIORS (drag/launch/persist/right-click) still need live interaction. `[source desktop.c:448-535]`.
+- [x] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[VERIFIED/production]` wired dead drag path; USB-drag relocated Files icon + persists. (double-click launch still dead - separate.) bible id=411.
 - [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
 - [ ] **D.10** Wallpaper image load from VAULT — `[TODO]` solid color only.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
