@@ -1938,5 +1938,8 @@ int browser_app_open(const char *url)
     if (url && url[0]) rc = browser_navigate(&g_browser_app, url);
     wm_force_visible(g_browser_surface);
     wm_focus_surface(g_browser_surface);
+    /* Force a full recomposite so the newly-created surface actually shows —
+     * at idle the compositor only redraws on a dirty region. */
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
     return rc;
 }
