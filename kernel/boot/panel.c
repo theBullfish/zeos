@@ -27,6 +27,9 @@
 static uint64_t s_panel_tokens[PANEL_MAX_HOVERS];
 static int      s_panel_token_count = 0;
 
+/* Panel state (declared early: panel_right_click hit-tests pills). */
+static panel_state_t g_panel;
+
 static void rc_settings(void *ctx) { (void)ctx; kputs("PANEL: open settings\n"); }
 static void rc_about(void *ctx)    { (void)ctx; kputs("PANEL: about Zeos\n"); }
 static void rc_activity(void *ctx) {
@@ -35,9 +38,31 @@ static void rc_activity(void *ctx) {
     (void)activity_open();
 }
 
+/* D.6: per-pill right-click target + actions (act on the pill's window). */
+static int s_rc_pill_surface = -1;
+static void rc_pill_focus(void *ctx)    { (void)ctx; if (s_rc_pill_surface >= 0) { wm_focus_surface(s_rc_pill_surface); wm_restore_surface(s_rc_pill_surface); } }
+static void rc_pill_minimize(void *ctx) { (void)ctx; if (s_rc_pill_surface >= 0) wm_minimize_surface(s_rc_pill_surface); }
+static void rc_pill_close(void *ctx)    { (void)ctx; if (s_rc_pill_surface >= 0) wm_detach_surface(s_rc_pill_surface); }
+
 int panel_right_click(int x, int y) {
     extern int panel_get_height(void);
     if (y < 0 || y >= panel_get_height()) return 0;
+
+    /* D.6: right-click on a center-zone pill -> per-window menu. */
+    for (int i = 0; i < g_panel.pill_count; i++) {
+        panel_pill_t *p = &g_panel.pills[i];
+        if (p->w > 0 && x >= p->x && x < p->x + p->w) {
+            s_rc_pill_surface = p->surface_id;
+            static const ctx_menu_item_t pill_items[3] = {
+                { "Focus",    rc_pill_focus,    0, 1 },
+                { "Minimize", rc_pill_minimize, 0, 1 },
+                { "Close",    rc_pill_close,    0, 1 },
+            };
+            context_menu_open(x, y, pill_items, 3);
+            return 1;
+        }
+    }
+
     static const ctx_menu_item_t items[3] = {
         { "Activity Monitor", rc_activity, 0, 1 },
         { "Settings",         rc_settings, 0, 1 },
@@ -48,7 +73,6 @@ int panel_right_click(int x, int y) {
 }
 
 /* ── Static state ── */
-static panel_state_t g_panel;
 static int s_ws_indicator_x = 0;   /* set by panel_draw, used by panel_click */
 static int s_ws_indicator_y = 0;
 static int s_ws_indicator_w = 0;

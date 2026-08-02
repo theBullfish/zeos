@@ -98,10 +98,10 @@ void context_menu_open(int x, int y, const ctx_menu_item_t *items, int count)
     }
     g_total_opens++;
 
-    /* L.5: spring the menu open (scale 0 -> 1). */
+    /* L.5: open full immediately (visible), close animates out via the spring
+     * (context_menu_close springs open_t 1 -> 0). */
     g_menu.closing = 0;
-    g_menu.open_t  = 0.0f;
-    g_menu.anim_id = anim_spring_default(0.0f, 1.0f, cm_anim_cb, 0);
+    g_menu.open_t  = 1.0f;
 
     compositor_dirty(g_menu.x, g_menu.y, g_menu.w, g_menu.h);
 }
@@ -202,10 +202,11 @@ void context_menu_draw(void)
 {
     if (!g_menu.active && !g_menu.closing) return;
 
-    /* L.5: scale the box from the anchor by the spring value (clamped to [0,1]
-     * for sizing so it never draws past the menu bounds). Items are painted only
-     * once nearly settled, so text never renders outside the growing box. */
-    float t = g_menu.open_t;
+    /* L.5: scale the box by the spring value while CLOSING (dismiss animation).
+     * While open, always draw full-size -- gating the open state on the spring
+     * risked an invisible menu if open_t hadn't advanced (regression). Items are
+     * painted only once nearly settled. */
+    float t = g_menu.closing ? g_menu.open_t : 1.0f;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     int cw = (int)(g_menu.w * t + 0.5f);
@@ -264,9 +265,7 @@ void context_menu_l5_selftest(void)
         items[i].action = 0; items[i].ctx = 0; items[i].enabled = 1;
     }
     context_menu_open(100, 100, items, 2);
-    int open_started_low = (g_menu.open_t < 0.5f);       /* not instant */
-    for (int i = 0; i < 120; i++) anim_tick(1.0f / 240.0f);
-    int opened = (g_menu.open_t > 0.9f) && context_menu_active();
+    int opened = (g_menu.open_t > 0.9f) && context_menu_active();  /* full + visible immediately */
 
     context_menu_close();
     int input_off_now = (context_menu_active() == 0);    /* input gone immediately */
@@ -274,9 +273,8 @@ void context_menu_l5_selftest(void)
     for (int i = 0; i < 240; i++) anim_tick(1.0f / 240.0f);
     int torn_down = (g_menu.closing == 0 && g_menu.item_count == 0);
 
-    int pass = open_started_low && opened && input_off_now && still_drawing && torn_down;
-    kputs("[L5] open_low="); kput_dec((uint64_t)open_started_low);
-    kputs(" opened="); kput_dec((uint64_t)opened);
+    int pass = opened && input_off_now && still_drawing && torn_down;
+    kputs("[L5] opened="); kput_dec((uint64_t)opened);
     kputs(" input_off="); kput_dec((uint64_t)input_off_now);
     kputs(" deferred="); kput_dec((uint64_t)still_drawing);
     kputs(" torndown="); kput_dec((uint64_t)torn_down);

@@ -707,6 +707,12 @@ static const settings_entry_t E_TIME_TZ = {
     "time.tz_offset_minutes", SK_INT, 0, g_tz, s_tz, 0,
     "timezone offset in minutes east of UTC"
 };
+extern int time_sync_get(char *out, int n);   /* net_ntp.c */
+extern int time_sync_set(const char *v);
+static const settings_entry_t E_TIME_SYNC = {
+    "time.sync_now", SK_BOOL, 0, time_sync_get, time_sync_set, 0,
+    "calibrate clock to a central public NTP source (set 1 to sync now)"
+};
 static const settings_entry_t E_NET_DHCP = {
     "network.dhcp_enabled", SK_BOOL,
     SETTINGS_FLAG_READONLY | SETTINGS_FLAG_STUB,
@@ -763,6 +769,7 @@ void settings_register_all(void)
     settings_register(&E_POWER_LID_CLOSE);
     settings_register(&E_POWER_LID_OPEN);
     settings_register(&E_TIME_TZ);
+    settings_register(&E_TIME_SYNC);
     settings_register(&E_NET_DHCP);
     settings_register(&E_THEME_DARK);
     settings_register(&E_MDE_SELECT_POLICY);
