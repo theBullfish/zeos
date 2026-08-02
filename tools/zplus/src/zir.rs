@@ -40,6 +40,11 @@ struct ZNode {
     emit: Option<String>,    // JSON value fragment, for sources
     gate: Option<String>,    // JSON object fragment, for gates
     merge: Option<String>,   // JSON object fragment, for merges
+    // Paradigm modifiers promoted to first-class (SIGNAL_LOGIC.md): knee/curve/
+    // dead (soft gates), on_silence (graded silence), priority (reflex/
+    // deliberate), sustained/for, weighted (grade). Each is a `"name": <value>`
+    // fragment. A back-end must be able to act on these without re-parsing args.
+    mods: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +136,7 @@ impl Zir {
             emit: None,
             gate: None,
             merge: None,
+            mods: Vec::new(),
         });
         id
     }
@@ -213,6 +219,13 @@ impl Zir {
                 for a in &call.args {
                     let av = arg_json(a);
                     self.nodes[id as usize].args.push(av);
+                    // Promote paradigm modifiers (SIGNAL_LOGIC.md) to first-class.
+                    if let Arg::Named { name, value, .. } = a {
+                        if is_paradigm_mod(name.text) {
+                            let m = format!("{}: {}", json_str(name.text), chain_value_json(value));
+                            self.nodes[id as usize].mods.push(m);
+                        }
+                    }
                 }
                 id
             }
@@ -307,6 +320,9 @@ impl Zir {
             if let Some(m) = &n.merge {
                 fields.push(format!("\"merge\": {}", m));
             }
+            if !n.mods.is_empty() {
+                fields.push(format!("\"mods\": {{{}}}", n.mods.join(", ")));
+            }
             s.push_str(&format!(
                 "    {{ {} }}{}\n",
                 fields.join(", "),
@@ -385,12 +401,36 @@ fn arg_json(a: &Arg<'_>) -> String {
     }
 }
 
+/// Paradigm modifiers (SIGNAL_LOGIC.md) that must survive as first-class data,
+/// not be buried in opaque args: soft-gate knee family, graded silence, the
+/// grade weight, sustained/for windows, and reflex/deliberate priority.
+fn is_paradigm_mod(name: &str) -> bool {
+    matches!(
+        name,
+        "knee" | "knee_in" | "knee_out" | "curve" | "dead"
+            | "on_silence" | "on_degrade"
+            | "priority" | "sustained" | "for" | "within"
+            | "weighted" | "correlated" | "resolve"
+    )
+}
+
 /// Render a chain used as a *value* (arg / emit) to a JSON value fragment.
+/// Nested calls recurse so higher-order forms like `delta(delta(temp))` survive
+/// (SIGNAL_LOGIC.md §4) instead of collapsing to an opaque placeholder.
 fn chain_value_json(c: &Chain<'_>) -> String {
     match c {
         Chain::Atom(Atom::Literal(lit)) => literal_json(lit),
         Chain::Atom(Atom::Path(p)) => format!("{{\"ref\": {}}}", json_str(&p.joined())),
         Chain::Atom(Atom::DevNull(_)) => "{\"ref\": \"/dev/null\"}".to_string(),
+        Chain::Atom(Atom::TimePast { steps, .. }) => format!("{{\"t_past\": {}}}", steps),
+        Chain::Call(call) => {
+            let args: Vec<String> = call.args.iter().map(arg_json).collect();
+            format!(
+                "{{\"call\": {}, \"args\": [{}]}}",
+                json_str(&call.callee.joined()),
+                args.join(", ")
+            )
+        }
         Chain::BinExpr { op, rhs, .. } => gate_json(*op, rhs),
         Chain::UnaryCmp { op, rhs, .. } => gate_json(*op, rhs),
         _ => "{\"expr\": true}".to_string(),
@@ -425,7 +465,11 @@ fn merge_policy_json(p: &MergePolicy<'_>) -> String {
             format!("{{\"policy\": \"quorum\", \"n\": {}, \"m\": {}}}", n, m)
         }
         MergePolicy::Fastest(n) => format!("{{\"policy\": \"fastest\", \"n\": {}}}", n),
-        MergePolicy::Within(_) => "{\"policy\": \"within\"}".to_string(),
+        // Confluence (SIGNAL_LOGIC.md §5) — the temporal window IS the policy;
+        // dropping it would flatten `within(100ms)` into a bare AND.
+        MergePolicy::Within(w) => {
+            format!("{{\"policy\": \"within\", \"window\": {}}}", chain_value_json(w))
+        }
         MergePolicy::By(path) => {
             format!("{{\"policy\": \"by\", \"key\": {}}}", json_str(&path.joined()))
         }
@@ -515,6 +559,38 @@ mod tests {
         let opens = json.matches('{').count();
         let closes = json.matches('}').count();
         assert_eq!(opens, closes, "unbalanced braces in ZIR json");
+    }
+
+    #[test]
+    fn confluence_window_survives() {
+        // within(100ms) must keep its temporal window (SIGNAL_LOGIC.md §5).
+        let z = zir_of("c : a -> | within(100ms) | -> out");
+        let json = z.to_json();
+        assert!(json.contains("\"policy\": \"within\""), "within policy present");
+        assert!(
+            json.contains("\"window\":"),
+            "within window must not be dropped: {json}"
+        );
+    }
+
+    #[test]
+    fn higher_order_delta_survives() {
+        // delta(delta(temp)) must not collapse to an opaque placeholder
+        // (SIGNAL_LOGIC.md §4).
+        let z = zir_of("c : delta(delta(temp))");
+        let json = z.to_json();
+        assert!(json.contains("\"call\": \"delta\""), "nested delta preserved: {json}");
+        assert!(!json.contains("\"expr\": true"), "must not flatten to placeholder");
+    }
+
+    #[test]
+    fn paradigm_modifiers_are_first_class() {
+        // knee / priority ride as first-class `mods`, not buried opaque args.
+        let z = zir_of("c : temp -> gate(< 72, knee: 3, priority: reflex) -> heat");
+        let json = z.to_json();
+        assert!(json.contains("\"mods\":"), "mods object present: {json}");
+        assert!(json.contains("\"knee\":"), "knee promoted");
+        assert!(json.contains("\"priority\":"), "priority promoted");
     }
 
     #[test]

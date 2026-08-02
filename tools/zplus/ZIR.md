@@ -92,6 +92,24 @@ A `|` merge is **one** `merge` node carrying `merge.policy`
 the invariant the Rust AST guards (`ast.rs` "chord rule") and ZIR carries it
 verbatim so no back-end can re-linearize it.
 
+### Paradigm-primitive fidelity (docs/SIGNAL_LOGIC.md)
+ZIR must carry the signal-logic primitives as structured data, not flatten them
+into opaque args — a back-end that can't see a primitive can't honor it:
+- **Chord** — `merge.policy` (above).
+- **Confluence** — `within` carries its **time window**:
+  `{"policy":"within","window":{"duration":100,"unit":"ms"}}`. Dropping the
+  window would reduce confluence to a bare AND.
+- **Knee / soft gates, graded silence, grade weight, reflex/deliberate
+  priority, sustained** — promoted to a first-class `node.mods` object
+  (`{"knee":…,"curve":…,"on_silence":…,"priority":…,"weighted":…}`), not left
+  buried in `args`.
+- **Delta (higher-order)** — nested calls recurse, so `delta(delta(temp))`
+  survives as `{"call":"delta","args":[{"pos":{"call":"delta",…}}]}` rather than
+  collapsing to a placeholder.
+
+These are guarded by `zir::tests::{confluence_window_survives,
+higher_order_delta_survives, paradigm_modifiers_are_first_class}`.
+
 ### Verb → kernel node-type
 The kernel loader (`zplus_zir.c`) maps `verb` to `enum zp_node_type`
 (`emit`→`ZP_EMIT`, `gate`+`op:gt`→`ZP_GATE_GT`, `str.len`→`ZP_STR_LEN`, …). Verbs
