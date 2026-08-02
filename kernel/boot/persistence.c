@@ -512,6 +512,22 @@ int persistence_save_snapshot_now(void)
     uint32_t prefix = (uint32_t)((uint8_t *)&hdr->saved_tsc - buf);
     hdr->crc32 = p_crc32(buf + prefix, total - prefix);
 
+    /* A.6 perf: skip the ~100ms block-chain flush when the persisted chain
+     * state is byte-identical to the last save. The count-based trigger
+     * (every CHECKPOINT_EVERY resolves) fires even at idle when nothing
+     * mutated; here we CRC the chain records (excludes the volatile
+     * saved_tsc header) and no-op when unchanged. SAFE: any real mutation
+     * changes the CRC, so a needed save is never skipped. */
+    static uint32_t g_last_records_crc = 0;
+    static int      g_records_ever_saved = 0;
+    uint32_t records_crc = (n > 0)
+        ? p_crc32((const uint8_t *)records, n * (uint32_t)sizeof(persistence_chain_record_t))
+        : 0;
+    if (g_records_ever_saved && records_crc == g_last_records_crc) {
+        spin_unlock(&g_persist_lock);
+        return 0;   /* nothing changed — skip the expensive flush */
+    }
+
     /* vault_write replaces the file (creates a new temporal version
      * if it already exists) -- exactly what we want for a single
      * rolling snapshot key. */
@@ -526,6 +542,8 @@ int persistence_save_snapshot_now(void)
 
     g_snapshot_saves++;
     g_last_save_tsc = hdr->saved_tsc;
+    g_last_records_crc = records_crc;   /* A.6: remember what we just flushed */
+    g_records_ever_saved = 1;
 
     /* Sink the current wall clock too. */
     tod_persist_save();
