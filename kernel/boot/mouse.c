@@ -83,14 +83,16 @@ static int mouse_ui_dispatch_down(int x, int y, int button) {
         /* Left-click routing: panel/dock chrome, then the WM (full-frame hit
          * test incl. titlebar/controls/resize edges -- so focus/drag/close/
          * resize all work), then the desktop as the fall-through. */
-        extern int  panel_left_click(int x, int y);
+        extern int  panel_click(int x, int y);   /* D.4: real handler (palette/pills/workspace) */
         extern int  dock_left_click(int x, int y);
         extern void desktop_click(int x, int y);
+        extern void desktop_drag_start(int x, int y);   /* D.8: arm icon drag (no-op off-icon) */
         extern void compositor_dirty_all(void);
         compositor_dirty_all();         /* any click changes focus/state -> recomposite */
-        if (panel_left_click(x, y)) return 1;
+        if (panel_click(x, y)) return 1;   /* D.4: was panel_left_click (dead consume-only) */
         if (dock_left_click(x, y))  return 1;
         if (wm_mouse_down(x, y, 1) >= 0) return 1;
+        desktop_drag_start(x, y);   /* D.8: arm drag if an icon is under the cursor */
         desktop_click(x, y);
         return 1;
     }
@@ -176,7 +178,9 @@ static void mouse_ui_dispatch_move(int x, int y) {
      * self-gates on s->dragging/s->resizing, so it's a no-op otherwise). */
     if (mouse_get_buttons() & MOUSE_BTN_LEFT) {
         extern void wm_mouse_move(int x, int y);
+        extern void desktop_drag_move(int x, int y);   /* D.8: self-gates on dragging */
         wm_mouse_move(x, y);
+        desktop_drag_move(x, y);
     }
     hover_dispatch(x, y);
 }

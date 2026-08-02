@@ -324,6 +324,11 @@ static void composite_draw(void)
           if (file_mgr_active()) file_mgr_draw(); }
         { extern int activity_active(void);   extern void activity_draw(void);
           if (activity_active()) activity_draw(); }
+        /* Command palette: topmost overlay. Was drawn only in the palette CHAIN
+         * resolve (to the FRONT buffer), which the B.6/B.9 composite then flipped
+         * over -> it opened but never showed. Draw it here in the composited
+         * backbuffer like every other overlay. Self-gates on visibility. */
+        { extern void palette_draw(void); palette_draw(); }
         dirty_modal_draw();
     }
     theme_apply_night_shift();

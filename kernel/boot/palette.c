@@ -462,6 +462,8 @@ void palette_show(void)
 
     palette_ensure_undo();
     undo_set_focus(&s_pal_undo);
+    /* Full recomposite so the palette overlay + backdrop paints (D.4). */
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
 }
 
 void palette_hide(void)
@@ -470,6 +472,8 @@ void palette_hide(void)
     for (int i = 0; i < s_row_token_count; i++) hover_unregister(s_row_tokens[i]);
     s_row_token_count = 0;
     if (undo_get_focus() == &s_pal_undo) undo_set_focus(0);
+    /* Full recomposite so the full-screen backdrop is cleared (D.4). */
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
 }
 
 void palette_toggle(void)
