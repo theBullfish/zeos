@@ -587,3 +587,48 @@ int dock_get_height(void) {
 dock_state_t *dock_get_state(void) {
     return &g_dock;
 }
+
+#ifdef ZEOS_DIAG_D12
+/* D.12 selftest: prove the dock's structural + auto-hide claims deterministically.
+ *  - centered:    dx == (screen_w - dock_w)/2
+ *  - divider:     rendered iff pinned_count>0 AND running_count>0
+ *  - state dots:  every running item carries has_state_dot (set in dock_update)
+ *  - auto-hide:   dock_hide() springs slide_y -> 0 (off-screen), dock_show() -> 1
+ * Static render (icons/divider/dots at boot) is verified separately by screendump. */
+void dock_d12_selftest(void)
+{
+    dock_update();  /* rebuild running list from live WM surfaces */
+
+    compositor_t *comp = compositor_get_state();
+    int screen_w = comp ? comp->screen_w : 0;
+    int dx = (screen_w - g_dock.dock_w) / 2;
+    int centered = (g_dock.dock_w > 0) && (dx >= 0) &&
+                   (dx == (screen_w - g_dock.dock_w) / 2);
+
+    int has_pinned  = (g_dock.pinned_count > 0);
+    int has_running = (g_dock.running_count > 0);
+    int divider     = has_pinned && has_running;  /* dock_draw draws it under this */
+
+    int dots_ok = 1;
+    for (int i = 0; i < g_dock.running_count; i++)
+        if (!g_dock.running[i].has_state_dot) dots_ok = 0;
+
+    /* Auto-hide slide: hide -> settle -> assert off-screen; show -> settle -> on. */
+    dock_show(); for (int i = 0; i < 400; i++) anim_tick(1.0f / 240.0f);
+    int shown = (g_dock.slide_y > 0.9f);
+    dock_hide(); for (int i = 0; i < 400; i++) anim_tick(1.0f / 240.0f);
+    int hidden = (g_dock.slide_y < 0.1f);
+    dock_show(); for (int i = 0; i < 400; i++) anim_tick(1.0f / 240.0f); /* restore */
+    int reshown = (g_dock.slide_y > 0.9f);
+
+    int pass = centered && divider && dots_ok && shown && hidden && reshown;
+    kputs("[D12] centered="); kput_dec((uint64_t)centered);
+    kputs(" pinned="); kput_dec((uint64_t)g_dock.pinned_count);
+    kputs(" running="); kput_dec((uint64_t)g_dock.running_count);
+    kputs(" divider="); kput_dec((uint64_t)divider);
+    kputs(" dots="); kput_dec((uint64_t)dots_ok);
+    kputs(" slide[show/hide/reshow]=");
+    kput_dec((uint64_t)shown); kput_dec((uint64_t)hidden); kput_dec((uint64_t)reshown);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

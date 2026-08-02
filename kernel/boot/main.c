@@ -1122,6 +1122,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void context_menu_l5_selftest(void); context_menu_l5_selftest(); }
 #endif
 
+
 #ifdef ZEOS_DIAG_J2
         /* J.2 selftest: settings GUI mutates the one real access config. */
         { extern void settings_j2_selftest(void); settings_j2_selftest(); }
@@ -1226,6 +1227,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         wm_force_visible(w_files);
         wm_force_visible(w_term);
         wm_focus_surface(w_term);
+
+#ifdef ZEOS_DIAG_D12
+        /* D.12 selftest: run AFTER dock pin + window creation so the dock is
+         * populated (pinned + running). Restores dock_show() at the end. */
+        { extern void dock_d12_selftest(void); dock_d12_selftest();
+          dock_force_open(); }
+#endif
 
 #ifdef ZEOS_DIAG_C9
         /* C.9: force controls side LEFT (AFTER wm_init, which defaults RIGHT) so

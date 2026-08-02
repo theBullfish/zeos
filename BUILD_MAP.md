@@ -218,7 +218,7 @@ the OS. When in doubt it's the OS.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
 - [x] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[VERIFIED/production]` all 4 work (USB HID); double-click launched Files->chain+surface; fixed click-moves-icon margin bug. bible id=411.
 - [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
-- [ ] **D.10** Wallpaper image load from VAULT — `[TODO]` solid color only.
+- [x] **D.10** Wallpaper image load from VAULT — `[VERIFIED/harness]` embedded 480x270 gradient PNG (31485B, fits 48KB VAULT cap) seeded to /system/wallpaper.png first boot, loaded back via vault_read + lodepng_decode32, nearest-neighbour scale-blit to fill; solid-color fallback on failure. Serial 'wallpaper loaded from VAULT 480x270 (31485 bytes)' on fresh vault + screendump gradient. bible id=417. `[source desktop.c desktop_load_wallpaper + desktop_draw]`.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
 - [ ] **D.12** Dock: centered, pinned|divider|running, state dots, auto-hide, empty-at-boot — `[UNVERIFIED]` `[source dock.c:407-483,330-339,192-218,97-99]`.
 - [ ] **D.13** Dock hover thumbnail, drag-reorder/poof, density size — `[TODO]`.
