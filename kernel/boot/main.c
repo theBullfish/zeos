@@ -1228,6 +1228,21 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         wm_force_visible(w_term);
         wm_focus_surface(w_term);
 
+#ifdef ZEOS_DIAG_D3
+        /* D.3: force distinct signal states so the panel center-pill color-by-state
+         * (pill_color: LIVE->accent, PAUSED->dim, ERROR->danger) is observable in a
+         * single screendump. LIVE(green) is the already-observed default. Nothing in
+         * the tick path rewrites s->signal, so the forced states persist. */
+        {
+            extern chain_surface_t *wm_get_surface(int id);
+            chain_surface_t *sf = wm_get_surface(w_files);
+            chain_surface_t *st = wm_get_surface(w_term);
+            if (sf) sf->signal = SIGNAL_PAUSED;
+            if (st) st->signal = SIGNAL_ERROR;
+            kputs("[D3] forced Files=PAUSED Terminal=ERROR for pill color observe\n");
+        }
+#endif
+
 #ifdef ZEOS_DIAG_D12
         /* D.12 selftest: run AFTER dock pin + window creation so the dock is
          * populated (pinned + running). Restores dock_show() at the end. */

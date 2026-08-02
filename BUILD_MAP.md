@@ -211,7 +211,7 @@ the OS. When in doubt it's the OS.
 ## D. Desktop Surface / Panel / Dock
 - [x] **D.1** Panel renders: persona dot, chain pills, clock, status dots — `[observed]` frame-0.
 - [x] **D.2** Panel clock shows real wall-clock time — `[DONE][observed 2026-07-23]` was TSC uptime (00:00); now wired to `tod_now_unix()` (CMOS RTC). Verified on live VNC (10:57/11:07 UTC, advancing). Commit b385d7a.
-- [ ] **D.3** Panel zones (left persona/palette trigger; center pills color-by-state; right health/notif/clock) — `[UNVERIFIED]` `[source panel.c:279-399]` (renders, per-state color unobserved).
+- [x] **D.3** Panel zones (left persona/palette trigger; center pills color-by-state; right health/notif/clock) — `[VERIFIED/harness]` per-state color OBSERVED: forced Files=PAUSED/Terminal=ERROR -> Terminal pill text red, Files dot dim, window status controls red/dim, panel health dot red (LIVE=green default). bible id=419. `[source panel.c pill_color; wm.c:1145]`.
 - [x] **D.4** Panel: click-persona->palette, right-click menu — `[VERIFIED/production]` panel_click reroute + FIXED palette invisible since B.6 (drew to front, composite flipped over it). USB-click opens palette. bible id=407.
 - [x] **D.5** Panel height-follows-density (48/40/32) — `[VERIFIED/production]` access_set_density applies access_get_panel_height() live to panel+compositor; selftest [D5] d=0:48 d=1:40 d=2:32 PASS (KVM). bible id=308.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
