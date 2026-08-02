@@ -226,7 +226,7 @@ the OS. When in doubt it's the OS.
 ## E. Input & Cursor
 - [x] **E.1** Mouse driver PS/2 (IRQ12) — `[observed 2026-08-02]` cursor physically moved across desktop→moved→click shots (970,552→870,452→770,402), serial `routed IRQ12(mouse)`. `[source mouse.c:354-410]`. USB-HID leg still UNVERIFIED (no xHCI controller in this VM).
 - [ ] **E.2** Cursor: 22 states, real SVG-derived sprites, hotspot table, save-under — `[UNVERIFIED]` `[source cursor.c; cursor_sprites.h]`; suspected in B.7.
-- [ ] **E.3** Cursor click feedback (scale pulse, ripple, burst) — `[UNVERIFIED]` `[source cursor.c:140-197]`.
+- [x] **E.3** Cursor click feedback (scale pulse, ripple, burst) — `[VERIFIED/harness]` selftest [E3] scale[press/restore]=11 ripple[active/grew]=11 burst[on/off]=11 PASS + observed no stuck-shrink after long-hold click. Fixed latent retarget-of-settled-id hazard (cursor_scale_to + anim_is_active guard). bible id=421. `[source cursor.c cursor_scale_to]`.
 - [x] **E.4** Cursor confirm (checkmark) — `[VERIFIED/production]` wired into settings save_all (was zero callers). KVM [E4] flash=1 reverted=1 PASS. bible id=326.
 - [x] **E.5** Hot corners: 8px zones, 150ms dwell, TL palette / BL workspace / BR show-desktop — `[VERIFIED/harness]` all 4 fire after dwell (isolated per-corner USB-mouse test): serial [HC] TL->palette, TR->notify, BL->workspace 0->1, BR->show-desktop + observed effects. bible id=420. `[source hotcorners.c:35-169]`.
 - [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.

@@ -135,32 +135,36 @@ void cursor_move(int x, int y) {
     g_cursor.y = y;
 }
 
+/* Drive the cursor scale toward `target`. Retargets the live scale spring
+ * (preserving velocity for rapid clicks) ONLY if it's still active; otherwise
+ * starts a fresh spring from the current scale. The old code retargeted a
+ * possibly-SETTLED id -- anim_retarget no-ops on an inactive slot, so a click
+ * held longer than the spring settle (e.g. a window drag) left the cursor stuck
+ * at SCALE_PRESSED; a reused slot could even be hijacked. */
+static void cursor_scale_to(float target) {
+    if (g_cursor.anim_scale >= 0 && anim_is_active(g_cursor.anim_scale)) {
+        anim_retarget(g_cursor.anim_scale, target);
+    } else {
+        g_cursor.anim_scale = anim_spring(
+            g_cursor.scale, target,
+            CLICK_SCALE_STIFFNESS, CLICK_SCALE_DAMPING,
+            on_scale_update, 0
+        );
+    }
+}
+
 void cursor_press(void) {
     g_cursor.pressed = 1;
 
     switch (g_cursor.click_anim) {
     case CLICK_ANIM_SCALE:
         /* Scale down with snappy spring */
-        if (g_cursor.anim_scale >= 0)
-            anim_retarget(g_cursor.anim_scale, SCALE_PRESSED);
-        else
-            g_cursor.anim_scale = anim_spring(
-                SCALE_NORMAL, SCALE_PRESSED,
-                CLICK_SCALE_STIFFNESS, CLICK_SCALE_DAMPING,
-                on_scale_update, 0
-            );
+        cursor_scale_to(SCALE_PRESSED);
         break;
 
     case CLICK_ANIM_RIPPLE:
         /* Scale + ripple */
-        if (g_cursor.anim_scale >= 0)
-            anim_retarget(g_cursor.anim_scale, SCALE_PRESSED);
-        else
-            g_cursor.anim_scale = anim_spring(
-                SCALE_NORMAL, SCALE_PRESSED,
-                CLICK_SCALE_STIFFNESS, CLICK_SCALE_DAMPING,
-                on_scale_update, 0
-            );
+        cursor_scale_to(SCALE_PRESSED);
         ripple_spawn(g_cursor.x, g_cursor.y);
         break;
 
@@ -183,14 +187,7 @@ void cursor_release(void) {
     case CLICK_ANIM_SCALE:
     case CLICK_ANIM_RIPPLE:
         /* Spring back through overshoot to normal */
-        if (g_cursor.anim_scale >= 0)
-            anim_retarget(g_cursor.anim_scale, SCALE_NORMAL);
-        else
-            g_cursor.anim_scale = anim_spring(
-                SCALE_PRESSED, SCALE_NORMAL,
-                CLICK_SCALE_STIFFNESS, CLICK_SCALE_DAMPING,
-                on_scale_update, 0
-            );
+        cursor_scale_to(SCALE_NORMAL);
         break;
 
     case CLICK_ANIM_BURST:
@@ -330,3 +327,59 @@ void cursor_draw(void) {
             }
     }
 }
+
+#ifdef ZEOS_DIAG_E3
+/* E.3 selftest: prove all three click-feedback physics fire.
+ *  SCALE:  press springs scale toward SCALE_PRESSED (0.85), release restores ~1.0
+ *  RIPPLE: press spawns an active ripple whose radius grows and opacity fades
+ *  BURST:  press swaps to CURSOR_CLICK_BURST sprite, release restores previous */
+void cursor_e3_selftest(void)
+{
+    cursor_move(500, 500);
+
+    /* SCALE (default). Tick BOTH anim_tick + cursor_tick to mirror the real
+     * per-frame path (cursor_tick owns settled-spring cleanup). */
+    g_cursor.click_anim = CLICK_ANIM_SCALE;
+    g_cursor.anim_scale = -1; g_cursor.scale = SCALE_NORMAL;
+    cursor_press();
+    for (int i = 0; i < 3; i++) { anim_tick(1.0f / 240.0f); }  /* mid-pulse, pre-settle */
+    int scale_shrank = (g_cursor.scale < SCALE_NORMAL - 0.01f);
+    cursor_release();
+    for (int i = 0; i < 400; i++) { anim_tick(1.0f / 240.0f); cursor_tick(1.0f / 240.0f); }
+    int scale_restored = (g_cursor.scale > SCALE_NORMAL - 0.02f);
+
+    /* RIPPLE */
+    g_cursor.click_anim = CLICK_ANIM_RIPPLE;
+    for (int i = 0; i < MAX_RIPPLES; i++) g_cursor.ripples[i].active = 0;
+    cursor_press();
+    for (int i = 0; i < 20; i++) anim_tick(1.0f / 240.0f);
+    int ripple_active = 0; float rr = 0.0f, ro = 180.0f;
+    for (int i = 0; i < MAX_RIPPLES; i++)
+        if (g_cursor.ripples[i].active) {
+            ripple_active = 1;
+            rr = g_cursor.ripples[i].radius;
+            ro = g_cursor.ripples[i].opacity;
+        }
+    int ripple_grew = ripple_active && (rr > 0.0f) && (ro < 180.0f);
+    cursor_release();
+
+    /* BURST */
+    g_cursor.click_anim = CLICK_ANIM_BURST;
+    g_cursor.state = CURSOR_DEFAULT; g_cursor.prev_state = CURSOR_DEFAULT;
+    cursor_press();
+    int burst_on = (g_cursor.state == CURSOR_CLICK_BURST);
+    cursor_release();
+    int burst_off = (g_cursor.state == CURSOR_DEFAULT);
+
+    /* restore default feedback mode */
+    g_cursor.click_anim = CLICK_ANIM_SCALE;
+    g_cursor.scale = SCALE_NORMAL;
+
+    int pass = scale_shrank && scale_restored && ripple_active && ripple_grew
+             && burst_on && burst_off;
+    kputs("[E3] scale[press/restore]="); kput_dec((uint64_t)scale_shrank); kput_dec((uint64_t)scale_restored);
+    kputs(" ripple[active/grew]="); kput_dec((uint64_t)ripple_active); kput_dec((uint64_t)ripple_grew);
+    kputs(" burst[on/off]="); kput_dec((uint64_t)burst_on); kput_dec((uint64_t)burst_off);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
