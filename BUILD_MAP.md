@@ -220,7 +220,7 @@ the OS. When in doubt it's the OS.
 - [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
 - [x] **D.10** Wallpaper image load from VAULT — `[VERIFIED/harness]` embedded 480x270 gradient PNG (31485B, fits 48KB VAULT cap) seeded to /system/wallpaper.png first boot, loaded back via vault_read + lodepng_decode32, nearest-neighbour scale-blit to fill; solid-color fallback on failure. Serial 'wallpaper loaded from VAULT 480x270 (31485 bytes)' on fresh vault + screendump gradient. bible id=417. `[source desktop.c desktop_load_wallpaper + desktop_draw]`.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
-- [ ] **D.12** Dock: centered, pinned|divider|running, state dots, auto-hide, empty-at-boot — `[UNVERIFIED]` `[source dock.c:407-483,330-339,192-218,97-99]`.
+- [x] **D.12** Dock: centered, pinned|divider|running, state dots, auto-hide — `[VERIFIED/harness]` selftest [D12] centered=1 pinned=5 running=2 divider=1 dots=1 slide[show/hide/reshow]=111 PASS (KVM) + screendump centered dock w/ icons + running state dot. bible id=418. **NOT verified: empty-at-boot** (current boot is pinned-at-boot via main.c dev seed). `[source dock.c:407-483,dock_d12_selftest]`.
 - [ ] **D.13** Dock hover thumbnail, drag-reorder/poof, density size — `[TODO]`.
 
 ## E. Input & Cursor
