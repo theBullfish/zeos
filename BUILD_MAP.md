@@ -200,7 +200,7 @@ the OS. When in doubt it's the OS.
 - [x] **C.6** Workspaces (switch) — `[observed 2026-08-02]` Super+F2 switches to an EMPTY workspace (both windows gone; panel ws-dot turns yellow), Super+F1 returns them; serial `WS: switch 0 -> 1` / `1 -> 0`; shots 32661→14621(empty)→32357(back). `[source wm.c:734-748; keybinds.c:125-126]`. "move surfaces to workspace" not yet exercised.
 - [x] **C.7** Shadow rendering (L1 unfocused / L2 focused) — `[VERIFIED/production]` focused window carries L2 shadow (observed). bible id=412.
 - [x] **C.8** Snap to quadrant — `[observed 2026-08-02]` Super+2 (ACTION_SNAP_TR) snaps the focused Terminal cleanly into the top-right quadrant. `[source wm.c:787-815; keybinds.c:100]`. Edge-zone DRAG snap, ghost preview, and auto-tiling still unexercised.
-- [ ] **C.9** Controls side L/R configurable + live toggle — `[UNVERIFIED]` `[source wm.c:228,247-252; settings.c:266-268,494-496]`.
+- [x] **C.9** Controls side L/R configurable + live toggle — `[VERIFIED/production]` controls_side=LEFT -> buttons render left (screenshot); apply path wired. bible id=413.
 - [ ] **C.10** Sheets (modal, slide from titlebar) — `[TODO]`.
 - [ ] **C.11** Popovers (non-modal, attached) — `[TODO]`.
 - [ ] **C.12** Tabs / chain multiplexing — `[TODO]`.
@@ -216,7 +216,7 @@ the OS. When in doubt it's the OS.
 - [x] **D.5** Panel height-follows-density (48/40/32) — `[VERIFIED/production]` access_set_density applies access_get_panel_height() live to panel+compositor; selftest [D5] d=0:48 d=1:40 d=2:32 PASS (KVM). bible id=308.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
-- [x] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[VERIFIED/production]` wired dead drag path; USB-drag relocated Files icon + persists. (double-click launch still dead - separate.) bible id=411.
+- [x] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[VERIFIED/production]` all 4 work (USB HID); double-click launched Files->chain+surface; fixed click-moves-icon margin bug. bible id=411.
 - [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
 - [ ] **D.10** Wallpaper image load from VAULT — `[TODO]` solid color only.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
