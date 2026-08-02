@@ -429,6 +429,12 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
     serial_init();
     kprint_init();
 
+    /* Activate the TTF font system (Inter/JBMono + F.4 Noto fallback). Was
+     * never called -> all text had been falling back to the 8x16 boot bitmap.
+     * InitFont is parse-only (no heap needed); glyph cache mallocs lazily
+     * later once the heap is up. */
+    { extern int font_init(void); font_init(); }
+
     /* Engage boot splash on the GOP framebuffer. From here through
      * chain_registry_init the user sees a wordmark + progress bar
      * instead of the kernel debug stream. Serial logs continue. */

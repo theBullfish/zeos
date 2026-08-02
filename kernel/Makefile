@@ -154,7 +154,8 @@ OBJS     = $(SRCS:.c=.o) $(MBEDTLS_SRCS:.c=.o)
 # ── Embedded fonts (TTF -> ELF via objcopy) ──
 FONT_INTER  = ../assets/fonts/inter/Inter-Regular.ttf
 FONT_JBMONO = ../assets/fonts/jetbrains-mono/JetBrainsMono-Regular.ttf
-FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o
+FONT_NOTO   = ../assets/fonts/noto/NotoSans-Fallback.ttf
+FONT_OBJS   = boot/font_inter.o boot/font_jbmono.o boot/font_noto.o
 
 # ── Embedded firmware blobs (binary -> ELF via objcopy) ──
 FW_RTL8188EU       = lib/firmware/rtl8188eufw.bin
@@ -232,6 +233,14 @@ boot/font_jbmono.o: $(FONT_JBMONO)
 		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_start=_binary_jbmono_regular_ttf_start \
 		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_end=_binary_jbmono_regular_ttf_end \
 		--redefine-sym _binary____assets_fonts_jetbrains_mono_JetBrainsMono_Regular_ttf_size=_binary_jbmono_regular_ttf_size \
+		$< $@
+
+# F.4: Noto Sans fallback tier
+boot/font_noto.o: $(FONT_NOTO)
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary____assets_fonts_noto_NotoSans_Fallback_ttf_start=_binary_noto_regular_ttf_start \
+		--redefine-sym _binary____assets_fonts_noto_NotoSans_Fallback_ttf_end=_binary_noto_regular_ttf_end \
+		--redefine-sym _binary____assets_fonts_noto_NotoSans_Fallback_ttf_size=_binary_noto_regular_ttf_size \
 		$< $@
 
 # Embed RTL8188EU firmware blob. cd into the firmware dir so objcopy

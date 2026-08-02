@@ -22,4 +22,8 @@ extern const uint8_t _binary_inter_regular_ttf_end[];
 extern const uint8_t _binary_jbmono_regular_ttf_start[];
 extern const uint8_t _binary_jbmono_regular_ttf_end[];
 
+/* Noto Sans Regular — F.4 fallback tier (glyphs Inter/JBMono lack) */
+extern const uint8_t _binary_noto_regular_ttf_start[];
+extern const uint8_t _binary_noto_regular_ttf_end[];
+
 #endif /* ZEOS_FONT_DATA_H */

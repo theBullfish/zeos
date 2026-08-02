@@ -176,6 +176,15 @@ int font_init(void) {
         kputs("FONT: WARN - JetBrains Mono Regular failed to parse\n");
     }
 
+    /* Noto Sans Regular -> FONT_FALLBACK (F.4 glyph fallback tier) */
+    font_data[FONT_FALLBACK] = _binary_noto_regular_ttf_start;
+    if (stbtt_InitFont(&font_info[FONT_FALLBACK], font_data[FONT_FALLBACK], 0)) {
+        font_loaded[FONT_FALLBACK] = 1;
+        kputs("FONT: Noto Sans fallback tier loaded\n");
+    } else {
+        kputs("FONT: WARN - Noto Sans fallback failed to parse\n");
+    }
+
     kputs("FONT: TTF engine ready (stb_truetype)\n");
     return 0;
 }
@@ -183,8 +192,52 @@ int font_init(void) {
 const glyph_t *font_get_glyph(font_id_t font, int size_px, uint32_t codepoint) {
     glyph_t *g = cache_find(font, size_px, codepoint);
     if (g) return g;
+
+    /* F.4 fallback chain: if the requested vector face lacks this codepoint,
+     * render it from the Noto fallback tier instead (Inter/JBMono -> Noto).
+     * The boot bitmap remains the final tier for the whole-face-fail path in
+     * the drawers. */
+    if (font != FONT_BOOT && font != FONT_FALLBACK && font_loaded[font] &&
+        stbtt_FindGlyphIndex(&font_info[font], (int)codepoint) == 0 &&
+        font_loaded[FONT_FALLBACK] &&
+        stbtt_FindGlyphIndex(&font_info[FONT_FALLBACK], (int)codepoint) != 0) {
+        glyph_t *fg = cache_find(FONT_FALLBACK, size_px, codepoint);
+        if (fg) return fg;
+        return cache_render(FONT_FALLBACK, size_px, codepoint);
+    }
+
     return cache_render(font, size_px, codepoint);
 }
+
+#ifdef ZEOS_DIAG_F4
+/* F.4 selftest: prove the Inter->Noto fallback chain delivers a glyph the
+ * primary face lacks. Finds a codepoint where Inter's glyph index is 0 but the
+ * Noto fallback has it, then confirms font_get_glyph(FONT_UI, ...) returns a
+ * (necessarily fallback-sourced) glyph. */
+void font_f4_selftest(void)
+{
+    int found_cp = -1;
+    for (uint32_t cp = 0x00A0; cp < 0x2E00 && found_cp < 0; cp++) {
+        if (font_loaded[FONT_UI] && font_loaded[FONT_FALLBACK] &&
+            stbtt_FindGlyphIndex(&font_info[FONT_UI], (int)cp) == 0 &&
+            stbtt_FindGlyphIndex(&font_info[FONT_FALLBACK], (int)cp) != 0)
+            found_cp = (int)cp;
+    }
+    int noto_loaded = font_loaded[FONT_FALLBACK];
+    int fell_back = 0;
+    if (found_cp >= 0)
+        fell_back = (font_get_glyph(FONT_UI, 16, (uint32_t)found_cp) != 0);
+
+    /* Diagnostic: runtime first-4-bytes of the embedded Noto (should be
+     * 00 01 00 00 = sfnt) + embedded size, to tell a load/placement failure
+     * apart from an stbtt parse failure. */
+    int pass = noto_loaded && (found_cp >= 0) && fell_back;
+    kputs("[F4] noto_loaded="); kput_dec((uint64_t)noto_loaded);
+    kputs(" gap_cp=0x"); kput_hex((uint64_t)(found_cp < 0 ? 0 : found_cp));
+    kputs(" fell_back="); kput_dec((uint64_t)fell_back);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
 
 int font_draw(int x, int y, const char *text, font_id_t font,
               int size_px, uint32_t color)

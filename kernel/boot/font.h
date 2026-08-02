@@ -25,6 +25,7 @@ typedef enum {
     FONT_UI_LIGHT,       /* Inter Light */
     FONT_CODE,           /* JetBrains Mono — code/terminal */
     FONT_CODE_BOLD,      /* JetBrains Mono Bold */
+    FONT_FALLBACK,       /* Noto Sans — F.4 glyph fallback tier (broad Unicode) */
     FONT_COUNT
 } font_id_t;
 
