@@ -328,6 +328,7 @@ int tls_init(void)
     kput_dec((unsigned long)zeos_time(0));
     kputs(", cfa_handle=conf\n");
 
+    g_tls_inited = 1;
     return 0;
 }
 
@@ -339,6 +340,17 @@ int tls_init(void)
  */
 static tls_conn_t *tls_finish_handshake(void)
 {
+    /* Ensure the TLS subsystem is initialized. tls_init() is deferred (not run
+     * at boot) and idempotent — the client path must lazy-init it here or
+     * g_ssl_conf is unconfigured and ssl_setup returns BAD_CONFIG (-0x5E80). */
+    if (tls_init() != 0) {
+        kputs("TLS: init failed\n");
+        if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
+        else                                  tcp_close(&g_tls.tcp);
+        g_tls.xport.family = TLS_FAM_NONE;
+        return NULL;
+    }
+
     /* Set up SSL context. The slot's CFA handle was wrapped at
      * tls_init time; we just initialize the underlying struct here.
      * Every subsequent access goes through cfa_resolve via tls_ssl(). */
