@@ -352,7 +352,9 @@ static tls_conn_t *tls_finish_handshake(void)
 
     int ret = mbedtls_ssl_setup(ssl, conf);
     if (ret != 0) {
-        kputs("TLS: ssl_setup failed\n");
+        kputs("TLS: ssl_setup failed ret=-0x");
+        kput_hex((uint64_t)(-ret));
+        kputc('\n');
         mbedtls_ssl_free(ssl);
         if (g_tls.xport.family == TLS_FAM_V6) tcp_close_v6(g_tls.xport.h.v6);
         else                                  tcp_close(&g_tls.tcp);
