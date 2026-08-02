@@ -714,6 +714,7 @@ void scheduler_run(void)
     for (;;) {
         s_tick++;
         uint64_t tsc_start = timer_read_tsc();
+        uint64_t comp_cycles = 0;   /* composite advance+present time this tick */
 
         /* 0. Watchdog sweep first: any chain whose deadline was armed
          *    last tick and never cleared = hung. Mark + log. */
@@ -728,7 +729,9 @@ void scheduler_run(void)
             extern void net_service(void);
             usb_hid_poll();
             net_service();          /* pump RX + async DHCP under the scheduler */
+            uint64_t _ca = timer_read_tsc();
             compositor_advance();
+            comp_cycles += timer_read_tsc() - _ca;
         }
 
         /* 1. Arm watchdog deadlines for the upcoming resolve pass. */
@@ -749,11 +752,14 @@ void scheduler_run(void)
          *     top level, outside any chain_resolve -- so its block-chain write
          *     path isn't a re-entrant chain_resolve (which wedged the scheduler
          *     hard at ~tick 4 the first time the checkpoint tripped). */
-        { extern void persistence_checkpoint_if_due(void); persistence_checkpoint_if_due(); }
+        uint64_t persist_cycles;
+        { extern void persistence_checkpoint_if_due(void);
+          uint64_t _pc = timer_read_tsc(); persistence_checkpoint_if_due();
+          persist_cycles = timer_read_tsc() - _pc; }
 
         /* Live desktop: draw gated overlays + the cursor (every tick) on top of
          * the freshly-resolved frame. */
-        { extern void compositor_present(void); compositor_present(); }
+        { extern void compositor_present(void); uint64_t _cp = timer_read_tsc(); compositor_present(); comp_cycles += timer_read_tsc() - _cp; }
 
         uint64_t tsc_end = timer_read_tsc();
 
@@ -795,6 +801,10 @@ void scheduler_run(void)
                 kputs(" exceeded budget by ");
                 /* Print as ms for human readability. */
                 kput_dec((uint64_t)(over_us / 1000));
+                kputs("ms; composite=");
+                kput_dec((uint64_t)((comp_cycles / cycles_per_us) / 1000));
+                kputs("ms persist=");
+                kput_dec((uint64_t)((persist_cycles / cycles_per_us) / 1000));
                 kputs("ms; top:");
                 for (int i = 0; i < 3; i++) {
                     if (top_ids[i] < 0) break;
