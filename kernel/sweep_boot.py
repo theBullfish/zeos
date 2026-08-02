@@ -18,7 +18,7 @@ for p in (QMP,SER):
     except OSError: pass
 
 qemu=subprocess.Popen([
-    "qemu-system-x86_64", *accel_args(), "-machine","q35","-m","512M","-smp","4",
+    "qemu-system-x86_64", *accel_args(), "-machine","q35","-m","512M",
     "-drive","if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive",f"if=pflash,format=raw,file={B}/OVMF_VARS.fd",
     "-drive",f"format=raw,file=fat:rw:{ESP}",
@@ -78,12 +78,16 @@ for i in range(6):
     time.sleep(1.2)
     shot(f"wiz-{i}")
     key("ret")
-# 4. Wait for the live desktop / scheduler loop
+# 4. Wait for the live desktop (settled oracle: key on the definitive marker,
+#    not a blind sleep). Keep nudging enter in case a wizard screen lingers.
 t0=time.time(); ready=False
-while time.time()-t0<30:
-    if "chain-resolution main loop" in ser(): ready=True; break
-    time.sleep(0.3)
-print("scheduler loop up:", ready, flush=True)
+while time.time()-t0<50:
+    s=ser()
+    if "graphical desktop shell up" in s or "chain-resolution main loop" in s:
+        ready=True; break
+    key("ret")           # advance any lingering wizard screen
+    time.sleep(0.6)
+print("desktop shell up:", ready, flush=True)
 time.sleep(3.0)
 shot("desktop")
 

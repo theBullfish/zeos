@@ -51,9 +51,36 @@
 #include "firstboot.h"
 #include "access.h"
 #include "wm.h"
+#include "font.h"
 
 /* Boot info passed from UEFI to kernel */
 static struct zeos_boot_info boot_info;
+
+/* Content-draw callbacks so the two boot windows aren't empty chrome.
+ * wm calls these with the chrome-stripped content rect. Honest content:
+ * the Z+ shell prompt and the VAULT root listing. */
+static void boot_term_draw_content(int id, int x, int y, int w, int h)
+{
+    (void)id; (void)w; (void)h;
+    int lh = 20, ty = y + 14;
+    font_draw(x + 14, ty,        "Zeos Terminal - Z+ shell",            FONT_UI, 13, 0xFF8FB6C9);
+    font_draw(x + 14, ty + lh,   "zeos> help",                          FONT_UI, 14, 0xFFDDE6EC);
+    font_draw(x + 14, ty + lh*2, "  chains    list live signal chains", FONT_UI, 13, 0xFFAAB4BC);
+    font_draw(x + 14, ty + lh*3, "  zp <file> run a Z+ program",        FONT_UI, 13, 0xFFAAB4BC);
+    font_draw(x + 14, ty + lh*4, "zeos> _",                             FONT_UI, 14, 0xFFDDE6EC);
+}
+
+static void boot_files_draw_content(int id, int x, int y, int w, int h)
+{
+    (void)id; (void)w; (void)h;
+    int lh = 24, ty = y + 12;
+    static const char *rows[] = {
+        "programs/", "editor/", "notes/", "chat/", "time/", "settings.cfg"
+    };
+    font_draw(x + 14, ty, "VAULT  /", FONT_UI, 13, 0xFF8FB6C9);
+    for (int i = 0; i < 6; i++)
+        font_draw(x + 22, ty + lh*(i + 1), rows[i], FONT_UI, 14, 0xFFDDE6EC);
+}
 
 /*
  * Find the ACPI RSDP in UEFI configuration tables.
@@ -1094,6 +1121,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void settings_j2_selftest(void); settings_j2_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_F4
+        /* F.4 selftest: Inter->Noto glyph fallback chain. */
+        { extern void font_f4_selftest(void); font_f4_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_A4_PREEMPT_SELFTEST
         /* A.4 selftest: prove LAPIC-timer preemption rescues a hung
          * chain_resolve. GATED behind a diagnostic define (fleet-review
@@ -1177,8 +1209,8 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
                                       void (*)(int, int, int, int, int));
         extern void wm_focus_surface(int);
         extern void wm_force_visible(int);
-        int w_files = wm_create_surface("Files",     -1, 180, 200, 640, 460, 0);
-        int w_term  = wm_create_surface("Terminal",  -1, 760, 320, 780, 480, 0);
+        int w_files = wm_create_surface("Files",     -1, 180, 200, 640, 460, boot_files_draw_content);
+        int w_term  = wm_create_surface("Terminal",  -1, 760, 320, 780, 480, boot_term_draw_content);
         wm_force_visible(w_files);
         wm_force_visible(w_term);
         wm_focus_surface(w_term);
