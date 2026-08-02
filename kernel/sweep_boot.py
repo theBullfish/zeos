@@ -18,7 +18,7 @@ for p in (QMP,SER):
     except OSError: pass
 
 qemu=subprocess.Popen([
-    "qemu-system-x86_64", *accel_args(), "-machine","q35","-m","512M",
+    "qemu-system-x86_64", *accel_args(), "-machine","q35","-m","512M","-smp","4",
     "-drive","if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
     "-drive",f"if=pflash,format=raw,file={B}/OVMF_VARS.fd",
     "-drive",f"format=raw,file=fat:rw:{ESP}",

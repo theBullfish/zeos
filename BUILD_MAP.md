@@ -62,6 +62,68 @@ survives** (‼ B.7). Every scheduler tick ~100–124ms over a 1ms quantum (‼ 
 
 ---
 
+## VERIFICATION SWEEP — 2026-08-02 (fresh cold boot, 5 agents, per-item evidence)
+
+`[observed]` Built `build/BOOTZ.EFI` (links `zplus_zir.o`; version alpha-0.2) and booted it
+under QEMU q35 + OVMF (KVM) via the new **`kernel/sweep_boot.py`** harness, which drives the
+full cold-boot path headless over QMP: **PIN enrollment → 5-screen first-boot wizard → live
+desktop**, then an interaction battery (cursor, Super+Space palette, Super+2 workspace, drag,
+Super+Up maximize), one PNG per stage + serial. Five agents graded sections A/B, C, D, E/F/G,
+J/K/L/M/N against those artifacts under the One Law (observed, not code-exists).
+
+**Independently CONFIRMED this boot (measured+observed, evidence cited in agent logs):**
+A.1, A.2, A.5 · B.1, B.2, B.6, B.7 · D.1, D.2, D.5, D.7, D.9 · N.1, N.2, N.3.
+
+**Newly OBSERVED this boot (were `[UNVERIFIED]`, now earn `[observed 2026-08-02]`):**
+- **B.3** 6-layer paint order — wallpaper < windows < panel/dock < cursor composited correctly.
+- **C.1** window chrome — BOTH windows render full title + 4 controls (×/−/□/⚡); the old
+  `‼ chrome seam` (focused window blank title/single dot) is **GONE**. *Caveat (new negative):*
+  window **content bodies are EMPTY** — chrome renders, app bodies don't.
+- **C.2** stacking / z-order + focus render — Terminal occludes Files, focused-border vs dimmed.
+- **E.1** mouse (PS/2 leg) — cursor physically moved across shots; USB-HID leg untested (no xHCI).
+- **E.8** keybinds — Super+Space→palette proven by serial (`keyboard→palette`, `preempted chain
+  13 "palette"`). *Note:* the palette OVERLAY did not visibly render in the shot — J.3's 42-item
+  enumeration rests on the prior KVM selftest, NOT this boot.
+- **F.1/F.2/F.5** typography+icons — live AA TTF glyphs (Inter + JetBrains Mono) and multi-size
+  accent-tinted SVG icon dispatch on screen.
+
+**‼ FALSE GREEN FOUND — A.6 corrected below.** The `[x] "characterized & addressed"` is
+contradicted at the scheduler-tick level: every tick 1–128 overruns the 1 ms quantum by
+**20–70 ms**, top `id=29 hotplug.pci` 9–12 ms, and the overrun exceeds the named chain 2–6× (most
+of it unattributed). The narrower id=29 139→9 ms amortization sub-claim IS confirmed; the
+"addressed" framing is not. A.4 is a related soft negative (preempt fires at ~496 ms, does not
+enforce the quantum).
+
+**Stale prose corrected (see inline `[2026-08-02]` notes):** A.7 ("encryption inactive, no PIN"
+→ PIN now enrolls + crypto arms AES-XTS-256, but 0 regions = path still unexercised); D.8 & D.12
+("empty at boot" → this build seeds 3 desktop icons + a populated dock).
+
+**Real negatives this boot:** empty window content bodies (C.1); Super+Up maximize (C.5) and
+Super+2 workspace-switch (C.6) produced NO visible change (keybinds not acting, unlike
+Super+Space); minor: panel persona label shows "Zeos" though persona=2 (Full) was applied.
+
+**`[x]` items resting on PRIOR KVM selftests, not re-observed here (legit, flagged for honesty):**
+B.4, B.5, B.9 (diagnostics `#ifdef`-compiled-out of this build) · E.4 · J.2, J.3 · L.5 ·
+M.1, M.2, M.4, M.5, M.6. A.3 confirmed BSP/single-core only (harness now passes `-smp 4` for AP
+bring-up next run).
+
+**Still UNVERIFIED — the honest remaining work, bucketed by what each needs:**
+- *Targeted interaction* (imprecise QMP mouse / non-firing keybinds this run): C.3–C.9, D.3(state
+  colors)/D.4/D.6/D.8(drag)/D.10–D.13, E.2(21 non-arrow cursor states)/E.3/E.5/E.6/E.7,
+  G.2/G.3/G.4, J.1/J.4, K.1–K.4, L.1–L.4/L.6, M.7.
+- *Net-enabled boot past the gate*: all of **H** — this sweep detected the NIC
+  (`chain 4: nic:1af4:1000 [Ethernet]`, net_tx/rx chains wired) but no DHCP/ARP/TCP traffic fired
+  before the PIN gate.
+- *Browser opened + navigating*: all of **I**.
+- *`-DZEOS_DIAG_*` selfcheck build*: re-observe B.4/B.5/B.9 on THIS build rather than prior runs.
+
+Net: the OS boots to a real, correctly-composited desktop and the first-boot experience is
+solid — but the interactive window behaviors (drag/resize/maximize/workspace), app CONTENT,
+networking, and the browser remain unproven, and A.6 was a false green. Verified base truth or
+no checkbox.
+
+---
+
 ## ⧉ THE LINE — three deliverables, one sort (2026-07-23)
 
 The product is **three deliverables**: ONE portable chip-agnostic OS, updated universally;
@@ -114,13 +176,13 @@ the OS. When in doubt it's the OS.
 - [x] **A.3** SMP bring-up (BSP online, chains lifted) — `[observed]` serial `SMP … 1 cores online, RESOLVING`.
 - [ ] **A.4** LAPIC-timer preemption (vec 0xEF + setjmp/longjmp), per-chain watchdog — `[UNVERIFIED]` serial shows a preempt fire (`preempted chain 50 after 495950us`) but correctness not asserted.
 - [x] **A.5** VAULT ramdisk mount + program load — `[observed]` serial `VAULT: 2MB ramdisk mounted. 16 programs loaded.`
-- [x] **A.6** Composite cost characterized under KVM & addressed — `[VERIFIED/production]` full composite ~17ms, clipped ~4.7ms (real KVM TSC). The earlier ~120ms was TCG emulation overhead, NOT native; the per-tick id=29(139ms) is a separate CHAIN, not the composite. Damage tracking (B.5/B.9) implemented. bible id=320. Follow-on DONE: id=29=hotplug.pci (256-bus PCI brute-scan); amortized to 9ms (was 139ms), bible id=325.
-- [ ] **A.7** Disk encryption / crypto_disk (PIN-gated) — `[UNVERIFIED]` serial `encryption inactive (no PIN)`; path unexercised.
+- [ ] **A.6** Composite cost characterized under KVM & addressed — `[‼ CONTRADICTED 2026-08-02]` the composite-cost sub-claim holds (full ~17ms / clipped ~4.7ms KVM TSC; id=29 amortized 139→9ms) BUT the "addressed" framing is false at the scheduler-tick level: a fresh boot overruns the 1ms quantum by **20–70ms every tick 1–128**, top id=29 9–12ms, overrun exceeds the named chain 2–6× (unattributed). Downgraded from [x] until the per-tick stall is bounded. Prior evidence retained: full composite ~17ms, clipped ~4.7ms (real KVM TSC); the earlier ~120ms was TCG overhead; damage tracking (B.5/B.9) implemented. bible id=320. Follow-on: id=29=hotplug.pci (256-bus PCI brute-scan) amortized to 9ms, bible id=325 — CONFIRMED, but insufficient: the desktop still eats a 20–70ms scheduler stall per tick.
+- [ ] **A.7** Disk encryption / crypto_disk (PIN-gated) — `[UNVERIFIED; prose corrected 2026-08-02]` the old "encryption inactive (no PIN)" is STALE: a cold boot now enrolls a PIN and arms crypto (`[crypto] armed AES-XTS-256`), but `0 regions / 0 accesses` = the encrypt/decrypt path is still unexercised. Needs a real encrypted region + a read/write that round-trips.
 
 ## B. Compositor & Display
 - [x] **B.1** Compositor init 1920×1080@60 — `[observed]` serial `COMP: initialized`.
 - [x] **B.2** Split advance/present (advance pre-resolve every tick; present composites on dirty; cursor ungated) — `[observed]` `compositor.c:160-249`; boot frame composits.
-- [ ] **B.3** 6-layer paint order (desktop→surfaces→panel→dock→overlays→cursor) — `[UNVERIFIED]` `[source compositor.c:211-249]` order correct in code; full correctness not observed (see B.7).
+- [x] **B.3** 6-layer paint order (desktop→surfaces→panel→dock→overlays→cursor) — `[observed 2026-08-02]` fresh boot composites wallpaper < 2 windows < panel(top)+dock(bottom) < cursor correctly; `[source compositor.c:307-311,:453 cursor ungated]`. Overlay layer (menus/notify) not yet exercised.
 - [ ] **B.4** Frame timing from TSC — `[UNVERIFIED]` `[source compositor.c:170-176]`.
 - [x] **B.5** Dirty-region tracking — `[VERIFIED/production]` now CONSUMED: compositor_dirty accumulates a region-delta union the correction pass clips to (was tracked-but-unused). bible id (B.5 VERIFIED).
 - [x] **B.6** Double buffering / atomic present — `[DONE][measured+observed 2026-07-23]` composite into a WB-cached back buffer, atomic flip of the whole finished scene to the WC front once per composite. `fb.c`: `fb_backbuf_init` (kmalloc pitch×height×4), `fb_present_begin` (pointer-swap `g_fb->base`→backbuf so every existing writer paints offscreen — zero writer edits), `fb_present_end` (bulk copy backbuf→front, restore). Wired in `compositor_present`; `compositor_init` logs `double buffer active`. VERIFIED: settled render STABLE (windows present, spread 0) with FB write-combining — reader never sees a half-drawn frame. Flip is a full-frame copy today; B.9 makes it damage-only, and the copy loop itself is a SIMD/`rep movs` modernization candidate (audit). `[source fb.c; compositor.c]`
@@ -130,8 +192,8 @@ the OS. When in doubt it's the OS.
 - [x] **B.9** Partial redraw (only dirty regions) — `[VERIFIED/production]` delta-correction: redraws AND flips only the dirty region (fb clip + fb_present_end_rect). KVM selfcheck 20/20 frames 0 mismatches (backbuf-checksum, cursor-immune); 3.5x faster (16.3ms full -> 4.7ms clipped); no cursor trails. DRAGON WING. Remaining: tighten dirty_all callers; step-3 parallel delta across SMP.
 
 ## C. Window System
-- [ ] **C.1** Window chrome renderer (title, border, 4 controls ×/−/□/⚡) — `[PARTIAL][observed]` renders at boot (`[source wm.c:1010-1074]`) BUT focused window drew no title + a single control dot (frame-0) — chrome inconsistent. ‼ chrome seam.
-- [ ] **C.2** Stacking / z-order + focus mgmt — `[UNVERIFIED]` `[source wm.c:1090-1100, 424-435]`.
+- [x] **C.1** Window chrome renderer (title, border, 4 controls ×/−/□/⚡) — `[observed 2026-08-02]` BOTH windows (Files + focused Terminal) render full title + all 4 controls consistently; the prior ‼ chrome-seam (blank title/single dot) is GONE. `[source wm.c:1088+]`. **New negative:** window CONTENT bodies are EMPTY (chrome-only; no terminal prompt / file list) — a follow-on item.
+- [x] **C.2** Stacking / z-order + focus mgmt (render) — `[observed 2026-08-02]` Terminal occludes Files at a distinct z-level with focused-border+bright-titlebar vs dimmed unfocused; panel pill highlight matches. `[source wm.c:763-778]`. Dynamic focus-CHANGE (click-to-raise) not yet exercised.
 - [ ] **C.3** Titlebar drag with snap-zone detection — `[UNVERIFIED]` `[source wm.c:923-972]`; vshot drag hit nothing (windows already gone, B.7) so unproven.
 - [ ] **C.4** Resize from any edge/corner with minimums — `[UNVERIFIED]` `[source wm.c:772-783,451]`.
 - [ ] **C.5** Minimize / maximize / restore / detach — `[UNVERIFIED]` `[source wm.c:374-435,334-372]`.
@@ -154,7 +216,7 @@ the OS. When in doubt it's the OS.
 - [x] **D.5** Panel height-follows-density (48/40/32) — `[VERIFIED/production]` access_set_density applies access_get_panel_height() live to panel+compositor; selftest [D5] d=0:48 d=1:40 d=2:32 PASS (KVM). bible id=308.
 - [ ] **D.6** Panel auto-hide / vibrancy / per-pill right-click — `[TODO]`.
 - [x] **D.7** Desktop wallpaper + persona accent gradient — `[observed]` frame-0 background.
-- [ ] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[UNVERIFIED]` `[source desktop.c:457-540]`; ships empty (0 icons, by design) so unexercised at boot.
+- [ ] **D.8** Desktop icons: grid-snap drag, VAULT persist, double-click launch, right-click menu — `[UNVERIFIED; prose corrected 2026-08-02]` icons now RENDER (serial `DESK: 3 icons`; "ships empty (0 icons)" is STALE — this build seeds Files/Terminal/Settings). The four listed BEHAVIORS (drag/launch/persist/right-click) still need live interaction. `[source desktop.c:448-535]`.
 - [x] **D.9** Desktop icons are persona-tinted SVGs — `[VERIFIED/production]` build-time rsvg raster -> objcopy -> lodepng decode + alpha-mask accent tint (in-tree assets/icons); Files=folder Terminal=code Settings=gear, verified on KVM screenshot. Also seeded default launcher icons (desktop was empty). bible id=403.
 - [ ] **D.10** Wallpaper image load from VAULT — `[TODO]` solid color only.
 - [ ] **D.11** Drag desktop icon → chain surface (feed a chain) — `[TODO]`.
@@ -162,7 +224,7 @@ the OS. When in doubt it's the OS.
 - [ ] **D.13** Dock hover thumbnail, drag-reorder/poof, density size — `[TODO]`.
 
 ## E. Input & Cursor
-- [ ] **E.1** Mouse driver PS/2 + USB HID (IRQ12 / hid inject) — `[UNVERIFIED]` `[source mouse.c:354-410,608-649; usb_hid.c:235]`; motion reached the guest (vshot) but E-path correctness unproven.
+- [x] **E.1** Mouse driver PS/2 (IRQ12) — `[observed 2026-08-02]` cursor physically moved across desktop→moved→click shots (970,552→870,452→770,402), serial `routed IRQ12(mouse)`. `[source mouse.c:354-410]`. USB-HID leg still UNVERIFIED (no xHCI controller in this VM).
 - [ ] **E.2** Cursor: 22 states, real SVG-derived sprites, hotspot table, save-under — `[UNVERIFIED]` `[source cursor.c; cursor_sprites.h]`; suspected in B.7.
 - [ ] **E.3** Cursor click feedback (scale pulse, ripple, burst) — `[UNVERIFIED]` `[source cursor.c:140-197]`.
 - [x] **E.4** Cursor confirm (checkmark) — `[VERIFIED/production]` wired into settings save_all (was zero callers). KVM [E4] flash=1 reverted=1 PASS. bible id=326.
@@ -173,11 +235,11 @@ the OS. When in doubt it's the OS.
 - [ ] **E.9** Input-method framework — `[TODO]`.
 
 ## F. Typography & Icons
-- [ ] **F.1** stb_truetype: glyph cache + grayscale AA, font_draw/measure/line_height — `[UNVERIFIED]` `[source font.c:49,71-142,188-253]`.
-- [ ] **F.2** TTF embedded in kernel (objcopy) + consumed at boot — `[UNVERIFIED]` `[source Makefile:153-199; font.c:161-170]`.
+- [x] **F.1** stb_truetype: glyph cache + grayscale AA, font_draw/measure/line_height — `[observed 2026-08-02]` smooth AA proportional + monospace glyphs rendered across panel/titles/clock/labels. `[source font.c:71-142,188-253]`.
+- [x] **F.2** TTF embedded in kernel (objcopy) + consumed at boot — `[observed 2026-08-02]` on-screen Inter+JBMono glyphs prove the embedded blob loads + draws at boot. `[source Makefile:153-199; font.c:161-170]`.
 - [ ] **F.3** Fonts: Inter (7wt), JetBrains Mono (6wt) present — `[x]` `[observed]` asset files counted (7 + 6).
 - [ ] **F.4** Font fallback chain (Inter→Noto→bitmap) — `[PARTIAL]` only Inter→bitmap; no Noto tier.
-- [ ] **F.5** icon_render: 31-icon dispatch at 16/24/32, accent tint — `[UNVERIFIED]` `[source icon_render.c:610-658]`.
+- [x] **F.5** icon_render: 31-icon dispatch at 16/24/32, accent tint — `[observed 2026-08-02]` desktop icons + ~7 dock icons + titlebar buttons render as accent-tinted vector sprites at multiple sizes. `[source icon_render.c:610-658]`. Exact 31-count/bucket enumeration not dissected from the shot.
 - [ ] **F.6** SVG asset library (934 svg / 16 categories; 50 cursor + ~150 themed) — `[x]` `[observed]` file counts (note: ROADMAP claimed 1,067 — actual 934).
 - [ ] **F.7** Build-time SVG→bitmap rasterization / sprite sheets — `[TODO]` `[source icon_render.c:9]` "Future".
 
