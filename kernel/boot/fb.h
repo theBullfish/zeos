@@ -20,6 +20,8 @@ void fb_clear(uint32_t color);
  * drawing. Non-composite code never calls these, so it is unaffected. */
 void fb_set_clip(int x, int y, int w, int h);
 void fb_reset_clip(void);
+/* Active clip rect (half-open); full framebuffer when no clip is set. */
+void fb_get_clip(int *x0, int *y0, int *x1, int *y1);
 
 /* B.9 selfcheck: FNV-1a hash of the scanned-out front buffer. */
 uint64_t fb_frame_checksum(void);

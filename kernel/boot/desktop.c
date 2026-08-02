@@ -441,17 +441,29 @@ void desktop_draw(void) {
      * (the compositor only invokes us over dirty regions). */
     int desk_h = sh - panel_h;
     if (g_wp_rgba && g_wp_w > 0 && g_wp_h > 0 && desk_h > 0) {
-        for (int dy = 0; dy < desk_h; dy++) {
+        /* Only iterate the region that will actually be written this frame:
+         * intersect the desktop area with the active clip (the compositor sets
+         * a small dirty rect on partial redraws). Screen coords dy/dx map into
+         * wallpaper source via nearest-neighbour. Without this the loop scans
+         * all ~2M pixels every desktop_draw, dominating composite time. */
+        int cx0, cy0, cx1, cy1;
+        fb_get_clip(&cx0, &cy0, &cx1, &cy1);
+        int y0 = panel_h,       y1 = sh;      /* desktop band in screen coords */
+        int x0 = 0,             x1 = sw;
+        if (cy0 > y0) y0 = cy0; if (cy1 < y1) y1 = cy1;
+        if (cx0 > x0) x0 = cx0; if (cx1 < x1) x1 = cx1;
+        for (int sy = y0; sy < y1; sy++) {
+            int dy = sy - panel_h;
             int syi = dy * g_wp_h / desk_h;
             if (syi >= g_wp_h) syi = g_wp_h - 1;
             const uint8_t *srow = g_wp_rgba + (size_t)syi * g_wp_w * 4;
-            for (int dx = 0; dx < sw; dx++) {
-                int sxi = dx * g_wp_w / sw;
+            for (int sx = x0; sx < x1; sx++) {
+                int sxi = sx * g_wp_w / sw;
                 if (sxi >= g_wp_w) sxi = g_wp_w - 1;
                 const uint8_t *p = srow + (size_t)sxi * 4;
                 uint32_t c = 0xFF000000u | ((uint32_t)p[0] << 16) |
                              ((uint32_t)p[1] << 8) | (uint32_t)p[2];
-                fb_pixel(dx, panel_h + dy, c);
+                fb_pixel(sx, sy, c);
             }
         }
     } else {

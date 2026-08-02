@@ -189,6 +189,11 @@ static int zeos_tls_recv(void *ctx, unsigned char *buf, size_t len)
 
 int tls_init(void)
 {
+    /* Idempotent: the full init (CA parse, config_defaults, DRBG seed, CFA
+     * wrap) runs exactly once. Client + server paths both lazy-call this. */
+    static int g_tls_inited = 0;
+    if (g_tls_inited) return 0;
+
     /* Register our platform shims with mbedTLS before anything else. */
     mbedtls_platform_set_calloc_free(zeos_calloc, zeos_free);
     mbedtls_platform_set_snprintf(snprintf);

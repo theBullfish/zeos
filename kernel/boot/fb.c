@@ -37,6 +37,21 @@ void fb_set_clip(int x, int y, int w, int h)
 
 void fb_reset_clip(void) { g_clip_on = 0; }
 
+/* Report the active clip rect (half-open [x0,x1) x [y0,y1)). When no clip is
+ * set, returns the full framebuffer. Lets big producers (e.g. the wallpaper
+ * blit) iterate only the region that will actually be written. */
+void fb_get_clip(int *x0, int *y0, int *x1, int *y1)
+{
+    if (g_clip_on) {
+        if (x0) *x0 = g_clip_x0; if (y0) *y0 = g_clip_y0;
+        if (x1) *x1 = g_clip_x1; if (y1) *y1 = g_clip_y1;
+    } else {
+        if (x0) *x0 = 0; if (y0) *y0 = 0;
+        if (x1) *x1 = g_fb ? (int)g_fb->width  : 0;
+        if (y1) *y1 = g_fb ? (int)g_fb->height : 0;
+    }
+}
+
 /* B.9 selfcheck: FNV-1a hash of the scanned-out front buffer. Used to prove a
  * clipped (partial) composite produced the same frame a full redraw would. */
 uint64_t fb_frame_checksum(void)
