@@ -839,6 +839,31 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         zp_runtime_init();
     }
 
+    /* ZIR ingestion selftest — proves the front-end -> ZIR -> kernel path
+     * executes in the live kernel (not just the host unit test). Loads a
+     * minimal emit->gate->print ZIR document through zir_run() and reports on
+     * serial. HONEST: reaches the sig_chain engine, not chain_t (no MasQ/B3
+     * yet — see kernel/boot/zplus_zir.h). */
+    {
+        extern int zir_run(const char *json);
+        static const char zir_selftest[] =
+            "{ \"zir\": 1, \"source\": \"boot-selftest\","
+            " \"chains\": [ { \"id\": 0, \"name\": \"main\", \"masq\": \"reference\", \"parent\": -1, \"nodes\": [0,1,2] } ],"
+            " \"nodes\": ["
+            "  { \"id\": 0, \"kind\": \"source\", \"verb\": \"emit\", \"name\": \"emit_0\", \"emit\": {\"int\": 7} },"
+            "  { \"id\": 1, \"kind\": \"gate\", \"verb\": \"gate\", \"name\": \"gate_1\", \"gate\": {\"op\": \"gt\", \"rhs\": {\"int\": 3}} },"
+            "  { \"id\": 2, \"kind\": \"processor\", \"verb\": \"print\", \"name\": \"print_2\" } ],"
+            " \"edges\": [ { \"kind\": \"flow\", \"from\": 0, \"to\": 1 }, { \"kind\": \"flow\", \"from\": 1, \"to\": 2 } ] }";
+        int fired = zir_run(zir_selftest);
+        if (fired >= 0) {
+            kputs("ZIR: selftest loaded+ran (emit->gate->print), ");
+            kput_dec((uint64_t)fired);
+            kputs(" nodes fired\n");
+        } else {
+            kputs("ZIR: selftest FAILED to load\n");
+        }
+    }
+
     /* Editor session restore: re-open files that were open at last
      * shutdown and restore cursor positions. Reads /editor/open_files
      * from VAULT. No-op if VAULT entry doesn't exist (first boot or

@@ -6,8 +6,17 @@
  * `struct zp_program` — the same structure the in-kernel parser builds.
  *
  * This is the convergence point described in tools/zplus/ZIR.md: the kernel
- * no longer needs its own Z+ source parser as the ingestion path. A front-end
- * lowers .zp -> ZIR; the kernel loads ZIR -> zp_program -> signal chain.
+ * can ingest a front-end-produced graph instead of re-parsing .zp source.
+ *
+ * STATUS (be honest — do not overstate): this loader produces a
+ * `struct zp_program` and is exercised by a host unit test (zplus_zir_test.c).
+ * The `zir_run()` boot call site below feeds it through zp_compile so it is
+ * NOT dead code. KNOWN PARADIGM GAPS (tracked in ZIR.md + BUILD_MAP P.2):
+ *   - it currently reaches the `sig_chain` DAG engine (via zp_compile), NOT the
+ *     paradigm `chain_t` engine — so no MasQ tier / vault_version / B3 yet;
+ *   - chord `merge` policy, the per-chain MasQ tier, and node `mods` are read
+ *     but not yet given first-class kernel node types (ZP_MERGE etc.).
+ * These are real gaps, not "done". Don't let a comment claim more than the code.
  *
  * Deliberately dependency-free: no libc, no kmalloc. It uses only the small
  * static helpers in zplus_zir.c and writes into caller-provided fixed storage,
@@ -40,6 +49,13 @@ typedef struct {
  * degradation (unmapped verbs, truncation) is NOT fatal and is reported in res.
  */
 int zir_load(const char *json, struct zp_program *prog, zir_load_result_t *res);
+
+/*
+ * Load + compile + execute ZIR text through the kernel Z+ engine. Returns nodes
+ * fired (>=0), or -1 if the ZIR failed to load. Makes the loader live; a boot
+ * selftest exercises it. See STATUS note above for the paradigm gaps.
+ */
+int zir_run(const char *json);
 
 /* Map a ZIR verb (+ optional gate op) to a kernel node type. Returns the type,
  * or ZP_PASSTHROUGH for anything unknown (and sets *known = 0). Exposed for the

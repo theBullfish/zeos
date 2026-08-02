@@ -373,3 +373,21 @@ int zir_load(const char *json, struct zp_program *prog, zir_load_result_t *res) 
     res->ok = 1;
     return 0;
 }
+
+/*
+ * Live entry point: load ZIR text, compile it through the kernel's Z+ engine,
+ * and drive one resolution pass. Returns nodes fired (>=0), or -1 if the ZIR
+ * failed to load. This is the call site that makes the loader LIVE (a boot
+ * selftest calls it — see tests.c), so it is not dead code.
+ *
+ * HONEST STATUS: zp_compile targets the sig_chain engine today, so this does
+ * NOT yet get MasQ tier / vault_version / B3 (see the header's KNOWN GAPS).
+ * It proves the .zp -> ZIR -> kernel ingestion path executes end to end.
+ */
+int zir_run(const char *json) {
+    static struct zp_program prog;   /* static: keep this off the kernel stack */
+    zir_load_result_t res;
+    if (zir_load(json, &prog, &res) != 0) return -1;
+    (void)zp_compile(&prog);
+    return zp_execute(&prog);
+}

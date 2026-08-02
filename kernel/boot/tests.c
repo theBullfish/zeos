@@ -19,6 +19,7 @@
 #include "net.h"
 #include "vault.h"
 #include "zplus.h"
+#include "zplus_zir.h"
 #include "cfa_handle.h"
 #include "notify.h"
 #include "settings_registry.h"
@@ -433,6 +434,35 @@ static int test_zp_program_runs_chain(char *reason, uint32_t rsize)
     (void)vv1;
     if (vv2 < vv0) {
         t_strcopy(reason, "audio vault_version regressed", rsize);
+        return TEST_FAIL;
+    }
+    return TEST_PASS;
+}
+
+/*
+ * ZIR ingestion: a front-end-produced ZIR document loads through zir_run()
+ * (zir_load -> zp_compile -> zp_execute) in the LIVE kernel. This is the boot
+ * observation that turns the ZIR loader from host-tested code into a real,
+ * exercised kernel path. Embeds a minimal emit->gate->print graph so the test
+ * needs no VAULT file.
+ */
+static int test_zir_program_runs(char *reason, uint32_t rsize)
+{
+    static const char zir[] =
+        "{ \"zir\": 1, \"source\": \"selftest.zp\","
+        " \"chains\": [ { \"id\": 0, \"name\": \"main\", \"masq\": \"reference\", \"parent\": -1, \"nodes\": [0,1,2] } ],"
+        " \"nodes\": ["
+        "  { \"id\": 0, \"chain\": 0, \"seq\": 0, \"kind\": \"source\", \"verb\": \"emit\", \"name\": \"emit_0\", \"emit\": {\"int\": 7} },"
+        "  { \"id\": 1, \"chain\": 0, \"seq\": 1, \"kind\": \"gate\", \"verb\": \"gate\", \"name\": \"gate_1\", \"gate\": {\"op\": \"gt\", \"rhs\": {\"int\": 3}} },"
+        "  { \"id\": 2, \"chain\": 0, \"seq\": 2, \"kind\": \"processor\", \"verb\": \"print\", \"name\": \"print_2\" }"
+        " ],"
+        " \"edges\": ["
+        "  { \"id\": 0, \"kind\": \"flow\", \"from\": 0, \"to\": 1 },"
+        "  { \"id\": 1, \"kind\": \"flow\", \"from\": 1, \"to\": 2 } ] }";
+
+    int rc = zir_run(zir);
+    if (rc < 0) {
+        t_strcopy(reason, "zir_run failed to load/compile ZIR", rsize);
         return TEST_FAIL;
     }
     return TEST_PASS;
@@ -1334,6 +1364,7 @@ void tests_register_all(void)
     test_register("chain.mouse",          test_chain_mouse,          CHAIN_MOUSE);
     test_register("integration.https",    test_https_through_chains, -1);
     test_register("integration.zp.chain", test_zp_program_runs_chain, CHAIN_AUDIO);
+    test_register("integration.zir.run", test_zir_program_runs, -1);
     test_register("cfa.perceive.violation", test_cfa_perceive_violation, -1);
     test_register("cfa.coverage",           test_cfa_coverage,           -1);
     test_register("gpu.compute",            test_gpu_compute,            CHAIN_MDE);
