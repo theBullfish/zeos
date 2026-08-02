@@ -191,6 +191,7 @@ SMP_OBJS    = boot/smp_trampoline.o
 # rsvg-convert rasterizes; objcopy embeds; icon_svg.c decodes (lodepng) + tints.
 ICON_SVG_DIR = ../assets/icons
 ICON_OBJS    = boot/icon_folder.o boot/icon_code.o boot/icon_gear.o
+WALLPAPER_OBJS = boot/wallpaper.o
 
 # D.9 icons: rasterize the SVG to 48x48 RGBA PNG, then objcopy-embed it with a
 # clean symbol name (_binary_icon_<name>_png_{start,end,size}).
@@ -220,6 +221,19 @@ boot/icon_gear.o: $(ICON_SVG_DIR)/ui-basic/Gear.svg
 		--redefine-sym _binary_build_icons_icon_gear_png_end=_binary_icon_gear_png_end \
 		--redefine-sym _binary_build_icons_icon_gear_png_size=_binary_icon_gear_png_size \
 		build/icons/icon_gear.png $@
+
+# ── D.10: default desktop wallpaper (SVG -> 480x270 RGBA PNG -> ELF) ──
+# rsvg rasterizes a smooth gradient (compresses < 48KB so it fits a VAULT file).
+# Seeded into VAULT at boot; desktop.c loads it back via vault_read + lodepng and
+# nearest-neighbour scale-blits x4 to fill 1920x1080.
+boot/wallpaper.o: assets/wallpaper.svg
+	@mkdir -p build
+	rsvg-convert -w 480 -h 270 $< -o build/wallpaper.png
+	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
+		--redefine-sym _binary_build_wallpaper_png_start=_binary_wallpaper_png_start \
+		--redefine-sym _binary_build_wallpaper_png_end=_binary_wallpaper_png_end \
+		--redefine-sym _binary_build_wallpaper_png_size=_binary_wallpaper_png_size \
+		build/wallpaper.png $@
 
 boot/font_inter.o: $(FONT_INTER)
 	$(OBJCOPY) -I binary -O elf64-x86-64 -B i386:x86-64 \
@@ -406,9 +420,9 @@ lib/lodepng/lodepng.o: lib/lodepng/lodepng.c
 -include $(OBJS:.o=.d)
 
 # Link to shared object (includes embedded font and firmware blobs)
-$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS)
+$(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) $(WALLPAPER_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) $(WALLPAPER_OBJS) -o $@ $(LIBS)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so

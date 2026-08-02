@@ -47,6 +47,9 @@ typedef struct {
  */
 void desktop_init(uint32_t wallpaper_color, int density);
 
+/* D.10: 1 if a wallpaper image was decoded from VAULT (not the solid fallback). */
+int desktop_wallpaper_loaded(void);
+
 /*
  * Add an icon to the desktop.
  * Returns icon index, or -1 if full.

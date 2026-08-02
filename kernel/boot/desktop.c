@@ -22,6 +22,22 @@
 #include "ui_context_menu.h"
 #include "quick_look.h"
 #include "image_viewer.h"
+#include "lodepng/lodepng.h"   /* D.10: decode wallpaper PNG loaded from VAULT */
+
+/* D.10: default wallpaper, embedded (SVG->480x270 RGBA PNG). Seeded into VAULT
+ * at first boot, then always LOADED BACK from VAULT (vault_read) so the desktop
+ * honors a user-replaceable /system/wallpaper.png. */
+extern const unsigned char _binary_wallpaper_png_start[];
+extern const unsigned char _binary_wallpaper_png_end[];
+extern void lodepng_free(void *ptr);   /* not exposed in lodepng.h */
+
+#define DESKTOP_WALLPAPER_PATH "/system/wallpaper.png"
+#define DESKTOP_WP_FILEBUF     49152   /* VAULT max file: 12 direct * 4096 */
+
+static unsigned char  s_wp_filebuf[DESKTOP_WP_FILEBUF];
+static const uint8_t *g_wp_rgba = 0;   /* lodepng RGBA, row-major, 4 B/px */
+static int            g_wp_w = 0, g_wp_h = 0;
+static int            g_wp_from_vault = 0;  /* 1 = decoded from a VAULT read */
 
 /* ── UI primitive wiring ── */
 static void rc_new_folder(void *ctx) { (void)ctx; kputs("DESK: new folder\n"); }
@@ -277,6 +293,55 @@ static uint32_t blend_accent_20(uint32_t base, uint32_t accent) {
 
 /* ── API ── */
 
+/* D.10: seed the embedded default into VAULT if absent, then load the wallpaper
+ * back FROM VAULT and decode it. Sets g_wp_rgba/w/h on success; leaves them zero
+ * (solid-color fallback) on any failure. Idempotent — safe to call once at init. */
+static void desktop_load_wallpaper(void) {
+    unsigned emb_len = (unsigned)(_binary_wallpaper_png_end -
+                                  _binary_wallpaper_png_start);
+
+    /* Read whatever is in VAULT at the wallpaper path. */
+    int got = vault_read(DESKTOP_WALLPAPER_PATH, s_wp_filebuf,
+                         sizeof(s_wp_filebuf));
+
+    /* Not present (or empty) -> seed the embedded default, then re-read so the
+     * decode path always runs against VAULT bytes (proves the load path). */
+    if (got <= 0) {
+        if (emb_len > 0 && emb_len <= sizeof(s_wp_filebuf)) {
+            vault_write(DESKTOP_WALLPAPER_PATH,
+                        _binary_wallpaper_png_start, emb_len);
+            got = vault_read(DESKTOP_WALLPAPER_PATH, s_wp_filebuf,
+                             sizeof(s_wp_filebuf));
+        }
+    }
+    if (got <= 0) {
+        kputs("DESK: wallpaper VAULT read failed, using solid color\n");
+        return;
+    }
+
+    unsigned char *pixels = 0;
+    unsigned w = 0, h = 0;
+    unsigned err = lodepng_decode32(&pixels, &w, &h,
+                                    s_wp_filebuf, (size_t)got);
+    if (err || !pixels || w == 0 || h == 0) {
+        if (pixels) lodepng_free(pixels);
+        kputs("DESK: wallpaper decode failed, using solid color\n");
+        return;
+    }
+
+    g_wp_rgba = pixels;   /* kept alive for the life of the desktop */
+    g_wp_w = (int)w;
+    g_wp_h = (int)h;
+    g_wp_from_vault = 1;
+    kputs("DESK: wallpaper loaded from VAULT ");
+    kput_dec((uint64_t)w); kputs("x"); kput_dec((uint64_t)h);
+    kputs(" ("); kput_dec((uint64_t)got); kputs(" bytes)\n");
+}
+
+int desktop_wallpaper_loaded(void) {
+    return (g_wp_rgba != 0 && g_wp_w > 0 && g_wp_h > 0 && g_wp_from_vault) ? 1 : 0;
+}
+
 void desktop_init(uint32_t wallpaper_color, int density) {
     /* Zero everything */
     for (int i = 0; i < DESKTOP_MAX_ICONS; i++) {
@@ -317,6 +382,10 @@ void desktop_init(uint32_t wallpaper_color, int density) {
         desktop_add_icon("Terminal", "terminal", 0, 2);
         desktop_add_icon("Settings", "settings", 0, 4);
     }
+
+    /* D.10: load the wallpaper image from VAULT (seeds the embedded default on
+     * first boot). Falls back to wallpaper_color if unavailable. */
+    desktop_load_wallpaper();
 
     kputs("DESK: initialized, ");
     kput_dec(g_desktop.icon_count);
@@ -367,8 +436,27 @@ void desktop_draw(void) {
     int sw = comp->screen_w;
     int sh = comp->screen_h;
 
-    /* Wallpaper fill */
-    fb_rect(0, panel_h, sw, sh - panel_h, g_desktop.wallpaper_color);
+    /* Wallpaper: image from VAULT (D.10) nearest-neighbour scaled to fill, else
+     * solid color. fb_pixel is clip-tested, so off-dirty-rect pixels are cheap
+     * (the compositor only invokes us over dirty regions). */
+    int desk_h = sh - panel_h;
+    if (g_wp_rgba && g_wp_w > 0 && g_wp_h > 0 && desk_h > 0) {
+        for (int dy = 0; dy < desk_h; dy++) {
+            int syi = dy * g_wp_h / desk_h;
+            if (syi >= g_wp_h) syi = g_wp_h - 1;
+            const uint8_t *srow = g_wp_rgba + (size_t)syi * g_wp_w * 4;
+            for (int dx = 0; dx < sw; dx++) {
+                int sxi = dx * g_wp_w / sw;
+                if (sxi >= g_wp_w) sxi = g_wp_w - 1;
+                const uint8_t *p = srow + (size_t)sxi * 4;
+                uint32_t c = 0xFF000000u | ((uint32_t)p[0] << 16) |
+                             ((uint32_t)p[1] << 8) | (uint32_t)p[2];
+                fb_pixel(dx, panel_h + dy, c);
+            }
+        }
+    } else {
+        fb_rect(0, panel_h, sw, sh - panel_h, g_desktop.wallpaper_color);
+    }
 
     /* Subtle persona accent gradient at bottom (5% opacity) */
     uint32_t accent_faint = (COLOR_PRIMARY & 0x00FFFFFF) | 0x0D000000;
