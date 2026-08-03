@@ -115,6 +115,11 @@ typedef struct {
     /* Persistence name. NULL = surface state is not persisted. The WM
      * uses this on detach to flush via wm_persist_save(name). */
     const char    *persist_name;
+
+    /* D.11: last payload dropped onto this surface (a desktop icon dragged +
+     * released over the window "feeds the chain"). */
+    char           last_drop[32];
+    int            drop_count;
 } chain_surface_t;
 
 /* ── Snap zone ghost ── */
@@ -268,6 +273,11 @@ int  wm_is_desktop_shown(void);  /* 1 if show-desktop mode is active */
 
 /* ── Queries ── */
 chain_surface_t *wm_get_surface(int id);
+
+/* D.11: topmost visible surface containing (x,y), or -1. */
+int  wm_surface_at(int x, int y);
+/* D.11: deliver a dropped payload (desktop icon name) to a surface's chain. */
+int  wm_feed_surface(int id, const char *payload);
 chain_surface_t *wm_get_surface_by_index(int index);  /* Index into surface array */
 int wm_surface_count(void);
 int wm_visible_count(void);    /* On current workspace */

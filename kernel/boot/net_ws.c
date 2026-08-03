@@ -12,6 +12,7 @@
 
 #include "mbedtls/sha1.h"
 #include "mbedtls/base64.h"
+#include "mbedtls/ssl.h"      /* MBEDTLS_ERR_SSL_WANT_READ/WRITE for wss */
 
 #include <stddef.h>
 
@@ -48,20 +49,61 @@ static uint64_t ws_deadline(uint32_t sec)
 }
 static int ws_expired(uint64_t deadline) { return timer_read_tsc() > deadline; }
 
-/* Read exactly n bytes into buf (loops over the TCP stream). Returns 0 on
- * success, -1 on close/error/timeout. Time-based ~5s bound. */
+/* ── Transport abstraction: ws:// over TCP, wss:// over TLS ────────────── */
+
+/* Send all `len` bytes. Returns 0 on success, -1 on error. */
+static int ws_xport_send(ws_conn_t *ws, const uint8_t *data, uint32_t len)
+{
+    if (ws->secure) {
+        uint32_t off = 0;
+        while (off < len) {
+            int w = tls_send(ws->tls, data + off, (int)(len - off));
+            if (w > 0) { off += (uint32_t)w; continue; }
+            if (w == MBEDTLS_ERR_SSL_WANT_WRITE || w == MBEDTLS_ERR_SSL_WANT_READ) {
+                net_poll(); continue;
+            }
+            return -1;
+        }
+        return 0;
+    }
+    return tcp_send_on(ws->tcp, data, (uint16_t)len) < 0 ? -1 : 0;
+}
+
+/* Non-blocking receive: >0 bytes copied, 0 = nothing ready, -1 = closed/error. */
+static int ws_xport_recv(ws_conn_t *ws, uint8_t *buf, uint32_t max)
+{
+    if (ws->secure) {
+        int r = tls_recv(ws->tls, buf, (int)max);
+        if (r > 0) return r;
+        if (r == 0) return -1;                 /* clean EOF = closed */
+        if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE)
+            return 0;
+        return -1;
+    }
+    return tcp_recv_on_nb(ws->tcp, buf, (uint16_t)max);
+}
+
+/* Still connected? (best-effort; TLS close surfaces via recv EOF/-1) */
+static int ws_xport_connected(ws_conn_t *ws)
+{
+    if (ws->secure) return ws->tls != 0;
+    return tcp_is_connected(ws->tcp);
+}
+
+/* Read exactly n bytes into buf over the active transport. Returns 0 on
+ * success, -1 on close/error/timeout. Time-based ~6s bound. */
 static int ws_read_n(ws_conn_t *ws, uint8_t *buf, uint32_t n)
 {
     uint32_t got = 0;
-    uint64_t dl = ws_deadline(5);
+    uint64_t dl = ws_deadline(6);
     while (got < n) {
-        int r = tcp_recv_on_nb(ws->tcp, buf + got, (uint16_t)(n - got));
+        int r = ws_xport_recv(ws, buf + got, n - got);
         if (r < 0) return -1;
         if (r == 0) {
             net_poll();               /* pump the stack so incoming frames land */
-            if (!tcp_is_connected(ws->tcp)) return -1;
+            if (!ws_xport_connected(ws)) return -1;
             if (ws_expired(dl)) return -1;
-            tcp_retransmit_tick();
+            if (!ws->secure) tcp_retransmit_tick();
             continue;
         }
         got += (uint32_t)r;
@@ -101,10 +143,75 @@ static void ws_expected_accept(const char *key, char *out, uint32_t out_sz)
     if (olen < out_sz) out[olen] = 0; else out[out_sz - 1] = 0;
 }
 
+/* Send the HTTP Upgrade request over the (already-connected) transport, read
+ * the 101 response and verify Sec-WebSocket-Accept. Returns 0 on success. */
+static int ws_do_handshake(ws_conn_t *out, const char *host, const char *path)
+{
+    char key[32];
+    ws_make_key(key, sizeof(key));
+    char req[512];
+    int n = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: %s\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n",
+        path, host, key);
+    if (n <= 0 || n >= (int)sizeof(req)) return -4;
+    if (ws_xport_send(out, (const uint8_t *)req, (uint32_t)n) < 0) return -5;
+
+    /* Read the response headers (until \r\n\r\n). */
+    char resp[1024];
+    uint32_t rlen = 0;
+    int done = 0;
+    uint64_t dl = ws_deadline(8);
+    while (rlen < sizeof(resp) - 1 && !done) {
+        int r = ws_xport_recv(out, (uint8_t *)resp + rlen, sizeof(resp) - 1 - rlen);
+        if (r < 0) break;
+        if (r == 0) {
+            net_poll();
+            if (!ws_xport_connected(out) && rlen == 0) break;
+            if (ws_expired(dl)) break;
+            if (!out->secure) tcp_retransmit_tick();
+            continue;
+        }
+        rlen += (uint32_t)r;
+        resp[rlen] = 0;
+        if (ws_find_ci(resp, rlen, "\r\n\r\n") >= 0) done = 1;
+    }
+    if (!done) { kputs("  WS: no handshake response\n"); return -6; }
+
+    if (ws_find_ci(resp, rlen, "101") < 0 ||
+        ws_find_ci(resp, rlen, "upgrade: websocket") < 0) {
+        kputs("  WS: server did not upgrade (no 101)\n");
+        return -7;
+    }
+
+    char expect[40];
+    ws_expected_accept(key, expect, sizeof(expect));
+    int ai = ws_find_ci(resp, rlen, "sec-websocket-accept:");
+    if (ai >= 0) {
+        const char *p = resp + ai + (int)ws_strlen("sec-websocket-accept:");
+        while (*p == ' ') p++;
+        uint32_t el = ws_strlen(expect);
+        if (!ws_memeq(p, expect, el)) {
+            kputs("  WS: Accept mismatch (handshake not trusted)\n");
+            return -8;
+        }
+    }
+
+    out->open = 1;
+    kputs(out->secure ? "  WSS: connected (101, over TLS)\n"
+                      : "  WS: connected (101 Switching Protocols)\n");
+    return 0;
+}
+
 int ws_connect(ws_conn_t *out, const char *host, const char *path, uint16_t port)
 {
     if (!out || !host) return -1;
-    out->open = 0;
+    out->open = 0; out->secure = 0; out->tls = 0;
     if (port == 0) port = 80;
     if (!path || !path[0]) path = "/";
 
@@ -133,68 +240,26 @@ int ws_connect(ws_conn_t *out, const char *host, const char *path, uint16_t port
     }
     out->tcp = h;
 
-    /* Build + send the Upgrade request. */
-    char key[32];
-    ws_make_key(key, sizeof(key));
-    char req[512];
-    int n = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\n"
-        "Host: %s\r\n"
-        "Upgrade: websocket\r\n"
-        "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Key: %s\r\n"
-        "Sec-WebSocket-Version: 13\r\n"
-        "\r\n",
-        path, host, key);
-    if (n <= 0 || n >= (int)sizeof(req)) { tcp_close_on(h); return -4; }
-    if (tcp_send_on(h, req, (uint16_t)n) < 0) { tcp_close_on(h); return -5; }
+    int rc = ws_do_handshake(out, host, path);
+    if (rc != 0) { tcp_close_on(h); return rc; }
+    return 0;
+}
 
-    /* Read the response headers (until \r\n\r\n). */
-    char resp[1024];
-    uint32_t rlen = 0;
-    int done = 0;
-    uint64_t dl = ws_deadline(6);
-    while (rlen < sizeof(resp) - 1 && !done) {
-        int r = tcp_recv_on_nb(h, (uint8_t *)resp + rlen, (uint16_t)(sizeof(resp) - 1 - rlen));
-        if (r < 0) break;
-        if (r == 0) {
-            net_poll();               /* pump the stack so the 101 gets received */
-            if (!tcp_is_connected(h) && rlen == 0) break;
-            if (ws_expired(dl)) break;
-            tcp_retransmit_tick();
-            continue;
-        }
-        rlen += (uint32_t)r;
-        resp[rlen] = 0;
-        if (ws_find_ci(resp, rlen, "\r\n\r\n") >= 0) done = 1;
-    }
-    if (!done) { kputs("  WS: no handshake response\n"); tcp_close_on(h); return -6; }
+int ws_connect_secure(ws_conn_t *out, const char *host, const char *path, uint16_t port)
+{
+    if (!out || !host) return -1;
+    out->open = 0; out->secure = 1; out->tls = 0; out->tcp = TCP_INVALID_HANDLE;
+    if (port == 0) port = 443;
+    if (!path || !path[0]) path = "/";
 
-    /* Must be 101 Switching Protocols. */
-    if (ws_find_ci(resp, rlen, "101") < 0 ||
-        ws_find_ci(resp, rlen, "upgrade: websocket") < 0) {
-        kputs("  WS: server did not upgrade (no 101)\n");
-        tcp_close_on(h);
-        return -7;
-    }
+    /* tls_connect resolves DNS, does the TLS handshake, and verifies the
+     * server cert against the CA bundle (verify REQUIRED). */
+    tls_conn_t *t = tls_connect(host, port);
+    if (!t) { kputs("  WSS: TLS connect failed\n"); return -3; }
+    out->tls = t;
 
-    /* Verify Sec-WebSocket-Accept if present. */
-    char expect[40];
-    ws_expected_accept(key, expect, sizeof(expect));
-    int ai = ws_find_ci(resp, rlen, "sec-websocket-accept:");
-    if (ai >= 0) {
-        const char *p = resp + ai + (int)ws_strlen("sec-websocket-accept:");
-        while (*p == ' ') p++;
-        uint32_t el = ws_strlen(expect);
-        if (!ws_memeq(p, expect, el)) {
-            kputs("  WS: Accept mismatch (handshake not trusted)\n");
-            tcp_close_on(h);
-            return -8;
-        }
-    }
-
-    out->open = 1;
-    kputs("  WS: connected (101 Switching Protocols)\n");
+    int rc = ws_do_handshake(out, host, path);
+    if (rc != 0) { tls_close(t); out->tls = 0; return rc; }
     return 0;
 }
 
@@ -219,7 +284,7 @@ static int ws_send_frame(ws_conn_t *ws, uint8_t opcode, const uint8_t *data, uin
     uint8_t mask[4] = { (uint8_t)t, (uint8_t)(t >> 8), (uint8_t)(t >> 16), (uint8_t)(t >> 24) };
     ws_memcpy(hdr + h, mask, 4); h += 4;
 
-    if (tcp_send_on(ws->tcp, hdr, (uint16_t)h) < 0) return -1;
+    if (ws_xport_send(ws, hdr, h) < 0) return -1;
 
     /* Masked payload, in chunks. */
     uint8_t chunk[512];
@@ -228,7 +293,7 @@ static int ws_send_frame(ws_conn_t *ws, uint8_t opcode, const uint8_t *data, uin
         uint32_t c = len - off; if (c > sizeof(chunk)) c = sizeof(chunk);
         for (uint32_t i = 0; i < c; i++)
             chunk[i] = (uint8_t)(data[off + i] ^ mask[(off + i) & 3]);
-        if (tcp_send_on(ws->tcp, chunk, (uint16_t)c) < 0) return -1;
+        if (ws_xport_send(ws, chunk, c) < 0) return -1;
         off += c;
     }
     return 0;
@@ -286,5 +351,9 @@ void ws_close(ws_conn_t *ws)
         ws_send_frame(ws, WS_OP_CLOSE, &empty, 0);
         ws->open = 0;
     }
-    tcp_close_on(ws->tcp);
+    if (ws->secure) {
+        if (ws->tls) { tls_close(ws->tls); ws->tls = 0; }
+    } else {
+        tcp_close_on(ws->tcp);
+    }
 }

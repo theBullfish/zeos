@@ -618,6 +618,23 @@ void desktop_drag_end(int x, int y) {
     int panel_h = comp->panel_h;
     int idx = g_desktop.drag_icon;
 
+    /* D.11: if the icon was dropped over an open window (chain surface), feed
+     * that chain the icon's payload instead of grid-snapping. */
+    if (idx >= 0 && idx < g_desktop.icon_count) {
+        extern int wm_surface_at(int, int);
+        extern int wm_feed_surface(int, const char *);
+        int over = wm_surface_at(x, y);
+        if (over >= 0) {
+            wm_feed_surface(over, g_desktop.icons[idx].name);
+            kputs("DESK: fed '"); kputs(g_desktop.icons[idx].name);
+            kputs("' -> surface "); kput_dec((uint64_t)over); kputs("\n");
+            g_desktop.dragging = 0;
+            g_desktop.drag_icon = -1;
+            compositor_dirty_all();
+            return;   /* icon returns to its grid cell (unchanged) */
+        }
+    }
+
     if (idx >= 0 && idx < g_desktop.icon_count) {
         /* Snap to grid. Must use the same DESKTOP_GRID_MARGIN inset as the draw
          * and icon_at, or a click (which arms a drag) snaps the icon to the
@@ -709,3 +726,39 @@ void desktop_load(void) {
 desktop_state_t *desktop_get_state(void) {
     return &g_desktop;
 }
+
+#ifdef ZEOS_DIAG_D11
+/* D.11 selftest: dragging a desktop icon and releasing over a window feeds that
+ * window's chain the icon's payload. Create a probe surface, arm a drag of icon
+ * 0, end the drag inside the surface, assert it received the icon name. */
+void desktop_d11_selftest(void)
+{
+    extern int  wm_create_surface(const char*, int, int, int, int, int, void(*)(int,int,int,int,int));
+    extern void wm_force_visible(int);
+    extern chain_surface_t *wm_get_surface(int);
+
+    if (g_desktop.icon_count <= 0) { kputs("[D11] no icons -> FAIL\n"); return; }
+    int sid = wm_create_surface("D11probe", -1, 500, 500, 300, 200, 0);
+    wm_force_visible(sid);
+    chain_surface_t *s = wm_get_surface(sid);
+    int before = s ? s->drop_count : -1;
+
+    /* arm a drag of icon 0 and drop it at the surface center (650,600) */
+    char iconname[32]; str_copy(iconname, g_desktop.icons[0].name, 32);
+    g_desktop.dragging = 1;
+    g_desktop.drag_icon = 0;
+    desktop_drag_end(650, 600);
+
+    s = wm_get_surface(sid);
+    int fed_count = s ? (s->drop_count > before) : 0;
+    int name_ok = 0;
+    if (s) { name_ok = 1; for (int i=0; iconname[i] || s->last_drop[i]; i++) if (iconname[i]!=s->last_drop[i]) { name_ok=0; break; } }
+
+    int pass = (sid >= 0) && fed_count && name_ok;
+    kputs("[D11] surface="); kput_dec((uint64_t)sid);
+    kputs(" fed='"); if (s) kputs(s->last_drop); kputs("'");
+    kputs(" drop_count+="); kput_dec((uint64_t)fed_count);
+    kputs(" name_ok="); kput_dec((uint64_t)name_ok);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

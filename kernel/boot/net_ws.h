@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include "net_tcp.h"
+#include "net_tls.h"
 
 #define WS_MAX_FRAME  4096
 
@@ -24,7 +25,9 @@
 #define WS_OP_PONG   0xA
 
 typedef struct {
-    tcp_handle_t tcp;
+    tcp_handle_t tcp;         /* plain ws:// transport (secure == 0) */
+    tls_conn_t  *tls;         /* wss:// transport (secure == 1) */
+    int          secure;      /* 1 = TLS transport (wss://) */
     int          open;        /* 1 = handshake completed */
     uint8_t      rx[WS_MAX_FRAME];
 } ws_conn_t;
@@ -36,6 +39,13 @@ typedef struct {
  */
 int ws_connect(ws_conn_t *out, const char *host, const char *path,
                uint16_t port);
+
+/*
+ * wss:// — same handshake + framing, but over a TLS transport (net_tls, full
+ * cert verification against the CA bundle). `port` defaults to 443 if 0.
+ */
+int ws_connect_secure(ws_conn_t *out, const char *host, const char *path,
+                      uint16_t port);
 
 /* Send a text frame (masked). Returns 0 on success. */
 int ws_send_text(ws_conn_t *ws, const char *data, uint32_t len);

@@ -1413,6 +1413,38 @@ chain_surface_t *wm_get_surface(int id) {
     return find_surface(id);
 }
 
+/* D.11: topmost visible surface whose frame contains (x,y). Iterates the WM's
+ * z-order (front-most first) and returns the first hit, else -1. */
+int wm_surface_at(int x, int y)
+{
+    int n = wm_surface_count();
+    /* front-most last drawn = highest z; scan by index and keep the top hit via
+     * focus/z if available, else last match wins (draw order = ascending z). */
+    int hit = -1;
+    for (int i = 0; i < n; i++) {
+        chain_surface_t *s = wm_get_surface_by_index(i);
+        if (!s || !s->visible) continue;
+        if (s->state == SURFACE_MINIMIZED) continue;
+        if (x >= s->x && x < s->x + s->w && y >= s->y && y < s->y + s->h)
+            hit = s->id;   /* later index = drawn on top */
+    }
+    return hit;
+}
+
+/* D.11: deliver a dropped payload to a surface's chain (records it on the
+ * surface; the app content can read last_drop). Returns 1 on delivery. */
+int wm_feed_surface(int id, const char *payload)
+{
+    chain_surface_t *s = find_surface(id);
+    if (!s || !payload) return 0;
+    int j = 0;
+    while (payload[j] && j < 31) { s->last_drop[j] = payload[j]; j++; }
+    s->last_drop[j] = 0;
+    s->drop_count++;
+    return 1;
+}
+
+
 chain_surface_t *wm_get_surface_by_index(int index) {
     if (index < 0 || index >= g_wm.surface_count) return 0;
     return &g_wm.surfaces[index];
