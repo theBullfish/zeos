@@ -237,10 +237,10 @@ the OS. When in doubt it's the OS.
 ## F. Typography & Icons
 - [x] **F.1** stb_truetype: glyph cache + grayscale AA, font_draw/measure/line_height — `[observed 2026-08-02]` smooth AA proportional + monospace glyphs rendered across panel/titles/clock/labels. `[source font.c:71-142,188-253]`.
 - [x] **F.2** TTF embedded in kernel (objcopy) + consumed at boot — `[observed 2026-08-02]` on-screen Inter+JBMono glyphs prove the embedded blob loads + draws at boot. `[source Makefile:153-199; font.c:161-170]`.
-- [ ] **F.3** Fonts: Inter (7wt), JetBrains Mono (6wt) present — `[x]` `[observed]` asset files counted (7 + 6).
+- [x] **F.3** Fonts: Inter (7wt), JetBrains Mono (6wt) present — `[observed]` asset files counted (7 + 6).
 - [x] **F.4** Font fallback chain (Inter->Noto->bitmap) — `[VERIFIED/production]` wired font_init (was DEAD -> all text was 8x16 bitmap; now real Inter/JBMono TTF) + Noto subset fallback tier (92KB OFL) via font_get_glyph glyph-index fallback. KVM [F4] noto_loaded=1 gap_cp=0xad fell_back=1 PASS. bible id=405.
 - [x] **F.5** icon_render: 31-icon dispatch at 16/24/32, accent tint — `[observed 2026-08-02]` desktop icons + ~7 dock icons + titlebar buttons render as accent-tinted vector sprites at multiple sizes. `[source icon_render.c:610-658]`. Exact 31-count/bucket enumeration not dissected from the shot.
-- [ ] **F.6** SVG asset library (934 svg / 16 categories; 50 cursor + ~150 themed) — `[x]` `[observed]` file counts (note: ROADMAP claimed 1,067 — actual 934).
+- [x] **F.6** SVG asset library (934 svg / 16 categories; 50 cursor + ~150 themed) — `[observed]` file counts (actual 934).
 - [ ] **F.7** Build-time SVG→bitmap rasterization / sprite sheets — `[TODO]` `[source icon_render.c:9]` "Future".
 
 ## G. Persona & Theme
@@ -287,7 +287,7 @@ the OS. When in doubt it's the OS.
 - [x] **K.1** Node-graph renderer + state colors — `[VERIFIED/harness]` Super+G opens Signal Graph overlay: 9 chain nodes, compositor->panel/dock/desktop edges+arrows, accent(LIVE) borders, 100% zoom. Wired ACTION_CHAIN_GRAPH (was TODO stub). bible id=439. `[source sigviz.c; sigviz_overlay_*]`.
 - [x] **K.2** Interactive selection / inspector — `[VERIFIED/harness]` click compositor node -> selected chain_id=7 + highlighted w/ inspector detail; empty-click deselects. Wired click routing. bible id=441. `[source sigviz.c sigviz_click]`.
 - [x] **K.3** Live pulse animation — `[VERIFIED/harness]` sigviz_tick advances frame (wired to compositor); sine_pulse varies 0/127/255 across frames, bounded. bible id=442. `[source sigviz.c sine_pulse/sigviz_tick]`.
-- [ ] **K.4** Zoom / pan — `[UNVERIFIED]` `[source sigviz.c:537-568]`.
+- [x] **K.4** Zoom / pan — `[VERIFIED/harness]` = zooms 100%->150% (nodes larger), arrows pan; wired to overlay. bible id=440. `[source sigviz.c:537-568]`.
 
 ## L. Animation & Motion
 - [x] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[VERIFIED/harness]` selftest [L1] gradual+settle+converge, concurrent=64 (65th=-1), retarget preserves velocity. bible id=427. `[source anim.c anim_l1_selftest]`.
@@ -313,7 +313,7 @@ the OS. When in doubt it's the OS.
 - [x] **N.3** Reconcile: one first-run flow, wired and observed — `[VERIFIED/production]` reconciled to firstboot 5-screen wizard; welcome_run_if_first_boot() no longer on boot path (one-call revert documented). bible id=305.
 
 ## O. Hardware Targets
-- [ ] **O.1** x86-64 target (current) — `[x]` `[observed]` boots + runs.
+- [x] **O.1** x86-64 target (current) — `[observed]` boots + runs.
 - [ ] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[TODO]`.
 - [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`.
 
