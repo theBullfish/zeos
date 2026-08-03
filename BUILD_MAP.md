@@ -278,7 +278,7 @@ the OS. When in doubt it's the OS.
 - [ ] **I.7** JavaScript engine — `[2.0]`.
 
 ## J. Settings
-- [ ] **J.1** Settings app (WM app, VAULT persist, inline current values) — `[UNVERIFIED]` `[source settings.c:219-432]`.
+- [x] **J.1** Settings app (WM app, VAULT persist, inline current values) — `[VERIFIED/harness]` save->clobber->load VAULT round-trip restores mouse_speed/key_repeat/wallpaper. bible id=437. `[source settings.c save_all/load_all]`.
 - [x] **J.2** One settings surface, no duplicate — `[VERIFIED/production]` settings.h dropped its name-colliding duplicate types (access_config_t/color_scheme_t/etc.), includes access.h; settings GUI operates on the ONE real config via access_get()/access_set_*. KVM [J2] shared_ptr=1 sensory/reduced_motion/focus live=1 PASS. Also fixed latent bug: accessibility changes now actually apply. bible id=395.
 - [x] **J.3** Search-first (palette enumerates every setting) — `[VERIFIED/production]` palette_show enumerates settings_registry (42 items), bool toggles inline. KVM [J3] items=42 registry=42 PASS. PALETTE_MAX_ITEMS 64->128. bible id=336.
 - [ ] **J.4** Right-click element → "Settings for this…" — `[TODO]`.

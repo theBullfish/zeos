@@ -721,3 +721,31 @@ void settings_j2_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+#ifdef ZEOS_DIAG_J1
+/* J.1 selftest: the Settings app persists to VAULT and reloads correctly.
+ * Set known values -> save_all -> clobber in-memory -> load_all -> assert the
+ * VAULT round-trip restored them (an independent read across the VAULT boundary,
+ * G3). Restores the originals afterward. */
+void settings_j1_selftest(void)
+{
+    int o_ms = g_mouse_speed, o_kr = g_key_repeat, o_wp = g_wallpaper;
+
+    g_mouse_speed = 7; g_key_repeat = 3; g_wallpaper = 2;
+    save_all();
+    g_mouse_speed = 99; g_key_repeat = 99; g_wallpaper = 99;   /* clobber */
+    load_all();
+    int ms_ok = (g_mouse_speed == 7);
+    int kr_ok = (g_key_repeat == 3);
+    int wp_ok = (g_wallpaper == 2);
+
+    /* restore */
+    g_mouse_speed = o_ms; g_key_repeat = o_kr; g_wallpaper = o_wp; save_all();
+
+    int pass = ms_ok && kr_ok && wp_ok;
+    kputs("[J1] vault round-trip mouse_speed="); kput_dec((uint64_t)ms_ok);
+    kputs(" key_repeat="); kput_dec((uint64_t)kr_ok);
+    kputs(" wallpaper="); kput_dec((uint64_t)wp_ok);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

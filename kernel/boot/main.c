@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_J1
+        /* J.1 selftest: Settings app VAULT persist round-trip. */
+        { extern void settings_j1_selftest(void); settings_j1_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_P2
         /* P.2 selftest: Z+ REPL core runs real programs, rejects garbage. */
         { extern void zp_p2_selftest(void); zp_p2_selftest(); }
