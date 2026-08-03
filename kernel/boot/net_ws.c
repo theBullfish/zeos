@@ -58,10 +58,10 @@ static int ws_read_n(ws_conn_t *ws, uint8_t *buf, uint32_t n)
         int r = tcp_recv_on_nb(ws->tcp, buf + got, (uint16_t)(n - got));
         if (r < 0) return -1;
         if (r == 0) {
+            net_poll();               /* pump the stack so incoming frames land */
             if (!tcp_is_connected(ws->tcp)) return -1;
             if (ws_expired(dl)) return -1;
             tcp_retransmit_tick();
-            for (volatile int k = 0; k < 5000; k++) { }
             continue;
         }
         got += (uint32_t)r;
@@ -158,10 +158,10 @@ int ws_connect(ws_conn_t *out, const char *host, const char *path, uint16_t port
         int r = tcp_recv_on_nb(h, (uint8_t *)resp + rlen, (uint16_t)(sizeof(resp) - 1 - rlen));
         if (r < 0) break;
         if (r == 0) {
-            if (!tcp_is_connected(h)) { if (rlen == 0) break; }
+            net_poll();               /* pump the stack so the 101 gets received */
+            if (!tcp_is_connected(h) && rlen == 0) break;
             if (ws_expired(dl)) break;
             tcp_retransmit_tick();
-            for (volatile int k = 0; k < 5000; k++) { }
             continue;
         }
         rlen += (uint32_t)r;
