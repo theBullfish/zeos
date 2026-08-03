@@ -285,8 +285,8 @@ the OS. When in doubt it's the OS.
 
 ## K. Signal Visualizer
 - [x] **K.1** Node-graph renderer + state colors — `[VERIFIED/harness]` Super+G opens Signal Graph overlay: 9 chain nodes, compositor->panel/dock/desktop edges+arrows, accent(LIVE) borders, 100% zoom. Wired ACTION_CHAIN_GRAPH (was TODO stub). bible id=439. `[source sigviz.c; sigviz_overlay_*]`.
-- [ ] **K.2** Interactive selection / inspector — `[UNVERIFIED]` `[source sigviz.c:500-525]`.
-- [ ] **K.3** Live pulse animation — `[UNVERIFIED]` `[source sigviz.c:266-270]`.
+- [x] **K.2** Interactive selection / inspector — `[VERIFIED/harness]` click compositor node -> selected chain_id=7 + highlighted w/ inspector detail; empty-click deselects. Wired click routing. bible id=441. `[source sigviz.c sigviz_click]`.
+- [x] **K.3** Live pulse animation — `[VERIFIED/harness]` sigviz_tick advances frame (wired to compositor); sine_pulse varies 0/127/255 across frames, bounded. bible id=442. `[source sigviz.c sine_pulse/sigviz_tick]`.
 - [ ] **K.4** Zoom / pan — `[UNVERIFIED]` `[source sigviz.c:537-568]`.
 
 ## L. Animation & Motion

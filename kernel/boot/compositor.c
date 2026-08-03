@@ -280,6 +280,9 @@ void compositor_advance(void) {
         { extern void editor_tick(void);   editor_tick();   }
         { extern void file_mgr_tick(void); file_mgr_tick(); }
         { extern void activity_tick(void); activity_tick(); }
+        /* K.3: live pulse animation of the chain-graph overlay. */
+        { extern int sigviz_overlay_visible(void); extern void sigviz_tick(void);
+          if (sigviz_overlay_visible()) { sigviz_tick(); compositor_dirty_all(); } }
     }
 
     /* Keep compositing while any spring is live; the gate closes when settled. */

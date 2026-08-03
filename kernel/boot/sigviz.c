@@ -10,6 +10,7 @@
  */
 
 #include "sigviz.h"
+#include "kprint.h"
 #include "signal.h"
 #include "chain.h"
 #include "mde.h"
@@ -608,3 +609,30 @@ void sigviz_overlay_draw(void)
     fb_rect_blend(0, 0, sw, sh, 0xC00D1117u);          /* dim scrim */
     sigviz_draw(-1, m, m, sw - 2 * m, sh - 2 * m);     /* all chains */
 }
+
+#ifdef ZEOS_DIAG_K3
+/* K.3 selftest: live pulse animation. sigviz_tick advances viz.frame (now called
+ * each compositor frame while the overlay is open), and the node pulse is driven
+ * by sine_pulse(frame): prove the frame counter advances and the pulse value
+ * varies across frames (animated, not static) and stays bounded 0..255. */
+void sigviz_k3_selftest(void)
+{
+    uint32_t f0 = viz.frame;
+    for (int i = 0; i < 10; i++) sigviz_tick();
+    int advanced = (viz.frame == f0 + 10);
+
+    int p1 = sine_pulse(0,  60);
+    int p2 = sine_pulse(15, 60);
+    int p3 = sine_pulse(30, 60);
+    int varies  = (p1 != p2) || (p2 != p3);
+    int bounded = (p1>=0&&p1<=255) && (p2>=0&&p2<=255) && (p3>=0&&p3<=255);
+
+    int pass = advanced && varies && bounded;
+    kputs("[K3] frame_adv="); kput_dec((uint64_t)advanced);
+    kputs(" pulse(0/15/30)="); kput_dec((uint64_t)p1); kputs("/");
+    kput_dec((uint64_t)p2); kputs("/"); kput_dec((uint64_t)p3);
+    kputs(" varies="); kput_dec((uint64_t)varies);
+    kputs(" bounded="); kput_dec((uint64_t)bounded);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

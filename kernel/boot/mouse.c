@@ -51,6 +51,13 @@ void mouse_set_modal(int on) { s_input_modal = on ? 1 : 0; }
 
 static int mouse_ui_dispatch_down(int x, int y, int button) {
     if (s_input_modal) return 1;   /* consume; modal owns input */
+    /* K.2: chain-graph overlay owns clicks while visible (node selection). */
+    {
+        extern int  sigviz_overlay_visible(void);
+        extern int  sigviz_click(int x, int y);
+        extern void compositor_dirty_all(void);
+        if (sigviz_overlay_visible()) { (void)sigviz_click(x, y); compositor_dirty_all(); return 1; }
+    }
     extern int workspaces_overview_active(void);
     extern int workspaces_overview_mouse_down(int x, int y, int button);
     if (workspaces_overview_active() &&

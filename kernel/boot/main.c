@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_K3
+        /* K.3 selftest: sigviz live pulse animation. */
+        { extern void sigviz_k3_selftest(void); sigviz_k3_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_E2
         /* E.2 selftest: 22 cursor sprites + hotspot table. */
         { extern void cursor_e2_selftest(void); cursor_e2_selftest(); }

@@ -228,6 +228,18 @@ static void process_scancode(uint8_t scancode, int extended)
             if (context_menu_active()) { context_menu_key(27); return; }
         }
 
+        /* K.4: chain-graph overlay owns +/- zoom while visible. */
+        {
+            extern int  sigviz_overlay_visible(void);
+            extern void sigviz_zoom_in(void);
+            extern void sigviz_zoom_out(void);
+            extern void compositor_dirty_all(void);
+            if (sigviz_overlay_visible()) {
+                if (scancode == 0x0D) { sigviz_zoom_in();  compositor_dirty_all(); return; } /* = / + */
+                if (scancode == 0x0C) { sigviz_zoom_out(); compositor_dirty_all(); return; } /* - */
+            }
+        }
+
         /* Command palette owns text input while visible. Route printable chars,
          * backspace and enter into it, BEFORE the space/quick-look handler below
          * (so typing a space searches, not opens Quick Look). Skip when
@@ -317,6 +329,20 @@ static void process_scancode(uint8_t scancode, int extended)
     /* Extended arrow keys → image viewer pan. We re-check here because
      * the block above is gated on !extended. */
     if (extended && !(scancode & 0x80)) {
+        /* K.4: chain-graph overlay pans with arrow keys. */
+        {
+            extern int  sigviz_overlay_visible(void);
+            extern void sigviz_pan(int dx, int dy);
+            extern void compositor_dirty_all(void);
+            if (sigviz_overlay_visible()) {
+                int step = 40, dx = 0, dy = 0;
+                if (scancode == 0x4B) dx =  step;  /* left  -> content right */
+                if (scancode == 0x4D) dx = -step;  /* right */
+                if (scancode == 0x48) dy =  step;  /* up */
+                if (scancode == 0x50) dy = -step;  /* down */
+                if (dx || dy) { sigviz_pan(dx, dy); compositor_dirty_all(); return; }
+            }
+        }
         extern int image_viewer_active(void);
         extern int image_viewer_key_arrow(int dir);
         extern int calculator_active(void);
