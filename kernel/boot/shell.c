@@ -59,6 +59,7 @@
 #include "net_ipv6.h"
 #include "net_tcp.h"
 #include "net_http.h"
+#include "net_ws.h"
 #include "net_tls.h"
 #include "timer.h"
 #include "signal.h"
@@ -269,6 +270,7 @@ static void cmd_notes(const char *args);
 static void cmd_chat(const char *args);
 static void cmd_web(const char *args);
 static void cmd_browse(const char *args);
+static void cmd_ws(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -778,6 +780,7 @@ static const struct shell_cmd commands[] = {
     {"chat",    "chat-zeos: rooms | send <r> <body> | tail <r> [N] | search <q> | presence", cmd_chat, VIS_ALWAYS},
     {"web",     "web-zeos: start [port] | add-route <m> <p> <h> | stop | stats | bench", cmd_web, VIS_ALWAYS},
     {"browse",  "open a URL in the Zeos browser (browse <url>)", cmd_browse, VIS_ALWAYS},
+    {"ws",      "WebSocket echo test: ws <host> [path] [message]", cmd_ws, VIS_ALWAYS},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3101,6 +3104,41 @@ static void cmd_browse(const char *args)
     kputc('\n');
     int rc = browser_app_open(url);
     kputs(rc == 0 ? "  Browser: page loaded\n" : "  Browser: navigate error\n");
+}
+
+static void cmd_ws(const char *args)
+{
+    char host[128] = {0}, path[128] = "/", msg[256] = "hello from zeos";
+    if (!args || !args[0]) { kputs("  Usage: ws <host> [path] [message]\n"); return; }
+    int i = 0, j = 0;
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j < (int)sizeof(host) - 1) host[j++] = args[i++];
+    host[j] = 0;
+    while (args[i] == ' ') i++;
+    if (args[i]) {
+        j = 0;
+        while (args[i] && args[i] != ' ' && j < (int)sizeof(path) - 1) path[j++] = args[i++];
+        path[j] = 0;
+        while (args[i] == ' ') i++;
+        if (args[i]) {
+            j = 0;
+            while (args[i] && j < (int)sizeof(msg) - 1) msg[j++] = args[i++];
+            msg[j] = 0;
+        }
+    }
+    uint32_t mlen = 0; while (msg[mlen]) mlen++;
+
+    kputs("  WS: connecting ws://"); kputs(host); kputs(path); kputc('\n');
+    static ws_conn_t ws;
+    if (ws_connect(&ws, host, path, 0) != 0) { kputs("  WS: connect failed\n"); return; }
+    kputs("  WS: sending \""); kputs(msg); kputs("\"\n");
+    if (ws_send_text(&ws, msg, mlen) != 0) { kputs("  WS: send failed\n"); ws_close(&ws); return; }
+    char rbuf[512]; int op = 0;
+    int r = ws_recv(&ws, rbuf, sizeof(rbuf) - 1, &op);
+    if (r >= 0) { rbuf[r] = 0; kputs("  WS: recv \""); kputs(rbuf); kputs("\"\n"); }
+    else kputs("  WS: recv failed/closed\n");
+    ws_close(&ws);
+    kputs("  WS: closed\n");
 }
 
 static void cmd_web(const char *args)

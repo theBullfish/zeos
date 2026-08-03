@@ -58,7 +58,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/std_btree.c boot/std_json.c boot/std_regex.c boot/std_http.c boot/std_tls_server.c \
            boot/sigviz.c boot/vault.c \
            boot/net.c boot/net_chain.c boot/net_virtio.c boot/net_e1000.c boot/net_rtl8169.c boot/net_rtl8139.c boot/net_arp.c boot/net_ip.c \
-           boot/net_udp.c boot/net_tcp.c boot/net_tcp6.c boot/net_dns.c boot/net_http.c boot/net_ntp.c \
+           boot/net_udp.c boot/net_tcp.c boot/net_tcp6.c boot/net_dns.c boot/net_http.c boot/net_ntp.c boot/net_ws.c \
            boot/net_ipv6.c boot/net_dhcpv6.c \
            boot/shell.c boot/anim.c boot/ui.c boot/cursor.c boot/net_dhcp.c boot/net_tls.c boot/browser.c \
            boot/mbedtls_platform.c boot/font.c boot/wm.c boot/compositor.c \

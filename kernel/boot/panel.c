@@ -179,9 +179,32 @@ static void format_int(char *buf, int val) {
 
 void panel_set_height(int h) { if (h < 16) h = 16; g_panel.height = h; }
 
+/* D.6 auto-hide reveal zone: pointer within this many px of the top edge
+ * reveals the panel; moving below the panel hides it again. */
+#define PANEL_REVEAL_ZONE 2
+
+void panel_set_auto_hide(int on) {
+    g_panel.auto_hide = on ? 1 : 0;
+    /* Enabling hides immediately (until the pointer reaches the top edge);
+     * disabling always shows. */
+    g_panel.visible = on ? 0 : 1;
+}
+
+int panel_get_auto_hide(void) { return g_panel.auto_hide; }
+
+int panel_pointer_y(int y) {
+    if (!g_panel.auto_hide) return 0;
+    int want = g_panel.visible;
+    if (y <= PANEL_REVEAL_ZONE)          want = 1;   /* at top edge -> reveal */
+    else if (y > g_panel.height)         want = 0;   /* left the bar -> hide */
+    if (want != g_panel.visible) { g_panel.visible = want; return 1; }
+    return 0;
+}
+
 void panel_init(int persona, int height) {
     g_panel.height = height;
     g_panel.visible = 1;
+    g_panel.auto_hide = 0;
     g_panel.persona = persona;
     g_panel.persona_color = persona_accent(persona);
     g_panel.pill_count = 0;
@@ -290,8 +313,12 @@ void panel_draw(void) {
     int pw = g_panel.screen_w;
     int ph = g_panel.height;
 
-    /* ── Panel background ── */
-    fb_rect(0, 0, pw, ph, COLOR_SURFACE_HIGH);
+    /* ── Panel background (D.6 vibrancy) ── */
+    /* Translucent fill so the wallpaper/windows beneath bleed through subtly
+     * (frosted panel), instead of a flat opaque bar. Panel paints after the
+     * desktop + windows in the composite order, so the blend picks up whatever
+     * is under it. ~90% surface over ~10% content. */
+    fb_rect_blend(0, 0, pw, ph, 0xE6161B22u);
 
     /* ── Bottom separator ── */
     fb_hline(0, ph - 1, pw, COLOR_SEPARATOR);
@@ -520,3 +547,34 @@ void panel_overlay_draw_camera_indicator(void)
     /* Draw a 4-px red dot just to the left of the health dot. */
     fb_circle_filled(rz_x + 6, ry_center, 4, COLOR_DANGER);
 }
+
+#ifdef ZEOS_DIAG_D6
+/* D.6 selftest: panel auto-hide. Enable -> panel hides; pointer at the top edge
+ * (y<=REVEAL) reveals it; pointer below the bar hides it again; disable -> always
+ * visible. (Vibrancy = translucent bg, observed via screendump; per-pill right-
+ * click already verified id=416.) */
+void panel_d6_selftest(void)
+{
+    int saved_ah = g_panel.auto_hide, saved_vis = g_panel.visible;
+
+    panel_set_auto_hide(1);
+    int hid_on_enable = (g_panel.visible == 0);
+    int revealed = 0, rehid = 0;
+    (void)panel_pointer_y(0);                 int r1 = g_panel.visible;   /* top edge -> reveal */
+    revealed = (r1 == 1);
+    (void)panel_pointer_y(g_panel.height + 50); int r2 = g_panel.visible; /* below bar -> hide */
+    rehid = (r2 == 0);
+    panel_set_auto_hide(0);
+    int shown_on_disable = (g_panel.visible == 1);
+
+    /* restore */
+    g_panel.auto_hide = saved_ah; g_panel.visible = saved_vis;
+
+    int pass = hid_on_enable && revealed && rehid && shown_on_disable;
+    kputs("[D6] hide_on_enable="); kput_dec((uint64_t)hid_on_enable);
+    kputs(" reveal_top="); kput_dec((uint64_t)revealed);
+    kputs(" hide_below="); kput_dec((uint64_t)rehid);
+    kputs(" show_on_disable="); kput_dec((uint64_t)shown_on_disable);
+    kputs(pass ? " -> PASS (vibrancy: screendump; per-pill: id=416)\n" : " -> FAIL\n");
+}
+#endif

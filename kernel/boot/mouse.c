@@ -170,6 +170,13 @@ static void mouse_ui_dispatch_up(int x, int y, int button) {
 }
 
 static void mouse_ui_dispatch_move(int x, int y) {
+    /* D.6: feed pointer Y to the panel for auto-hide reveal/hide (no-op unless
+     * auto_hide is on). Recomposite when visibility flips. */
+    {
+        extern int  panel_pointer_y(int y);
+        extern void compositor_dirty_all(void);
+        if (panel_pointer_y(y)) compositor_dirty_all();
+    }
     extern int workspaces_overview_active(void);
     extern int workspaces_overview_mouse_move(int x, int y);
     if (workspaces_overview_active()) {

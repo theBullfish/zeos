@@ -45,6 +45,7 @@ typedef struct {
 typedef struct {
     int              height;         /* From density setting */
     int              visible;
+    int              auto_hide;      /* D.6: 1 = hide unless pointer at top edge */
 
     /* Left zone */
     int              persona;        /* 0=zeros, 1=derez, 2=full */
@@ -84,6 +85,15 @@ void panel_set_persona(int persona);
 
 /* Current panel height */
 int  panel_get_height(void);
+
+/* D.6 auto-hide: enable/disable. When enabled the panel hides until the pointer
+ * reaches the top screen edge. */
+void panel_set_auto_hide(int on);
+int  panel_get_auto_hide(void);
+
+/* D.6: feed pointer Y so auto-hide can reveal (y at top edge) / hide. Returns 1
+ * if visibility changed (caller should recomposite). No-op unless auto_hide. */
+int  panel_pointer_y(int y);
 
 /* Right-click on the panel — opens Settings / About Zeos menu. */
 int  panel_right_click(int x, int y);
