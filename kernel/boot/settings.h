@@ -44,6 +44,11 @@ typedef struct {
 /* Open the settings window (creates a WM chain surface) */
 void settings_open(void);
 
+/* J.4: open Settings on a specific page (SETTINGS_PAGE_*). */
+void settings_open_page(int page);
+int  settings_current_page(void);
+int  settings_is_open(void);
+
 /* Close (detach) the settings surface */
 void settings_close(void);
 

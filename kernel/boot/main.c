@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_J4
+        /* J.4 selftest: Settings-for-this opens Settings on the element page. */
+        { extern void settings_j4_selftest(void); settings_j4_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_L6
         /* L.6 selftest: spring scroll physics (momentum + rubber-band). */
         { extern void anim_l6_selftest(void); anim_l6_selftest(); }

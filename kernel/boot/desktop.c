@@ -41,8 +41,11 @@ static int            g_wp_from_vault = 0;  /* 1 = decoded from a VAULT read */
 
 /* ── UI primitive wiring ── */
 static void rc_new_folder(void *ctx) { (void)ctx; kputs("DESK: new folder\n"); }
-static void rc_settings(void *ctx)   { (void)ctx; kputs("DESK: settings\n"); }
-static void rc_wallpaper(void *ctx)  { (void)ctx; kputs("DESK: wallpaper\n"); }
+/* J.4: element-scoped settings — right-clicking the desktop opens Settings
+ * jumped to the page for that element (wallpaper/display lives on DISPLAY). */
+static void rc_settings(void *ctx)   { (void)ctx; extern void settings_open(void); settings_open(); }
+static void rc_wallpaper(void *ctx)  { (void)ctx; extern void settings_open_page(int);
+                                       settings_open_page(0 /* SETTINGS_PAGE_DISPLAY */); }
 
 /* "Open in Image Viewer" path target. Set when a right-click lands on an
  * icon whose name has a .png suffix — the menu item only renders in that

@@ -671,6 +671,18 @@ void settings_open(void)
     wm_focus_surface(g_settings.surface_id);
 }
 
+/* J.4: open Settings jumped to a specific page ("Settings for this <element>"
+ * routes here with the element's relevant page). */
+void settings_open_page(int page)
+{
+    if (page < 0 || page >= SETTINGS_PAGE_COUNT) page = SETTINGS_PAGE_DISPLAY;
+    settings_open();
+    g_settings.page = page;
+    g_settings.selected_item = 0;
+    g_settings.scroll_y = 0;
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+}
+
 void settings_close(void)
 {
     if (!g_open) return;
@@ -746,6 +758,26 @@ void settings_j1_selftest(void)
     kputs("[J1] vault round-trip mouse_speed="); kput_dec((uint64_t)ms_ok);
     kputs(" key_repeat="); kput_dec((uint64_t)kr_ok);
     kputs(" wallpaper="); kput_dec((uint64_t)wp_ok);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
+int settings_current_page(void) { return g_settings.page; }
+int settings_is_open(void) { return g_open; }
+
+#ifdef ZEOS_DIAG_J4
+void settings_j4_selftest(void)
+{
+    /* "Settings for this…" opens Settings jumped to the element's page. */
+    settings_close();
+    settings_open_page(SETTINGS_PAGE_INPUT);
+    int open_input = settings_is_open() && (settings_current_page() == SETTINGS_PAGE_INPUT);
+    settings_open_page(SETTINGS_PAGE_ACCESSIBILITY);   /* re-route while open */
+    int reroute = (settings_current_page() == SETTINGS_PAGE_ACCESSIBILITY);
+    settings_close();
+    int pass = open_input && reroute;
+    kputs("[J4] open_on_input="); kput_dec((uint64_t)open_input);
+    kputs(" reroute_to_a11y="); kput_dec((uint64_t)reroute);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
