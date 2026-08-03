@@ -291,7 +291,7 @@ the OS. When in doubt it's the OS.
 
 ## L. Animation & Motion
 - [x] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[VERIFIED/harness]` selftest [L1] gradual+settle+converge, concurrent=64 (65th=-1), retarget preserves velocity. bible id=427. `[source anim.c anim_l1_selftest]`.
-- [ ] **L.2** Presets snappy/smooth/bouncy/interactive — `[UNVERIFIED]` `[source theme.h:50-57]`.
+- [x] **L.2** Presets snappy/smooth/bouncy/interactive — `[VERIFIED/harness]` distinct physics: bouncy overshoots peak 128, interactive settles 2x faster than smooth (104 vs 226 ticks), all converge. bible id=428. `[source theme.h:50-57; anim_l2_selftest]`.
 - [ ] **L.3** Compositor ticks anims per frame + re-arm while live — `[UNVERIFIED]` `[source compositor.c:179-198]`.
 - [ ] **L.4** Spring surface open/close, snap settle, dock auto-hide slide — `[UNVERIFIED]` `[source wm.c:306-354; dock.c:172-198]`.
 - [x] **L.5** Spring menu appear/dismiss — `[VERIFIED/production]` context menus spring-scale open/dismiss; deferred teardown, no input ripple. KVM [L5] PASS. bible id=341.

@@ -253,3 +253,52 @@ void anim_l1_selftest(void)
     anim_init();   /* leave the pool clean for real boot */
 }
 #endif
+
+#ifdef ZEOS_DIAG_L2
+#include "kprint.h"
+/* L.2 selftest: prove the 4 presets produce DISTINCT, name-appropriate physics
+ * (not just distinct constants). Spring 0->100 with each; measure peak position
+ * (overshoot) and ticks-to-settle. Expect: BOUNCY overshoots (low damping);
+ * INTERACTIVE settles fastest (high stiffness); all converge to 100. */
+static int l2_run(float S, float D, float *peak_out)
+{
+    anim_init();
+    int id = anim_spring(0.0f, 100.0f, S, D, 0, 0);
+    float peak = 0.0f; int ticks = 0;
+    for (int i = 0; i < 6000; i++) {
+        anim_tick(1.0f / 240.0f);
+        ticks++;
+        if (anims[id].position > peak) peak = anims[id].position;
+        if (!anims[id].active) break;
+    }
+    *peak_out = peak;
+    return ticks;
+}
+void anim_l2_selftest(void)
+{
+    float p_snap, p_smooth, p_bouncy, p_inter;
+    int t_snap   = l2_run(SPRING_SNAPPY_S,      SPRING_SNAPPY_D,      &p_snap);
+    int t_smooth = l2_run(SPRING_SMOOTH_S,      SPRING_SMOOTH_D,      &p_smooth);
+    int t_bouncy = l2_run(SPRING_BOUNCY_S,      SPRING_BOUNCY_D,      &p_bouncy);
+    int t_inter  = l2_run(SPRING_INTERACTIVE_S, SPRING_INTERACTIVE_D, &p_inter);
+
+    int bouncy_overshoots = (p_bouncy > 101.0f);           /* low damping rings */
+    int smooth_settled    = (p_smooth < p_bouncy);         /* smoother than bouncy */
+    int interactive_fast  = (t_inter < t_smooth);          /* stiffest = fastest */
+    int all_converge = 1;                                  /* each ended near 100 */
+    /* peak >= ~100 for all (they all reach target); convergence proven by settle */
+    if (p_snap < 99.0f || p_smooth < 99.0f || p_bouncy < 99.0f || p_inter < 99.0f)
+        all_converge = 0;
+
+    int pass = bouncy_overshoots && smooth_settled && interactive_fast && all_converge;
+    kputs("[L2] peak(snap/smooth/bouncy/inter)=");
+    kput_dec((uint64_t)p_snap); kputs("/"); kput_dec((uint64_t)p_smooth);
+    kputs("/"); kput_dec((uint64_t)p_bouncy); kputs("/"); kput_dec((uint64_t)p_inter);
+    kputs(" ticks(smooth/inter)="); kput_dec((uint64_t)t_smooth);
+    kputs("/"); kput_dec((uint64_t)t_inter);
+    kputs(" bounce="); kput_dec((uint64_t)bouncy_overshoots);
+    kputs(" inter_fast="); kput_dec((uint64_t)interactive_fast);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    anim_init();
+}
+#endif

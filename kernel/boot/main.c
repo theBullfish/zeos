@@ -1127,6 +1127,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void anim_l1_selftest(void); anim_l1_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_L2
+        /* L.2 selftest: spring presets produce distinct name-appropriate physics. */
+        { extern void anim_l2_selftest(void); anim_l2_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_E3
         /* E.3 selftest: cursor click feedback (scale pulse / ripple / burst). */
         { extern void cursor_e3_selftest(void); cursor_e3_selftest(); }
