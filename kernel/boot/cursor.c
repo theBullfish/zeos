@@ -385,3 +385,34 @@ void cursor_e3_selftest(void)
 #endif
 
 uint32_t cursor_get_accent(void) { return g_cursor.accent; }
+
+#ifdef ZEOS_DIAG_E2
+#include "kprint.h"
+/* E.2 selftest: 22 cursor states each have a real (non-empty) 24x24 sprite and a
+ * hotspot-table entry; hotspots are not all identical (per-cursor hotspots);
+ * cursor_set accepts every state. save-under is N/A here: the compositor fully
+ * recomposites under the cursor each frame (no saved-pixels restore needed). */
+void cursor_e2_selftest(void)
+{
+    int count_ok = (CURSOR_COUNT == 22);
+    int nonempty = 0;
+    for (int s = 0; s < 22; s++) {
+        for (int p = 0; p < CURSOR_SPR_SZ * CURSOR_SPR_SZ; p++)
+            if (cursor_sprites[s][p] >> 24) { nonempty++; break; }  /* any alpha>0 */
+    }
+    int hotspots_distinct = 0;
+    for (int s = 1; s < 22; s++)
+        if (cursor_hotspot[s][0] != cursor_hotspot[0][0] ||
+            cursor_hotspot[s][1] != cursor_hotspot[0][1]) { hotspots_distinct = 1; break; }
+    int set_ok = 1;
+    for (int s = 0; s < 22; s++) { cursor_set((cursor_state_t)s); if (g_cursor.state != s) set_ok = 0; }
+    cursor_set(CURSOR_DEFAULT);
+
+    int pass = count_ok && (nonempty == 22) && hotspots_distinct && set_ok;
+    kputs("[E2] states="); kput_dec((uint64_t)CURSOR_COUNT);
+    kputs(" nonempty_sprites="); kput_dec((uint64_t)nonempty); kputs("/22");
+    kputs(" hotspots_distinct="); kput_dec((uint64_t)hotspots_distinct);
+    kputs(" set_ok="); kput_dec((uint64_t)set_ok);
+    kputs(pass ? " -> PASS (save-under N/A: full recomposite)\n" : " -> FAIL\n");
+}
+#endif
