@@ -34,6 +34,21 @@ typedef enum {
     SCHEME_AUTO,
 } color_scheme_t;
 
+/* ── M.8: color-vision-deficiency simulation ── */
+typedef enum {
+    CVD_NONE,
+    CVD_PROTANOPIA,     /* red-blind */
+    CVD_DEUTERANOPIA,   /* green-blind */
+    CVD_TRITANOPIA,     /* blue-blind */
+    CVD_COUNT,
+} cvd_mode_t;
+
+/* Simulate how `color` (0xAARRGGBB) appears under a CVD mode (Viénot matrices).
+ * CVD_NONE is identity. Alpha preserved. */
+uint32_t cvd_transform(uint32_t color, cvd_mode_t mode);
+void       access_set_cvd_mode(cvd_mode_t mode);
+cvd_mode_t access_get_cvd_mode(void);
+
 /* ── Master accessibility config ── */
 typedef struct {
     sensory_mode_t  sensory;
@@ -58,6 +73,9 @@ typedef struct {
 
     /* Touch */
     int             min_touch_target;   /* Minimum interactive element size (px) */
+
+    /* M.8: CVD simulation mode (cvd_mode_t; 0 = none) */
+    int             cvd_mode;
 } access_config_t;
 
 /* ── API ── */

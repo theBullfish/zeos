@@ -12,14 +12,16 @@ def ws_echo():
     srv=socket.socket(socket.AF_INET,socket.SOCK_STREAM); srv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
     srv.bind(("0.0.0.0",WSPORT)); srv.listen(2)
     while True:
-        try: c,_=srv.accept()
+        try: c,addr=srv.accept()
         except OSError: break
+        print("ECHO: accepted from",addr,flush=True)
         try:
             data=b""
             while b"\r\n\r\n" not in data:
                 d=c.recv(1024)
                 if not d: raise IOError()
                 data+=d
+            print("ECHO: got request (%d bytes):"%len(data),data[:120],flush=True)
             key=None
             for line in data.split(b"\r\n"):
                 if line.lower().startswith(b"sec-websocket-key:"): key=line.split(b":",1)[1].strip()
@@ -38,7 +40,8 @@ def ws_echo():
             if len(pl)<126: out.append(len(pl))
             else: out+=bytes([126])+struct.pack(">H",len(pl))
             out+=pl; c.sendall(out)
-        except Exception: pass
+            print("ECHO: replied 101 + echoed %d-byte frame"%len(pl),flush=True)
+        except Exception as e: print("ECHO: err",repr(e),flush=True)
         finally:
             try: c.close()
             except: pass

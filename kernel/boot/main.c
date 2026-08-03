@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_M8
+        /* M.8 selftest: CVD color transform. */
+        { extern void access_m8_selftest(void); access_m8_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_B8
         /* B.8 selftest: material vibrancy ladder. */
         { extern void fb_b8_selftest(void); fb_b8_selftest(); }

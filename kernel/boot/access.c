@@ -49,6 +49,7 @@ static void access_set_defaults(void)
     g_access.color_temp     = 0x00000000;  /* No tint */
 
     g_access.min_touch_target = 44;
+    g_access.cvd_mode = CVD_NONE;
 }
 
 /* ── Clamp helpers ── */
@@ -432,3 +433,69 @@ int access_min_touch_target(void)
 {
     return g_access.min_touch_target;
 }
+
+/* ── M.8: CVD (color vision deficiency) simulation ── */
+/* Viénot 1999 simulation matrices, fixed-point x1000. Rows R/G/B, cols R/G/B. */
+static const int CVD_MAT[CVD_COUNT][9] = {
+    /* NONE (identity) */        { 1000,0,0,  0,1000,0,  0,0,1000 },
+    /* PROTANOPIA */             {  567,433,0, 558,442,0, 0,242,758 },
+    /* DEUTERANOPIA */           {  625,375,0, 700,300,0, 0,300,700 },
+    /* TRITANOPIA */             {  950,50,0,  0,433,567, 0,475,525 },
+};
+
+uint32_t cvd_transform(uint32_t color, cvd_mode_t mode)
+{
+    if (mode <= CVD_NONE || mode >= CVD_COUNT) return color;
+    int r = (int)((color >> 16) & 0xFF);
+    int g = (int)((color >> 8)  & 0xFF);
+    int b = (int)( color        & 0xFF);
+    const int *m = CVD_MAT[mode];
+    int rr = (m[0]*r + m[1]*g + m[2]*b) / 1000;
+    int gg = (m[3]*r + m[4]*g + m[5]*b) / 1000;
+    int bb = (m[6]*r + m[7]*g + m[8]*b) / 1000;
+    if (rr<0) rr=0; if (rr>255) rr=255;
+    if (gg<0) gg=0; if (gg>255) gg=255;
+    if (bb<0) bb=0; if (bb>255) bb=255;
+    return (color & 0xFF000000u) | ((uint32_t)rr<<16) | ((uint32_t)gg<<8) | (uint32_t)bb;
+}
+
+void access_set_cvd_mode(cvd_mode_t mode)
+{
+    if (mode < 0 || mode >= CVD_COUNT) return;
+    g_access.cvd_mode = (int)mode;
+    compositor_dirty_all();
+    access_save();
+}
+
+cvd_mode_t access_get_cvd_mode(void) { return (cvd_mode_t)g_access.cvd_mode; }
+
+#ifdef ZEOS_DIAG_M8
+#include "kprint.h"
+/* M.8 selftest: CVD transform. NONE is identity; DEUTERANOPIA collapses the
+ * red/green axis so pure red and pure green map to MORE-similar colors than they
+ * started (the confusion CVD simulates); output stays in 0..255; alpha preserved. */
+static int chan_dist(uint32_t a, uint32_t b) {
+    int dr=((a>>16)&0xFF)-((b>>16)&0xFF); if(dr<0)dr=-dr;
+    int dg=((a>>8)&0xFF)-((b>>8)&0xFF);   if(dg<0)dg=-dg;
+    int db=(a&0xFF)-(b&0xFF);             if(db<0)db=-db;
+    return dr+dg+db;
+}
+void access_m8_selftest(void)
+{
+    uint32_t red = 0xFFFF0000u, grn = 0xFF00FF00u;
+    int identity = (cvd_transform(red, CVD_NONE) == red) && (cvd_transform(grn, CVD_NONE) == grn);
+    uint32_t rd = cvd_transform(red, CVD_DEUTERANOPIA);
+    uint32_t gd = cvd_transform(grn, CVD_DEUTERANOPIA);
+    int orig_dist = chan_dist(red, grn);
+    int sim_dist  = chan_dist(rd, gd);
+    int confuses  = (sim_dist < orig_dist);            /* red/green pulled together */
+    int alpha_ok  = ((rd>>24)==0xFF) && ((gd>>24)==0xFF);
+    int changed   = (rd != red) && (gd != grn);
+    int pass = identity && confuses && alpha_ok && changed;
+    kputs("[M8] identity="); kput_dec((uint64_t)identity);
+    kputs(" red_deut="); kput_hex(rd); kputs(" grn_deut="); kput_hex(gd);
+    kputs(" dist(orig/sim)="); kput_dec((uint64_t)orig_dist); kputs("/"); kput_dec((uint64_t)sim_dist);
+    kputs(" confuses="); kput_dec((uint64_t)confuses);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

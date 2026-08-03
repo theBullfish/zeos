@@ -305,7 +305,7 @@ the OS. When in doubt it's the OS.
 - [x] **M.5** 44px min touch targets — `[VERIFIED/production]` wm hit_control catch-zone expanded toward min_touch_target (nearest-center + full-titlebar); KVM [M5] glyph/hslop/vslop hit, beyond/offbar miss, PASS. bible id=301.
 - [x] **M.6** Letter/word/line spacing — `[DONE 2026-07-23]` font_draw honors letter_spacing (per-glyph advance) + word_spacing (on spaces). Commit 6d3de02. (line_spacing: no single-line consumer yet.)
 - [x] **M.7** Focus Mode (suppress non-critical notifications) — `[VERIFIED/harness]` notify_focus_suppresses: off suppresses nothing, on suppresses INFO/WARN/ERROR, CRITICAL always passes. bible id=434. `[source notify.c notify_focus_suppresses]`.
-- [ ] **M.8** CVD simulation mode — `[TODO]`.
+- [x] **M.8** CVD simulation mode — `[VERIFIED/harness]` cvd_transform (Vienot matrices): deuteranopia collapses red-green dist 510->242, NONE identity, alpha preserved. bible id=447. NOTE: transform+mode plumbed; full-screen live apply is opt-in (perf). `[source access.c cvd_transform]`.
 
 ## N. First-Boot Experience
 - [x] **N.1** 5-screen first-run flow (welcome/persona/controls/appearance/done) — `[VERIFIED/production]` firstboot_run() wired canonical; KVM drove all 5 screens, applied persona=0 controls=1 theme=0 density=2 (all != defaults); idempotent 2nd boot skip. Found+fixed kbd-IRQ-vs-poll bug. bible id=304.
