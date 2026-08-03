@@ -278,6 +278,9 @@ chain_surface_t *wm_get_surface(int id);
 int  wm_surface_at(int x, int y);
 /* D.11: deliver a dropped payload (desktop icon name) to a surface's chain. */
 int  wm_feed_surface(int id, const char *payload);
+
+/* C.13: dock a surface beside a same-chain neighbor (magnetic adjacency). */
+int  wm_snap_adjacent(int id);
 chain_surface_t *wm_get_surface_by_index(int index);  /* Index into surface array */
 int wm_surface_count(void);
 int wm_visible_count(void);    /* On current workspace */

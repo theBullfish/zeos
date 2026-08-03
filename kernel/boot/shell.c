@@ -3134,21 +3134,34 @@ static void cmd_ws(const char *args)
     }
     uint32_t mlen = 0; while (msg[mlen]) mlen++;
 
-    /* Split an optional :port off the host token. */
+    /* Strip a ws:// or wss:// scheme BEFORE the :port split (wss:// contains a
+     * ':' that would otherwise be mis-parsed as a port). */
+    int secure = 0;
+    char *hp = host;
+    if (host[0]=='w'&&host[1]=='s'&&host[2]=='s'&&host[3]==':'&&host[4]=='/'&&host[5]=='/') {
+        secure = 1; hp = host + 6;
+    } else if (host[0]=='w'&&host[1]=='s'&&host[2]==':'&&host[3]=='/'&&host[4]=='/') {
+        hp = host + 5;
+    }
+
+    /* Split an optional :port off the (scheme-stripped) host token. */
     uint16_t port = 0;
-    for (int k = 0; host[k]; k++) {
-        if (host[k] == ':') {
-            host[k] = 0;
+    for (int k = 0; hp[k]; k++) {
+        if (hp[k] == ':') {
+            hp[k] = 0;
             int p = 0;
-            for (int m = k + 1; host[m]; m++) if (host[m] >= '0' && host[m] <= '9') p = p * 10 + (host[m] - '0');
+            for (int m = k + 1; hp[m]; m++) if (hp[m] >= '0' && hp[m] <= '9') p = p * 10 + (hp[m] - '0');
             port = (uint16_t)p;
             break;
         }
     }
 
-    kputs("  WS: connecting ws://"); kputs(host); kputs(path); kputc('\n');
+    kputs(secure ? "  WSS: connecting wss://" : "  WS: connecting ws://");
+    kputs(hp); kputs(path); kputc('\n');
     static ws_conn_t ws;
-    if (ws_connect(&ws, host, path, port) != 0) { kputs("  WS: connect failed\n"); return; }
+    int crc = secure ? ws_connect_secure(&ws, hp, path, port)
+                     : ws_connect(&ws, hp, path, port);
+    if (crc != 0) { kputs("  WS: connect failed\n"); return; }
     kputs("  WS: sending \""); kputs(msg); kputs("\"\n");
     if (ws_send_text(&ws, msg, mlen) != 0) { kputs("  WS: send failed\n"); ws_close(&ws); return; }
     char rbuf[512]; int op = 0;

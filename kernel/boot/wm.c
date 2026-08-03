@@ -1444,6 +1444,32 @@ int wm_feed_surface(int id, const char *payload)
     return 1;
 }
 
+/* C.13: magnetic adjacency. Dock `id` immediately to the right of the nearest
+ * OTHER visible surface that shares its chain_id (same chain -> side-by-side),
+ * matching its y and height. Returns the neighbor id, or -1 if none. */
+int wm_snap_adjacent(int id)
+{
+    chain_surface_t *me = find_surface(id);
+    if (!me || me->chain_id < 0) return -1;
+    int n = wm_surface_count();
+    chain_surface_t *nb = 0;
+    for (int i = 0; i < n; i++) {
+        chain_surface_t *o = wm_get_surface_by_index(i);
+        if (!o || o->id == id || !o->visible) continue;
+        if (o->chain_id == me->chain_id) { nb = o; break; }
+    }
+    if (!nb) return -1;
+    me->x = nb->x + nb->w;
+    me->y = nb->y;
+    me->h = nb->h;
+    /* keep on-screen: if it would run off the right edge, dock to the LEFT. */
+    if (me->x + me->w > g_wm.screen_w) me->x = nb->x - me->w;
+    if (me->x < 0) me->x = 0;
+    me->anim_x = (float)me->x; me->anim_y = (float)me->y; me->anim_h = (float)me->h;
+    return nb->id;
+}
+
+
 
 chain_surface_t *wm_get_surface_by_index(int index) {
     if (index < 0 || index >= g_wm.surface_count) return 0;
@@ -1492,5 +1518,33 @@ void wm_l4_selftest(void)
     kputs("[L4] open[grad/full]="); kput_dec((uint64_t)opening); kput_dec((uint64_t)opened);
     kputs(" close[flag/anim]="); kput_dec((uint64_t)closing_set); kput_dec((uint64_t)closing);
     kputs(pass ? " -> PASS (dock-slide: see D.12)\n" : " -> FAIL\n");
+}
+#endif
+
+#ifdef ZEOS_DIAG_C13
+/* C.13 selftest: two surfaces sharing a chain_id dock side-by-side; a surface
+ * with a unique chain finds no neighbor. */
+void wm_c13_selftest(void)
+{
+    int a = wm_create_surface("C13a", 77, 100, 120, 300, 200, 0);
+    int b = wm_create_surface("C13b", 77, 900, 400, 250, 180, 0);  /* same chain 77 */
+    int c = wm_create_surface("C13c", 88, 500, 600, 200, 150, 0);  /* unique chain 88 */
+    wm_force_visible(a); wm_force_visible(b); wm_force_visible(c);
+
+    chain_surface_t *sa = wm_get_surface(a);
+    int nb = wm_snap_adjacent(b);
+    chain_surface_t *sb = wm_get_surface(b);
+    int adjacent = sa && sb && (sb->x == sa->x + sa->w) && (sb->y == sa->y) && (sb->h == sa->h);
+    int neighbor_ok = (nb == a);
+    int no_neighbor = (wm_snap_adjacent(c) == -1);
+
+    int pass = adjacent && neighbor_ok && no_neighbor;
+    kputs("[C13] a.x="); kput_dec((uint64_t)(sa?sa->x:-1));
+    kputs(" a.w="); kput_dec((uint64_t)(sa?sa->w:-1));
+    kputs(" b.x="); kput_dec((uint64_t)(sb?sb->x:-1));
+    kputs(" adjacent="); kput_dec((uint64_t)adjacent);
+    kputs(" neighbor="); kput_dec((uint64_t)neighbor_ok);
+    kputs(" no_neighbor_for_unique="); kput_dec((uint64_t)no_neighbor);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif

@@ -204,7 +204,7 @@ the OS. When in doubt it's the OS.
 - [ ] **C.10** Sheets (modal, slide from titlebar) — `[TODO]`.
 - [ ] **C.11** Popovers (non-modal, attached) — `[TODO]`.
 - [ ] **C.12** Tabs / chain multiplexing — `[TODO]`.
-- [ ] **C.13** Magnetic adjacency (same chain → side-by-side) — `[TODO]`.
+- [x] **C.13** Magnetic adjacency (same chain → side-by-side) — `[VERIFIED/harness]` wm_snap_adjacent docks same-chain_id surfaces side-by-side (b.x=a.x+a.w, matched y/h), unique chain -> no neighbor. bible id=451. `[source wm.c wm_snap_adjacent]`.
 - [ ] **C.14** Parent/child chain stacking — `[TODO]`.
 - [ ] **C.15** Custom button placement (drag) — `[2.0]`.
 
