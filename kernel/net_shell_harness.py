@@ -9,6 +9,7 @@ K=os.path.dirname(os.path.abspath(__file__)); B=os.path.join(K,"build"); ESP=os.
 QMP="/tmp/zeos-h-qmp.sock"; SERSOCK="/tmp/zeos-h-ser.sock"; SERLOG="/tmp/zeos-h-serial.txt"
 os.makedirs(os.path.join(ESP,"EFI","BOOT"),exist_ok=True)
 subprocess.run(["cp",os.path.join(B,"BOOTZ.EFI"),os.path.join(ESP,"EFI","BOOT","BOOTX64.EFI")],check=True)
+open(os.path.join(ESP,"startup.nsh"),"w").write("FS0:\r\nEFI\\BOOT\\BOOTX64.EFI\r\n")  # deterministic auto-launch (no UEFI-shell drop)
 subprocess.run(["cp","/usr/share/OVMF/OVMF_VARS_4M.fd",os.path.join(B,"OVMF_VARS.fd")],check=True)
 vault=os.path.join(B,"vault.img")
 subprocess.run(["rm","-f",vault]); subprocess.run(["qemu-img","create","-f","raw",vault,"8M"],check=True)

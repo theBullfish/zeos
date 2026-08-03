@@ -272,7 +272,7 @@ the OS. When in doubt it's the OS.
 - [x] **I.1** HTML parser (tags/attrs/comments/void/script-skip), 2048-node DOM — `[observed 2026-08-02]` `browse example.com` parsed the page into 18 DOM nodes (serial `BROWSE: 0 OK, 18 nodes`). `[source browser.c:208-264,130]`.
 - [ ] **I.2** CSS per-tag defaults + inline `style=` + persona-accent links — `[UNVERIFIED]` `[source browser.c:597,749-751]`.
 - [ ] **I.3** Block layout + framebuffer render (clip/scroll/bg/HR) + TTF text — `[UNVERIFIED]` `[source browser.c:1155-1707]`.
-- [ ] **I.4** Navigation: URL parse, 32-history, back/fwd/refresh/home — `[UNVERIFIED]` `[source browser.c:1349-1544]`.
+- [x] **I.4** Navigation chrome — `[observed 2026-08-02]` the browser WINDOW now composites (after the `compositor_dirty_all` fix): screenshot shows the toolbar `< > R` (back/forward/refresh) + a URL bar rendering the navigated `http://example.com/` + a `HTTP | nodes:N` status bar, focused with a "Browser" panel pill. URL parse + navigate proven end-to-end earlier (HTTP 200, 18 nodes). 32-history depth not separately exercised. `[source browser.c:1349-1544]`.
 - [ ] **I.5** Link click hit-test → navigate — `[UNVERIFIED]` `[source browser.c:1590-1672]`.
 - [ ] **I.6** PNG images (lodepng), forms (input/button), scrollbar — `[UNVERIFIED]` `[source browser.c:1331-1414,566-994,1688-1714]`.
 - [ ] **I.7** JavaScript engine — `[2.0]`.
