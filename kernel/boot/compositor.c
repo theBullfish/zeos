@@ -340,6 +340,7 @@ static void composite_draw(void)
          * over -> it opened but never showed. Draw it here in the composited
          * backbuffer like every other overlay. Self-gates on visibility. */
         { extern void palette_draw(void); palette_draw(); }
+        { extern void sigviz_overlay_draw(void); sigviz_overlay_draw(); }  /* K.1 chain graph */
         dirty_modal_draw();
     }
     theme_apply_night_shift();

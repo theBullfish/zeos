@@ -582,3 +582,29 @@ const sigviz_state_t *sigviz_get_state(void)
 {
     return &viz;
 }
+
+/* ── K.1: chain-graph overlay (wires ACTION_CHAIN_GRAPH, previously a stub) ──
+ * A full-screen dimmed panel that renders the live chain graph via sigviz_draw
+ * over all chains (-1). Toggled by Super+G; Esc/Super+G closes. sigviz_init on
+ * open so zoom/pan are sane (it was never called at boot). */
+static int g_sigviz_overlay = 0;
+
+void sigviz_overlay_toggle(void)
+{
+    g_sigviz_overlay = !g_sigviz_overlay;
+    if (g_sigviz_overlay) sigviz_init();
+}
+
+int sigviz_overlay_visible(void) { return g_sigviz_overlay; }
+
+void sigviz_overlay_close(void) { g_sigviz_overlay = 0; }
+
+void sigviz_overlay_draw(void)
+{
+    if (!g_sigviz_overlay) return;
+    int sw = (int)fb_width();
+    int sh = (int)fb_height();
+    int m  = 80;
+    fb_rect_blend(0, 0, sw, sh, 0xC00D1117u);          /* dim scrim */
+    sigviz_draw(-1, m, m, sw - 2 * m, sh - 2 * m);     /* all chains */
+}

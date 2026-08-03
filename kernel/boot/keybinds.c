@@ -439,7 +439,11 @@ void keybinds_execute(action_id_t action)
         break;
 
     case ACTION_CHAIN_GRAPH:
-        /* TODO: open chain graph visualization */
+        /* K.1: toggle the chain-graph (sigviz) overlay. */
+        { extern void sigviz_overlay_toggle(void);
+          extern void compositor_dirty_all(void);
+          sigviz_overlay_toggle();
+          compositor_dirty_all(); }
         break;
 
     case ACTION_NONE:

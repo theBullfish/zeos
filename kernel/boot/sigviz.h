@@ -118,6 +118,12 @@ void sigviz_notify_resolved(int chain_id);
 /* Advance frame counter (call once per frame, before draw) */
 void sigviz_tick(void);
 
+/* K.1: chain-graph overlay (Super+G). */
+void sigviz_overlay_toggle(void);
+int  sigviz_overlay_visible(void);
+void sigviz_overlay_close(void);
+void sigviz_overlay_draw(void);
+
 /* ── Read-only access ───────────────────────────────────────────── */
 
 const sigviz_state_t *sigviz_get_state(void);

@@ -215,6 +215,8 @@ static void process_scancode(uint8_t scancode, int extended)
 
         /* Esc (scancode 0x01) closes overlays before anything else. */
         if (scancode == 0x01) {
+            { extern int sigviz_overlay_visible(void); extern void sigviz_overlay_close(void);
+              if (sigviz_overlay_visible()) { sigviz_overlay_close(); return; } }
             if (palette_is_visible())  { palette_hide();       return; }
             if (dirty_modal_active())  { dirty_modal_key(27);  return; }
             if (calculator_active())   { calculator_key(27);   return; }
