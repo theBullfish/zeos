@@ -19,6 +19,7 @@
  */
 
 #include "persona_anim.h"
+#include "kprint.h"
 #include "anim.h"
 #include "theme.h"
 #include "persona.h"
@@ -206,3 +207,35 @@ void persona_anim_tick(void)
      */
     (void)0;
 }
+
+#ifdef ZEOS_DIAG_G3
+/* G.3 selftest: persona crossfade is a real per-channel spring color lerp, not a
+ * hard swap. Transition ZEROS->FULL: mid-flight accent differs from BOTH
+ * endpoints (proves lerp); settles exactly on FULL's accent; transitioning
+ * flag goes 1 then 0. */
+void persona_g3_selftest(void)
+{
+    extern void anim_tick(float);
+    uint32_t src = accent_table[PERSONA_ZEROS];
+    uint32_t dst = accent_table[PERSONA_FULL];
+
+    persona_transition(PERSONA_ZEROS, PERSONA_FULL);
+    int started = persona_transitioning();
+    for (int i = 0; i < 8; i++) anim_tick(1.0f / 240.0f);
+    uint32_t mid = persona_current_accent();
+    int is_lerp = (mid != src) && (mid != dst);          /* genuine intermediate */
+    for (int i = 0; i < 2000; i++) anim_tick(1.0f / 240.0f);
+    int settled = (persona_transitioning() == 0);
+    uint32_t fin = persona_current_accent();
+    int converged = (fin == dst);
+
+    int pass = started && is_lerp && settled && converged;
+    kputs("[G3] src="); kput_hex(src); kputs(" mid="); kput_hex(mid);
+    kputs(" dst="); kput_hex(dst);
+    kputs(" started="); kput_dec((uint64_t)started);
+    kputs(" lerp="); kput_dec((uint64_t)is_lerp);
+    kputs(" settled="); kput_dec((uint64_t)settled);
+    kputs(" converged="); kput_dec((uint64_t)converged);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

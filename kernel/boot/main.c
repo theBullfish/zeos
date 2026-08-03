@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_G3
+        /* G.3 selftest: persona crossfade spring color lerp. */
+        { extern void persona_g3_selftest(void); persona_g3_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_L4
         /* L.4 selftest: surface open/close spring (dock-slide proven by D.12). */
         { extern void wm_l4_selftest(void); wm_l4_selftest(); }

@@ -246,7 +246,7 @@ the OS. When in doubt it's the OS.
 ## G. Persona & Theme
 - [ ] **G.1** 3 personas (Zeros/DereZ/Full) + accent/dim tokens — `[UNVERIFIED]` `[source persona.h:20-24; theme.h:112-119]`; "Zeos" persona shown in panel `[observed]`.
 - [ ] **G.2** Shell prompt + cursor colorway switch on persona — `[UNVERIFIED]` `[source shell.c:1866; cursor.c:35]`.
-- [ ] **G.3** Persona crossfade (spring color lerp) — `[UNVERIFIED]` `[source persona_anim.c:76-160]`.
+- [x] **G.3** Persona crossfade (spring color lerp) — `[VERIFIED/harness]` ZEROS->FULL mid-accent ff0ab98b strictly between src ff09bc8a/dst ff2e86ab (per-channel lerp), settles on dst. bible id=430. `[source persona_anim.c:76-160]`.
 - [ ] **G.4** Dark/light/auto + night shift — `[UNVERIFIED]` `[source theme_runtime.c:43-151]` (auto = TSC placeholder).
 - [ ] **G.5** Per-persona dock/launcher defaults — `[TODO]`.
 
