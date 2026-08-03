@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_M7
+        /* M.7 selftest: Focus Mode suppresses non-critical notifications. */
+        { extern void notify_m7_selftest(void); notify_m7_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_G4
         /* G.4 selftest: dark/light scheme switching yields distinct palettes. */
         { extern void theme_g4_selftest(void); theme_g4_selftest(); }

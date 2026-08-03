@@ -304,7 +304,7 @@ the OS. When in doubt it's the OS.
 - [x] **M.4** 3 sensory modes (Standard/Low-Stimuli/High-Contrast) — `[VERIFIED/production]` runtime sensory transform (access_apply_sensory/text_color/border/anims/stiffness) wired into panel+theme+anim; KVM: STANDARD/LOW/HIGH panel-dot rgb matches transform (sat 125/63/175). bible id=300.
 - [x] **M.5** 44px min touch targets — `[VERIFIED/production]` wm hit_control catch-zone expanded toward min_touch_target (nearest-center + full-titlebar); KVM [M5] glyph/hslop/vslop hit, beyond/offbar miss, PASS. bible id=301.
 - [x] **M.6** Letter/word/line spacing — `[DONE 2026-07-23]` font_draw honors letter_spacing (per-glyph advance) + word_spacing (on spaces). Commit 6d3de02. (line_spacing: no single-line consumer yet.)
-- [ ] **M.7** Focus Mode (suppress non-critical notifications) — `[UNVERIFIED]` `[source notify.c:176-179,808]` (has a real consumer, unlike M.1-M.6).
+- [x] **M.7** Focus Mode (suppress non-critical notifications) — `[VERIFIED/harness]` notify_focus_suppresses: off suppresses nothing, on suppresses INFO/WARN/ERROR, CRITICAL always passes. bible id=434. `[source notify.c notify_focus_suppresses]`.
 - [ ] **M.8** CVD simulation mode — `[TODO]`.
 
 ## N. First-Boot Experience

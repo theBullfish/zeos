@@ -178,6 +178,12 @@ static int focus_active(void) {
     return cfg ? cfg->focus_mode : 0;
 }
 
+/* M.7: Focus Mode suppresses non-CRITICAL notifications. Extracted so the
+ * decision is unit-testable (see notify_m7_selftest). CRITICAL always passes. */
+int notify_focus_suppresses(int level) {
+    return focus_active() && level != NOTIFY_CRITICAL;
+}
+
 static uint64_t tsc_to_sec(uint64_t tsc_delta) {
     uint64_t freq = timer_tsc_freq();
     if (freq == 0) return 0;
@@ -805,7 +811,7 @@ void notify_tick(void) {
             /* Focus Mode: suppress non-critical */
             int idx = next_unread();
             if (idx >= 0) {
-                if (focus_active() && g_notify.queue[idx].level != NOTIFY_CRITICAL) {
+                if (notify_focus_suppresses(g_notify.queue[idx].level)) {
                     /* Suppressed -- skip, try again next interval */
                     return;
                 }
@@ -1243,3 +1249,33 @@ void notify_cmd_send(const char *args) {
     kputs(notify_should_silence(lvl, source) ? "yes" : "no");
     kputs(")\n");
 }
+
+#ifdef ZEOS_DIAG_M7
+/* M.7 selftest: Focus Mode suppresses non-CRITICAL notifications and lets
+ * CRITICAL through; OFF suppresses nothing. Drives the real access_set_focus_mode
+ * and the real suppression predicate used by the notify tick. */
+void notify_m7_selftest(void)
+{
+    extern void access_set_focus_mode(int);
+    access_config_t *cfg = access_get();
+    int saved = cfg ? cfg->focus_mode : 0;
+
+    access_set_focus_mode(0);
+    int off_info = notify_focus_suppresses(NOTIFY_INFO);      /* 0 */
+    int off_crit = notify_focus_suppresses(NOTIFY_CRITICAL);  /* 0 */
+
+    access_set_focus_mode(1);
+    int on_info  = notify_focus_suppresses(NOTIFY_INFO);      /* 1 suppressed */
+    int on_warn  = notify_focus_suppresses(NOTIFY_WARNING);   /* 1 suppressed */
+    int on_err   = notify_focus_suppresses(NOTIFY_ERROR);     /* 1 suppressed */
+    int on_crit  = notify_focus_suppresses(NOTIFY_CRITICAL);  /* 0 passes */
+
+    access_set_focus_mode(saved);
+
+    int pass = !off_info && !off_crit && on_info && on_warn && on_err && !on_crit;
+    kputs("[M7] off(info/crit)="); kput_dec((uint64_t)off_info); kput_dec((uint64_t)off_crit);
+    kputs(" on(info/warn/err/crit)="); kput_dec((uint64_t)on_info); kput_dec((uint64_t)on_warn);
+    kput_dec((uint64_t)on_err); kput_dec((uint64_t)on_crit);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
