@@ -271,6 +271,7 @@ static void cmd_chat(const char *args);
 static void cmd_web(const char *args);
 static void cmd_browse(const char *args);
 static void cmd_ws(const char *args);
+static void cmd_bclick(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -781,6 +782,7 @@ static const struct shell_cmd commands[] = {
     {"web",     "web-zeos: start [port] | add-route <m> <p> <h> | stop | stats | bench", cmd_web, VIS_ALWAYS},
     {"browse",  "open a URL in the Zeos browser (browse <url>)", cmd_browse, VIS_ALWAYS},
     {"ws",      "WebSocket echo test: ws <host> [path] [message]", cmd_ws, VIS_ALWAYS},
+    {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3151,6 +3153,27 @@ static void cmd_ws(const char *args)
     else kputs("  WS: recv failed/closed\n");
     ws_close(&ws);
     kputs("  WS: closed\n");
+}
+
+/* Diagnostic: drive the browser app's link hit-test with a screen-space
+ * click (verifies I.5 hit-test -> resolve -> navigate without the compositor
+ * input path). Usage: bclick <screenX> <screenY> */
+static void cmd_bclick(const char *args)
+{
+    extern int browser_app_active(void);
+    extern void browser_app_click(int x, int y);
+    if (!browser_app_active()) {
+        kputs("  bclick: browser not open (run `browse` first)\n");
+        return;
+    }
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    int x = cam_atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    int y = cam_atoi(p);
+    kputs("  bclick: click ("); kput_dec(x); kputc(','); kput_dec(y); kputs(")\n");
+    browser_app_click(x, y);
 }
 
 static void cmd_web(const char *args)

@@ -1346,6 +1346,21 @@ static void decode_images(browser_t *b, dom_node_t *node)
         decode_images(b, c);
 }
 
+/* (Re)compute block layout + total page height for the current DOM against
+ * the current surface width. Split out so draw_content can re-lay-out when the
+ * WM finally sizes the surface (surface_w is 0 during the initial navigate). */
+void browser_layout(browser_t *b)
+{
+    if (!b->dom) return;
+    int content_w = b->surface_w - 16;   /* 8px padding each side */
+    layout_compute(b->dom, content_w, b->surface_h - 96);  /* toolbar + status */
+    b->page_height = 0;
+    for (dom_node_t *c = b->dom->first_child; c; c = c->next_sibling) {
+        int bottom = c->box.y + c->box.h + c->style.margin[2];
+        if (bottom > b->page_height) b->page_height = bottom;
+    }
+}
+
 int browser_navigate(browser_t *b, const char *url)
 {
     str_copy(b->url, url);
@@ -1371,7 +1386,53 @@ int browser_navigate(browser_t *b, const char *url)
     static char page_buf[262144];
     int status = -1;
 
-    if (use_tls) {
+    /* Built-in offline pages (test:NAME) — drive the full
+     * parse/style/layout/render path with no network so link hit-test,
+     * forms and the scrollbar can be verified deterministically. */
+    int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
+    if (builtin) {
+        const char *html;
+        if (str_eq(url, "test:page2")) {
+            html = "<html><head><title>Page Two</title></head><body>"
+                   "<h1>Page Two</h1>"
+                   "<p>You followed the link — this is the second built-in page.</p>"
+                   "<p><a href=\"test:home\">Back to the home page</a></p>"
+                   "</body></html>";
+        } else {
+            html = "<html><head><title>Zeos Test</title></head><body>"
+                   "<h1>Zeos Browser Test</h1>"
+                   "<p>Built-in offline page to verify render, links, forms and scrolling.</p>"
+                   "<p><a href=\"test:page2\">Follow this link</a> to load page two.</p>"
+                   "<form><input type=\"text\"><button>Submit</button></form>"
+                   "<hr>"
+                   "<p>Filler 01 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 02 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 03 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 04 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 05 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 06 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 07 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 08 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 09 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 10 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 11 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 12 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 13 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 14 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 15 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 16 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 17 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 18 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 19 - the quick brown fox jumps over the lazy dog.</p>"
+                   "<p>Filler 20 - end of the built-in test page.</p>"
+                   "</body></html>";
+        }
+        int L = 0;
+        while (html[L] && L < (int)sizeof(page_buf) - 1) { page_buf[L] = html[L]; L++; }
+        page_buf[L] = 0;
+        b->page_len = L;
+        status = 0;
+    } else if (use_tls) {
         int body_len = 0;
         status = https_get(hostname, path, page_buf, sizeof(page_buf), &body_len);
         b->page_len = body_len;
@@ -1415,16 +1476,11 @@ int browser_navigate(browser_t *b, const char *url)
      * picks up real image dimensions instead of the 200x80 default. */
     decode_images(b, b->dom);
 
-    /* Compute layout */
-    int content_w = b->surface_w - 16;  /* 8px padding each side */
-    layout_compute(b->dom, content_w, b->surface_h - 96);  /* toolbar + status = ~96px */
-
-    /* Compute total page height */
-    b->page_height = 0;
-    for (dom_node_t *c = b->dom->first_child; c; c = c->next_sibling) {
-        int bottom = c->box.y + c->box.h + c->style.margin[2];
-        if (bottom > b->page_height) b->page_height = bottom;
-    }
+    /* Compute layout against the current surface width. NOTE: at open time
+     * the WM hasn't sized the surface yet (surface_w == 0), so this first pass
+     * lays out at width 0 — browser_app_draw_content re-runs browser_layout()
+     * once the real width arrives, which is when links get correct box widths. */
+    browser_layout(b);
 
     b->scroll_y = 0;
 
@@ -1617,8 +1673,9 @@ static dom_node_t *hit_test_link(dom_node_t *node, int px, int py,
 
 /* Resolve a possibly-relative URL against the current page */
 static void resolve_url(browser_t *b, const char *href, char *out, int max) {
-    if (str_starts(href, "http://") || str_starts(href, "https://")) {
-        /* Absolute URL — use as-is */
+    if (str_starts(href, "http://") || str_starts(href, "https://") ||
+        str_starts(href, "test:")) {
+        /* Absolute URL (or a built-in test: page) — use as-is */
         int i = 0;
         while (href[i] && i < max - 1) { out[i] = href[i]; i++; }
         out[i] = 0;
@@ -1704,9 +1761,22 @@ void browser_draw(browser_t *b) {
 
     fb_rect(cx, cy, cw, ch, COLOR_SURFACE);
 
-    /* Render page (narrowed to leave room for scrollbar) */
+    /* Render page (narrowed to leave room for scrollbar). Clip to the content
+     * viewport (intersected with any existing compositor clip) so nested blocks
+     * — which clip only against their own box height in the recursion — cannot
+     * bleed past the window bottom onto the desktop. */
     int page_w = cw - SCROLLBAR_WIDTH - 2;  /* 2px gap before scrollbar */
+    int sx0, sy0, sx1, sy1;
+    fb_get_clip(&sx0, &sy0, &sx1, &sy1);
+    int rx0 = cx, ry0 = cy, rx1 = cx + cw, ry1 = cy + ch;
+    if (rx0 < sx0) rx0 = sx0;
+    if (ry0 < sy0) ry0 = sy0;
+    if (rx1 > sx1) rx1 = sx1;
+    if (ry1 > sy1) ry1 = sy1;
+    if (rx1 > rx0 && ry1 > ry0)
+        fb_set_clip(rx0, ry0, rx1 - rx0, ry1 - ry0);
     render_page(b->dom, cx, cy, b->scroll_y, page_w, ch);
+    fb_set_clip(sx0, sy0, sx1 - sx0, sy1 - sy0);  /* restore prior clip */
 
     /* Refresh link hover zones — cursor changes to hand over <a>. */
     browser_refresh_link_hovers(b);
@@ -1908,6 +1978,9 @@ static browser_t g_browser_app;
 static int       g_browser_surface = -1;
 static int       g_browser_active  = 0;
 
+static int g_browser_laid_w = -1;
+static int g_browser_laid_h = -1;
+
 static void browser_app_draw_content(int id, int x, int y, int w, int h)
 {
     (void)id;
@@ -1915,12 +1988,39 @@ static void browser_app_draw_content(int id, int x, int y, int w, int h)
     g_browser_app.surface_y = y;
     g_browser_app.surface_w = w;
     g_browser_app.surface_h = h;
+    /* The surface is sized by the WM only after browser_navigate() ran (with
+     * surface_w == 0), so re-lay-out the DOM the first time — and whenever the
+     * window is resized — the real content width is known. Without this, every
+     * box has width surface_w-16 == -16 and links become un-hittable. */
+    if (g_browser_app.dom && (w != g_browser_laid_w || h != g_browser_laid_h)) {
+        browser_layout(&g_browser_app);
+        g_browser_laid_w = w;
+        g_browser_laid_h = h;
+    }
     browser_draw(&g_browser_app);
     browser_draw_toolbar(&g_browser_app);
     browser_draw_status(&g_browser_app);
 }
 
 int browser_app_active(void) { return g_browser_active; }
+
+/* Route a screen-space click into the active browser app. This is the entry
+ * point the compositor input path should call for the Browser surface; the
+ * `bclick` diagnostic command uses it to verify link hit-test → navigate. */
+void browser_app_click(int x, int y)
+{
+    if (!g_browser_active) return;
+    char prev[2048];
+    int i = 0; for (; g_browser_app.url[i] && i < 2047; i++) prev[i] = g_browser_app.url[i];
+    prev[i] = 0;
+    browser_click(&g_browser_app, x, y);
+    /* If the click navigated (URL changed), force a recomposite so the new
+     * page actually shows — the compositor only redraws dirty regions at idle. */
+    if (!str_eq(prev, g_browser_app.url)) {
+        extern void compositor_dirty_all(void);
+        compositor_dirty_all();
+    }
+}
 
 /* Open (or focus) the browser app and navigate to url. Returns
  * browser_navigate()'s result (0 = ok), or -1 if the surface won't create. */
