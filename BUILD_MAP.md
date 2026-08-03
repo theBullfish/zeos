@@ -290,7 +290,7 @@ the OS. When in doubt it's the OS.
 - [ ] **K.4** Zoom / pan — `[UNVERIFIED]` `[source sigviz.c:537-568]`.
 
 ## L. Animation & Motion
-- [ ] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[UNVERIFIED]` `[source anim.c:64-139]`.
+- [x] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[VERIFIED/harness]` selftest [L1] gradual+settle+converge, concurrent=64 (65th=-1), retarget preserves velocity. bible id=427. `[source anim.c anim_l1_selftest]`.
 - [ ] **L.2** Presets snappy/smooth/bouncy/interactive — `[UNVERIFIED]` `[source theme.h:50-57]`.
 - [ ] **L.3** Compositor ticks anims per frame + re-arm while live — `[UNVERIFIED]` `[source compositor.c:179-198]`.
 - [ ] **L.4** Spring surface open/close, snap settle, dock auto-hide slide — `[UNVERIFIED]` `[source wm.c:306-354; dock.c:172-198]`.

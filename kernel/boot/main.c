@@ -1122,6 +1122,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void context_menu_l5_selftest(void); context_menu_l5_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_L1
+        /* L.1 selftest: spring engine (Euler converge, 64 concurrent, retarget). */
+        { extern void anim_l1_selftest(void); anim_l1_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_E3
         /* E.3 selftest: cursor click feedback (scale pulse / ripple / burst). */
         { extern void cursor_e3_selftest(void); cursor_e3_selftest(); }

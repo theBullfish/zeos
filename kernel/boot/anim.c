@@ -198,3 +198,58 @@ int anim_active_count(void)
 {
     return anim_count;
 }
+
+#ifdef ZEOS_DIAG_L1
+#include "kprint.h"
+static void l1_cb(int id, float v, void *ctx) { (void)id; (void)v; (void)ctx; }
+/* L.1 selftest: prove the spring engine's three claims.
+ *  - semi-implicit Euler: a spring moves GRADUALLY (0<pos<target mid-flight) and
+ *    CONVERGES to target then deactivates on settle.
+ *  - 64 concurrent: MAX_ANIMS springs coexist; the 65th allocation fails (-1).
+ *  - retarget-with-velocity: retarget mid-flight leaves velocity untouched and
+ *    the spring then converges to the NEW target. */
+void anim_l1_selftest(void)
+{
+    /* 1. Euler convergence + gradual motion */
+    anim_init();
+    int id = anim_spring(0.0f, 100.0f, SPRING_STIFFNESS, SPRING_DAMPING, l1_cb, 0);
+    for (int i = 0; i < 3; i++) anim_tick(1.0f / 240.0f);
+    float mid = anims[id].position;
+    int gradual = (mid > 0.0f && mid < 100.0f);
+    for (int i = 0; i < 4000; i++) anim_tick(1.0f / 240.0f);
+    int settled   = (anims[id].active == 0);
+    int converged = (fabsf_z(anims[id].position - 100.0f) < 0.5f);
+
+    /* 2. 64 concurrent + pool-full */
+    anim_init();
+    int spawned = 0;
+    for (int i = 0; i < MAX_ANIMS; i++)
+        if (anim_spring(0.0f, 1.0f, SPRING_STIFFNESS, SPRING_DAMPING, l1_cb, 0) >= 0)
+            spawned++;
+    int full_count = (spawned == MAX_ANIMS) && (anim_active_count() == MAX_ANIMS);
+    int overflow   = (anim_spring(0.0f, 1.0f, SPRING_STIFFNESS, SPRING_DAMPING, l1_cb, 0) == -1);
+
+    /* 3. retarget preserves velocity */
+    anim_init();
+    int r = anim_spring(0.0f, 100.0f, SPRING_STIFFNESS, SPRING_DAMPING, l1_cb, 0);
+    for (int i = 0; i < 5; i++) anim_tick(1.0f / 240.0f);
+    float vel_before = anims[r].velocity;
+    anim_retarget(r, 50.0f);
+    float vel_after = anims[r].velocity;
+    int vel_preserved = (vel_before > 0.0f) && (vel_after == vel_before);
+    for (int i = 0; i < 4000; i++) anim_tick(1.0f / 240.0f);
+    int retarget_converged = (fabsf_z(anims[r].position - 50.0f) < 0.5f);
+
+    int pass = gradual && settled && converged && full_count && overflow &&
+               vel_preserved && retarget_converged;
+    kputs("[L1] gradual="); kput_dec((uint64_t)gradual);
+    kputs(" settled=");     kput_dec((uint64_t)settled);
+    kputs(" converged=");   kput_dec((uint64_t)converged);
+    kputs(" concurrent=");  kput_dec((uint64_t)spawned);
+    kputs(" overflow=");    kput_dec((uint64_t)overflow);
+    kputs(" vel_kept=");    kput_dec((uint64_t)vel_preserved);
+    kputs(" retgt_conv=");  kput_dec((uint64_t)retarget_converged);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    anim_init();   /* leave the pool clean for real boot */
+}
+#endif
