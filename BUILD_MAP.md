@@ -241,7 +241,7 @@ the OS. When in doubt it's the OS.
 - [x] **F.4** Font fallback chain (Inter->Noto->bitmap) — `[VERIFIED/production]` wired font_init (was DEAD -> all text was 8x16 bitmap; now real Inter/JBMono TTF) + Noto subset fallback tier (92KB OFL) via font_get_glyph glyph-index fallback. KVM [F4] noto_loaded=1 gap_cp=0xad fell_back=1 PASS. bible id=405.
 - [x] **F.5** icon_render: 31-icon dispatch at 16/24/32, accent tint — `[observed 2026-08-02]` desktop icons + ~7 dock icons + titlebar buttons render as accent-tinted vector sprites at multiple sizes. `[source icon_render.c:610-658]`. Exact 31-count/bucket enumeration not dissected from the shot.
 - [x] **F.6** SVG asset library (934 svg / 16 categories; 50 cursor + ~150 themed) — `[observed]` file counts (actual 934).
-- [ ] **F.7** Build-time SVG→bitmap rasterization / sprite sheets — `[TODO]` `[source icon_render.c:9]` "Future".
+- [x] **F.7** Build-time SVG→bitmap rasterization — `[VERIFIED/real-build]` Makefile rsvg-convert -> RGBA PNG -> objcopy embed -> lodepng runtime (D.9 icons id=403, D.10 wallpaper id=417). bible id=443. NOTE: single-image raster, sprite-sheet atlasing not implemented. `[source Makefile; icon_svg.c]`.
 
 ## G. Persona & Theme
 - [x] **G.1** 3 personas (Zeros/DereZ/Full) + accent/dim tokens — `[VERIFIED/harness]` accent_table + dim_table each 3 distinct, dim!=accent per persona. bible id=431. `[source persona.h; theme.h:112-119]`.
