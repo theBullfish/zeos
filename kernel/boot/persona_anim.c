@@ -239,3 +239,52 @@ void persona_g3_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+#ifdef ZEOS_DIAG_G12
+#include "persona.h"
+/* G.1: 3 personas have distinct accent AND dim tokens (each dim != its accent).
+ * G.2: shell prompt differs per persona AND cursor colorway switches per persona. */
+void persona_g12_selftest(void)
+{
+    extern void cursor_select_colorway(int);
+    extern uint32_t cursor_get_accent(void);
+    extern int str_eq_z(const char*, const char*);  /* not used; compare inline */
+
+    /* G.1 tokens distinct */
+    int acc_distinct = (accent_table[0] != accent_table[1]) &&
+                       (accent_table[1] != accent_table[2]) &&
+                       (accent_table[0] != accent_table[2]);
+    int dim_distinct = (dim_table[0] != dim_table[1]) &&
+                       (dim_table[1] != dim_table[2]) &&
+                       (dim_table[0] != dim_table[2]);
+    int dim_ne_acc = (dim_table[0] != accent_table[0]) &&
+                     (dim_table[1] != accent_table[1]) &&
+                     (dim_table[2] != accent_table[2]);
+
+    /* G.2 prompts distinct (compare first chars: 'z'eros/'d'erez/'z'eos -> compare full) */
+    const char *p0 = persona_prompt(PERSONA_ZEROS);
+    const char *p1 = persona_prompt(PERSONA_DEREZ);
+    const char *p2 = persona_prompt(PERSONA_FULL);
+    /* inline strcmp */
+    int prompt_distinct = 1;
+    { const char *a=p0,*b=p1; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+    { const char *a=p1,*b=p2; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+    { const char *a=p0,*b=p2; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+
+    /* G.2 cursor colorway switches per persona */
+    cursor_select_colorway(PERSONA_ZEROS); uint32_t c0 = cursor_get_accent();
+    cursor_select_colorway(PERSONA_DEREZ); uint32_t c1 = cursor_get_accent();
+    cursor_select_colorway(PERSONA_FULL);  uint32_t c2 = cursor_get_accent();
+    int cursor_switches = (c0 != c1) && (c1 != c2) && (c0 != c2);
+    cursor_select_colorway(PERSONA_FULL);  /* restore default */
+
+    int pass = acc_distinct && dim_distinct && dim_ne_acc && prompt_distinct && cursor_switches;
+    kputs("[G12] acc_distinct="); kput_dec((uint64_t)acc_distinct);
+    kputs(" dim_distinct="); kput_dec((uint64_t)dim_distinct);
+    kputs(" dim!=acc="); kput_dec((uint64_t)dim_ne_acc);
+    kputs(" prompt_distinct="); kput_dec((uint64_t)prompt_distinct);
+    kputs(" cursor_sw="); kput_dec((uint64_t)cursor_switches);
+    kputs(" ("); kputs(p0); kputs("/"); kputs(p1); kputs("/"); kputs(p2); kputs(")");
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

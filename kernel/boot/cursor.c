@@ -383,3 +383,5 @@ void cursor_e3_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+uint32_t cursor_get_accent(void) { return g_cursor.accent; }

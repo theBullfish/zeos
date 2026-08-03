@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_G12
+        /* G.1+G.2: persona accent/dim tokens + prompt/cursor colorway switch. */
+        { extern void persona_g12_selftest(void); persona_g12_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_G3
         /* G.3 selftest: persona crossfade spring color lerp. */
         { extern void persona_g3_selftest(void); persona_g3_selftest(); }

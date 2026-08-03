@@ -244,8 +244,8 @@ the OS. When in doubt it's the OS.
 - [ ] **F.7** Build-time SVG→bitmap rasterization / sprite sheets — `[TODO]` `[source icon_render.c:9]` "Future".
 
 ## G. Persona & Theme
-- [ ] **G.1** 3 personas (Zeros/DereZ/Full) + accent/dim tokens — `[UNVERIFIED]` `[source persona.h:20-24; theme.h:112-119]`; "Zeos" persona shown in panel `[observed]`.
-- [ ] **G.2** Shell prompt + cursor colorway switch on persona — `[UNVERIFIED]` `[source shell.c:1866; cursor.c:35]`.
+- [x] **G.1** 3 personas (Zeros/DereZ/Full) + accent/dim tokens — `[VERIFIED/harness]` accent_table + dim_table each 3 distinct, dim!=accent per persona. bible id=431. `[source persona.h; theme.h:112-119]`.
+- [x] **G.2** Shell prompt + cursor colorway switch on persona — `[VERIFIED/harness]` prompts distinct (zeros>/derez>/zeos>); cursor_select_colorway switches accent per persona. bible id=432. `[source persona.h persona_prompt; cursor.c cursor_select_colorway]`.
 - [x] **G.3** Persona crossfade (spring color lerp) — `[VERIFIED/harness]` ZEROS->FULL mid-accent ff0ab98b strictly between src ff09bc8a/dst ff2e86ab (per-channel lerp), settles on dst. bible id=430. `[source persona_anim.c:76-160]`.
 - [ ] **G.4** Dark/light/auto + night shift — `[UNVERIFIED]` `[source theme_runtime.c:43-151]` (auto = TSC placeholder).
 - [ ] **G.5** Per-persona dock/launcher defaults — `[TODO]`.

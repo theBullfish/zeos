@@ -117,6 +117,7 @@ void cursor_set_persona(uint32_t accent, uint32_t accent_dim);
 
 /* Select cursor colorway by persona index (0=zeros, 1=derez, 2=full) */
 void cursor_select_colorway(int index);
+uint32_t cursor_get_accent(void);
 int  cursor_get_colorway(void);
 void cursor_cycle_colorway(void);
 
