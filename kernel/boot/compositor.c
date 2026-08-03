@@ -243,14 +243,25 @@ void compositor_advance(void) {
                 uint64_t real_us = (now - s_dt_selftest_start_tsc) * 1000000ULL / freq;
                 uint32_t sum_us = (uint32_t)(s_dt_selftest_sum * 1000000.0f);
                 uint32_t fallback_us = DT_SELFTEST_WINDOW * 16666u;
+                /* Compare with a small tolerance: sum_us is a sum of float
+                 * frame_dt values, so it accrues sub-us float rounding vs the
+                 * single integer TSC delta (e.g. 96037 vs 96036). Exact equality
+                 * false-alarmed. The real signal is TSC-path vs 1/60 fallback,
+                 * which differ by ~46000us here -- a few us of drift is a MATCH. */
+                uint32_t diff_us = (sum_us > (uint32_t)real_us)
+                                 ? sum_us - (uint32_t)real_us
+                                 : (uint32_t)real_us - sum_us;
+                int on_tsc_path = (diff_us <= 100u);   /* << the ~46000us fallback gap */
                 kputs("[compositor] B.4 smoke-check: summed frame_dt=");
                 kput_dec(sum_us);
                 kputs("us vs raw-TSC delta=");
                 kput_dec(real_us);
                 kputs("us (1/60 fallback would read ~");
                 kput_dec((uint64_t)fallback_us);
+                kputs("us, diff=");
+                kput_dec((uint64_t)diff_us);
                 kputs("us) -> ");
-                kputs(sum_us == (uint32_t)real_us ? "on TSC path\n" : "MISMATCH (check fallback)\n");
+                kputs(on_tsc_path ? "on TSC path\n" : "MISMATCH (check fallback)\n");
                 s_dt_selftest_done = 1;
             }
         }
