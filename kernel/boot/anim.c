@@ -302,3 +302,87 @@ void anim_l2_selftest(void)
     anim_init();
 }
 #endif
+
+/* ── L.6: spring scroll physics ──────────────────────────────────────
+ * A scroll offset with momentum + edge rubber-band. A flick imparts velocity;
+ * friction decays it; when the offset passes a content bound it springs back
+ * (rubber-band) instead of hard-clamping. Distinct from a plain spring (L.1):
+ * this is velocity-driven with bounded overscroll. */
+void scroll_phys_init(scroll_phys_t *s, float max_offset)
+{
+    s->pos = 0.0f; s->vel = 0.0f; s->max = max_offset < 0 ? 0 : max_offset;
+}
+
+void scroll_phys_flick(scroll_phys_t *s, float velocity) { s->vel = velocity; }
+
+void scroll_phys_tick(scroll_phys_t *s, float dt)
+{
+    if (dt <= 0.0f) return;
+    if (dt > 0.05f) dt = 0.05f;               /* clamp big frames */
+
+    /* Integrate momentum. */
+    s->pos += s->vel * dt;
+    s->vel *= 0.92f;                            /* friction (per-tick decay) */
+
+    /* Edge rubber-band: past a bound, pull back with a stiff spring + heavy
+     * damping so it settles at the bound without oscillating forever. */
+    float target = -1.0f;
+    if (s->pos < 0.0f)          target = 0.0f;
+    else if (s->pos > s->max)   target = s->max;
+    if (target >= 0.0f) {
+        float k = 200.0f, c = 26.0f;
+        float a = (target - s->pos) * k - s->vel * c;
+        s->vel += a * dt;
+        s->pos += s->vel * dt * 0.5f;
+    }
+
+    /* Settle: kill tiny residual motion at rest. */
+    if (fabsf_z(s->vel) < 0.5f &&
+        (s->pos >= -0.5f && s->pos <= s->max + 0.5f)) {
+        s->vel = 0.0f;
+        if (s->pos < 0.0f) s->pos = 0.0f;
+        if (s->pos > s->max) s->pos = s->max;
+    }
+}
+
+int scroll_phys_active(const scroll_phys_t *s)
+{
+    return (fabsf_z(s->vel) >= 0.5f) || s->pos < -0.5f || s->pos > s->max + 0.5f;
+}
+
+#ifdef ZEOS_DIAG_L6
+#include "kprint.h"
+/* L.6 selftest: (1) a flick moves the offset and DECELERATES (momentum+friction);
+ * (2) it settles (comes to rest); (3) an overscroll past the bound rubber-bands
+ * BACK to the bound rather than sticking past it. */
+void anim_l6_selftest(void)
+{
+    scroll_phys_t s;
+    /* momentum + friction */
+    scroll_phys_init(&s, 1000.0f);
+    scroll_phys_flick(&s, 800.0f);
+    scroll_phys_tick(&s, 1.0f/60.0f);  float p1 = s.pos; float v1 = s.vel;
+    for (int i=0;i<3;i++) scroll_phys_tick(&s, 1.0f/60.0f);
+    float v2 = s.vel;
+    int moved = (p1 > 0.0f);
+    int decel = (v2 < v1);                       /* friction slows it */
+    /* settle */
+    for (int i=0;i<600;i++) scroll_phys_tick(&s, 1.0f/60.0f);
+    int settled = !scroll_phys_active(&s);
+    int in_bounds = (s.pos >= -0.5f && s.pos <= 1000.5f);
+    /* rubber-band: shove past the top bound, must return to max */
+    scroll_phys_init(&s, 1000.0f);
+    s.pos = 1200.0f;                              /* overscrolled past max=1000 */
+    int overscrolled = (s.pos > 1000.0f);
+    for (int i=0;i<600;i++) scroll_phys_tick(&s, 1.0f/60.0f);
+    int rubber_back = (s.pos <= 1000.5f && s.pos >= 999.5f);
+
+    int pass = moved && decel && settled && in_bounds && overscrolled && rubber_back;
+    kputs("[L6] moved="); kput_dec((uint64_t)moved);
+    kputs(" decel="); kput_dec((uint64_t)decel);
+    kputs(" settled="); kput_dec((uint64_t)settled);
+    kputs(" in_bounds="); kput_dec((uint64_t)in_bounds);
+    kputs(" rubberband="); kput_dec((uint64_t)rubber_back);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

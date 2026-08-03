@@ -70,4 +70,12 @@ int anim_is_active(int anim_id);
 /* Count of active animations */
 int anim_active_count(void);
 
+
+/* L.6: spring scroll physics — momentum + edge rubber-band. */
+typedef struct { float pos; float vel; float max; } scroll_phys_t;
+void scroll_phys_init(scroll_phys_t *s, float max_offset);
+void scroll_phys_flick(scroll_phys_t *s, float velocity);
+void scroll_phys_tick(scroll_phys_t *s, float dt);
+int  scroll_phys_active(const scroll_phys_t *s);
+
 #endif /* ZEOS_ANIM_H */

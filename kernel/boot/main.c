@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_L6
+        /* L.6 selftest: spring scroll physics (momentum + rubber-band). */
+        { extern void anim_l6_selftest(void); anim_l6_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_M8
         /* M.8 selftest: CVD color transform. */
         { extern void access_m8_selftest(void); access_m8_selftest(); }

@@ -295,7 +295,7 @@ the OS. When in doubt it's the OS.
 - [ ] **L.3** Compositor ticks anims per frame + re-arm while live — `[UNVERIFIED]` `[source compositor.c:179-198]`.
 - [x] **L.4** Spring surface open/close, snap settle, dock auto-hide slide — `[VERIFIED/harness]` surface create springs scale 0.8->1.0+opacity 0->255, detach springs back ([L4] open/close PASS); dock-slide via D.12. bible id=429. `[source wm.c:306-354; dock.c]`.
 - [x] **L.5** Spring menu appear/dismiss — `[VERIFIED/production]` context menus spring-scale open/dismiss; deferred teardown, no input ripple. KVM [L5] PASS. bible id=341.
-- [ ] **L.6** Spring scroll physics — `[TODO]`.
+- [x] **L.6** Spring scroll physics — `[VERIFIED/harness]` scroll_phys_t momentum+friction+edge rubber-band: flick decelerates+settles, overscroll (1200>max1000) springs back to 1000. bible id=448. `[source anim.c scroll_phys_*]`.
 
 ## M. Accessibility  (⚠ whole class: UI + VAULT persist exist, but NO CONSUMER reads them)
 - [x] **M.1** Reduced-motion mode — `[DONE 2026-07-23]` `access_init()` was never called (whole a11y config zero-init); now called at boot + `anim_tick` snaps springs instantly when reduced_motion on. Commit 38c54df.
