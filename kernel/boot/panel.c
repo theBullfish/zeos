@@ -313,12 +313,11 @@ void panel_draw(void) {
     int pw = g_panel.screen_w;
     int ph = g_panel.height;
 
-    /* ── Panel background (D.6 vibrancy) ── */
-    /* Translucent fill so the wallpaper/windows beneath bleed through subtly
-     * (frosted panel), instead of a flat opaque bar. Panel paints after the
-     * desktop + windows in the composite order, so the blend picks up whatever
-     * is under it. ~90% surface over ~10% content. */
-    fb_rect_blend(0, 0, pw, ph, 0xE6161B22u);
+    /* ── Panel background (D.6 vibrancy via B.8 material) ── */
+    /* Frosted THICK material: translucent surface so the wallpaper/windows
+     * beneath bleed through subtly. Panel paints after desktop+windows, so the
+     * blend picks up what's under it. */
+    fb_material_fill(0, 0, pw, ph, COLOR_SURFACE_HIGH, MATERIAL_THICK);
 
     /* ── Bottom separator ── */
     fb_hline(0, ph - 1, pw, COLOR_SEPARATOR);

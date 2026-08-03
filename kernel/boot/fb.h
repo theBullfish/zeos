@@ -105,6 +105,24 @@ void fb_pixel_blend(int x, int y, uint32_t color);
 /* Filled rectangle with alpha blending */
 void fb_rect_blend(int x, int y, int w, int h, uint32_t color);
 
+/* B.8: material vibrancy levels (translucency ladder, ultraThin -> ultraThick).
+ * fb_material_fill blends the surface color at the level's opacity over whatever
+ * is beneath, giving the frosted-material look. (True gaussian blur is not
+ * implemented; this is the translucency/vibrancy tier.) */
+typedef enum {
+    MATERIAL_ULTRA_THIN = 0,   /* most see-through */
+    MATERIAL_THIN,
+    MATERIAL_REGULAR,
+    MATERIAL_THICK,
+    MATERIAL_ULTRA_THICK,      /* nearly opaque */
+    MATERIAL_COUNT
+} material_level_t;
+
+/* Opacity (0..255) for a material level. */
+int      fb_material_alpha(material_level_t level);
+/* Fill a rect with the surface color at the material level's opacity. */
+void     fb_material_fill(int x, int y, int w, int h, uint32_t surface, material_level_t level);
+
 /* Get current text cursor position (character grid) */
 void fb_cursor_pos(uint32_t *col, uint32_t *row);
 

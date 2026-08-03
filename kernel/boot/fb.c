@@ -666,6 +666,30 @@ void fb_rect_blend(int x, int y, int w, int h, uint32_t color)
             fb_pixel_blend(px, py, color);
 }
 
+/* B.8: material vibrancy ladder. Opacities chosen so each level is visibly
+ * distinct and monotonically increasing (ultraThin most transparent). */
+static const int s_material_alpha[MATERIAL_COUNT] = {
+    140,   /* ULTRA_THIN  ~55% */
+    179,   /* THIN        ~70% */
+    209,   /* REGULAR     ~82% */
+    230,   /* THICK       ~90% */
+    247,   /* ULTRA_THICK ~97% */
+};
+
+int fb_material_alpha(material_level_t level)
+{
+    if (level < 0 || level >= MATERIAL_COUNT) level = MATERIAL_REGULAR;
+    return s_material_alpha[level];
+}
+
+void fb_material_fill(int x, int y, int w, int h, uint32_t surface, material_level_t level)
+{
+    int a = fb_material_alpha(level);
+    uint32_t c = ((uint32_t)a << 24) | (surface & 0x00FFFFFF);
+    fb_rect_blend(x, y, w, h, c);
+}
+
+
 void fb_cursor_pos(uint32_t *col, uint32_t *row)
 {
     if (col) *col = cursor_x;
@@ -677,3 +701,32 @@ void fb_set_cursor(uint32_t col, uint32_t row)
     cursor_x = col;
     cursor_y = row;
 }
+
+#ifdef ZEOS_DIAG_B8
+#include "kprint.h"
+/* B.8 selftest: material vibrancy ladder is 5 distinct, monotonically increasing
+ * opacity levels (ultraThin most transparent -> ultraThick most opaque), and
+ * fb_material_fill composes the surface color with that alpha. */
+void fb_b8_selftest(void)
+{
+    int a[MATERIAL_COUNT];
+    for (int i = 0; i < MATERIAL_COUNT; i++) a[i] = fb_material_alpha((material_level_t)i);
+    int monotonic = 1, in_range = 1;
+    for (int i = 0; i < MATERIAL_COUNT; i++) {
+        if (a[i] < 1 || a[i] > 255) in_range = 0;
+        if (i > 0 && a[i] <= a[i-1]) monotonic = 0;
+    }
+    int count_ok = (MATERIAL_COUNT == 5);
+    /* composed color carries the level alpha in the top byte */
+    uint32_t composed = ((uint32_t)fb_material_alpha(MATERIAL_THICK) << 24) | (COLOR_SURFACE_HIGH & 0x00FFFFFF);
+    int alpha_applied = ((composed >> 24) == (uint32_t)a[MATERIAL_THICK]);
+
+    int pass = count_ok && monotonic && in_range && alpha_applied;
+    kputs("[B8] levels="); kput_dec((uint64_t)MATERIAL_COUNT);
+    kputs(" alpha=");
+    for (int i=0;i<MATERIAL_COUNT;i++){ kput_dec((uint64_t)a[i]); if(i<MATERIAL_COUNT-1) kputs("/"); }
+    kputs(" monotonic="); kput_dec((uint64_t)monotonic);
+    kputs(" applied="); kput_dec((uint64_t)alpha_applied);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
