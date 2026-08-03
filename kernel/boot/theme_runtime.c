@@ -8,6 +8,7 @@
  */
 
 #include "theme_runtime.h"
+#include "kprint.h"
 #include "theme.h"
 #include "access.h"
 #include "timer.h"
@@ -156,3 +157,40 @@ void theme_apply_night_shift(void)
 
     fb_rect_blend(0, 0, (int)w, (int)h, NIGHT_SHIFT_TINT);
 }
+
+#ifdef ZEOS_DIAG_G4
+/* G.4 selftest: dark/light scheme switching yields distinct, correctly-ordered
+ * palettes (light surface brighter than dark; text inverts). theme_get_scheme
+ * round-trips. (AUTO is a known TSC placeholder; night-shift is a gated
+ * whole-screen tint blend, source-verified.) */
+static uint32_t lum_z(uint32_t c){ return ((c>>16)&0xff)+((c>>8)&0xff)+(c&0xff); }
+void theme_g4_selftest(void)
+{
+    color_scheme_t saved = theme_get_scheme();
+
+    theme_set_scheme(SCHEME_DARK);
+    int rt_dark = (theme_get_scheme() == SCHEME_DARK);
+    uint32_t d_surf = theme_surface();
+    uint32_t d_text = theme_on_surface();
+
+    theme_set_scheme(SCHEME_LIGHT);
+    int rt_light = (theme_get_scheme() == SCHEME_LIGHT);
+    uint32_t l_surf = theme_surface();
+    uint32_t l_text = theme_on_surface();
+
+    int surf_distinct = (d_surf != l_surf);
+    int text_distinct = (d_text != l_text);
+    int light_brighter = (lum_z(l_surf) > lum_z(d_surf));   /* light surface is lighter */
+    int text_inverts   = (lum_z(l_text) < lum_z(d_text));   /* dark text on light bg */
+
+    theme_set_scheme(saved);
+
+    int pass = rt_dark && rt_light && surf_distinct && text_distinct &&
+               light_brighter && text_inverts;
+    kputs("[G4] rt(dark/light)="); kput_dec((uint64_t)rt_dark); kput_dec((uint64_t)rt_light);
+    kputs(" surf(d/l)="); kput_hex(d_surf); kputs("/"); kput_hex(l_surf);
+    kputs(" light_brighter="); kput_dec((uint64_t)light_brighter);
+    kputs(" text_inverts="); kput_dec((uint64_t)text_inverts);
+    kputs(pass ? " -> PASS (auto=placeholder; night-shift=gated tint)\n" : " -> FAIL\n");
+}
+#endif
