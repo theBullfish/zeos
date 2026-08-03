@@ -3128,9 +3128,21 @@ static void cmd_ws(const char *args)
     }
     uint32_t mlen = 0; while (msg[mlen]) mlen++;
 
+    /* Split an optional :port off the host token. */
+    uint16_t port = 0;
+    for (int k = 0; host[k]; k++) {
+        if (host[k] == ':') {
+            host[k] = 0;
+            int p = 0;
+            for (int m = k + 1; host[m]; m++) if (host[m] >= '0' && host[m] <= '9') p = p * 10 + (host[m] - '0');
+            port = (uint16_t)p;
+            break;
+        }
+    }
+
     kputs("  WS: connecting ws://"); kputs(host); kputs(path); kputc('\n');
     static ws_conn_t ws;
-    if (ws_connect(&ws, host, path, 0) != 0) { kputs("  WS: connect failed\n"); return; }
+    if (ws_connect(&ws, host, path, port) != 0) { kputs("  WS: connect failed\n"); return; }
     kputs("  WS: sending \""); kputs(msg); kputs("\"\n");
     if (ws_send_text(&ws, msg, mlen) != 0) { kputs("  WS: send failed\n"); ws_close(&ws); return; }
     char rbuf[512]; int op = 0;

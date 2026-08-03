@@ -120,6 +120,9 @@ static void on_transition_update(int anim_id, float position, void *ctx)
         /* Panel accent */
         panel_set_persona(p);
 
+        /* G.5: apply this persona's default dock launcher set. */
+        { extern void dock_apply_persona_defaults(int); dock_apply_persona_defaults(p); }
+
         /* Force full redraw with final colors */
         compositor_dirty_all();
 

@@ -123,6 +123,21 @@ int dock_pin(const char *name, int chain_id) {
     return 0;
 }
 
+/* G.5: per-persona default launcher sets. Clears pins and applies the set for
+ * the given persona (0=Zeros robotics/build, 1=DereZ code/debug, 2=Full). Each
+ * persona surfaces a distinct default toolset. */
+void dock_apply_persona_defaults(int persona) {
+    g_dock.pinned_count = 0;
+    static const char *ZEROS[] = { "Files", "Terminal", "Build", "Inspector", "Settings" };
+    static const char *DEREZ[] = { "Files", "Editor", "Terminal", "Chains", "Settings" };
+    static const char *FULL[]  = { "Files", "Editor", "Terminal", "Settings", "Calculator" };
+    const char **set = FULL; int n = 5;
+    if (persona == 0)      { set = ZEROS; n = 5; }
+    else if (persona == 1) { set = DEREZ; n = 5; }
+    for (int i = 0; i < n; i++) dock_pin(set[i], -1);
+    g_dock.dock_w = compute_dock_width();
+}
+
 void dock_unpin(int index) {
     if (index < 0 || index >= g_dock.pinned_count) return;
 
@@ -629,6 +644,30 @@ void dock_d12_selftest(void)
     kputs(" dots="); kput_dec((uint64_t)dots_ok);
     kputs(" slide[show/hide/reshow]=");
     kput_dec((uint64_t)shown); kput_dec((uint64_t)hidden); kput_dec((uint64_t)reshown);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
+#ifdef ZEOS_DIAG_G5
+/* G.5 selftest: each persona yields a DISTINCT default dock launcher set. */
+void dock_g5_selftest(void)
+{
+    extern int n_streq_g5(const char*, const char*);
+    dock_apply_persona_defaults(0); int nz = g_dock.pinned_count;
+    char z1[32]; str_copy(z1, g_dock.pinned[2].name, 32);   /* Zeros[2]=Build */
+    dock_apply_persona_defaults(1); int nd = g_dock.pinned_count;
+    char d1[32]; str_copy(d1, g_dock.pinned[1].name, 32);   /* DereZ[1]=Editor */
+    dock_apply_persona_defaults(2); int nf = g_dock.pinned_count;
+    char f1[32]; str_copy(f1, g_dock.pinned[4].name, 32);   /* Full[4]=Calculator */
+
+    /* distinct: Zeros has "Build", DereZ has "Editor" at [1], Full has "Calculator" */
+    int zeros_build = (z1[0]=='B'&&z1[1]=='u'&&z1[2]=='i');
+    int derez_editor= (d1[0]=='E'&&d1[1]=='d'&&d1[2]=='i');
+    int full_calc   = (f1[0]=='C'&&f1[1]=='a'&&f1[2]=='l');
+    int counts_ok = (nz==5 && nd==5 && nf==5);
+    int pass = zeros_build && derez_editor && full_calc && counts_ok;
+    kputs("[G5] zeros[2]="); kputs(z1); kputs(" derez[1]="); kputs(d1);
+    kputs(" full[4]="); kputs(f1);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif

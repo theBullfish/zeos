@@ -39,22 +39,31 @@ static int ws_find_ci(const char *hay, uint32_t hn, const char *needle)
     return -1;
 }
 
+/* Wall-clock deadline `sec` seconds from now (TSC-based). */
+static uint64_t ws_deadline(uint32_t sec)
+{
+    uint64_t f = timer_tsc_freq();
+    if (f == 0) f = 2000000000ULL;
+    return timer_read_tsc() + (uint64_t)sec * f;
+}
+static int ws_expired(uint64_t deadline) { return timer_read_tsc() > deadline; }
+
 /* Read exactly n bytes into buf (loops over the TCP stream). Returns 0 on
- * success, -1 on close/error. Bounded spin so a stalled peer can't hang us. */
+ * success, -1 on close/error/timeout. Time-based ~5s bound. */
 static int ws_read_n(ws_conn_t *ws, uint8_t *buf, uint32_t n)
 {
     uint32_t got = 0;
-    int idle = 0;
+    uint64_t dl = ws_deadline(5);
     while (got < n) {
         int r = tcp_recv_on_nb(ws->tcp, buf + got, (uint16_t)(n - got));
         if (r < 0) return -1;
         if (r == 0) {
-            if (!tcp_is_connected(ws->tcp) && ++idle > 4) return -1;
-            if (++idle > 2000) return -1;   /* ~ generous stall bound */
-            for (volatile int k = 0; k < 20000; k++) { }
+            if (!tcp_is_connected(ws->tcp)) return -1;
+            if (ws_expired(dl)) return -1;
+            tcp_retransmit_tick();
+            for (volatile int k = 0; k < 5000; k++) { }
             continue;
         }
-        idle = 0;
         got += (uint32_t)r;
     }
     return 0;
@@ -99,8 +108,21 @@ int ws_connect(ws_conn_t *out, const char *host, const char *path, uint16_t port
     if (port == 0) port = 80;
     if (!path || !path[0]) path = "/";
 
+    /* Accept a dotted-quad literal (a.b.c.d) directly; else DNS-resolve. */
     struct ipv4_addr ip;
-    if (dns_resolve(host, &ip) < 0) {
+    int oct[4], oi = 0, cur = 0, seen = 0, is_ip = 1;
+    for (const char *q = host; ; q++) {
+        if (*q >= '0' && *q <= '9') { cur = cur * 10 + (*q - '0'); seen = 1; }
+        else if (*q == '.' || *q == 0) {
+            if (!seen || cur > 255 || oi >= 4) { is_ip = 0; break; }
+            oct[oi++] = cur; cur = 0; seen = 0;
+            if (*q == 0) break;
+        } else { is_ip = 0; break; }
+    }
+    if (is_ip && oi == 4) {
+        ip.b[0] = (uint8_t)oct[0]; ip.b[1] = (uint8_t)oct[1];
+        ip.b[2] = (uint8_t)oct[2]; ip.b[3] = (uint8_t)oct[3];
+    } else if (dns_resolve(host, &ip) < 0) {
         kputs("  WS: DNS failed\n");
         return -2;
     }
@@ -130,17 +152,18 @@ int ws_connect(ws_conn_t *out, const char *host, const char *path, uint16_t port
     /* Read the response headers (until \r\n\r\n). */
     char resp[1024];
     uint32_t rlen = 0;
-    int done = 0, idle = 0;
+    int done = 0;
+    uint64_t dl = ws_deadline(6);
     while (rlen < sizeof(resp) - 1 && !done) {
         int r = tcp_recv_on_nb(h, (uint8_t *)resp + rlen, (uint16_t)(sizeof(resp) - 1 - rlen));
         if (r < 0) break;
         if (r == 0) {
-            if (!tcp_is_connected(h) && ++idle > 4) break;
-            if (++idle > 2000) break;
-            for (volatile int k = 0; k < 20000; k++) { }
+            if (!tcp_is_connected(h)) { if (rlen == 0) break; }
+            if (ws_expired(dl)) break;
+            tcp_retransmit_tick();
+            for (volatile int k = 0; k < 5000; k++) { }
             continue;
         }
-        idle = 0;
         rlen += (uint32_t)r;
         resp[rlen] = 0;
         if (ws_find_ci(resp, rlen, "\r\n\r\n") >= 0) done = 1;

@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_G5
+        /* G.5 selftest: per-persona default dock launcher sets. */
+        { extern void dock_g5_selftest(void); dock_g5_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_D6
         /* D.6 selftest: panel auto-hide reveal/hide. */
         { extern void panel_d6_selftest(void); panel_d6_selftest(); }

@@ -248,7 +248,7 @@ the OS. When in doubt it's the OS.
 - [x] **G.2** Shell prompt + cursor colorway switch on persona — `[VERIFIED/harness]` prompts distinct (zeros>/derez>/zeos>); cursor_select_colorway switches accent per persona. bible id=432. `[source persona.h persona_prompt; cursor.c cursor_select_colorway]`.
 - [x] **G.3** Persona crossfade (spring color lerp) — `[VERIFIED/harness]` ZEROS->FULL mid-accent ff0ab98b strictly between src ff09bc8a/dst ff2e86ab (per-channel lerp), settles on dst. bible id=430. `[source persona_anim.c:76-160]`.
 - [x] **G.4** Dark/light/auto + night shift — `[VERIFIED/harness]` dark(ff0d1117)/light(fffafaf8) distinct+ordered, scheme round-trips, text inverts. auto=TSC placeholder, night-shift=gated tint (source). bible id=433. `[source theme_runtime.c:43-151]`.
-- [ ] **G.5** Per-persona dock/launcher defaults — `[TODO]`.
+- [x] **G.5** Per-persona dock/launcher defaults — `[VERIFIED/harness]` dock_apply_persona_defaults: distinct set per persona (Zeros/DereZ/Full), wired to persona transition. bible id=445. `[source dock.c dock_apply_persona_defaults]`.
 
 ## H. Networking
 - [x] **H.1** virtio-net driver — `[observed 2026-08-02]` net-enabled boot detects the NIC (`chain 4: nic:1af4:1000 [Ethernet]`), binds `[net_chain] hw backend = virtio-net`, and passes real DHCP traffic (H.3). `[source net_virtio.c:220]`. e1000/rtl NICs still untested (need those device models).
