@@ -272,6 +272,7 @@ static void cmd_web(const char *args);
 static void cmd_browse(const char *args);
 static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
+static void cmd_tcpsend(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -783,6 +784,7 @@ static const struct shell_cmd commands[] = {
     {"browse",  "open a URL in the Zeos browser (browse <url>)", cmd_browse, VIS_ALWAYS},
     {"ws",      "WebSocket echo test: ws <host> [path] [message]", cmd_ws, VIS_ALWAYS},
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
+    {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3174,6 +3176,60 @@ static void cmd_bclick(const char *args)
     int y = cam_atoi(p);
     kputs("  bclick: click ("); kput_dec(x); kputc(','); kput_dec(y); kputs(")\n");
     browser_app_click(x, y);
+}
+
+/* Diagnostic: send N bytes to a raw-TCP echo server in ONE tcp_send_on call,
+ * read them back and verify. Exercises the H.5 sliding window / congestion
+ * control (a >1-MSS send shows max_inflight > 1460 -> not stop-and-wait).
+ * Usage: tcpsend <ip:port> <nbytes> */
+static void cmd_tcpsend(const char *args)
+{
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    struct ipv4_addr ip;
+    int oct = 0, val = 0, seen = 0;
+    while (*p && *p != ' ' && *p != ':') {
+        if (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); seen = 1; }
+        else if (*p == '.') { if (oct < 4) ip.b[oct++] = (uint8_t)val; val = 0; }
+        p++;
+    }
+    if (oct < 4 && seen) ip.b[oct++] = (uint8_t)val;
+    if (oct != 4) { kputs("  tcpsend: usage tcpsend <ip:port> <nbytes>\n"); return; }
+    int port = 0;
+    if (*p == ':') { p++; while (*p >= '0' && *p <= '9') port = port * 10 + (*p++ - '0'); }
+    while (*p == ' ') p++;
+    int n = cam_atoi(p);
+    if (n <= 0) n = 2048;
+
+    static uint8_t sbuf[8192];
+    static uint8_t rbuf[8192];
+    if (n > (int)sizeof(sbuf)) n = sizeof(sbuf);
+    for (int i = 0; i < n; i++) sbuf[i] = (uint8_t)('A' + (i % 26));
+
+    tcp_handle_t h = tcp_open(ip, (uint16_t)port);
+    if (h == TCP_INVALID_HANDLE) { kputs("  tcpsend: connect failed\n"); return; }
+    kputs("  tcpsend: sending "); kput_dec(n); kputs(" bytes in one call\n");
+    if (tcp_send_on(h, sbuf, (uint16_t)n) < 0) {
+        kputs("  tcpsend: send failed\n"); tcp_close_on(h); return;
+    }
+    int got = 0;
+    for (int spin = 0; spin < 400000 && got < n; spin++) {
+        int want = n - got; if (want > 4096) want = 4096;
+        int r = tcp_recv_on_nb(h, rbuf + got, (uint16_t)want);
+        if (r < 0) break;
+        if (r == 0) {
+            net_poll();
+            if (!tcp_is_connected(h) && got == 0 && spin > 100) break;
+            for (volatile int j = 0; j < 200; j++);
+            continue;
+        }
+        got += r;
+    }
+    int ok = (got == n);
+    for (int i = 0; i < got && ok; i++) if (rbuf[i] != sbuf[i]) ok = 0;
+    kputs("  tcpsend: echoed "); kput_dec(got); kputc('/'); kput_dec(n);
+    kputs(ok ? " bytes VERIFIED\n" : " bytes MISMATCH\n");
+    tcp_close_on(h);
 }
 
 static void cmd_web(const char *args)

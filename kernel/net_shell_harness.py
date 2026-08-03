@@ -100,9 +100,10 @@ mark_len=len(ser())
 for cmd in ["\n", "dns example.com\n", "dns google.com\n"]:
     serwrite(cmd); time.sleep(4.0)
 serwrite("fetch example.com /\n"); time.sleep(8.0)
+serwrite("https example.com /\n"); time.sleep(12.0)
 
 print("=== NET SHELL OUTPUT (after commands) ===")
-print(ser()[mark_len:][-1500:])
+print(ser()[mark_len:][-2200:])
 
 _stop=True
 qmp("quit")

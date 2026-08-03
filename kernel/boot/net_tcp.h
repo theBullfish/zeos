@@ -24,6 +24,11 @@
 #define TCP_MAX_LISTENERS    16
 #define TCP_LISTEN_BACKLOG   16
 
+/* H.5: send-side sliding window + congestion control (DATA path only). */
+#define TCP_MSS            1460      /* max segment size (data bytes) */
+#define TCP_INIT_SSTHRESH  65535     /* start in slow-start up to ~64 KB */
+#define TCP_CWND_MAX       65535     /* cap cwnd; bounds the MSS*MSS/cwnd math */
+
 /* ── TCP header ──────────────────────────────── */
 
 struct tcp_hdr {
@@ -93,6 +98,17 @@ struct tcp_conn {
     uint8_t          retx_count;    /* Attempts so far */
     uint64_t         retx_tsc;      /* TSC when last sent */
     uint32_t         retx_expected_ack; /* ACK we need to clear retx */
+
+    /* H.5: send-side sliding window + congestion control (DATA path only;
+     * SYN/SYN-ACK/FIN keep using the single-segment retx_* fields above).
+     * snd_nxt is the existing `seq`; outstanding = seq - snd_una. Go-Back-N
+     * retransmits from the caller's buffer, so no copy buffer is needed. */
+    uint32_t         snd_una;       /* oldest unacked DATA byte (absolute seq) */
+    uint32_t         snd_wnd;       /* peer advertised receive window (bytes) */
+    uint32_t         cwnd;          /* congestion window (bytes) */
+    uint32_t         ssthresh;      /* slow-start threshold (bytes) */
+    uint64_t         snd_tsc;       /* RTO timer: TSC when oldest unacked (re)sent */
+    uint8_t          snd_retx_count;/* GBN RTO attempts (parallel to retx_count) */
 };
 
 /* ── New handle-based API ────────────────────── */

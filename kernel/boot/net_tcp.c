@@ -270,6 +270,14 @@ static void conn_init(struct tcp_conn *conn, struct ipv4_addr dst,
     conn->retx_count = 0;
     conn->retx_tsc = 0;
     conn->retx_expected_ack = 0;
+
+    /* H.5: send window / congestion control (start in slow-start, 1 MSS). */
+    conn->snd_una = conn->seq;
+    conn->snd_wnd = TCP_MSS;
+    conn->cwnd = TCP_MSS;
+    conn->ssthresh = TCP_INIT_SSTHRESH;
+    conn->snd_tsc = 0;
+    conn->snd_retx_count = 0;
 }
 
 /* ── New handle-based API ────────────────────── */
@@ -311,50 +319,90 @@ tcp_handle_t tcp_open(struct ipv4_addr dst, uint16_t port)
     return slot;
 }
 
+/*
+ * H.5: send DATA with a sliding window + congestion control (slow-start +
+ * AIMD, Go-Back-N retransmit). Still fully blocking — returns only when all
+ * `len` bytes are acked, or -1 on error. Because we block, the caller's `data`
+ * stays valid for the whole call, so Go-Back-N retransmits straight from it
+ * (no per-conn copy buffer). SYN/SYN-ACK/FIN are untouched — they still use the
+ * single-segment retx_* path via tcp_send_tracked.
+ */
 int tcp_send_on(tcp_handle_t h, const void *data, uint16_t len)
 {
     struct tcp_conn *conn = conn_get(h);
     if (!conn || conn->state != TCP_ESTABLISHED)
         return -1;
+    if (len == 0)
+        return 0;
 
-    uint16_t mss = 1460;
-    uint16_t sent = 0;
+    const uint8_t *buf = (const uint8_t *)data;
+    uint32_t start = conn->seq;               /* absolute seq of buf[0] */
+    uint32_t end   = start + len;             /* one past last byte */
 
-    while (sent < len) {
-        uint16_t chunk = len - sent;
-        if (chunk > mss) chunk = mss;
+    /* Resync the send window to the current send position for this call.
+     * cwnd/ssthresh persist across calls on the same connection. */
+    conn->snd_una = conn->seq;
+    conn->snd_retx_count = 0;
+    conn->snd_tsc = read_tsc_tcp();
+    if (conn->cwnd == 0)     conn->cwnd = TCP_MSS;
+    if (conn->ssthresh == 0) conn->ssthresh = TCP_INIT_SSTHRESH;
+    if (conn->snd_wnd == 0)  conn->snd_wnd = TCP_MSS;
 
-        uint32_t expected_ack = conn->seq + chunk;
-        tcp_send_tracked(conn, TCP_ACK | TCP_PSH,
-                          (const uint8_t *)data + sent, chunk,
-                          expected_ack);
-        conn->seq += chunk;
-        sent += chunk;
+    uint64_t last_progress = read_tsc_tcp();
+    uint64_t stall_limit   = (TCP_RETX_MAX + 1) * retx_timeout_tsc();
+    uint32_t max_inflight  = 0;                /* H.5 instrumentation */
 
-        /* Wait for ACK with retransmission support */
-        for (int i = 0; i < 50000; i++) {
-            net_poll();
-            tcp_retransmit_tick();
+    while ((int32_t)(conn->snd_una - end) < 0) {
+        /* 1) FILL: emit segments while cwnd + receiver window allow. */
+        for (;;) {
+            uint32_t outstanding = conn->seq - conn->snd_una;
+            if (outstanding > max_inflight) max_inflight = outstanding;
+            uint32_t win = conn->cwnd < conn->snd_wnd ? conn->cwnd : conn->snd_wnd;
+            if (win == 0) win = TCP_MSS;             /* zero-window probe */
+            if (outstanding >= win) break;           /* window full */
+            if ((int32_t)(conn->seq - end) >= 0) break; /* all app bytes sent */
 
-            /* ACK received — retx cleared by tcp_process */
-            if (conn->retx_len == 0)
-                break;
+            uint32_t off   = conn->seq - start;
+            uint32_t avail = end - conn->seq;
+            uint32_t room  = win - outstanding;
+            uint32_t chunk = avail;
+            if (chunk > TCP_MSS) chunk = TCP_MSS;
+            if (chunk > room)    chunk = room;
 
-            /* Retransmit gave up */
-            if (conn->state == TCP_ERROR)
-                return -1;
-
-            for (volatile int j = 0; j < 1000; j++);
+            if (outstanding == 0)                    /* first of a new batch */
+                conn->snd_tsc = read_tsc_tcp();
+            tcp_send_segment(conn, TCP_ACK | TCP_PSH, buf + off, (uint16_t)chunk);
+            conn->seq += chunk;
         }
 
-        if (conn->retx_len != 0) {
-            /* Timed out waiting for ACK even after retransmits */
+        /* 2) PUMP: process ACKs (advance snd_una, grow cwnd) + drive GBN RTO. */
+        uint32_t una_prev = conn->snd_una;
+        net_poll();
+        tcp_retransmit_tick();
+        if (conn->state == TCP_ERROR)
+            return -1;
+
+        /* 3) progress / overall stall guard (mirrors the old iteration cap). */
+        if ((int32_t)(conn->snd_una - una_prev) > 0)
+            last_progress = read_tsc_tcp();
+        else if (read_tsc_tcp() - last_progress > stall_limit) {
             conn->state = TCP_ERROR;
             return -1;
         }
+
+        for (volatile int j = 0; j < 1000; j++);
     }
 
-    return sent;
+    /* H.5: for multi-segment sends, report that the window engaged (max bytes
+     * in flight > 1 MSS proves it's no longer stop-and-wait) + final cwnd. */
+    if (len > TCP_MSS) {
+        kputs("  TCP: sent "); kput_dec(len);
+        kputs(" B, max_inflight="); kput_dec(max_inflight);
+        kputs(" B, cwnd="); kput_dec(conn->cwnd);
+        kputs(" B\n");
+    }
+
+    return (int)len;
 }
 
 int tcp_recv_on_nb(tcp_handle_t h, void *buf, uint16_t max_len)
@@ -537,6 +585,38 @@ void tcp_retransmit_tick(void)
                           conn->retx_len);
         conn->seq = saved_seq;
         conn->retx_tsc = now;
+    }
+
+    /* H.5: Go-Back-N retransmit for outstanding DATA (independent of the
+     * single-segment control retx above — keyed on snd_* not retx_*). Only
+     * touches ESTABLISHED connections with unacked data, which exist only while
+     * tcp_send_on is spinning; a no-op for handshake/teardown/recv callers. */
+    for (int i = 0; i < TCP_MAX_CONNECTIONS; i++) {
+        struct tcp_conn *conn = &connections[i];
+        if (!conn->in_use || conn->state != TCP_ESTABLISHED)
+            continue;
+        if ((int32_t)(conn->seq - conn->snd_una) <= 0)
+            continue;                               /* no data outstanding */
+        if ((now - conn->snd_tsc) < timeout)
+            continue;
+
+        conn->snd_retx_count++;
+        if (conn->snd_retx_count > TCP_RETX_MAX) {
+            kputs("tcp: data retransmit timeout on port ");
+            kput_dec(conn->local_port);
+            kputs("\n");
+            conn->state = TCP_ERROR;
+            continue;
+        }
+        /* AIMD multiplicative decrease, then re-enter slow start at 1 MSS. */
+        uint32_t half = conn->cwnd / 2;
+        conn->ssthresh = half > (2 * TCP_MSS) ? half : (2 * TCP_MSS);
+        conn->cwnd = TCP_MSS;
+        /* Go-Back-N: rewind snd_nxt to the oldest unacked byte. tcp_send_on's
+         * fill loop (spinning while data is outstanding) re-emits from snd_una
+         * under the collapsed cwnd, sourcing bytes from the caller's buffer. */
+        conn->seq = conn->snd_una;
+        conn->snd_tsc = now;
     }
 }
 
@@ -760,6 +840,12 @@ static int conn_alloc_server(struct ipv4_addr src_ip, uint16_t src_port,
     c->retx_count     = 0;
     c->retx_tsc       = 0;
     c->retx_expected_ack = 0;
+    c->snd_una        = c->seq;
+    c->snd_wnd        = TCP_MSS;
+    c->cwnd           = TCP_MSS;
+    c->ssthresh       = TCP_INIT_SSTHRESH;
+    c->snd_tsc        = 0;
+    c->snd_retx_count = 0;
     return slot;
 }
 
@@ -847,6 +933,9 @@ void tcp_process(const void *frame, uint16_t len)
         if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
             conn->ack = seg_seq + 1;
             conn->state = TCP_ESTABLISHED;
+            conn->snd_una = conn->seq;                 /* H.5: sync send window */
+            conn->snd_wnd = ntohs(tcp->window);        /* seed peer window */
+            if (conn->snd_wnd == 0) conn->snd_wnd = TCP_MSS;
             retx_clear(conn);
             /* Send ACK (no tracking needed — pure ACK) */
             tcp_send_segment(conn, TCP_ACK, 0, 0);
@@ -910,6 +999,26 @@ void tcp_process(const void *frame, uint16_t len)
         break;
 
     case TCP_ESTABLISHED:
+        /* H.5: DATA-path ACK handling — advance the send window + grow the
+         * congestion window. Runs for pure ACKs too (data_len==0). This is
+         * disjoint from the control-retx clearing above: that block fires only
+         * while retx_len/retx_expected_ack are set (SYN/SYN-ACK/FIN); during
+         * data flow those are 0, so the two mechanisms never collide. */
+        if (flags & TCP_ACK) {
+            conn->snd_wnd = ntohs(tcp->window);        /* flow control */
+            uint32_t outstanding = conn->seq - conn->snd_una;
+            int32_t  adv = (int32_t)(seg_ack - conn->snd_una);
+            if (adv > 0 && (uint32_t)adv <= outstanding) {
+                conn->snd_una = seg_ack;               /* slide window forward */
+                conn->snd_retx_count = 0;
+                conn->snd_tsc = read_tsc_tcp();        /* restart RTO for new oldest */
+                if (conn->cwnd < conn->ssthresh)
+                    conn->cwnd += TCP_MSS;                            /* slow start */
+                else
+                    conn->cwnd += (TCP_MSS * TCP_MSS) / conn->cwnd;   /* AIMD */
+                if (conn->cwnd > TCP_CWND_MAX) conn->cwnd = TCP_CWND_MAX;
+            }
+        }
         /* Accept IN-ORDER data only (RFC 793 receive-sequence check). A duplicate
          * or out-of-order segment (seg_seq != rcv_nxt) must NOT be buffered — doing
          * so silently corrupted the stream (double-append on the peer's retransmit,
