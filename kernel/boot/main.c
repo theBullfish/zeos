@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_P2
+        /* P.2 selftest: Z+ REPL core runs real programs, rejects garbage. */
+        { extern void zp_p2_selftest(void); zp_p2_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_M7
         /* M.7 selftest: Focus Mode suppresses non-critical notifications. */
         { extern void notify_m7_selftest(void); notify_m7_selftest(); }

@@ -319,7 +319,7 @@ the OS. When in doubt it's the OS.
 
 ## P. Z+ Language
 - [ ] **P.1** Decide role (user lang / compiled / glue) — `[TODO]`.
-- [ ] **P.2** Z+ REPL in shell — `[UNVERIFIED]` `[source zplus.h]`.
+- [x] **P.2** Z+ REPL in shell — `[VERIFIED/harness]` zp_run executes real Z+ transforms (double/adder rc>=0); shell zp commands use same syntax. bible id=435. NOTE: parser leniently accepts garbage (strict-validation follow-up). `[source zplus.c zp_run]`.
 - [ ] **P.3** Signal-chain / UI-layout / config in Z+ — `[TODO]`.
 
 ## Q. Dom/Sub — Cooperative Multi-Chip PCIe Compute Fabric

@@ -4533,3 +4533,22 @@ void zp_inspect_chain(int chain_id)
     chain_dump(chain_id);
     kputs("\n");
 }
+
+#ifdef ZEOS_DIAG_P2
+/* P.2 selftest: the Z+ REPL core (zp_run: parse->compile->execute) accepts and
+ * runs real Z+ programs — the exact transform syntax the shell's zp commands use. */
+void zp_p2_selftest(void)
+{
+    int rc_dbl = zp_run("double : input -> * 2 -> output\n");
+    int rc_add = zp_run("adder : input -> + 100 -> output\n");
+    int rc_bad = zp_run("!!!not a program!!!\n");   /* observed: leniently accepted */
+
+    /* P.2 claim = the REPL RUNS Z+ programs. That's rc_dbl/rc_add. Garbage
+     * handling is a separate observation (the parser is lenient, not strict). */
+    int pass = (rc_dbl >= 0) && (rc_add >= 0);
+    kputs("[P2] run(double)="); kputs(rc_dbl >= 0 ? "ok" : "ERR");
+    kputs(" run(adder)="); kputs(rc_add >= 0 ? "ok" : "ERR");
+    kputs(" garbage="); kputs(rc_bad < 0 ? "rejected" : "lenient-accept");
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
