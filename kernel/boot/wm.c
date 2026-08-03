@@ -1431,3 +1431,34 @@ int wm_visible_count(void) {
     }
     return count;
 }
+
+#ifdef ZEOS_DIAG_L4
+/* L.4 selftest: spring-driven surface open/close. Create a surface -> its scale
+ * springs 0.8->1.0 and opacity 0->255 (gradual, SNAPPY); detach -> closing set
+ * and scale/opacity spring back toward 0.8/0. (Dock auto-hide slide is proven
+ * separately by D.12 [D12] slide[show/hide/reshow]=111.) */
+void wm_l4_selftest(void)
+{
+    extern void anim_tick(float);
+    int id = wm_create_surface("L4probe", -1, 100, 100, 300, 200, 0);
+    chain_surface_t *s = wm_get_surface(id);
+    int have = (s != 0);
+    /* open spring: a few ticks -> scale between 0.8 and 1.0 (moving up), opacity rising */
+    float sc0 = have ? s->anim_scale : 0.0f;
+    for (int i = 0; i < 4; i++) anim_tick(1.0f / 240.0f);
+    int opening = have && (s->anim_scale > 0.8f) && (s->anim_scale <= 1.0f) &&
+                  (s->anim_scale >= sc0) && (s->anim_opacity > 0.0f);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f / 240.0f);
+    int opened = have && (s->anim_scale > 0.98f) && (s->anim_opacity > 250.0f);
+    /* close spring */
+    wm_detach_surface(id);
+    int closing_set = have && (s->closing == 1);
+    for (int i = 0; i < 4; i++) anim_tick(1.0f / 240.0f);
+    int closing = have && (s->anim_scale < 1.0f) && (s->anim_opacity < 255.0f);
+
+    int pass = have && opening && opened && closing_set && closing;
+    kputs("[L4] open[grad/full]="); kput_dec((uint64_t)opening); kput_dec((uint64_t)opened);
+    kputs(" close[flag/anim]="); kput_dec((uint64_t)closing_set); kput_dec((uint64_t)closing);
+    kputs(pass ? " -> PASS (dock-slide: see D.12)\n" : " -> FAIL\n");
+}
+#endif
