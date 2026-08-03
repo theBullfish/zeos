@@ -273,6 +273,7 @@ static void cmd_browse(const char *args);
 static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
 static void cmd_tcpsend(const char *args);
+static void cmd_domsub(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -785,6 +786,7 @@ static const struct shell_cmd commands[] = {
     {"ws",      "WebSocket echo test: ws <host> [path] [message]", cmd_ws, VIS_ALWAYS},
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
+    {"domsub",  "Dom/Sub cohort: show + run election selftest", cmd_domsub, VIS_DEREZ},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3230,6 +3232,22 @@ static void cmd_tcpsend(const char *args)
     kputs("  tcpsend: echoed "); kput_dec(got); kputc('/'); kput_dec(n);
     kputs(ok ? " bytes VERIFIED\n" : " bytes MISMATCH\n");
     tcp_close_on(h);
+}
+
+/* Q.1–Q.4: show the live Dom/Sub cohort (boot-seeded from real Goya cards +
+ * live hotplug) and run the no-hardware election selftest. */
+static void cmd_domsub(const char *args)
+{
+    (void)args;
+    extern void dom_sub_poll(void);
+    extern void dom_sub_dump(void);
+    extern int  dom_sub_selftest(void);
+    extern void dom_sub_init(void);
+    dom_sub_poll();                 /* drain any live hotplug attach/detach */
+    kputs("  Live cohort (boot-seeded from real Goya cards):\n");
+    dom_sub_dump();
+    dom_sub_selftest();             /* synthetic election verification */
+    dom_sub_init();                 /* restore the real cohort after the test */
 }
 
 static void cmd_web(const char *args)

@@ -334,10 +334,18 @@ access (real). NOTE (corrected 2026-07-25, matches specs/DOM_SUB_CHIPS.md
 yet exist — `chain_t.affinity` + `smp_chain_owner()` is a CPU-core-index
 pattern only, no Goya chain sets affinity today (`grep affinity gpu_goya.c`
 is empty). Q.5 must BUILD chip-affinity routing, not "reuse" it.
-- [ ] **Q.1** Chip class registration table (vendor:device allowlist, starts with Goya 0x1DA3:0x0001) — `[TODO]`.
-- [ ] **Q.2** Cohort discovery riding CHAIN_HOTPLUG_PCI attach/detach events + boot-time seeding alongside gpu_goya_init() — `[TODO]`.
-- [ ] **Q.3** Identify handshake (fw_version, dram_mb, lazily-filled bench_score via first real THINK job) — `[TODO]`.
-- [ ] **Q.4** Election (score = bench_score*1000 + dram_mb, PCI-address tiebreak, hysteresis margin to prevent Dom/Sub flapping) — `[TODO]`.
+> **[2026-08-03] Dom/Sub cohort subsystem built (Q.1–Q.4).** New `dom_sub.c`/`dom_sub.h`
+> (chip-class table, cohort struct, identify, election w/ hysteresis), boot-seeded from
+> `gpu_goya_init()` (gpu_goya.c), live hotplug drain via the public `hotplug_event_copy`
+> API (no hotplug.c edit), + a `domsub` diagnostic (VIS_DEREZ) that dumps the live cohort
+> and runs `dom_sub_selftest()`. Verified live (domsub_test.py serial): **`Dom/Sub selftest:
+> PASS`** and boot-seed `cohort seeded, 0 cooperative chip(s)` (honest — no Goya in QEMU).
+> The election/table logic has no hardware dependency, so the synthetic exercise IS the
+> production path; real per-card register identify + live-PCI discovery are Q.7 (2+ cards).
+- [x] **Q.1** Chip class registration table (vendor:device allowlist, starts with Goya 0x1DA3:0x0001) — `[observed 2026-08-03]` `CHIP_CLASSES[]` + `dom_sub_is_cooperative_chip()`; selftest `PASS goya recognized (0x1DA3:0x0001)` + `PASS random rejected (0x8086:0x1234)`. `[source dom_sub.c CHIP_CLASSES/dom_sub_chip_label]`.
+- [~] **Q.2** Cohort discovery — `[built 2026-08-03]` boot-seed walks `gpu_goya_device()` into the cohort at the end of `gpu_goya_init()` (ran live: `cohort seeded, 0 chip(s)`); live attach/detach drains the hotplug ring via `hotplug_event_copy` + a tsc cursor (rides CHAIN_HOTPLUG_PCI, no hotplug.c edit). Attach→identify→re-elect and detach→re-elect **logic verified synthetically** (selftest inject path), but a **real live PCI hotplug event needs hardware → Q.7**. `[source dom_sub.c dom_sub_init/dom_sub_poll/dom_sub_on_attach]`.
+- [~] **Q.3** Identify handshake — `[built 2026-08-03]` `chip_identity_t` (fw_version, dram_mb, thermal, bench_score); `dom_sub_identify()` reads fw + DRAM (derived from the DDR/BAR4 aperture length) from the bound `gpu_goya_device` record; bench_score starts 0 (lazily filled by first real THINK job — Q.5/Q.7). Identity **model + its use in election verified** (synthetic injects feed dram/bench through scoring), but the **real per-card register read needs a live card → Q.7** (returns 0 with no hardware). `[source dom_sub.c dom_sub_identify; gpu_goya.h fw_version/bar4_len]`.
+- [x] **Q.4** Election (score = bench_score*1000 + dram_mb, PCI tiebreak, hysteresis) — `[observed 2026-08-03]` `dom_sub_elect()` verified live via selftest: `PASS first chip is Dom`, hysteresis `PASS Dom held after 1/2` then `challenger wins on Nth` (ELECT log `reason=challenger beat dom by sustained margin`, needs >=10% margin sustained N=3 elections), `PASS equal score keeps incumbent` (no flap), and Dom-detach `PASS survivor promoted immediately` (immediate re-election, no hysteresis). State transitions logged with tsc + reason (BIBLE G2). The algorithm has no hardware dependency. `[source dom_sub.c dom_sub_elect/member_score/best_member]`.
 - [ ] **Q.5** THINK vs BACKGROUND chain classification + affinity routing (BUILD chip-affinity on the chain_t.affinity/smp_chain_owner pattern — it is CPU-core-only today, not yet chip-aware) — `[TODO]`.
 - [ ] **Q.6** Detach/failure handling (Sub-detach = cheap re-election; Dom-detach = immediate re-election, in-flight work inherits existing CHAIN_ERROR/watchdog path) — `[TODO]`.
 - [ ] **Q.7** Real hardware verification: 2+ Goya cards, confirm election + THINK-affinity + Dom-unplug re-election, measured via serial log — `[TODO]`.

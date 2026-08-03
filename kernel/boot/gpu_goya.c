@@ -615,6 +615,12 @@ int gpu_goya_init(int parent_id)
         kputs(s_fw_present_global ? "embedded" : "absent");
         kputc('\n');
     }
+
+    /* Q.2: seed the Dom/Sub cohort from the cards we just bound (no-op when
+     * zero cards). The live hotplug drain (dom_sub_poll) picks up later
+     * attach/detach. */
+    { extern void dom_sub_init(void); dom_sub_init(); }
+
     return s_dev_count;
 }
 
