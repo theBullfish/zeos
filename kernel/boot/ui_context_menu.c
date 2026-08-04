@@ -371,3 +371,100 @@ void popover_c11_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+/* ── C.10: Sheet (modal, slides down from a window titlebar) ─────────────────
+ * A sheet is attached to a parent surface and is MODAL to that surface only
+ * (its window's content is blocked while the sheet is up; the rest of the
+ * desktop stays live). It springs down from just under the parent titlebar. */
+#include "anim.h"
+#include "wm.h"
+
+typedef struct {
+    int   active;
+    int   parent_id;
+    int   x, y, w, h;
+    float slide;      /* 0 = tucked at titlebar, 1 = fully down */
+    int   anim_id;
+    char  title[48];
+} sheet_t;
+
+static sheet_t g_sheet;
+
+static void sheet_slide_cb(int id, float v, void *ctx) { (void)id; (void)ctx; g_sheet.slide = v;
+    compositor_dirty(g_sheet.x - 2, g_sheet.y - 2, g_sheet.w + 8, g_sheet.h + 8); }
+
+int sheet_open(int parent_id, const char *title, int height)
+{
+    chain_surface_t *p = wm_get_surface(parent_id);
+    if (!p) return 0;
+    g_sheet.parent_id = parent_id;
+    g_sheet.w = p->w - 40; if (g_sheet.w < 120) g_sheet.w = p->w;
+    g_sheet.x = p->x + (p->w - g_sheet.w) / 2;
+    g_sheet.y = p->y + 40;                 /* just below the 40px titlebar */
+    g_sheet.h = height > 0 ? height : 140;
+    int j = 0; if (title) while (j < 47 && title[j]) { g_sheet.title[j] = title[j]; j++; } g_sheet.title[j] = 0;
+    g_sheet.slide = 0.0f;
+    g_sheet.active = 1;
+    g_sheet.anim_id = anim_spring(0.0f, 1.0f, SPRING_SMOOTH_S, SPRING_SMOOTH_D, sheet_slide_cb, 0);
+    return 1;
+}
+
+void sheet_close(void)
+{
+    if (!g_sheet.active) return;
+    g_sheet.anim_id = anim_spring(g_sheet.slide, 0.0f, SPRING_SMOOTH_S, SPRING_SMOOTH_D, sheet_slide_cb, 0);
+    g_sheet.active = 0;   /* input un-blocks immediately; slide animates out */
+}
+
+int  sheet_active(void) { return g_sheet.active; }
+/* C.10: is a sheet modal over this surface? (parent's content should ignore input) */
+int  sheet_modal_for(int surface_id) { return g_sheet.active && g_sheet.parent_id == surface_id; }
+
+void sheet_draw(void)
+{
+    if (!g_sheet.active && g_sheet.slide <= 0.01f) return;
+    int drawn_h = (int)(g_sheet.h * g_sheet.slide + 0.5f);
+    if (drawn_h < 2) return;
+    /* dim the parent window behind the sheet (modal scrim over the parent only) */
+    chain_surface_t *p = wm_get_surface(g_sheet.parent_id);
+    if (p) fb_rect_blend(p->x, p->y + 40, p->w, p->h - 40, 0x50000000u);
+    fb_rect(g_sheet.x, g_sheet.y, g_sheet.w, drawn_h, COLOR_SURFACE_TOP);
+    fb_rect_outline(g_sheet.x, g_sheet.y, g_sheet.w, drawn_h, COLOR_SEPARATOR, 1);
+    if (drawn_h > 24)
+        fb_text(g_sheet.x + 12, g_sheet.y + 8, g_sheet.title, COLOR_ON_SURFACE);
+}
+
+#ifdef ZEOS_DIAG_C10
+#include "kprint.h"
+/* C.10 selftest: sheet attaches to a parent surface, springs down (gradual),
+ * is modal to that parent only, and closes. */
+void sheet_c10_selftest(void)
+{
+    extern int  wm_create_surface(const char*, int, int, int, int, int, void(*)(int,int,int,int,int));
+    extern void wm_force_visible(int);
+    extern void anim_tick(float);
+    int p = wm_create_surface("C10parent", -1, 300, 200, 500, 400, 0);
+    wm_force_visible(p);
+    int other = wm_create_surface("C10other", -1, 50, 50, 200, 150, 0);
+    wm_force_visible(other);
+
+    int opened = sheet_open(p, "Save changes?", 160);
+    int modal_parent = sheet_modal_for(p);
+    int not_modal_other = !sheet_modal_for(other);
+    for (int i = 0; i < 4; i++) anim_tick(1.0f/240.0f);
+    int sliding = (g_sheet.slide > 0.0f && g_sheet.slide < 1.0f);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f/240.0f);
+    int down = (g_sheet.slide > 0.9f);
+    sheet_close();
+    int closed = (sheet_active() == 0);
+
+    int pass = opened && modal_parent && not_modal_other && sliding && down && closed;
+    kputs("[C10] opened="); kput_dec((uint64_t)opened);
+    kputs(" modal_parent="); kput_dec((uint64_t)modal_parent);
+    kputs(" not_modal_other="); kput_dec((uint64_t)not_modal_other);
+    kputs(" sliding="); kput_dec((uint64_t)sliding);
+    kputs(" down="); kput_dec((uint64_t)down);
+    kputs(" closed="); kput_dec((uint64_t)closed);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

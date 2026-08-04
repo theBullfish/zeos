@@ -345,6 +345,7 @@ static void composite_draw(void)
         { extern void palette_draw(void); palette_draw(); }
         { extern void sigviz_overlay_draw(void); sigviz_overlay_draw(); }  /* K.1 chain graph */
         { extern void popover_draw(void); popover_draw(); }  /* C.11 popover */
+        { extern void sheet_draw(void); sheet_draw(); }  /* C.10 sheet */
         dirty_modal_draw();
     }
     theme_apply_night_shift();

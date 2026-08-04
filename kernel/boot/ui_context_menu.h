@@ -51,4 +51,11 @@ void popover_close(void);
 int  popover_active(void);
 void popover_draw(void);
 
+/* C.10: modal sheet sliding from a parent window titlebar. */
+int  sheet_open(int parent_id, const char *title, int height);
+void sheet_close(void);
+int  sheet_active(void);
+int  sheet_modal_for(int surface_id);
+void sheet_draw(void);
+
 #endif /* ZEOS_UI_CONTEXT_MENU_H */

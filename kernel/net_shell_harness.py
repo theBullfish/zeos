@@ -24,7 +24,7 @@ qemu=subprocess.Popen([
     "-drive",f"format=raw,file=fat:rw:{ESP}",
     "-drive",f"if=none,id=zeosvault,file={vault},format=raw",
     "-device","nvme,drive=zeosvault,serial=ZEOSVAULT",
-    "-device",os.environ.get("NIC","virtio-net-pci")+",netdev=n0","-netdev","user,id=n0",
+    "-device",os.environ.get("NIC","virtio-net-pci")+",netdev=n0","-netdev","user,id=n0,ipv6=on",
     "-chardev",f"socket,id=ss,path={SERSOCK},server=on,wait=off","-serial","chardev:ss",
     "-display","none","-qmp",f"unix:{QMP},server,nowait",
 ],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT)
@@ -103,6 +103,8 @@ serwrite("fetch example.com /\n"); time.sleep(8.0)
 serwrite("https example.com /\n"); time.sleep(12.0)
 serwrite("ping 10.0.2.2\n"); time.sleep(4.0)
 serwrite("ping 172.66.147.243\n"); time.sleep(4.0)
+serwrite("ping6 fec0::2\n"); time.sleep(4.0)
+serwrite("ping6 fec0::3\n"); time.sleep(4.0)
 
 print("=== NET SHELL OUTPUT (after commands) ===")
 print(ser()[mark_len:][-2200:])

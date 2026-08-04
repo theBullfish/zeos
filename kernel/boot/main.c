@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_C10
+        /* C.10 selftest: modal sheet slide-from-titlebar. */
+        { extern void sheet_c10_selftest(void); sheet_c10_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_C11
         /* C.11 selftest: non-modal popover. */
         { extern void popover_c11_selftest(void); popover_c11_selftest(); }
