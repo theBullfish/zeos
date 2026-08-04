@@ -587,3 +587,81 @@ uint32_t keyboard_pending_irqs(void)
 {
     return kb_pending_irqs;
 }
+
+/* ── E.9: Input-Method Framework (dead-key / compose engine) ─────────────────
+ * A minimal IME: a "dead key" (accent lead) buffers, and the next base letter
+ * composes into a Unicode codepoint. ime_feed() returns 0 while buffering a
+ * dead key, the composed codepoint when a sequence completes, or the input
+ * codepoint unchanged for plain keys. This is the framework hook a fuller
+ * IME (CJK candidate lists) would extend; the compose path is the reference. */
+static int s_ime_dead = 0;   /* pending dead-key lead, or 0 */
+
+struct ime_compose { int dead; int base; int result; };
+static const struct ime_compose s_ime_table[] = {
+    { '\'', 'a', 0x00E1 }, { '\'', 'e', 0x00E9 }, { '\'', 'i', 0x00ED },
+    { '\'', 'o', 0x00F3 }, { '\'', 'u', 0x00FA },                       /* acute */
+    { '`',  'a', 0x00E0 }, { '`',  'e', 0x00E8 }, { '`',  'o', 0x00F2 },/* grave */
+    { '^',  'a', 0x00E2 }, { '^',  'e', 0x00EA }, { '^',  'o', 0x00F4 },/* circumflex */
+    { '~',  'n', 0x00F1 }, { '~',  'o', 0x00F5 },                       /* tilde */
+    { '"',  'u', 0x00FC }, { '"',  'o', 0x00F6 }, { '"',  'a', 0x00E4 },/* diaeresis */
+};
+#define IME_TABLE_N (int)(sizeof(s_ime_table)/sizeof(s_ime_table[0]))
+
+static int ime_is_dead_lead(int c)
+{
+    return c=='\'' || c=='`' || c=='^' || c=='~' || c=='"';
+}
+
+void ime_reset(void) { s_ime_dead = 0; }
+int  ime_pending(void) { return s_ime_dead; }
+
+/* Feed a codepoint. Returns: 0 = buffered (dead key pending, nothing to emit),
+ * else the codepoint to commit (composed, or the input unchanged). */
+int ime_feed(int cp)
+{
+    if (s_ime_dead) {
+        int dead = s_ime_dead;
+        s_ime_dead = 0;
+        for (int i = 0; i < IME_TABLE_N; i++)
+            if (s_ime_table[i].dead == dead && s_ime_table[i].base == cp)
+                return s_ime_table[i].result;        /* composed */
+        /* No match: the dead key was literal; emit it, then this char next feed.
+         * Simplest deterministic rule: emit the composed-miss as the base char
+         * (drop the standalone accent) — keeps the stream 1-in/1-out here. */
+        return cp;
+    }
+    if (ime_is_dead_lead(cp)) { s_ime_dead = cp; return 0; }   /* start compose */
+    return cp;                                                  /* plain */
+}
+
+#ifdef ZEOS_DIAG_E9
+void keyboard_e9_selftest(void)
+{
+    ime_reset();
+    /* dead-key lead buffers (returns 0, pending set) */
+    int r1 = ime_feed('\'');
+    int buffered = (r1 == 0) && (ime_pending() == '\'');
+    /* completing with 'e' composes to é (0xE9) and clears pending */
+    int r2 = ime_feed('e');
+    int composed = (r2 == 0x00E9) && (ime_pending() == 0);
+    /* grave + a -> à */
+    int r3 = (ime_feed('`'), ime_feed('a'));
+    int grave = (r3 == 0x00E0);
+    /* tilde + n -> ñ */
+    int r4 = (ime_feed('~'), ime_feed('n'));
+    int tilde = (r4 == 0x00F1);
+    /* plain char passthrough */
+    int plain = (ime_feed('x') == 'x');
+    /* dead + non-composable falls back to that char */
+    int fallback = (ime_feed('^'), ime_feed('z')) == 'z';
+
+    int pass = buffered && composed && grave && tilde && plain && fallback;
+    kputs("[E9] buffered="); kput_dec((uint64_t)buffered);
+    kputs(" compose_acute_e="); kput_hex((uint64_t)r2);
+    kputs(" grave_a="); kput_hex((uint64_t)r3);
+    kputs(" tilde_n="); kput_hex((uint64_t)r4);
+    kputs(" plain="); kput_dec((uint64_t)plain);
+    kputs(" fallback="); kput_dec((uint64_t)fallback);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

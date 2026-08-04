@@ -232,7 +232,7 @@ the OS. When in doubt it's the OS.
 - [x] **E.6** Hot corner TR (notifications) — `[DONE 2026-07-23]` was a TODO stub; now toggles the notification panel via notify_show_all(). Commit 10993b1.
 - [x] **E.7** Keyboard: set-1 scancode → ASCII — `[VERIFIED/harness]` typed keys decode correctly: h/e/l/l/o SCRAW + typing "chains" echoed to shell serial in-order. No layout switching (single set-1 map). bible id=422. `[source keyboard.c scancode_to_ascii]`.
 - [x] **E.8** Keybinds system (Super+arrows/1-4/T/D/Space) — `[DONE 2026-07-23]` `[source keybinds.c:85-156]`; command-palette action wired (Super+Space). Terminal/inspect/chain-graph still TODO (need app entry points).
-- [ ] **E.9** Input-method framework — `[TODO]`.
+- [x] **E.9** Input-method framework — `[VERIFIED/harness]` ime_feed dead-key compose engine: acute/grave/circumflex/tilde/diaeresis -> Unicode codepoints (é/à/ñ...), passthrough + fallback. bible id=456. `[source keyboard.c ime_feed]`.
 
 ## F. Typography & Icons
 - [x] **F.1** stb_truetype: glyph cache + grayscale AA, font_draw/measure/line_height — `[observed 2026-08-02]` smooth AA proportional + monospace glyphs rendered across panel/titles/clock/labels. `[source font.c:71-142,188-253]`.

@@ -40,4 +40,9 @@ uint32_t keyboard_chain_drain(void);     /* drain through process_scancode */
 uint32_t keyboard_chain_total(void);     /* lifetime drained count */
 uint32_t keyboard_pending_irqs(void);    /* lifetime IRQ count */
 
+
+/* E.9: input-method (compose/dead-key) framework. */
+void ime_reset(void);
+int  ime_pending(void);
+int  ime_feed(int cp);
 #endif /* ZEOS_KEYBOARD_H */

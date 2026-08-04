@@ -1258,6 +1258,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_E9
+        { extern void keyboard_e9_selftest(void); keyboard_e9_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_C12
         { extern void wm_c12_selftest(void); wm_c12_selftest(); }
 #endif
