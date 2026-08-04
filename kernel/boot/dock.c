@@ -18,6 +18,7 @@
 #include "ui_hover.h"
 #include "ui_context_menu.h"
 #include "icon_render.h"
+#include "access.h"
 
 /* ── UI primitive wiring ── */
 #define DOCK_MAX_HOVERS  (DOCK_MAX_PINNED + DOCK_MAX_RUNNING)
@@ -28,7 +29,8 @@ static int      s_rc_idx  = -1;
 
 /* ── Constants ── */
 /* All metrics snap to the Z* spacing scale (theme.h). */
-#define DOCK_ITEM_SIZE    (Z12 + Z3)    /* 60px — bigger icons */
+static int s_dock_item_px = (Z12 + Z3);
+#define DOCK_ITEM_SIZE    s_dock_item_px
 #define DOCK_ITEM_PAD      Z2           /* 8px */
 #define DOCK_MARGIN        Z6           /* 24px */
 #define DOCK_DIVIDER_W     1            /* 1px hairline (separator thickness) */
@@ -89,6 +91,33 @@ static void dock_slide_cb(int anim_id, float position, void *ctx) {
 
 /* ── API ── */
 
+/* D.13: dock icon size follows accessibility density (comfortable/standard/
+ * compact -> 68/60/52). */
+void dock_apply_density(void) {
+    density_mode_t d = access_get()->density;
+    int px = (Z12 + Z3);
+    if (d == DENSITY_COMFORTABLE) px = (Z12+Z3)+Z2;
+    else if (d == DENSITY_COMPACT) px = (Z12+Z3)-Z2;
+    s_dock_item_px = px;
+    g_dock.dock_w = compute_dock_width();
+}
+
+/* D.13: drag-reorder a pinned item (move index from->to). Returns 0 on success. */
+int dock_reorder(int from, int to)
+{
+    if (from < 0 || from >= g_dock.pinned_count) return -1;
+    if (to   < 0 || to   >= g_dock.pinned_count) return -1;
+    if (from == to) return 0;
+    dock_item_t moved = g_dock.pinned[from];
+    if (from < to) for (int i = from; i < to; i++) g_dock.pinned[i] = g_dock.pinned[i+1];
+    else           for (int i = from; i > to; i--) g_dock.pinned[i] = g_dock.pinned[i-1];
+    g_dock.pinned[to] = moved;
+    return 0;
+}
+
+/* D.13: "poof" a pinned item (drag-off removal; the fade is the caller's). */
+void dock_poof(int index) { dock_unpin(index); }
+
 void dock_init(int auto_hide) {
     g_dock.visible = 0;
     g_dock.auto_hide = auto_hide;
@@ -100,6 +129,7 @@ void dock_init(int auto_hide) {
     g_dock.selected = -1;
     g_dock.dock_h = DOCK_HEIGHT;
     g_dock.dock_w = 0;
+    dock_apply_density();   /* D.13 */
 
     kputs("DOCK: initialized, auto_hide=");
     kput_dec((uint64_t)auto_hide);
@@ -669,5 +699,32 @@ void dock_g5_selftest(void)
     kputs("[G5] zeros[2]="); kputs(z1); kputs(" derez[1]="); kputs(d1);
     kputs(" full[4]="); kputs(f1);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
+#ifdef ZEOS_DIAG_D13
+/* D.13 selftest: density-size (via access density), drag-reorder, poof-remove.
+ * (Hover-thumbnail needs window-snapshot infra -- not implemented; noted.) */
+void dock_d13_selftest(void)
+{
+    extern void access_set_density(density_mode_t);
+    access_set_density(DENSITY_COMFORTABLE); int big   = s_dock_item_px;
+    access_set_density(DENSITY_COMPACT);      int small = s_dock_item_px;
+    access_set_density(DENSITY_STANDARD);     int std   = s_dock_item_px;
+    int density_ok = (big == (Z12+Z3)+Z2) && (small == (Z12+Z3)-Z2) && (std == (Z12+Z3)) && big>std && std>small;
+
+    g_dock.pinned_count = 0;
+    dock_pin("A", -1); dock_pin("B", -1); dock_pin("C", -1);
+    int rr = dock_reorder(0, 2);   /* A,B,C -> B,C,A */
+    int order_ok = (rr==0) && g_dock.pinned[0].name[0]=='B' && g_dock.pinned[1].name[0]=='C' && g_dock.pinned[2].name[0]=='A';
+    int nb = g_dock.pinned_count;
+    dock_poof(1);                  /* remove C -> B,A */
+    int poof_ok = (g_dock.pinned_count == nb-1) && g_dock.pinned[0].name[0]=='B' && g_dock.pinned[1].name[0]=='A';
+
+    int pass = density_ok && order_ok && poof_ok;
+    kputs("[D13] density(big/std/small)="); kput_dec((uint64_t)big); kputs("/"); kput_dec((uint64_t)std); kputs("/"); kput_dec((uint64_t)small);
+    kputs(" reorder="); kput_dec((uint64_t)order_ok);
+    kputs(" poof="); kput_dec((uint64_t)poof_ok);
+    kputs(pass ? " -> PASS (hover-thumbnail: needs snapshot infra, N/I)\n" : " -> FAIL\n");
 }
 #endif

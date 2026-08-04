@@ -1338,6 +1338,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void hal_o2_selftest(void); hal_o2_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_D13
+        { extern void dock_d13_selftest(void); dock_d13_selftest(); dock_apply_density(); }
+#endif
+
 #ifdef ZEOS_DIAG_A7
         { extern void crypto_disk_a7_selftest(void); crypto_disk_a7_selftest(); }
 #endif

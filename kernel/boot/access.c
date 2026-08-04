@@ -376,6 +376,8 @@ void access_set_density(density_mode_t mode)
       panel_set_height(ph);
       compositor_set_panel_h(ph); }
 
+    { extern void dock_apply_density(void); dock_apply_density(); }  /* D.13 */
+
     /* Mark everything dirty — control sizes change globally */
     compositor_dirty_all();
     access_save();
