@@ -538,3 +538,29 @@ void compositor_show_dock(int show) {
 compositor_t *compositor_get_state(void) {
     return &g_comp;
 }
+
+#ifdef ZEOS_DIAG_L3
+static float s_l3_pos;
+static void  l3_cb(int id, float v, void *c) { (void)id; (void)c; s_l3_pos = v; }
+/* L.3 selftest: the compositor ticks anims every frame and re-arms compositing
+ * while any spring is live. Spawn a spring, clear dirty, run ONE
+ * compositor_advance(): the spring must have advanced (anim_tick was driven by
+ * the compositor) AND dirty must be re-armed (anim_active_count>0 gate). */
+void compositor_l3_selftest(void)
+{
+    anim_init();
+    s_l3_pos = 0.0f;
+    anim_spring(0.0f, 100.0f, SPRING_SNAPPY_S, SPRING_SNAPPY_D, l3_cb, 0);
+    int live = (anim_active_count() > 0);
+    (void)compositor_consume_dirty();          /* clear pending */
+    compositor_advance();                       /* ticks anim + re-arms */
+    int ticked  = (s_l3_pos > 0.0f);            /* compositor drove the spring */
+    int rearmed = (compositor_consume_dirty() > 0);  /* re-armed while live */
+    int pass = live && ticked && rearmed;
+    kputs("[L3] live="); kput_dec((uint64_t)live);
+    kputs(" ticked(pos>0)="); kput_dec((uint64_t)ticked);
+    kputs(" rearmed="); kput_dec((uint64_t)rearmed);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    anim_init();
+}
+#endif

@@ -878,3 +878,35 @@ void crypto_cmd(const char *args)
 
     kputs("usage: crypto status | encrypt-region <name> <start> <count> | rekey\n");
 }
+
+#ifdef ZEOS_DIAG_A7
+#include "kprint.h"
+/* A.7 selftest: PIN-gated AES-XTS-256 disk encryption round-trips. Init from a
+ * PIN (arms the master key), create a region, encrypt a known sector (cipher
+ * must differ from plaintext), decrypt it back (must recover the plaintext). */
+void crypto_disk_a7_selftest(void)
+{
+    crypto_disk_init("4271", 4);
+    int armed = crypto_disk_armed();
+    int rid = crypto_disk_create_region("a7test", 0, 2048, 64);
+    int region_ok = (rid >= 0);
+
+    static uint8_t plain[512], cipher[512], back[512];
+    for (int i = 0; i < 512; i++) plain[i] = (uint8_t)(i * 7 + 3);
+
+    int enc = crypto_disk_transform(rid, 1, 2048, 1, 512, plain, cipher);
+    int differs = 0; for (int i = 0; i < 512; i++) if (cipher[i] != plain[i]) { differs = 1; break; }
+    int dec = crypto_disk_transform(rid, 0, 2048, 1, 512, cipher, back);
+    int recovered = 1; for (int i = 0; i < 512; i++) if (back[i] != plain[i]) { recovered = 0; break; }
+
+    int pass = armed && region_ok && (enc == 0) && differs && (dec == 0) && recovered;
+    kputs("[A7] armed="); kput_dec((uint64_t)armed);
+    kputs(" region="); kput_dec((uint64_t)region_ok);
+    kputs(" enc_ok="); kput_dec((uint64_t)(enc==0));
+    kputs(" cipher_differs="); kput_dec((uint64_t)differs);
+    kputs(" dec_ok="); kput_dec((uint64_t)(dec==0));
+    kputs(" recovered_plaintext="); kput_dec((uint64_t)recovered);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    crypto_disk_destroy_region("a7test");
+}
+#endif

@@ -1334,6 +1334,14 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void settings_j1_selftest(void); settings_j1_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_A7
+        { extern void crypto_disk_a7_selftest(void); crypto_disk_a7_selftest(); }
+#endif
+
+#ifdef ZEOS_DIAG_L3
+        { extern void compositor_l3_selftest(void); compositor_l3_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_P3
         { extern void zp_p3_selftest(void); zp_p3_selftest(); }
 #endif
