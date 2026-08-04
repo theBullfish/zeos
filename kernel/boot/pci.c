@@ -10,6 +10,7 @@
 
 #include "pci.h"
 #include "io.h"
+#include "hal.h"   /* O.2: PCI config I/O via the HAL */
 #include "fb.h"
 
 /* ACPI table signatures */
@@ -81,8 +82,8 @@ static uint32_t pci_legacy_read32(uint8_t bus, uint8_t dev, uint8_t func,
                   | ((uint32_t)func << 8)
                   | (offset & 0xFC);
 
-    outl(PCI_CONFIG_ADDR, addr);
-    return inl(PCI_CONFIG_DATA);
+    hal_out32(PCI_CONFIG_ADDR, addr);
+    return hal_in32(PCI_CONFIG_DATA);
 }
 
 /*
@@ -122,8 +123,8 @@ void pci_config_write32(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, 
                       | ((uint32_t)dev << 11)
                       | ((uint32_t)func << 8)
                       | (offset & 0xFC);
-        outl(PCI_CONFIG_ADDR, addr);
-        outl(PCI_CONFIG_DATA, val);
+        hal_out32(PCI_CONFIG_ADDR, addr);
+        hal_out32(PCI_CONFIG_DATA, val);
     }
 }
 

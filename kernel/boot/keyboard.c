@@ -6,6 +6,7 @@
  */
 
 #include "keyboard.h"
+#include "hal.h"   /* O.2: port I/O via the HAL */
 #include "keybinds.h"
 #include "idt.h"
 #include "io.h"

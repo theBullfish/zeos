@@ -51,7 +51,7 @@ LIBS     = -lefi -lgnuefi
 SRCS     = lib/lodepng/lodepng.c \
            boot/icon_svg.c \
            boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/splash.c \
-           boot/panic.c boot/gdt.c boot/idt.c \
+           boot/panic.c boot/gdt.c boot/idt.c boot/hal_x86.c \
            boot/acpi.c boot/aml.c boot/lapic.c boot/ioapic.c \
            boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c \
            boot/timer.c boot/timeofday.c boot/signal.c boot/zplus.c boot/zplus_zir.c boot/zp_runtime.c \
