@@ -314,7 +314,7 @@ the OS. When in doubt it's the OS.
 
 ## O. Hardware Targets
 - [x] **O.1** x86-64 target (current) — `[observed]` boots + runs.
-- [ ] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[TODO]`.
+- [x] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[VERIFIED/harness]` hal.h façade + hal_x86.c backend (O2 selftest: io_forwards/arch PASS); PCI config-io migrated behind it (enumeration verified). Full caller migration incremental. bible id=464. `[source hal.h; hal_x86.c]`.
 - [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`.
 
 ## P. Z+ Language
