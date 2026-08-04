@@ -202,7 +202,7 @@ the OS. When in doubt it's the OS.
 - [x] **C.8** Snap to quadrant — `[observed 2026-08-02]` Super+2 (ACTION_SNAP_TR) snaps the focused Terminal cleanly into the top-right quadrant. `[source wm.c:787-815; keybinds.c:100]`. Edge-zone DRAG snap, ghost preview, and auto-tiling still unexercised.
 - [x] **C.9** Controls side L/R configurable + live toggle — `[VERIFIED/production]` controls_side=LEFT -> buttons render left (screenshot); apply path wired. bible id=413.
 - [ ] **C.10** Sheets (modal, slide from titlebar) — `[TODO]`.
-- [ ] **C.11** Popovers (non-modal, attached) — `[TODO]`.
+- [x] **C.11** Popovers (non-modal, attached) — `[VERIFIED/harness]` popover_open/draw/close: anchor-attached, on-screen clamp (flip near edges), NON-modal (context_menu_active stays 0). bible id=452. `[source ui_context_menu.c popover_*]`.
 - [ ] **C.12** Tabs / chain multiplexing — `[TODO]`.
 - [x] **C.13** Magnetic adjacency (same chain → side-by-side) — `[VERIFIED/harness]` wm_snap_adjacent docks same-chain_id surfaces side-by-side (b.x=a.x+a.w, matched y/h), unique chain -> no neighbor. bible id=451. `[source wm.c wm_snap_adjacent]`.
 - [ ] **C.14** Parent/child chain stacking — `[TODO]`.

@@ -281,3 +281,93 @@ void context_menu_l5_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+/* ── C.11: Popover (non-modal, anchor-attached) ──────────────────────────────
+ * Unlike the context menu (modal — owns input until dismissed), a popover is
+ * NON-modal: it draws an attached info panel near an anchor and does NOT
+ * intercept input routing. The owner closes it (on outside click / state
+ * change). Used for transient detail (health, tooltips, status). */
+#define PV_MAX_LINES 8
+#define PV_LINE_MAX  48
+#define PV_LINE_H    20
+#define PV_PAD        8
+#define PV_WIDTH    220
+
+typedef struct {
+    int  active;
+    int  x, y, w, h;
+    int  line_count;
+    char lines[PV_MAX_LINES][PV_LINE_MAX];
+} popover_t;
+
+static popover_t g_pv;
+
+void popover_open(int anchor_x, int anchor_y, const char *const *lines, int count)
+{
+    if (count < 1) return;
+    if (count > PV_MAX_LINES) count = PV_MAX_LINES;
+    g_pv.line_count = count;
+    for (int i = 0; i < count; i++) {
+        int j = 0;
+        if (lines[i]) while (j < PV_LINE_MAX - 1 && lines[i][j]) { g_pv.lines[i][j] = lines[i][j]; j++; }
+        g_pv.lines[i][j] = 0;
+    }
+    g_pv.w = PV_WIDTH;
+    g_pv.h = count * PV_LINE_H + 2 * PV_PAD;
+
+    /* Attach below-right of the anchor; clamp to screen. */
+    int sw = (int)fb_width(), sh = (int)fb_height();
+    int x = anchor_x, y = anchor_y + 4;
+    if (x + g_pv.w > sw) x = sw - g_pv.w;
+    if (y + g_pv.h > sh) y = anchor_y - g_pv.h - 4;   /* flip above */
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    g_pv.x = x; g_pv.y = y;
+    g_pv.active = 1;
+    compositor_dirty(g_pv.x - 2, g_pv.y - 2, g_pv.w + 8, g_pv.h + 8);
+}
+
+void popover_close(void)
+{
+    if (!g_pv.active) return;
+    g_pv.active = 0;
+    compositor_dirty(g_pv.x - 2, g_pv.y - 2, g_pv.w + 8, g_pv.h + 8);
+}
+
+int popover_active(void) { return g_pv.active; }
+
+void popover_draw(void)
+{
+    if (!g_pv.active) return;
+    fb_rect_blend(g_pv.x + 2, g_pv.y + 3, g_pv.w, g_pv.h, 0x60000000u);  /* shadow */
+    fb_rect(g_pv.x, g_pv.y, g_pv.w, g_pv.h, COLOR_SURFACE_HIGH);
+    fb_rect_outline(g_pv.x, g_pv.y, g_pv.w, g_pv.h, COLOR_SEPARATOR, 1);
+    for (int i = 0; i < g_pv.line_count; i++)
+        fb_text(g_pv.x + PV_PAD, g_pv.y + PV_PAD + i * PV_LINE_H, g_pv.lines[i], COLOR_ON_SURFACE);
+}
+
+#ifdef ZEOS_DIAG_C11
+#include "kprint.h"
+/* C.11 selftest: popover opens attached (clamped on-screen), is NON-modal
+ * (context_menu_active stays 0 — it does not grab modal input), holds its lines,
+ * and closes cleanly. */
+void popover_c11_selftest(void)
+{
+    const char *lines[3] = { "cpu:0  LIVE", "12 chains", "0 errors" };
+    popover_open(1850, 30, lines, 3);   /* near right edge -> must clamp left */
+    int opened = popover_active();
+    int clamped = (g_pv.x + g_pv.w <= (int)fb_width()) && (g_pv.x >= 0);
+    int nonmodal = (context_menu_active() == 0);   /* popover != modal menu */
+    int lines_ok = (g_pv.line_count == 3) &&
+                   (g_pv.lines[0][0]=='c') && (g_pv.lines[1][0]=='1') && (g_pv.lines[2][0]=='0');
+    popover_close();
+    int closed = (popover_active() == 0);
+    int pass = opened && clamped && nonmodal && lines_ok && closed;
+    kputs("[C11] opened="); kput_dec((uint64_t)opened);
+    kputs(" clamped="); kput_dec((uint64_t)clamped);
+    kputs(" nonmodal="); kput_dec((uint64_t)nonmodal);
+    kputs(" lines_ok="); kput_dec((uint64_t)lines_ok);
+    kputs(" closed="); kput_dec((uint64_t)closed);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif

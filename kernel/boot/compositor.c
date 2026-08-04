@@ -344,6 +344,7 @@ static void composite_draw(void)
          * backbuffer like every other overlay. Self-gates on visibility. */
         { extern void palette_draw(void); palette_draw(); }
         { extern void sigviz_overlay_draw(void); sigviz_overlay_draw(); }  /* K.1 chain graph */
+        { extern void popover_draw(void); popover_draw(); }  /* C.11 popover */
         dirty_modal_draw();
     }
     theme_apply_night_shift();

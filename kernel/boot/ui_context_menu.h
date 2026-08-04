@@ -45,4 +45,10 @@ void context_menu_draw(void);
 /* Counter for selftest. */
 uint32_t context_menu_total_opens(void);
 
+/* C.11: non-modal anchor-attached popover. */
+void popover_open(int anchor_x, int anchor_y, const char *const *lines, int count);
+void popover_close(void);
+int  popover_active(void);
+void popover_draw(void);
+
 #endif /* ZEOS_UI_CONTEXT_MENU_H */

@@ -1258,6 +1258,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_C11
+        /* C.11 selftest: non-modal popover. */
+        { extern void popover_c11_selftest(void); popover_c11_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_C13
         /* C.13 selftest: same-chain magnetic adjacency. */
         { extern void wm_c13_selftest(void); wm_c13_selftest(); }
