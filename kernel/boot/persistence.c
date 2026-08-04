@@ -119,7 +119,7 @@ static uint64_t g_last_save_tsc;
 
 /* Resolve counter -> drives the checkpoint cadence. */
 static uint64_t g_resolve_count;
-#define CHECKPOINT_EVERY 500ULL
+#define CHECKPOINT_EVERY 2000ULL   /* A.6: was 500 — 4x rarer flush; skip-CRC cannot skip (vault_version/b3 churn every checkpoint), so reduce frequency of the synchronous ~38ms flush */
 
 /* Deferred-checkpoint flag (A.9 fix, 2026-07-25). The checkpoint used to call
  * persistence_save_snapshot_now() DIRECTLY from persistence_on_resolve_complete,
