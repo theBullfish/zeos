@@ -1334,6 +1334,10 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         { extern void settings_j1_selftest(void); settings_j1_selftest(); }
 #endif
 
+#ifdef ZEOS_DIAG_P3
+        { extern void zp_p3_selftest(void); zp_p3_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_P2
         /* P.2 selftest: Z+ REPL core runs real programs, rejects garbage. */
         { extern void zp_p2_selftest(void); zp_p2_selftest(); }

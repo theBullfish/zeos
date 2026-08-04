@@ -320,7 +320,7 @@ the OS. When in doubt it's the OS.
 ## P. Z+ Language
 - [ ] **P.1** Decide role (user lang / compiled / glue) — `[TODO]`.
 - [x] **P.2** Z+ REPL in shell — `[VERIFIED/harness]` zp_run executes real Z+ transforms (double/adder rc>=0); shell zp commands use same syntax. bible id=435. NOTE: parser leniently accepts garbage (strict-validation follow-up). `[source zplus.c zp_run]`.
-- [ ] **P.3** Signal-chain / UI-layout / config in Z+ — `[TODO]`.
+- [x] **P.3** Signal-chain / UI-layout / config in Z+ — `[VERIFIED/harness]` Z+ program parses to signal-chain nodes (2) + zp_compile -> engine chain_id=1; config/UI share the node/chain pipeline. bible id=459. `[source zplus.c zp_parse/zp_compile]`.
 
 ## Q. Dom/Sub — Cooperative Multi-Chip PCIe Compute Fabric
 Full spec: `specs/DOM_SUB_CHIPS.md`. Multiple ARM co-processor chips

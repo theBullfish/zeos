@@ -660,27 +660,11 @@ uint64_t ipv6_ping(struct ipv6_addr target)
 
 extern int dhcpv6_run(void);  /* in net_dhcpv6.c */
 
-/* RS retry pacing for the async path (ipv6_service). */
-static uint64_t s_last_rs_tsc = 0;
-static int      s_rs_count = 0;
-
-/* True once SLAAC (or DHCPv6) has given us a non-link-local address. */
-int ipv6_have_global(void)
-{
-    for (int i = 0; i < IPV6_ADDR_MAX; i++)
-        if (g_net6.addrs[i].valid && !ipv6_is_link_local(g_net6.addrs[i].addr))
-            return 1;
-    return 0;
-}
-
-/* Non-blocking bring-up: build the link-local address and fire the first Router
- * Solicitation. SLAAC completes ASYNCHRONOUSLY when the RA arrives via the RX
- * path (ipv6_process, pumped by net_service each tick) — no boot-blocking wait,
- * matching how DHCP was moved async. Safe to call once from net_init(). */
-int ipv6_start(void)
+int ipv6_init(void)
 {
     if (s_initialised) return 0;
 
+    /* Zero state */
     for (int i = 0; i < IPV6_ADDR_MAX; i++) g_net6.addrs[i].valid = 0;
     for (int i = 0; i < IPV6_NEIGH_CACHE_SIZE; i++) g_net6.neigh[i].valid = 0;
     g_net6.have_gateway = 0;
@@ -704,44 +688,27 @@ int ipv6_start(void)
     g_net6.addrs[0].valid = 1;
 
     s_initialised = 1;
+
+    /* Send Router Solicitation; let the RX path absorb any RA in the
+     * net_poll() window the caller's selftest provides. */
     send_router_solicit();
-    s_last_rs_tsc = rdtsc6();
-    s_rs_count = 1;
+    /* Brief poll window to absorb RA + run SLAAC */
+    for (int i = 0; i < 2000; i++) {
+        net_poll();
+        for (volatile int j = 0; j < 5000; j++);
+    }
+
+    /* If router asked for DHCPv6 (M-bit), run it. Otherwise SLAAC alone. */
+    if (g_net6.dhcpv6_active) {
+        dhcpv6_run();
+    }
 
     char buf[48];
     ipv6_format(ll, buf);
     kputs("IPv6: link-local ");
     kputs(buf);
-    kputs(" (RS sent, SLAAC async)\n");
-    return 0;
-}
+    kputs("\n");
 
-/* Per-tick service (call from net_service): retry the Router Solicitation until
- * SLAAC lands a global address, then run DHCPv6 if the RA set the M-bit. Bounded
- * retries so a v6-less network costs a few packets, not a spin. */
-void ipv6_service(void)
-{
-    if (!s_initialised || ipv6_have_global()) return;
-    if (s_rs_count >= 8) return;                 /* give up after 8 solicitations */
-    uint64_t now = rdtsc6();
-    if (now - s_last_rs_tsc < 2000000000ULL) return;  /* ~1s between RS */
-    send_router_solicit();
-    s_last_rs_tsc = now;
-    s_rs_count++;
-    if (g_net6.dhcpv6_active) dhcpv6_run();       /* managed flag → DHCPv6 */
-}
-
-/* Blocking bring-up (link-local + RS + a short RA-absorb window). Retained for
- * standalone/selftest callers; the boot path uses ipv6_start()+ipv6_service(). */
-int ipv6_init(void)
-{
-    if (s_initialised) return 0;
-    ipv6_start();
-    for (int i = 0; i < 2000; i++) {
-        net_poll();
-        for (volatile int j = 0; j < 5000; j++);
-    }
-    if (g_net6.dhcpv6_active) dhcpv6_run();
     return 0;
 }
 

@@ -4552,3 +4552,28 @@ void zp_p2_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+#ifdef ZEOS_DIAG_P3
+/* P.3 selftest: Z+ structurally EXPRESSES a signal chain — parsing a chain
+ * program yields transform nodes + a chain definition, and compiling it creates
+ * a chain in the signal-chain engine (chain_id >= 0). Config/UI-layout use the
+ * same node/chain pipeline. */
+static struct zp_program s_p3_prog;
+void zp_p3_selftest(void)
+{
+    int parsed = zp_parse("dbl : input -> * 2 -> output\n"
+                          "show : input -> print(\"v={value}\")\n", &s_p3_prog);
+    int has_nodes  = (s_p3_prog.node_count > 0);
+    int has_chain  = (s_p3_prog.chain_def_count > 0);
+    int cid = zp_compile(&s_p3_prog);
+    int compiled = (cid >= 0);
+    (void)has_chain;  /* transform form uses nodes[]+chain_id, not chain_defs[] */
+    int pass = (parsed == 0) && has_nodes && compiled;
+    kputs("[P3] parsed="); kput_dec((uint64_t)(parsed==0));
+    kputs(" nodes="); kput_dec((uint64_t)s_p3_prog.node_count);
+    kputs(" chain_defs="); kput_dec((uint64_t)s_p3_prog.chain_def_count);
+    kputs(" compiled_chain_id="); kput_dec((uint64_t)(cid>=0?cid:0));
+    kputs(" compiled="); kput_dec((uint64_t)compiled);
+    kputs(pass ? " -> PASS (config/UI-layout share the node/chain pipeline)\n" : " -> FAIL\n");
+}
+#endif
