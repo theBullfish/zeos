@@ -43,6 +43,12 @@ typedef enum {
     DOM_SUB_ROLE_SUB,
 } dom_sub_role_t;
 
+/* Q.5 — work-class tag set at chain-creation time by the enqueuing subsystem. */
+typedef enum {
+    DOM_SUB_CLASS_THINK,       /* high-priority: user is waiting on this */
+    DOM_SUB_CLASS_BACKGROUND,  /* prefetch, batch, telemetry — "incidental shit" */
+} dom_sub_class_t;
+
 /* One cohort member. */
 typedef struct {
     int             in_use;
@@ -82,6 +88,12 @@ void dom_sub_on_detach(uint8_t bus, uint8_t dev, uint8_t func);
  * -1 for an empty cohort. Applies hysteresis so a marginal challenger does not
  * flap the incumbent Dom. */
 int  dom_sub_elect(void);
+
+/* ── Q.5: task classification & routing ────────────────────── */
+/* Route a work class to a cohort chip slot. THINK → current Dom; BACKGROUND →
+ * round-robin across Subs (a lone chip is both Dom and Sub; empty cohort → -1
+ * so the caller uses its non-cooperative fallback). Returns a member index. */
+int  dom_sub_route(dom_sub_class_t cls);
 
 /* Current Dom member index (-1 if none) + accessors. */
 int  dom_sub_dom_index(void);

@@ -39,6 +39,7 @@ static int      s_dom = -1;          /* current Dom member index */
 static int      s_chal = -1;         /* challenger tracked for hysteresis */
 static int      s_chal_streak = 0;   /* consecutive elections chal has led */
 static uint64_t s_evt_cursor = 0;    /* hotplug drain: last processed tsc */
+static int      s_rr = 0;            /* Q.5 BACKGROUND round-robin cursor */
 
 int dom_sub_count(void)
 {
@@ -55,6 +56,29 @@ const cohort_member_t *dom_sub_member(int idx)
 }
 
 int dom_sub_dom_index(void) { return s_dom; }
+
+/* ── Q.5: task classification & routing ────────────────────────────── */
+int dom_sub_route(dom_sub_class_t cls)
+{
+    if (s_dom < 0) return -1;                    /* empty cohort → caller fallback */
+    if (cls == DOM_SUB_CLASS_THINK) return s_dom;/* THINK always → the Dom */
+
+    /* BACKGROUND: round-robin across the Subs (every non-Dom member). */
+    int subs = 0;
+    for (int i = 0; i < DOM_SUB_MAX_CHIPS; i++)
+        if (s_members[i].in_use && i != s_dom) subs++;
+    if (subs == 0) return s_dom;                 /* lone chip is Dom+Sub */
+
+    int target = s_rr % subs;
+    s_rr = (s_rr + 1) % 1000000;
+    int seen = 0;
+    for (int i = 0; i < DOM_SUB_MAX_CHIPS; i++) {
+        if (!s_members[i].in_use || i == s_dom) continue;
+        if (seen == target) return i;
+        seen++;
+    }
+    return s_dom;                                /* unreachable */
+}
 
 /* ── Q.3: identify ─────────────────────────────────────────────────── */
 /* Fill a member's identity. Real fw_version + DRAM come from the bound Goya
@@ -309,7 +333,7 @@ void dom_sub_reset(void)
         s_members[i].in_use = 0;
         s_members[i].role = DOM_SUB_ROLE_NONE;
     }
-    s_dom = -1; s_chal = -1; s_chal_streak = 0;
+    s_dom = -1; s_chal = -1; s_chal_streak = 0; s_rr = 0;
 }
 
 int dom_sub_inject_synthetic(uint8_t bus, uint8_t dev, uint8_t func,
@@ -367,13 +391,32 @@ int dom_sub_selftest(void)
     dom_sub_elect(); dom_sub_elect(); dom_sub_elect();
     ok &= expect("equal score keeps incumbent", dom_sub_dom_index(), 0);
 
-    /* Q.4e: Dom-detach → immediate re-election to the surviving chip. */
+    /* Q.4e / Q.6: Dom-detach → immediate re-election to the surviving chip. */
     dom_sub_reset();
     dom_sub_inject_synthetic(1, 0, 0, 8192, 0);                       /* slot 0 = Dom */
     dom_sub_inject_synthetic(2, 0, 0, 4096, 0);                       /* slot 1 = Sub */
     ok &= expect("higher-score chip is Dom", dom_sub_dom_index(), 0);
     dom_sub_on_detach(1, 0, 0);                                       /* unplug Dom */
     ok &= expect("survivor promoted immediately", dom_sub_dom_index(), 1);
+
+    /* Q.5: task classification & routing. */
+    dom_sub_reset();
+    ok &= expect("empty routes -1 (fallback)", dom_sub_route(DOM_SUB_CLASS_THINK), -1);
+    dom_sub_inject_synthetic(1, 0, 0, 8192, 0);                       /* slot 0 = Dom (lone) */
+    ok &= expect("lone chip: THINK->self", dom_sub_route(DOM_SUB_CLASS_THINK), 0);
+    ok &= expect("lone chip: BG->self",    dom_sub_route(DOM_SUB_CLASS_BACKGROUND), 0);
+    dom_sub_inject_synthetic(2, 0, 0, 4096, 0);                       /* slot 1 = Sub */
+    dom_sub_inject_synthetic(3, 0, 0, 2048, 0);                       /* slot 2 = Sub */
+    ok &= expect("THINK -> Dom", dom_sub_route(DOM_SUB_CLASS_THINK), 0);
+    ok &= expect("BG round-robin sub A", dom_sub_route(DOM_SUB_CLASS_BACKGROUND), 1);
+    ok &= expect("BG round-robin sub B", dom_sub_route(DOM_SUB_CLASS_BACKGROUND), 2);
+    ok &= expect("BG round-robin wraps", dom_sub_route(DOM_SUB_CLASS_BACKGROUND), 1);
+    ok &= expect("THINK never a Sub",    dom_sub_route(DOM_SUB_CLASS_THINK), 0);
+
+    /* Q.6: Sub-detach is a cheap re-election — the Dom is unchanged. */
+    dom_sub_on_detach(3, 0, 0);                                       /* unplug a Sub */
+    ok &= expect("Sub-detach keeps Dom", dom_sub_dom_index(), 0);
+    ok &= expect("BG now routes lone Sub", dom_sub_route(DOM_SUB_CLASS_BACKGROUND), 1);
 
     dom_sub_reset();
     kputs(ok ? "  Dom/Sub selftest: PASS\n" : "  Dom/Sub selftest: FAIL\n");
