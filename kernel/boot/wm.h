@@ -120,6 +120,15 @@ typedef struct {
      * released over the window "feeds the chain"). */
     char           last_drop[32];
     int            drop_count;
+
+    /* C.12: tabs — a surface can multiplex several chains as tabs. */
+    int            tab_chain[8];      /* chain_id per tab */
+    char           tab_title[8][24];
+    int            tab_count;
+    int            active_tab;
+
+    /* C.14: parent/child chain stacking. */
+    int            parent_surface;    /* -1 = top-level; else stacks on parent */
 } chain_surface_t;
 
 /* ── Snap zone ghost ── */
@@ -281,6 +290,17 @@ int  wm_feed_surface(int id, const char *payload);
 
 /* C.13: dock a surface beside a same-chain neighbor (magnetic adjacency). */
 int  wm_snap_adjacent(int id);
+
+/* C.12: tabs. */
+int  wm_tab_add(int id, int chain_id, const char *title);
+int  wm_tab_switch(int id, int index);
+int  wm_tab_count(int id);
+int  wm_tab_active(int id);
+
+/* C.14: parent/child chain stacking. */
+int  wm_set_parent(int id, int parent_id);
+int  wm_get_parent(int id);
+int  wm_is_ancestor(int a, int b);
 chain_surface_t *wm_get_surface_by_index(int index);  /* Index into surface array */
 int wm_surface_count(void);
 int wm_visible_count(void);    /* On current workspace */

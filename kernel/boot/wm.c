@@ -302,6 +302,9 @@ int wm_create_surface(const char *title, int chain_id,
     s->anim_w = (float)s->w;
     s->anim_h = (float)s->h;
     s->closing = 0;
+    s->drop_count = 0; s->last_drop[0] = 0;        /* D.11 */
+    s->tab_count = 0;  s->active_tab = 0;           /* C.12 */
+    s->parent_surface = -1;                          /* C.14 */
 
     /* Open animation: scale 0.8 → 1.0, opacity 0 → 255 */
     s->anim_scale_id = anim_spring(0.8f, 1.0f,
@@ -1469,6 +1472,59 @@ int wm_snap_adjacent(int id)
     return nb->id;
 }
 
+/* ── C.12: tabs / chain multiplexing ── */
+int wm_tab_add(int id, int chain_id, const char *title)
+{
+    chain_surface_t *s = find_surface(id);
+    if (!s || s->tab_count >= 8) return -1;
+    int t = s->tab_count++;
+    s->tab_chain[t] = chain_id;
+    int j = 0; if (title) while (j < 23 && title[j]) { s->tab_title[t][j] = title[j]; j++; }
+    s->tab_title[t][j] = 0;
+    if (s->tab_count == 1) { s->active_tab = 0; s->chain_id = chain_id; }
+    return t;
+}
+
+int wm_tab_switch(int id, int index)
+{
+    chain_surface_t *s = find_surface(id);
+    if (!s || index < 0 || index >= s->tab_count) return -1;
+    s->active_tab = index;
+    s->chain_id = s->tab_chain[index];   /* the surface now renders that chain */
+    return index;
+}
+
+int wm_tab_count(int id)  { chain_surface_t *s = find_surface(id); return s ? s->tab_count : 0; }
+int wm_tab_active(int id) { chain_surface_t *s = find_surface(id); return s ? s->active_tab : -1; }
+
+/* ── C.14: parent/child chain stacking ── */
+int wm_set_parent(int id, int parent_id)
+{
+    chain_surface_t *s = find_surface(id);
+    if (!s) return -1;
+    if (parent_id == id) return -1;                 /* no self-parent */
+    if (parent_id >= 0 && !find_surface(parent_id)) return -1;
+    s->parent_surface = parent_id;
+    /* Child stacks above its parent: pull it just in front. */
+    if (parent_id >= 0) wm_focus_surface(id);
+    return 0;
+}
+
+int wm_get_parent(int id) { chain_surface_t *s = find_surface(id); return s ? s->parent_surface : -1; }
+
+/* Is `a` an ancestor of `b` (child chain stacking chain)? */
+int wm_is_ancestor(int a, int b)
+{
+    int guard = 0;
+    chain_surface_t *s = find_surface(b);
+    while (s && s->parent_surface >= 0 && guard++ < 16) {
+        if (s->parent_surface == a) return 1;
+        s = find_surface(s->parent_surface);
+    }
+    return 0;
+}
+
+
 
 
 chain_surface_t *wm_get_surface_by_index(int index) {
@@ -1545,6 +1601,61 @@ void wm_c13_selftest(void)
     kputs(" adjacent="); kput_dec((uint64_t)adjacent);
     kputs(" neighbor="); kput_dec((uint64_t)neighbor_ok);
     kputs(" no_neighbor_for_unique="); kput_dec((uint64_t)no_neighbor);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
+#ifdef ZEOS_DIAG_C12
+/* C.12 selftest: a surface multiplexes chains as tabs; switching changes the
+ * active tab AND the chain the surface renders. */
+void wm_c12_selftest(void)
+{
+    int s = wm_create_surface("C12", -1, 200, 200, 500, 350, 0);
+    wm_force_visible(s);
+    int t0 = wm_tab_add(s, 10, "cpu");
+    int t1 = wm_tab_add(s, 20, "mem");
+    int t2 = wm_tab_add(s, 30, "gpu");
+    int count_ok = (wm_tab_count(s) == 3) && (t0==0 && t1==1 && t2==2);
+    int active0 = (wm_tab_active(s) == 0);                 /* first add = active */
+    chain_surface_t *sf = wm_get_surface(s);
+    int chain0 = sf && (sf->chain_id == 10);
+    wm_tab_switch(s, 2);
+    int active2 = (wm_tab_active(s) == 2);
+    int chain2 = sf && (sf->chain_id == 30);               /* now renders gpu */
+    int reject = (wm_tab_switch(s, 9) == -1);              /* out of range */
+    int pass = count_ok && active0 && chain0 && active2 && chain2 && reject;
+    kputs("[C12] count="); kput_dec((uint64_t)wm_tab_count(s));
+    kputs(" active0="); kput_dec((uint64_t)active0);
+    kputs(" chain0="); kput_dec((uint64_t)chain0);
+    kputs(" switch2="); kput_dec((uint64_t)active2);
+    kputs(" chain2="); kput_dec((uint64_t)chain2);
+    kputs(" reject_oob="); kput_dec((uint64_t)reject);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+}
+#endif
+
+#ifdef ZEOS_DIAG_C14
+/* C.14 selftest: parent/child chain stacking — a child links to a parent, the
+ * ancestor query walks the chain, self-parent is rejected. */
+void wm_c14_selftest(void)
+{
+    int p  = wm_create_surface("C14p",  -1, 100, 100, 300, 200, 0);
+    int c1 = wm_create_surface("C14c1", -1, 150, 150, 280, 180, 0);
+    int c2 = wm_create_surface("C14c2", -1, 180, 180, 260, 160, 0);
+    wm_force_visible(p); wm_force_visible(c1); wm_force_visible(c2);
+    int set1 = (wm_set_parent(c1, p)  == 0);
+    int set2 = (wm_set_parent(c2, c1) == 0);               /* grandchild */
+    int link_ok = (wm_get_parent(c1) == p) && (wm_get_parent(c2) == c1);
+    int anc_direct = wm_is_ancestor(p, c1);
+    int anc_trans  = wm_is_ancestor(p, c2);                /* p is ancestor of grandchild */
+    int self_reject = (wm_set_parent(p, p) == -1);
+    int toplevel = (wm_get_parent(p) == -1);
+    int pass = set1 && set2 && link_ok && anc_direct && anc_trans && self_reject && toplevel;
+    kputs("[C14] link="); kput_dec((uint64_t)link_ok);
+    kputs(" anc_direct="); kput_dec((uint64_t)anc_direct);
+    kputs(" anc_transitive="); kput_dec((uint64_t)anc_trans);
+    kputs(" self_reject="); kput_dec((uint64_t)self_reject);
+    kputs(" toplevel="); kput_dec((uint64_t)toplevel);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif

@@ -203,9 +203,9 @@ the OS. When in doubt it's the OS.
 - [x] **C.9** Controls side L/R configurable + live toggle — `[VERIFIED/production]` controls_side=LEFT -> buttons render left (screenshot); apply path wired. bible id=413.
 - [x] **C.10** Sheets (modal, slide from titlebar) — `[VERIFIED/harness]` sheet_open springs from parent titlebar, modal-to-parent-only (scrim), sheet_close animates out. bible id=453. `[source ui_context_menu.c sheet_*]`.
 - [x] **C.11** Popovers (non-modal, attached) — `[VERIFIED/harness]` popover_open/draw/close: anchor-attached, on-screen clamp (flip near edges), NON-modal (context_menu_active stays 0). bible id=452. `[source ui_context_menu.c popover_*]`.
-- [ ] **C.12** Tabs / chain multiplexing — `[TODO]`.
+- [x] **C.12** Tabs / chain multiplexing — `[VERIFIED/harness]` wm_tab_add/switch: surface multiplexes up to 8 chains as tabs; switch repoints rendered chain; OOB rejected. bible id=454. `[source wm.c wm_tab_*]`.
 - [x] **C.13** Magnetic adjacency (same chain → side-by-side) — `[VERIFIED/harness]` wm_snap_adjacent docks same-chain_id surfaces side-by-side (b.x=a.x+a.w, matched y/h), unique chain -> no neighbor. bible id=451. `[source wm.c wm_snap_adjacent]`.
-- [ ] **C.14** Parent/child chain stacking — `[TODO]`.
+- [x] **C.14** Parent/child chain stacking — `[VERIFIED/harness]` wm_set_parent/is_ancestor: child links to parent (raised), transitive ancestry, self-parent rejected. bible id=455. `[source wm.c wm_set_parent]`.
 - [ ] **C.15** Custom button placement (drag) — `[2.0]`.
 
 ## D. Desktop Surface / Panel / Dock

@@ -1258,6 +1258,13 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         }
 #endif
 
+#ifdef ZEOS_DIAG_C12
+        { extern void wm_c12_selftest(void); wm_c12_selftest(); }
+#endif
+#ifdef ZEOS_DIAG_C14
+        { extern void wm_c14_selftest(void); wm_c14_selftest(); }
+#endif
+
 #ifdef ZEOS_DIAG_C10
         /* C.10 selftest: modal sheet slide-from-titlebar. */
         { extern void sheet_c10_selftest(void); sheet_c10_selftest(); }
