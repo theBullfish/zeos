@@ -292,7 +292,7 @@ the OS. When in doubt it's the OS.
 ## L. Animation & Motion
 - [x] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[VERIFIED/harness]` selftest [L1] gradual+settle+converge, concurrent=64 (65th=-1), retarget preserves velocity. bible id=427. `[source anim.c anim_l1_selftest]`.
 - [x] **L.2** Presets snappy/smooth/bouncy/interactive — `[VERIFIED/harness]` distinct physics: bouncy overshoots peak 128, interactive settles 2x faster than smooth (104 vs 226 ticks), all converge. bible id=428. `[source theme.h:50-57; anim_l2_selftest]`.
-- [ ] **L.3** Compositor ticks anims per frame + re-arm while live — `[UNVERIFIED]` `[source compositor.c:179-198]`.
+- [x] **L.3** Compositor ticks anims per frame + re-arm while live — `[VERIFIED/harness]` one compositor_advance drove a spring (pos>0) + re-armed dirty while anim live. bible id=461. `[source compositor.c:272,289]`.
 - [x] **L.4** Spring surface open/close, snap settle, dock auto-hide slide — `[VERIFIED/harness]` surface create springs scale 0.8->1.0+opacity 0->255, detach springs back ([L4] open/close PASS); dock-slide via D.12. bible id=429. `[source wm.c:306-354; dock.c]`.
 - [x] **L.5** Spring menu appear/dismiss — `[VERIFIED/production]` context menus spring-scale open/dismiss; deferred teardown, no input ripple. KVM [L5] PASS. bible id=341.
 - [x] **L.6** Spring scroll physics — `[VERIFIED/harness]` scroll_phys_t momentum+friction+edge rubber-band: flick decelerates+settles, overscroll (1200>max1000) springs back to 1000. bible id=448. `[source anim.c scroll_phys_*]`.
