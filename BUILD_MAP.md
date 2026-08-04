@@ -315,7 +315,7 @@ the OS. When in doubt it's the OS.
 ## O. Hardware Targets
 - [x] **O.1** x86-64 target (current) — `[observed]` boots + runs.
 - [x] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[VERIFIED/harness]` hal.h façade + hal_x86.c backend (O2 selftest: io_forwards/arch PASS); PCI config-io migrated behind it (enumeration verified). Full caller migration incremental. bible id=464. `[source hal.h; hal_x86.c]`.
-- [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`.
+- [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`. `[PARTIAL 2026-08-03]` first brick: hal_arm64.c (ARM64 HAL backend — GICv2/generic-timer/PL011/DAIF/ECAM) compiles cross-arch with aarch64-linux-gnu-gcc, proving O.2's HAL is portable. Full boot path (EFI aarch64 stub, page tables, GIC dispatch, framebuffer) remaining. bible id=466.
 
 ## P. Z+ Language
 - [x] **P.1** Decide role (user lang / compiled / glue) — `[DECIDED]` Z+ = compiled signal-chain/config/glue DSL (parse->compile->ZIR->execute into the chain engine), NOT a general user lang or native compiler. Embodied in code; verified via P.2/P.3. bible id=460.
