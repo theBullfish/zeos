@@ -97,6 +97,11 @@ int net_init(void)
      * dhcp_service() (per tick) drives it to a bound lease. */
     dhcp_start();
 
+    /* Bring IPv6 up async too: link-local + Router Solicitation now, SLAAC
+     * completes over the next few net_service() ticks (ipv6_service). This is
+     * the async-under-the-scheduler treatment the old blocking ipv6_init needed. */
+    { extern int ipv6_start(void); ipv6_start(); }
+
     kputs("NET: ");
     for (int i = 0; i < 6; i++) {
         if (i > 0) kputs(":");
@@ -186,4 +191,5 @@ void net_service(void)
     net_poll();      /* drain a couple frames per tick */
     net_poll();
     dhcp_service();
+    { extern void ipv6_service(void); ipv6_service(); }   /* SLAAC retry until global addr */
 }

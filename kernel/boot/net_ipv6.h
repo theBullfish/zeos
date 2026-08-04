@@ -135,6 +135,11 @@ static inline struct ipv6_addr ipv6_solicited_node(struct ipv6_addr target) {
 /* Initialize: derive link-local from MAC via EUI-64, send RS, optionally DHCPv6.
  * Called from net_init() after the NIC is up and DHCPv4 has run. */
 int  ipv6_init(void);
+/* Async bring-up: non-blocking link-local + RS (call from net_init); SLAAC
+ * completes via ipv6_service() ticks + the RX path. */
+int  ipv6_start(void);
+void ipv6_service(void);
+int  ipv6_have_global(void);
 
 /* Send a packet from our chosen source to dst, with given next-header proto.
  * Builds ethernet+IPv6 header, resolves dst MAC via ND or multicast mapping. */
