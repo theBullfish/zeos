@@ -225,12 +225,26 @@ action_id_t keybinds_process(uint8_t scancode, uint8_t modifiers, int extended)
     (void)modifiers;  /* We use our own tracked mod_state */
 
     /* Update modifier state first */
-    if (update_modifiers(scancode, extended))
+    if (update_modifiers(scancode, extended)) {
+#ifdef ZEOS_DIAG_KEYTRACE
+        { extern void kputs(const char*); extern void kput_hex(uint64_t);
+          kputs("[KT] mod sc="); kput_hex(scancode); kputs(" ext=");
+          kput_hex((uint64_t)extended); kputs(" -> mods="); kput_hex(mod_state);
+          kputs("\n"); }
+#endif
         return ACTION_NONE;
+    }
 
     /* Ignore break (release) codes for action matching */
     if (scancode & 0x80)
         return ACTION_NONE;
+
+#ifdef ZEOS_DIAG_KEYTRACE
+    { extern void kputs(const char*); extern void kput_hex(uint64_t);
+      kputs("[KT] key sc="); kput_hex(scancode); kputs(" ext=");
+      kput_hex((uint64_t)extended); kputs(" mods="); kput_hex(mod_state);
+      kputs("\n"); }
+#endif
 
     /* Search bindings for a match */
     for (int i = 0; i < bind_count; i++) {
@@ -238,6 +252,11 @@ action_id_t keybinds_process(uint8_t scancode, uint8_t modifiers, int extended)
             bindings[i].modifiers == mod_state &&
             bindings[i].extended  == (uint8_t)extended)
         {
+#ifdef ZEOS_DIAG_KEYTRACE
+            { extern void kputs(const char*); extern void kput_hex(uint64_t);
+              kputs("[KT]   MATCH action="); kput_hex((uint64_t)bindings[i].action);
+              kputs("\n"); }
+#endif
             keybinds_execute(bindings[i].action);
             return bindings[i].action;
         }

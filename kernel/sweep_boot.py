@@ -25,6 +25,7 @@ qemu=subprocess.Popen([
     "-drive",f"format=raw,file=fat:rw:{ESP}",
     "-drive",f"if=none,id=zeosvault,file={vault},format=raw",
     "-device","nvme,drive=zeosvault,serial=ZEOSVAULT",
+    "-device","qemu-xhci,id=xhci","-device","usb-mouse",  # PS/2 kbd (i8042) drives keys; USB mouse for rel/btn
     "-vga","std","-net","none",
     "-serial",f"file:{SER}","-display","none","-qmp",f"unix:{QMP},server,nowait",
 ],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT)
@@ -111,6 +112,10 @@ combo(["meta_l"], "f1");   time.sleep(0.6); shot("workspace-1")
 combo(["meta_l"], "2");    time.sleep(0.6); shot("snap-tr")
 combo(["meta_l"], "up");   time.sleep(0.6); shot("maximize")
 combo(["meta_l"], "down"); time.sleep(0.6); shot("restore")
+# Signal-graph overlay (K.1): Super+G opens, arrows pan (K.4), '=' zoom (K.2)
+combo(["meta_l"], "g");   time.sleep(0.6); shot("sigviz");   key("esc"); time.sleep(0.3)
+# Show-desktop (peek): Super+D
+combo(["meta_l"], "d");   time.sleep(0.6); shot("show-desktop"); combo(["meta_l"], "d"); time.sleep(0.3)
 # Palette LAST (modal): Super+Space
 combo(["meta_l"], "spc"); time.sleep(0.6); shot("palette"); key("esc"); time.sleep(0.3)
 

@@ -482,6 +482,11 @@ void palette_toggle(void)
         palette_hide();
     else
         palette_show();
+#ifdef ZEOS_DIAG_KEYTRACE
+    { extern void kputs(const char*); extern void kput_hex(uint64_t);
+      kputs("[KT] palette_toggle -> visible="); kput_hex((uint64_t)pal.visible);
+      kputs("\n"); }
+#endif
 }
 
 /* Repaint after any state change. The result list grows/shrinks with the query,

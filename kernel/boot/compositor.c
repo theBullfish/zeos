@@ -382,6 +382,21 @@ void compositor_present(void) {
 #endif
 
     int dirty = compositor_consume_dirty();
+#ifdef ZEOS_DIAG_KEYTRACE
+    { extern void kputs(const char*); extern void kput_hex(uint64_t);
+      extern int palette_is_visible(void);
+      static uint32_t s_kt_present_n;
+      s_kt_present_n++;
+      /* Only trace every 30th idle present to avoid flooding; always trace when
+       * dirty or palette visible so the interesting frames show. */
+      if (dirty || palette_is_visible() || (s_kt_present_n % 30 == 0)) {
+          kputs("[KT] present n="); kput_hex(s_kt_present_n);
+          kputs(" dirty="); kput_hex((uint64_t)dirty);
+          kputs(" pal_vis="); kput_hex((uint64_t)palette_is_visible());
+          kputs("\n");
+      }
+    }
+#endif
     if (dirty) {
         /* B.5/B.9 delta correction: clip the whole layer stack to the union of
          * the region-deltas pushed since the last composite. The B.6 back buffer
