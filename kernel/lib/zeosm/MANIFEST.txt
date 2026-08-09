@@ -1,0 +1,178 @@
+================================================================================
+ zeosm — minimal freestanding libm vendored for the Zeos kernel (QuickJS link)
+================================================================================
+
+PURPOSE
+  Provide freestanding definitions for exactly the 34 libm symbols QuickJS
+  references as undefined, so QuickJS links against a from-scratch UEFI kernel
+  with NO hosted libc.
+
+  34 target symbols:
+    abs acos acosh asin asinh atan atan2 atanh cbrt ceil cos cosh exp expm1
+    fabs floor fmax fmin fmod hypot log log10 log1p log2 lrint modf pow round
+    sin sinh sqrt tan tanh trunc
+
+SOURCE / PROVENANCE
+  musl libc 1.2.5, src/math/*.c (and src/stdlib/abs.c for the integer abs()).
+  Upstream: https://git.musl-libc.org/cgit/musl/tree/src/math
+  Fetched via GitHub mirror tag v1.2.5 (git.musl-libc.org was unreachable):
+    https://codeload.github.com/ifduyue/musl/tar.gz/refs/tags/v1.2.5
+  All .c files are verbatim upstream musl. Only the *headers* below are new
+  (self-contained shims replacing musl's bits/alltypes + multi-file features.h
+  header web, so the directory compiles with only -Ilib/zeosm plus the
+  compiler's own freestanding headers).
+
+TARGET ARCH / MODEL
+  x86_64, LP64, little-endian, FLT_EVAL_METHOD == 0, 80-bit long double.
+  (These assumptions are baked into math.h / endian.h / limits.h.)
+
+--------------------------------------------------------------------------------
+ EXACT COMPILE COMMAND (succeeds, exit 0, for every .c below)
+--------------------------------------------------------------------------------
+  cd /home/brad/zeos-repos/zeos/kernel/lib/zeosm
+  gcc -ffreestanding -fno-stack-protector -fno-stack-check -fpic \
+      -fshort-wchar -mno-red-zone -maccumulate-outgoing-args -Wall -Wextra \
+      -I. -c <FILE>.c -o <FILE>.o
+
+  Verified: all 52 .c files compile with exit 0 under the exact Zeos flags.
+  Relocatable link (ld -r *.o) has ZERO undefined symbols — the set is fully
+  self-contained. A test object referencing all 34 target symbols links with
+  zero unresolved.
+
+  NOTE ON WARNINGS (not errors — exit is still 0):
+    - -Wunused-but-set-variable : from libm.h fp_force_eval{,f,l}() inline
+      helpers (volatile y set-but-unused is the intended fenv side-effect).
+      Present in stock musl under -Wextra.
+    - -Wparentheses : acos.c, asin.c, atan2.c (upstream `(ix-C | lx)` idiom).
+    Both are stock musl style under -Wextra; sources left unmodified.
+
+--------------------------------------------------------------------------------
+ ROOT .c FILES  (define the 34 target functions)
+--------------------------------------------------------------------------------
+  abs.c        -> abs        (from musl src/stdlib/abs.c; integer abs)
+  acos.c       -> acos
+  acosh.c      -> acosh
+  asin.c       -> asin
+  asinh.c      -> asinh
+  atan.c       -> atan
+  atan2.c      -> atan2
+  atanh.c      -> atanh
+  cbrt.c       -> cbrt
+  ceil.c       -> ceil
+  cos.c        -> cos
+  cosh.c       -> cosh
+  exp.c        -> exp
+  expm1.c      -> expm1
+  fabs.c       -> fabs
+  floor.c      -> floor
+  fmax.c       -> fmax
+  fmin.c       -> fmin
+  fmod.c       -> fmod
+  hypot.c      -> hypot
+  log.c        -> log
+  log10.c      -> log10
+  log1p.c      -> log1p
+  log2.c       -> log2
+  lrint.c      -> lrint      (x86_64: LONG_MAX huge -> `return rint(x)`;
+                              the fenv slow path is #if'd out, so NO fenv
+                              symbols are referenced — see fenv.h note)
+  modf.c       -> modf
+  pow.c        -> pow
+  round.c      -> round
+  sin.c        -> sin
+  sinh.c       -> sinh
+  sqrt.c       -> sqrt       (portable software sqrt using __rsqrt_tab)
+  tan.c        -> tan
+  tanh.c       -> tanh
+  trunc.c      -> trunc
+
+  => All 34 target functions are DEFINED (nm shows each as a T/W symbol).
+
+--------------------------------------------------------------------------------
+ INTERNAL HELPER .c FILES (transitive deps; define no target symbol directly)
+--------------------------------------------------------------------------------
+  __cos.c              -> __cos              (cos kernel)
+  __sin.c              -> __sin              (sin kernel)
+  __tan.c              -> __tan              (tan kernel)
+  __rem_pio2.c         -> __rem_pio2         (argument reduction)
+  __rem_pio2_large.c   -> __rem_pio2_large   (argument reduction, big args)
+  __expo2.c            -> __expo2            (used by cosh/sinh)
+  rint.c               -> rint               (used by lrint)
+  scalbn.c             -> scalbn             (used widely)
+  __math_invalid.c     -> __math_invalid     (error-value helper)
+  __math_divzero.c     -> __math_divzero     (error-value helper)
+  __math_oflow.c       -> __math_oflow       (error-value helper)
+  __math_uflow.c       -> __math_uflow       (error-value helper)
+  __math_xflow.c       -> __math_xflow       (error-value helper)
+
+  The __math_* helpers raise fp exceptions purely by arithmetic (x*x etc. via
+  FORCE_EVAL) — they do NOT call feraiseexcept and do NOT touch errno.
+
+--------------------------------------------------------------------------------
+ DATA TABLE .c / .h FILES (const lookup tables)
+--------------------------------------------------------------------------------
+  exp_data.c   / exp_data.h    -> __exp_data       (exp, exp2, pow)
+  log_data.c   / log_data.h    -> __log_data       (log)
+  log2_data.c  / log2_data.h   -> __log2_data      (log2)
+  pow_data.c   / pow_data.h    -> __pow_log_data   (pow)
+  sqrt_data.c  / sqrt_data.h   -> __rsqrt_tab       (sqrt)
+
+--------------------------------------------------------------------------------
+ VENDORED INTERNAL HEADER (verbatim upstream musl)
+--------------------------------------------------------------------------------
+  libm.h       musl src/internal/libm.h — union ldshape, asuint/asdouble,
+               EXTRACT_WORDS, FORCE_EVAL, fp_barrier, and hidden prototypes
+               for __sin/__cos/__tan/__rem_pio2/__expo2/__math_* etc.
+  fp_arch.h    musl arch/generic/fp_arch.h (empty on generic).
+
+--------------------------------------------------------------------------------
+ NEW SELF-CONTAINED SHIM HEADERS (written for zeosm; NOT from musl)
+--------------------------------------------------------------------------------
+  math.h       Adapted from musl include/math.h. Only change vs upstream is the
+               prologue: float_t/double_t typedef'd directly (FLT_EVAL_METHOD 0)
+               and features.h is the local shim, instead of pulling
+               <bits/alltypes.h> (a build-generated header) and musl's
+               multi-file <features.h>. Body (macros + prototypes) is upstream.
+  features.h   Defines: hidden, weak, weak_alias, __inline, __restrict,
+               _Noreturn. Replaces musl's src/include/features.h chain.
+  endian.h     Defines __BYTE_ORDER / __LITTLE_ENDIAN / __BIG_ENDIAN from the
+               compiler's __BYTE_ORDER__ builtin (libm.h needs this to pick the
+               long double layout).
+  limits.h     Minimal LP64 integer limits (lrint.c needs LONG_MAX). Needed
+               because the compiler's own <limits.h> chains into hosted glibc
+               headers on the build host, which aren't freestanding-clean.
+  fenv.h       Empty stub. Only lrint.c includes <fenv.h>; on x86_64 its
+               fenv code path is compiled out, so the header just needs to
+               exist and must NOT define FE_INEXACT (which it doesn't).
+  stdlib.h     Minimal: declares abs/labs/llabs. Only abs.c includes <stdlib.h>.
+
+  Headers the compiler supplies itself (freestanding, guaranteed by C std):
+     <stdint.h>  <float.h>   (used by libm.h and several sources)
+
+--------------------------------------------------------------------------------
+ UNRESOLVED / SHIM-NEEDED SYMBOLS
+--------------------------------------------------------------------------------
+  NONE.
+
+  - No errno dependency. (musl math *can* set errno in some funcs, but none of
+    these 34 + helpers do at the source level; nm confirms no `errno` /
+    `__errno_location` undefined reference.)
+  - No fenv symbol dependency (fetestexcept/feclearexcept/feraiseexcept are
+    NOT referenced on x86_64; lrint's fenv path is #if'd out).
+  - No complex, no 80-bit long-double math funcs pulled (only the ldshape
+    *type* is referenced in libm.h; no __polevll/__invtrigl/etc. needed).
+  - No memcpy/malloc/string dependency.
+
+  ld -r of all 52 objects => 0 undefined symbols (fully self-contained).
+
+--------------------------------------------------------------------------------
+ FILE COUNT
+--------------------------------------------------------------------------------
+  52 .c files (34 roots incl. abs + 13 helpers + 5 data tables)
+  13 .h files total, split as:
+     2 vendored-from-musl : libm.h fp_arch.h
+     6 new self-contained shims : math.h features.h endian.h limits.h fenv.h
+                                  stdlib.h
+     5 musl data headers : exp_data.h log_data.h log2_data.h pow_data.h
+                            sqrt_data.h
+================================================================================

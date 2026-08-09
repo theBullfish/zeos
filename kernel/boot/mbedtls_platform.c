@@ -623,57 +623,9 @@ void __assert_fail(const char *expr, const char *file, unsigned line, const char
     zeos_libc_panic(expr ? expr : "assertion failed");
 }
 
-/* fmod(x, y) = x - trunc(x/y)*y */
-double fmod(double x, double y) {
-    if (y == 0.0) return 0.0;
-    double q = x / y;
-    long long t = (long long)q;
-    return x - (double)t * y;
-}
-
-/* cos(x) via 2π reduction + 11-term Taylor series. Accurate to ~1e-10
- * for reasonable inputs — plenty for stb's path tessellation. */
-double cos(double x) {
-    const double PI2 = 6.283185307179586;
-    /* range reduction */
-    double q = x / PI2;
-    long long n = (long long)(q + (q >= 0 ? 0.5 : -0.5));
-    x -= (double)n * PI2;
-    double xx = x * x;
-    double term = 1.0, sum = 1.0;
-    for (int k = 1; k <= 10; k++) {
-        term *= -xx / ((double)(2 * k - 1) * (double)(2 * k));
-        sum += term;
-    }
-    return sum;
-}
-
-/* sin via cos for the asin helper below */
-static double zeos_sin(double x) {
-    /* sin(x) = cos(π/2 - x) */
-    return cos(1.5707963267948966 - x);
-}
-
-/* acos via Newton-Raphson on cos(t) = x.
- * Initial guess uses a polynomial approximation, then 4 iterations. */
-double acos(double x) {
-    if (x >= 1.0)  return 0.0;
-    if (x <= -1.0) return 3.141592653589793;
-    /* initial guess: Abramowitz & Stegun approximation (~1e-5 accurate) */
-    double ax = x < 0 ? -x : x;
-    double t = 1.5707963267948966 - ax * (1.5707288 + ax * (-0.2121144 + ax * (0.0742610 + ax * -0.0187293)));
-    /* Newton refinement: t -= (cos(t)-x) / -sin(t).
-     * Skip near |x|=1 where sin(t)→0 makes Newton diverge — the A&S
-     * initial guess is already accurate enough there. */
-    if (ax < 0.999) {
-        for (int i = 0; i < 4; i++) {
-            double s = zeos_sin(t);
-            if (s < 1e-9 && s > -1e-9) break;
-            t -= (cos(t) - ax) / -s;
-        }
-    }
-    return x < 0 ? 3.141592653589793 - t : t;
-}
+/* fmod / cos / acos are now provided by the full musl-libm (lib/zeosm),
+ * vendored for QuickJS — accurate versions supersede the old stb-grade
+ * approximations that used to live here. */
 
 /* 128-bit unsigned division — referenced by bignum.c on x86_64.
  * Standard binary long division; only invoked occasionally during

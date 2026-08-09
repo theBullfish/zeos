@@ -46,6 +46,8 @@ LDFLAGS  = -nostdlib \
            $(EFI_CRT)
 
 LIBS     = -lefi -lgnuefi
+# libgcc: __udivti3 / __umodti3 (128-bit div/mod) used by QuickJS BigInt.
+LIBGCC   = $(shell $(CC) -print-libgcc-file-name)
 
 # Source files
 SRCS     = lib/lodepng/lodepng.c \
@@ -150,7 +152,16 @@ SRCS     = lib/lodepng/lodepng.c \
 # mbedTLS library sources (3.6 LTS, vendored at lib/mbedtls/)
 MBEDTLS_SRCS = $(wildcard lib/mbedtls/library/*.c)
 
-OBJS     = $(SRCS:.c=.o) $(MBEDTLS_SRCS:.c=.o)
+# QuickJS (ES2020 engine) + qjs_port.c glue, and vendored musl-libm (lib/zeosm).
+# I.7: JavaScript engine for the browser. Third-party C; compiled -w. zeosm's
+# shim headers (math.h/stdlib.h/…) are scoped to lib/zeosm ONLY so they never
+# shadow the system headers the rest of the kernel uses.
+QUICKJS_SRCS = $(wildcard lib/quickjs/*.c)
+ZEOSM_SRCS   = $(wildcard lib/zeosm/*.c)
+QUICKJS_OBJS = $(QUICKJS_SRCS:.c=.o)
+ZEOSM_OBJS   = $(ZEOSM_SRCS:.c=.o)
+
+OBJS     = $(SRCS:.c=.o) $(MBEDTLS_SRCS:.c=.o) $(QUICKJS_OBJS) $(ZEOSM_OBJS)
 
 # ── Embedded fonts (TTF -> ELF via objcopy) ──
 FONT_INTER  = ../assets/fonts/inter/Inter-Regular.ttf
@@ -400,6 +411,16 @@ MBEDTLS_CFLAGS = $(CFLAGS) -Wno-unused-parameter -Wno-unused-variable \
 lib/mbedtls/library/%.o: lib/mbedtls/library/%.c
 	$(CC) $(MBEDTLS_CFLAGS) -c $< -o $@
 
+# QuickJS: system headers for prototypes, local headers for cutils.h/quickjs.h,
+# links against zeosm's libm. -w silences third-party warnings.
+lib/quickjs/%.o: lib/quickjs/%.c
+	$(CC) $(CFLAGS) -Ilib/quickjs -DCONFIG_VERSION='"zeos-0.2"' -w -c $< -o $@
+
+# musl-libm: -Ilib/zeosm scoped HERE so its shim math.h/stdlib.h/limits.h don't
+# leak into the rest of the kernel build.
+lib/zeosm/%.o: lib/zeosm/%.c
+	$(CC) $(CFLAGS) -Ilib/zeosm -w -c $< -o $@
+
 # lodepng: PNG decoder. Strip C++ wrappers, file I/O, encoder, and the
 # bundled allocators (we route to kmalloc/kfree via shim in browser.c).
 LODEPNG_CFLAGS = $(CFLAGS) \
@@ -423,7 +444,7 @@ lib/lodepng/lodepng.o: lib/lodepng/lodepng.c
 # Link to shared object (includes embedded font and firmware blobs)
 $(BUILDDIR)/zeos.so: $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) $(WALLPAPER_OBJS)
 	@mkdir -p $(BUILDDIR)
-	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) $(WALLPAPER_OBJS) -o $@ $(LIBS)
+	$(LD) $(LDFLAGS) $(OBJS) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) $(ICON_OBJS) $(WALLPAPER_OBJS) -o $@ $(LIBS) $(LIBGCC)
 
 # Convert to PE/COFF EFI executable
 $(BUILDDIR)/$(TARGET): $(BUILDDIR)/zeos.so

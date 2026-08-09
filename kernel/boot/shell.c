@@ -274,6 +274,7 @@ static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
 static void cmd_tcpsend(const char *args);
 static void cmd_domsub(const char *args);
+static void cmd_js(const char *args);
 
 /* USB UVC webcams */
 static void cmd_camera(const char *args);
@@ -787,6 +788,7 @@ static const struct shell_cmd commands[] = {
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
     {"domsub",  "Dom/Sub cohort: show + run election selftest", cmd_domsub, VIS_DEREZ},
+    {"js",      "evaluate JavaScript (QuickJS): js <expr>", cmd_js, VIS_ALWAYS},
 
     /* USB UVC webcams */
     {"camera",  "UVC webcams (camera list | preview [N] | capture [N] <path>)", cmd_camera, VIS_ALWAYS},
@@ -3261,6 +3263,21 @@ static void cmd_domsub(const char *args)
     dom_sub_dump();
     dom_sub_selftest();             /* synthetic election verification */
     dom_sub_init();                 /* restore the real cohort after the test */
+}
+
+/* I.7: evaluate JavaScript through the embedded QuickJS engine. */
+static void cmd_js(const char *args)
+{
+    extern int zeos_js_eval(const char *code, char *out, int outlen);
+    if (!args || !args[0]) {
+        kputs("  Usage: js <expression>\n  Example: js 1+1\n");
+        return;
+    }
+    static char out[1024];
+    int rc = zeos_js_eval(args, out, sizeof out);
+    kputs(rc == -1 ? "  JS error: " : "  JS: ");
+    kputs(out);
+    kputc('\n');
 }
 
 static void cmd_web(const char *args)
