@@ -232,7 +232,10 @@ int zeos_http_fetch(const char *url, char *body_out, int max, int *status_out) {
         if (len > max - 1) len = max - 1;
         body_out[len] = 0;
     } else {
-        struct http_response resp;
+        /* static, not stack: http_response.body is ~256 KB and this runs deep
+         * in the JS call chain (…JS_Eval->js_fetch) where a stack struct that
+         * big overflows. */
+        static struct http_response resp;
         extern int http_get(const char *host, const char *path, struct http_response *resp);
         if (http_get(hostname, path, &resp) < 0) { body_out[0] = 0; return -1; }
         status = resp.status_code;
@@ -1589,7 +1592,7 @@ int browser_navigate(browser_t *b, const char *url)
                    "<h1>Fetch Demo</h1>"
                    "<p id=\"out\">loading...</p>"
                    "<script>"
-                   "fetch('http://example.com/').then(function(r){"
+                   "fetch('http://neverssl.com/').then(function(r){"
                    "  console.log('fetch status', r.status, 'ok', r.ok);"
                    "  return r.text();"
                    "}).then(function(t){"
