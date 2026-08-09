@@ -180,6 +180,51 @@ dom_node_t *dom_first_child(dom_node_t *el)  { return el ? el->first_child : 0; 
 dom_node_t *dom_next_sibling(dom_node_t *el) { return el ? el->next_sibling : 0; }
 const char *dom_script_src(dom_node_t *el)   { return (el && el->script_src) ? el->script_src : 0; }
 
+/* document.createElement(tag) — new detached element from the pool. */
+dom_node_t *dom_create_element(const char *tag) {
+    dom_node_t *n = dom_alloc();
+    if (!n) return 0;
+    n->type = DOM_ELEMENT;
+    int i = 0; if (tag) for (; tag[i] && i < 31; i++) n->tag[i] = tag[i];
+    n->tag[i] = 0;
+    return n;
+}
+
+/* document.createTextNode(s) */
+dom_node_t *dom_create_text(const char *s) {
+    dom_node_t *n = dom_alloc();
+    if (!n) return 0;
+    n->type = DOM_TEXT;
+    int i = 0; if (s) for (; s[i] && i < 1023; i++) n->text[i] = s[i];
+    n->text[i] = 0;
+    return n;
+}
+
+/* parent.appendChild(child) — link child as the last child. */
+void dom_append_child(dom_node_t *parent, dom_node_t *child) {
+    if (!parent || !child) return;
+    child->parent = parent;
+    child->next_sibling = 0;
+    if (!parent->first_child) parent->first_child = child;
+    else {
+        dom_node_t *s = parent->first_child;
+        while (s->next_sibling) s = s->next_sibling;
+        s->next_sibling = child;
+    }
+    g_dom_dirty = 1;
+}
+
+/* document.body */
+dom_node_t *dom_get_body(dom_node_t *root) {
+    if (!root) return 0;
+    for (dom_node_t *c = root->first_child; c; c = c->next_sibling) {
+        if (c->type == DOM_ELEMENT && str_eq(c->tag, "body")) return c;
+        dom_node_t *b = dom_get_body(c);
+        if (b) return b;
+    }
+    return 0;
+}
+
 const char *dom_get_text_content(dom_node_t *el) {
     if (!el) return "";
     if (el->type == DOM_TEXT) return el->text;
@@ -1506,7 +1551,22 @@ int browser_navigate(browser_t *b, const char *url)
     int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
     if (builtin) {
         const char *html;
-        if (str_eq(url, "test:events")) {
+        if (str_eq(url, "test:build")) {
+            /* I.7 createElement/appendChild: a script builds a list from scratch. */
+            html = "<html><head><title>Build</title></head><body>"
+                   "<h1>Build Demo</h1>"
+                   "<ul id=\"list\"></ul>"
+                   "<script>"
+                   "var list = document.getElementById('list');"
+                   "for (var i = 1; i <= 3; i++) {"
+                   "  var li = document.createElement('li');"
+                   "  li.textContent = 'Item number ' + i + ' (' + (i*i) + ')';"
+                   "  list.appendChild(li);"
+                   "}"
+                   "console.log('built', list.tagName, 'with', 3, 'items');"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:events")) {
             /* I.7 events: a button whose click handler mutates the DOM. */
             html = "<html><head><title>Events</title></head><body>"
                    "<h1 id=\"h\">Counter Demo</h1>"
@@ -1630,8 +1690,11 @@ int browser_navigate(browser_t *b, const char *url)
         extern void browser_run_scripts(dom_node_t *root);
         extern int  dom_take_dirty(void);
         browser_run_scripts(b->dom);
-        if (dom_take_dirty())
+        if (dom_take_dirty()) {
+            css_apply_defaults(b->dom);   /* style JS-created nodes */
+            css_apply_inline(b->dom);
             browser_layout(b);
+        }
     }
 
     b->scroll_y = 0;
@@ -1924,8 +1987,11 @@ void browser_click(browser_t *b, int x, int y) {
         int fired = 0;
         for (dom_node_t *t = el; t; t = t->parent)
             fired += zeos_js_dispatch_event(t, "click");
-        if (fired && dom_take_dirty())
+        if (fired && dom_take_dirty()) {
+            css_apply_defaults(b->dom);   /* style JS-created nodes */
+            css_apply_inline(b->dom);
             browser_layout(b);
+        }
     }
 }
 

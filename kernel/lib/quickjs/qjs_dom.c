@@ -34,6 +34,11 @@ extern const char  *dom_node_id(dom_node_t *el);
 extern dom_node_t  *dom_first_child(dom_node_t *el);
 extern dom_node_t  *dom_next_sibling(dom_node_t *el);
 extern const char  *dom_script_src(dom_node_t *el);
+/* createElement / appendChild / body */
+extern dom_node_t  *dom_create_element(const char *tag);
+extern dom_node_t  *dom_create_text(const char *s);
+extern void         dom_append_child(dom_node_t *parent, dom_node_t *child);
+extern dom_node_t  *dom_get_body(dom_node_t *root);
 
 extern JSContext *zeos_js_context(void);
 
@@ -42,6 +47,7 @@ extern JSContext *zeos_js_context(void);
 static JSClassID  js_element_class_id;
 static int        g_dom_setup;
 static dom_node_t *g_dom_root;
+static JSValue     g_document;
 
 /* Event listeners live on the DOM node (the JS Element wrapper is recreated on
  * each getElementById), so we key the registry by dom_node_t*. */
@@ -117,6 +123,17 @@ static JSValue el_addEventListener(JSContext *ctx, JSValueConst this_val, int ar
     return JS_UNDEFINED;
 }
 
+static JSValue wrap_element(JSContext *ctx, dom_node_t *el);
+
+static JSValue el_appendChild(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc;
+    dom_node_t *parent = JS_GetOpaque(this_val, js_element_class_id);
+    dom_node_t *child  = JS_GetOpaque(argv[0], js_element_class_id);
+    dom_append_child(parent, child);
+    return JS_DupValue(ctx, argv[0]);   /* DOM appendChild returns the child */
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("textContent", el_get_textContent, el_set_textContent),
     JS_CGETSET_DEF("innerText",   el_get_textContent, el_set_textContent),
@@ -125,6 +142,7 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CFUNC_DEF("getAttribute", 1, el_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, el_setAttribute),
     JS_CFUNC_DEF("addEventListener", 2, el_addEventListener),
+    JS_CFUNC_DEF("appendChild", 1, el_appendChild),
 };
 
 static JSValue wrap_element(JSContext *ctx, dom_node_t *el)
@@ -143,6 +161,22 @@ static JSValue doc_getElementById(JSContext *ctx, JSValueConst this_val, int arg
     const char *id = JS_ToCString(ctx, argv[0]);
     dom_node_t *el = dom_get_by_id(g_dom_root, id ? id : "");
     if (id) JS_FreeCString(ctx, id);
+    return wrap_element(ctx, el);
+}
+static JSValue doc_createElement(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc;
+    const char *tag = JS_ToCString(ctx, argv[0]);
+    dom_node_t *el = dom_create_element(tag ? tag : "div");
+    if (tag) JS_FreeCString(ctx, tag);
+    return wrap_element(ctx, el);
+}
+static JSValue doc_createTextNode(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc;
+    const char *s = JS_ToCString(ctx, argv[0]);
+    dom_node_t *el = dom_create_text(s ? s : "");
+    if (s) JS_FreeCString(ctx, s);
     return wrap_element(ctx, el);
 }
 static JSValue console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
@@ -184,6 +218,12 @@ static void dom_setup(JSContext *ctx)
     JSValue document = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, document, "getElementById",
                       JS_NewCFunction(ctx, doc_getElementById, "getElementById", 1));
+    JS_SetPropertyStr(ctx, document, "createElement",
+                      JS_NewCFunction(ctx, doc_createElement, "createElement", 1));
+    JS_SetPropertyStr(ctx, document, "createTextNode",
+                      JS_NewCFunction(ctx, doc_createTextNode, "createTextNode", 1));
+    /* keep a reference so run_page can refresh document.body per navigation */
+    g_document = JS_DupValue(ctx, document);
     JS_SetPropertyStr(ctx, global, "document", document);
 
     JS_FreeValue(ctx, global);
@@ -254,5 +294,7 @@ void zeos_js_run_page(dom_node_t *root)
     zeos_js_reset_listeners();
     dom_setup(ctx);
     g_dom_root = root;
+    /* refresh document.body for this page */
+    JS_SetPropertyStr(ctx, g_document, "body", wrap_element(ctx, dom_get_body(root)));
     run_scripts(ctx, root);
 }
