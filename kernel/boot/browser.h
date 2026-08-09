@@ -67,6 +67,8 @@ typedef struct dom_node {
     char            attr_value[256];   /* input/button value */
     char            attr_alt[256];     /* img alt text */
     char            attr_placeholder[256]; /* input placeholder */
+    char            attr_id[128];      /* element id (getElementById) */
+    char           *script_src;        /* <script> body (kmalloc'd), else NULL */
 
     /* CSS computed style (simplified) */
     struct {

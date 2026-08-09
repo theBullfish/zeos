@@ -32,6 +32,13 @@ static int ensure_ctx(void)
     return 0;
 }
 
+/* Shared context accessor for the DOM bindings (qjs_dom.c). */
+JSContext *zeos_js_context(void)
+{
+    if (ensure_ctx() != 0) return 0;
+    return g_ctx;
+}
+
 /*
  * Evaluate `code` as global JS. On success writes the result's string form to
  * `out` and returns 0. On a JS exception writes the error text and returns -1.

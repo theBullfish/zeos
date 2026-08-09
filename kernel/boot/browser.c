@@ -148,8 +148,94 @@ void dom_free(dom_node_t *root) {
             dom_pool[i].img_w = 0;
             dom_pool[i].img_h = 0;
         }
+        if (dom_pool[i].script_src) {
+            extern void kfree(void *);
+            kfree(dom_pool[i].script_src);
+            dom_pool[i].script_src = 0;
+        }
     }
     dom_pool_next = 0;  /* Reset pool */
+}
+
+/* ── DOM manipulation API for the JS bindings (qjs_dom.c) ──────────────
+ * These own all node mutation (the pool is private to browser.c). A mutation
+ * sets g_dom_dirty so browser_navigate re-lays-out + repaints after scripts. */
+static int g_dom_dirty = 0;
+int dom_take_dirty(void) { int d = g_dom_dirty; g_dom_dirty = 0; return d; }
+
+dom_node_t *dom_get_by_id(dom_node_t *node, const char *id) {
+    if (!node || !id) return 0;
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (c->type == DOM_ELEMENT && c->attr_id[0] && str_eq(c->attr_id, id))
+            return c;
+        dom_node_t *r = dom_get_by_id(c, id);
+        if (r) return r;
+    }
+    return 0;
+}
+
+const char *dom_node_tag(dom_node_t *el) { return el ? el->tag : ""; }
+const char *dom_node_id(dom_node_t *el)  { return el ? el->attr_id : ""; }
+dom_node_t *dom_first_child(dom_node_t *el)  { return el ? el->first_child : 0; }
+dom_node_t *dom_next_sibling(dom_node_t *el) { return el ? el->next_sibling : 0; }
+const char *dom_script_src(dom_node_t *el)   { return (el && el->script_src) ? el->script_src : 0; }
+
+const char *dom_get_text_content(dom_node_t *el) {
+    if (!el) return "";
+    if (el->type == DOM_TEXT) return el->text;
+    for (dom_node_t *c = el->first_child; c; c = c->next_sibling)
+        if (c->type == DOM_TEXT) return c->text;
+    return "";
+}
+
+/* textContent = s : replace children with a single text node holding s. */
+void dom_set_text_content(dom_node_t *el, const char *s) {
+    if (!el || !s) return;
+    if (el->type == DOM_TEXT) {
+        int i = 0; for (; s[i] && i < 1023; i++) el->text[i] = s[i]; el->text[i] = 0;
+        g_dom_dirty = 1;
+        return;
+    }
+    dom_node_t *t = dom_alloc();
+    if (!t) return;
+    t->type = DOM_TEXT;
+    t->parent = el;
+    int i = 0; for (; s[i] && i < 1023; i++) t->text[i] = s[i]; t->text[i] = 0;
+    el->first_child = t;          /* textContent replaces all children */
+    t->next_sibling = 0;
+    g_dom_dirty = 1;
+}
+
+/* getAttribute/setAttribute over the fixed attribute slots. */
+const char *dom_get_attr(dom_node_t *el, const char *name) {
+    if (!el || !name) return 0;
+    if (str_eq(name, "id"))    return el->attr_id;
+    if (str_eq(name, "class")) return el->attr_class;
+    if (str_eq(name, "href"))  return el->attr_href;
+    if (str_eq(name, "src"))   return el->attr_src;
+    if (str_eq(name, "style")) return el->attr_style;
+    if (str_eq(name, "value")) return el->attr_value;
+    if (str_eq(name, "type"))  return el->attr_type;
+    return 0;
+}
+void dom_set_attr(dom_node_t *el, const char *name, const char *val) {
+    if (!el || !name || !val) return;
+    char *dst = 0; int cap = 0;
+    if (str_eq(name, "id"))    { dst = el->attr_id;    cap = 128; }
+    else if (str_eq(name, "class")) { dst = el->attr_class; cap = 256; }
+    else if (str_eq(name, "href"))  { dst = el->attr_href;  cap = 512; }
+    else if (str_eq(name, "src"))   { dst = el->attr_src;   cap = 512; }
+    else if (str_eq(name, "style")) { dst = el->attr_style; cap = 512; }
+    else if (str_eq(name, "value")) { dst = el->attr_value; cap = 256; }
+    else return;
+    int i = 0; for (; val[i] && i < cap - 1; i++) dst[i] = val[i]; dst[i] = 0;
+    g_dom_dirty = 1;
+}
+
+/* Run all <script> nodes in the tree against the JS engine (qjs_dom.c). */
+void browser_run_scripts(dom_node_t *root) {
+    extern void zeos_js_run_page(dom_node_t *root);
+    zeos_js_run_page(root);
 }
 
 /* ── HTML Parser (minimal, handles real-world HTML) ── */
@@ -260,25 +346,50 @@ dom_node_t *html_parse(const char *html, int len) {
             char tag[32];
             read_tag(&p, end, tag, 32);
 
-            /* Skip script/style content */
+            /* <script>: CAPTURE the body so JS can run; <style>: skip (CSS is
+             * handled separately). Both stop at their matching close tag. */
             if (str_eq(tag, "script") || str_eq(tag, "style")) {
-                while (p < end && *p != '>') p++;
+                int is_script = str_eq(tag, "script");
+                while (p < end && *p != '>') p++;   /* past the open tag's attrs */
                 if (p < end) p++;
-                /* Skip until closing tag */
-                while (p + 1 < end) {
-                    if (*p == '<' && *(p+1) == '/') {
-                        const char *check = p + 2;
+                const char *body = p;
+                const char *bend = p;
+                while (bend + 1 < end) {
+                    if (bend[0] == '<' && bend[1] == '/') {
+                        const char *check = bend + 2;
                         char ctag[32];
                         read_tag(&check, end, ctag, 32);
-                        if (str_eq(ctag, tag)) {
-                            p = check;
-                            while (p < end && *p != '>') p++;
-                            if (p < end) p++;
-                            break;
+                        if (str_eq(ctag, tag)) break;
+                    }
+                    bend++;
+                }
+                if (is_script) {
+                    int slen = (int)(bend - body);
+                    dom_node_t *snode = dom_alloc();
+                    if (snode) {
+                        snode->type = DOM_ELEMENT;
+                        str_copy(snode->tag, "script");
+                        snode->parent = current;
+                        snode->style.display = 2;   /* never rendered */
+                        if (slen > 0) {
+                            snode->script_src = (char *)kmalloc((uint64_t)slen + 1);
+                            if (snode->script_src) {
+                                for (int i = 0; i < slen; i++) snode->script_src[i] = body[i];
+                                snode->script_src[slen] = 0;
+                            }
+                        }
+                        if (!current->first_child) current->first_child = snode;
+                        else {
+                            dom_node_t *sib = current->first_child;
+                            while (sib->next_sibling) sib = sib->next_sibling;
+                            sib->next_sibling = snode;
                         }
                     }
-                    p++;
                 }
+                /* advance past the closing tag */
+                p = bend;
+                while (p < end && *p != '>') p++;
+                if (p < end) p++;
                 continue;
             }
 
@@ -329,6 +440,8 @@ dom_node_t *html_parse(const char *html, int len) {
                         read_attr_val(&p, end, node->attr_alt, 256);
                     else if (str_eq(attr_name, "placeholder"))
                         read_attr_val(&p, end, node->attr_placeholder, 256);
+                    else if (str_eq(attr_name, "id"))
+                        read_attr_val(&p, end, node->attr_id, 128);
                     else {
                         char dummy[512];
                         read_attr_val(&p, end, dummy, 512);
@@ -1392,7 +1505,19 @@ int browser_navigate(browser_t *b, const char *url)
     int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
     if (builtin) {
         const char *html;
-        if (str_eq(url, "test:page2")) {
+        if (str_eq(url, "test:js")) {
+            /* I.7 proof: a <script> reads + rewrites the DOM; the page must
+             * render the JS-set text, not the original. */
+            html = "<html><head><title>JS Test</title></head><body>"
+                   "<h1 id=\"title\">original heading</h1>"
+                   "<p id=\"msg\">before script</p>"
+                   "<script>"
+                   "document.getElementById('title').textContent = 'Set by JavaScript';"
+                   "document.getElementById('msg').textContent = '2 + 2 = ' + (2+2) + ', sqrt4 = ' + Math.sqrt(4);"
+                   "console.log('script ran; title id =', document.getElementById('title').id);"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:page2")) {
             html = "<html><head><title>Page Two</title></head><body>"
                    "<h1>Page Two</h1>"
                    "<p>You followed the link — this is the second built-in page.</p>"
@@ -1481,6 +1606,17 @@ int browser_navigate(browser_t *b, const char *url)
      * lays out at width 0 — browser_app_draw_content re-runs browser_layout()
      * once the real width arrives, which is when links get correct box widths. */
     browser_layout(b);
+
+    /* I.7: run the page's <script> tags now that the DOM + layout exist. If a
+     * script mutated the DOM (textContent/setAttribute), re-lay-out so the
+     * change is visible. */
+    {
+        extern void browser_run_scripts(dom_node_t *root);
+        extern int  dom_take_dirty(void);
+        browser_run_scripts(b->dom);
+        if (dom_take_dirty())
+            browser_layout(b);
+    }
 
     b->scroll_y = 0;
 
