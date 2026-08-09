@@ -99,10 +99,16 @@ rel(-200,-150); shot("cursor-moved")
 btn(True); time.sleep(0.15); btn(False); shot("cursor-click")
 # Command palette via Super+Space (E.8 keybinds, J.3 search palette)
 def combo(mods, k):
-    for m in mods: cmd("input-send-event",events=[{"type":"key","data":{"down":True,"key":{"type":"qcode","data":m}}}])
-    cmd("input-send-event",events=[{"type":"key","data":{"down":True,"key":{"type":"qcode","data":k}}}])
-    cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":k}}}])
-    for m in reversed(mods): cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":m}}}])
+    # Inter-event settles: firing modifier-down, key, and releases back-to-back
+    # occasionally races a heavy composite/persist tick and the combo is dropped
+    # (~1/5 boots the overlay never opened). Small gaps make the make/break pair
+    # land deterministically without changing what's tested.
+    for m in mods:
+        cmd("input-send-event",events=[{"type":"key","data":{"down":True,"key":{"type":"qcode","data":m}}}]); time.sleep(0.05)
+    cmd("input-send-event",events=[{"type":"key","data":{"down":True,"key":{"type":"qcode","data":k}}}]); time.sleep(0.06)
+    cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":k}}}]); time.sleep(0.05)
+    for m in reversed(mods):
+        cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":m}}}]); time.sleep(0.03)
     time.sleep(0.4)
 # Window-management keybinds FIRST (before the palette, which is modal and eats keys).
 # Each action captured from a CLEAN base: workspace switch first (Super+F2 -> empty ws,
@@ -112,8 +118,11 @@ combo(["meta_l"], "f1");   time.sleep(0.6); shot("workspace-1")
 combo(["meta_l"], "2");    time.sleep(0.6); shot("snap-tr")
 combo(["meta_l"], "up");   time.sleep(0.6); shot("maximize")
 combo(["meta_l"], "down"); time.sleep(0.6); shot("restore")
-# Signal-graph overlay (K.1): Super+G opens, arrows pan (K.4), '=' zoom (K.2)
-combo(["meta_l"], "g");   time.sleep(0.6); shot("sigviz");   key("esc"); time.sleep(0.3)
+# Signal-graph overlay (K.1): Super+G opens. K.4: '=' zooms in (100%->150%), arrows pan.
+combo(["meta_l"], "g");   time.sleep(0.6); shot("sigviz")
+key("equal"); time.sleep(0.25); key("equal"); time.sleep(0.4); shot("sigviz-zoom")  # K.4 zoom in
+key("left");  time.sleep(0.4); shot("sigviz-pan")                                    # K.4 pan
+key("esc"); time.sleep(0.3)
 # Show-desktop (peek): Super+D
 combo(["meta_l"], "d");   time.sleep(0.6); shot("show-desktop"); combo(["meta_l"], "d"); time.sleep(0.3)
 # Palette LAST (modal): Super+Space

@@ -1505,7 +1505,22 @@ int browser_navigate(browser_t *b, const char *url)
     int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
     if (builtin) {
         const char *html;
-        if (str_eq(url, "test:js")) {
+        if (str_eq(url, "test:events")) {
+            /* I.7 events: a button whose click handler mutates the DOM. */
+            html = "<html><head><title>Events</title></head><body>"
+                   "<h1 id=\"h\">Counter Demo</h1>"
+                   "<p id=\"count\">clicks: 0</p>"
+                   "<button id=\"btn\">Click me</button>"
+                   "<script>"
+                   "var n = 0;"
+                   "document.getElementById('btn').addEventListener('click', function(e){"
+                   "  n = n + 1;"
+                   "  document.getElementById('count').textContent = 'clicks: ' + n;"
+                   "  console.log('clicked; n =', n, 'target =', e.target.tagName);"
+                   "});"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:js")) {
             /* I.7 proof: a <script> reads + rewrites the DOM; the page must
              * render the JS-set text, not the original. */
             html = "<html><head><title>JS Test</title></head><body>"
@@ -1852,6 +1867,27 @@ static void resolve_url(browser_t *b, const char *href, char *out, int max) {
     *p = 0;
 }
 
+/* Deepest ELEMENT whose box contains the point (for JS click dispatch). */
+static dom_node_t *hit_test_element(dom_node_t *node, int px, int py,
+                                    int parent_x, int parent_y)
+{
+    if (!node) return 0;
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int bx = parent_x + c->box.x;
+        int by = parent_y + c->box.y;
+        int nx = bx + c->style.padding[3];
+        int ny = by + c->style.padding[0];
+        /* deepest first */
+        dom_node_t *deeper = hit_test_element(c, px, py, nx, ny);
+        if (deeper) return deeper;
+        if (c->type == DOM_ELEMENT && c->box.w > 0 && c->box.h > 0 &&
+            px >= bx && px < bx + c->box.w && py >= by && py < by + c->box.h)
+            return c;
+    }
+    return 0;
+}
+
 void browser_click(browser_t *b, int x, int y) {
     if (!b->dom) return;
 
@@ -1875,6 +1911,20 @@ void browser_click(browser_t *b, int x, int y) {
         char resolved[2048];
         resolve_url(b, link->attr_href, resolved, 2048);
         browser_navigate(b, resolved);
+        return;
+    }
+
+    /* JS click events: dispatch to the element under the pointer, bubbling up
+     * the ancestor chain. If a handler mutated the DOM, re-lay-out. */
+    dom_node_t *el = hit_test_element(b->dom, px, py, 0, 0);
+    if (el) {
+        extern int zeos_js_dispatch_event(dom_node_t *node, const char *type);
+        extern int dom_take_dirty(void);
+        int fired = 0;
+        for (dom_node_t *t = el; t; t = t->parent)
+            fired += zeos_js_dispatch_event(t, "click");
+        if (fired && dom_take_dirty())
+            browser_layout(b);
     }
 }
 
@@ -2149,13 +2199,12 @@ void browser_app_click(int x, int y)
     char prev[2048];
     int i = 0; for (; g_browser_app.url[i] && i < 2047; i++) prev[i] = g_browser_app.url[i];
     prev[i] = 0;
+    (void)prev;
     browser_click(&g_browser_app, x, y);
-    /* If the click navigated (URL changed), force a recomposite so the new
-     * page actually shows — the compositor only redraws dirty regions at idle. */
-    if (!str_eq(prev, g_browser_app.url)) {
-        extern void compositor_dirty_all(void);
-        compositor_dirty_all();
-    }
+    /* Always recomposite after a click: it may have navigated (URL change) or
+     * a JS click handler may have mutated + re-laid-out the current page. The
+     * compositor only redraws dirty regions at idle, so force a full repaint. */
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
 }
 
 /* Open (or focus) the browser app and navigate to url. Returns

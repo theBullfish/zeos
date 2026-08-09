@@ -67,10 +67,12 @@ Default to REJECTED if uncertain. A REJECTED verdict blocks the commit (protocol
 - One item per cycle. Idempotent: if a cycle half-finished, the next reconciles from git + ledger.
 
 ## STATE  (each cycle updates this section, then commits it)
-- cursor: C.2 done (bible id=473). Next interactive candidates: D.3 (panel zones color-by-state, observable), C.13/C.12/C.14 (need multi-surface setup), E.3 (click pulse, transient), D.6 (vibrancy observable; auto-hide needs settings API — not input-drivable), M.8 (CVD needs toggle). Pure-logic remainder (L.1/L.2/L.6 spring math, A.7 crypto, P.2/P.3 Z+, B.4/B.8, E.9 IME) = build-invariant, plan production selftest or scope-note.
-- queue: [D.3, C.13, C.12, C.14, E.2, E.3, D.6(partial), K.2, K.3, K.4, L.5, M.7, M.8, ... then pure-logic]
-- last-two verified (most recent last): [K.1 (prod), C.2 (prod)]
+- cursor: K.4 done (bible id=476). SKIPPED D.3 (color-by-state needs chain-state forcing, not input-drivable on prod). Next candidates: K.2 (click-to-select node — mouse-drivable in sigviz), E.2 (cursor render), C.13/C.12/C.14 (multi-surface). D.3/D.6 (need state-force/settings API), M.8 (CVD toggle) = NOT input-observable, defer. Pure-logic (L.1/L.2/L.6, A.7, P.2/P.3, B.4/B.8, E.9) = build-invariant, plan prod-selftest or scope-note.
+- ‼ OPEN ISSUE for Brad: INPUT.DROP.COMPOSITE (bible id=475) — ~2/8 (up to 2/3 under load) boots a Super+combo never fires; i8042 1-byte buffer overrun during long A.6 composite ticks. Affects ALL combos → single-shot captures can false-negative; loop now needs multi-boot oracle + retries per item (expensive). Real fix = A.6 composite region-dirty (compositor.c:275). Needs a decision: fix A.6 next, or accept multi-boot oracle.
+- queue: [K.2, E.2, C.13, C.12, C.14, L.5, M.7, ... then D.3/D.6/M.8(need non-input path), then pure-logic]
+- last-two verified (most recent last): [C.2 (prod), K.4 (prod)]
 - cycle log:
   - (seed) 2026-08: PROD.COLDBOOT.CORE, PALETTE.FLOW, K.1 upgraded harness→production (bible 467-471). commit b971034.
-  - cycle 1 (2026-08): C.2 harness→production (bible 472→473). Occlusion+border-focus+pill-match observed on real cold-boot, settled 2-boot oracle. Adversarial review (vs K.1 paradigm) CONFIRMED; caught + corrected a "dimmed controls" overstatement (both windows' controls equally lit; discriminator is border+pill).
-- STATUS: RUNNING (1 item/cycle)
+  - cycle 1 (2026-08): C.2 harness→production (bible 472→473). Adversarial review (vs K.1) CONFIRMED; corrected a "dimmed controls" overstatement.
+  - cycle 2 (2026-08): K.4 harness→production (bible 474→476). Zoom 100→150 + pan settled on real cold-boot. Adversarial review (vs C.2) REJECTED first pass — pan asserted w/o saved settled evidence; FIXED this cycle (captured 2 settled pan samples, Read-confirmed). Discovered+logged INPUT.DROP.COMPOSITE (id=475). Hardened sweep combo() with inter-event settles (helped, didn't cure the drop).
+- STATUS: RUNNING (1 item/cycle) — flagging INPUT.DROP for Brad

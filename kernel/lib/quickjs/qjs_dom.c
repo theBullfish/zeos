@@ -43,6 +43,18 @@ static JSClassID  js_element_class_id;
 static int        g_dom_setup;
 static dom_node_t *g_dom_root;
 
+/* Event listeners live on the DOM node (the JS Element wrapper is recreated on
+ * each getElementById), so we key the registry by dom_node_t*. */
+#define MAX_LISTENERS 128
+static struct { dom_node_t *node; char type[16]; JSValue fn; } g_listeners[MAX_LISTENERS];
+static int g_nlisteners;
+
+static int type_eq(const char *a, const char *b)
+{
+    int i = 0; for (; a[i] && b[i]; i++) if (a[i] != b[i]) return 0;
+    return a[i] == b[i];
+}
+
 /* ── Element property/method implementations ── */
 static JSValue el_get_textContent(JSContext *ctx, JSValueConst this_val)
 {
@@ -89,6 +101,22 @@ static JSValue el_setAttribute(JSContext *ctx, JSValueConst this_val, int argc, 
     return JS_UNDEFINED;
 }
 
+static JSValue el_addEventListener(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc;
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *type = JS_ToCString(ctx, argv[0]);
+    if (el && type && JS_IsFunction(ctx, argv[1]) && g_nlisteners < MAX_LISTENERS) {
+        g_listeners[g_nlisteners].node = el;
+        int i = 0; for (; type[i] && i < 15; i++) g_listeners[g_nlisteners].type[i] = type[i];
+        g_listeners[g_nlisteners].type[i] = 0;
+        g_listeners[g_nlisteners].fn = JS_DupValue(ctx, argv[1]);
+        g_nlisteners++;
+    }
+    if (type) JS_FreeCString(ctx, type);
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("textContent", el_get_textContent, el_set_textContent),
     JS_CGETSET_DEF("innerText",   el_get_textContent, el_set_textContent),
@@ -96,6 +124,7 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("id",          el_get_id, NULL),
     JS_CFUNC_DEF("getAttribute", 1, el_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, el_setAttribute),
+    JS_CFUNC_DEF("addEventListener", 2, el_addEventListener),
 };
 
 static JSValue wrap_element(JSContext *ctx, dom_node_t *el)
@@ -180,11 +209,49 @@ static void run_scripts(JSContext *ctx, dom_node_t *node)
     }
 }
 
+/* Drop all listeners (called on navigation — the old DOM is gone). */
+void zeos_js_reset_listeners(void)
+{
+    JSContext *ctx = zeos_js_context();
+    for (int i = 0; i < g_nlisteners; i++)
+        if (ctx) JS_FreeValue(ctx, g_listeners[i].fn);
+    g_nlisteners = 0;
+}
+
+/* Fire `type` listeners registered on `node`. Returns the number fired. The
+ * caller (browser.c) re-lays-out if the handlers mutated the DOM. */
+int zeos_js_dispatch_event(dom_node_t *node, const char *type)
+{
+    JSContext *ctx = zeos_js_context();
+    if (!ctx || !node) return 0;
+    int fired = 0;
+    for (int i = 0; i < g_nlisteners; i++) {
+        if (g_listeners[i].node != node || !type_eq(g_listeners[i].type, type))
+            continue;
+        JSValue ev = JS_NewObject(ctx);
+        JS_SetPropertyStr(ctx, ev, "type", JS_NewString(ctx, type));
+        JS_SetPropertyStr(ctx, ev, "target", wrap_element(ctx, node));
+        JSValue r = JS_Call(ctx, g_listeners[i].fn, JS_UNDEFINED, 1, (JSValueConst *)&ev);
+        if (JS_IsException(r)) {
+            JSValue e = JS_GetException(ctx);
+            const char *s = JS_ToCString(ctx, e);
+            kputs("  JS event error: "); kputs(s ? s : "?"); kputc('\n');
+            if (s) JS_FreeCString(ctx, s);
+            JS_FreeValue(ctx, e);
+        }
+        JS_FreeValue(ctx, r);
+        JS_FreeValue(ctx, ev);
+        fired++;
+    }
+    return fired;
+}
+
 /* Entry point called by browser.c after a page's DOM is built. */
 void zeos_js_run_page(dom_node_t *root)
 {
     JSContext *ctx = zeos_js_context();
     if (!ctx || !root) return;
+    zeos_js_reset_listeners();
     dom_setup(ctx);
     g_dom_root = root;
     run_scripts(ctx, root);

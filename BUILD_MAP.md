@@ -287,7 +287,7 @@ the OS. When in doubt it's the OS.
 - [x] **K.1** Node-graph renderer + state colors — `[VERIFIED/harness]` Super+G opens Signal Graph overlay: 9 chain nodes, compositor->panel/dock/desktop edges+arrows, accent(LIVE) borders, 100% zoom. Wired ACTION_CHAIN_GRAPH (was TODO stub). bible id=439. `[source sigviz.c; sigviz_overlay_*]`.
 - [x] **K.2** Interactive selection / inspector — `[VERIFIED/harness]` click compositor node -> selected chain_id=7 + highlighted w/ inspector detail; empty-click deselects. Wired click routing. bible id=441. `[source sigviz.c sigviz_click]`.
 - [x] **K.3** Live pulse animation — `[VERIFIED/harness]` sigviz_tick advances frame (wired to compositor); sine_pulse varies 0/127/255 across frames, bounded. bible id=442. `[source sigviz.c sine_pulse/sigviz_tick]`.
-- [x] **K.4** Zoom / pan — `[VERIFIED/harness]` = zooms 100%->150% (nodes larger), arrows pan; wired to overlay. bible id=440. `[source sigviz.c:537-568]`.
+- [x] **K.4** Zoom / pan — `[VERIFIED/production]` = zooms 100%->150% (indicator changes, nodes larger, compositor pushed off-edge); left-arrow pans (graph shifts right, compositor scrolls off — settled 2/2). Observed on the real cold-boot path (no diag/bypass); zoom identical on all boots where overlay opened (misses = INPUT.DROP.COMPOSITE combo drop, not a K.4 defect). Adversarial review caught+fixed a missing pan-evidence gap. bible id=476. `[source sigviz.c:537-568]`.
 
 ## L. Animation & Motion
 - [x] **L.1** Spring engine (semi-implicit Euler, 64 concurrent, retarget-with-velocity) — `[VERIFIED/harness]` selftest [L1] gradual+settle+converge, concurrent=64 (65th=-1), retarget preserves velocity. bible id=427. `[source anim.c anim_l1_selftest]`.
