@@ -200,6 +200,7 @@ void dom_set_text_content(dom_node_t *el, const char *s) {
     if (!t) return;
     t->type = DOM_TEXT;
     t->parent = el;
+    t->style = el->style;         /* inherit font_size/color — css already ran */
     int i = 0; for (; s[i] && i < 1023; i++) t->text[i] = s[i]; t->text[i] = 0;
     el->first_child = t;          /* textContent replaces all children */
     t->next_sibling = 0;
