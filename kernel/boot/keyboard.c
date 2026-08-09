@@ -502,6 +502,11 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
         }
         int extended = e0_prefix;
         e0_prefix = 0;
+#ifdef ZEOS_DIAG_KEYTRACE
+        { extern void kputs(const char*); extern void kput_hex(uint64_t);
+          kputs("[ISR] rx sc="); kput_hex(scancode); kputs(" ext=");
+          kput_hex((uint64_t)extended); kputs("\n"); }
+#endif
         /* Push to the scancode ring; CHAIN_KEYBOARD's resolve drains it each
          * scheduler tick via keyboard_inject_scancode -> process_scancode. */
         kb_sc_push(scancode, extended);
