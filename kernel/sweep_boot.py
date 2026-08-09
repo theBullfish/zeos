@@ -25,7 +25,7 @@ qemu=subprocess.Popen([
     "-drive",f"format=raw,file=fat:rw:{ESP}",
     "-drive",f"if=none,id=zeosvault,file={vault},format=raw",
     "-device","nvme,drive=zeosvault,serial=ZEOSVAULT",
-    "-device","qemu-xhci,id=xhci","-device","usb-mouse",  # PS/2 kbd (i8042) drives keys; USB mouse for rel/btn
+    "-device","qemu-xhci,id=xhci","-device","usb-mouse",  # PS/2 kbd (i8042) drives keys; USB mouse for rel/btn. (usb-tablet abs is IGNORED by Zeos input stack — verified cycle 3.)
     "-vga","std","-net","none",
     "-serial",f"file:{SER}","-display","none","-qmp",f"unix:{QMP},server,nowait",
 ],stdout=subprocess.DEVNULL,stderr=subprocess.STDOUT)
@@ -119,6 +119,8 @@ combo(["meta_l"], "2");    time.sleep(0.6); shot("snap-tr")
 combo(["meta_l"], "up");   time.sleep(0.6); shot("maximize")
 combo(["meta_l"], "down"); time.sleep(0.6); shot("restore")
 # Signal-graph overlay (K.1): Super+G opens. K.4: '=' zooms in (100%->150%), arrows pan.
+# (K.2 click-to-select node NOT drivable here: Zeos ignores usb-tablet abs, and relative
+#  positioning + sigviz-open are both eaten by INPUT.DROP.COMPOSITE — needs A.6 fix first.)
 combo(["meta_l"], "g");   time.sleep(0.6); shot("sigviz")
 key("equal"); time.sleep(0.25); key("equal"); time.sleep(0.4); shot("sigviz-zoom")  # K.4 zoom in
 key("left");  time.sleep(0.4); shot("sigviz-pan")                                    # K.4 pan

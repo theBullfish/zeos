@@ -214,6 +214,37 @@ void dom_append_child(dom_node_t *parent, dom_node_t *child) {
     g_dom_dirty = 1;
 }
 
+static void parse_url(const char *url, char *hostname, int hmax,
+                      char *path, int pmax, int *use_tls);
+
+/* JS fetch(): blocking HTTP(S) GET of a URL into body_out (NUL-terminated up to
+ * max-1). Fills *status_out. Returns 0 on success, -1 on failure. Reuses the
+ * same parse_url + http_get/https_get the browser navigation uses. */
+int zeos_http_fetch(const char *url, char *body_out, int max, int *status_out) {
+    if (!url || !body_out || max <= 1) return -1;
+    char hostname[256], path[1024];
+    int use_tls = 0;
+    parse_url(url, hostname, 256, path, 1024, &use_tls);
+    int status = -1, len = 0;
+    if (use_tls) {
+        status = https_get(hostname, path, body_out, max, &len);
+        if (len < 0) len = 0;
+        if (len > max - 1) len = max - 1;
+        body_out[len] = 0;
+    } else {
+        struct http_response resp;
+        extern int http_get(const char *host, const char *path, struct http_response *resp);
+        if (http_get(hostname, path, &resp) < 0) { body_out[0] = 0; return -1; }
+        status = resp.status_code;
+        len = (int)resp.body_len;
+        if (len > max - 1) len = max - 1;
+        for (int i = 0; i < len; i++) body_out[i] = resp.body[i];
+        body_out[len] = 0;
+    }
+    if (status_out) *status_out = status;
+    return status >= 100 ? 0 : -1;
+}
+
 /* document.body */
 dom_node_t *dom_get_body(dom_node_t *root) {
     if (!root) return 0;
@@ -1551,7 +1582,23 @@ int browser_navigate(browser_t *b, const char *url)
     int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
     if (builtin) {
         const char *html;
-        if (str_eq(url, "test:build")) {
+        if (str_eq(url, "test:fetch")) {
+            /* I.7 fetch(): a script pulls a real URL over the net stack and
+             * writes the result into the DOM from a Promise .then chain. */
+            html = "<html><head><title>Fetch</title></head><body>"
+                   "<h1>Fetch Demo</h1>"
+                   "<p id=\"out\">loading...</p>"
+                   "<script>"
+                   "fetch('http://example.com/').then(function(r){"
+                   "  console.log('fetch status', r.status, 'ok', r.ok);"
+                   "  return r.text();"
+                   "}).then(function(t){"
+                   "  document.getElementById('out').textContent = 'fetched ' + t.length + ' bytes over the net';"
+                   "  console.log('fetch body bytes', t.length);"
+                   "});"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:build")) {
             /* I.7 createElement/appendChild: a script builds a list from scratch. */
             html = "<html><head><title>Build</title></head><body>"
                    "<h1>Build Demo</h1>"

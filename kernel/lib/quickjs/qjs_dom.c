@@ -39,6 +39,7 @@ extern dom_node_t  *dom_create_element(const char *tag);
 extern dom_node_t  *dom_create_text(const char *s);
 extern void         dom_append_child(dom_node_t *parent, dom_node_t *child);
 extern dom_node_t  *dom_get_body(dom_node_t *root);
+extern int          zeos_http_fetch(const char *url, char *body_out, int max, int *status_out);
 
 extern JSContext *zeos_js_context(void);
 
@@ -179,6 +180,61 @@ static JSValue doc_createTextNode(JSContext *ctx, JSValueConst this_val, int arg
     if (s) JS_FreeCString(ctx, s);
     return wrap_element(ctx, el);
 }
+/* ── fetch() ── */
+static JSValue resolved_promise(JSContext *ctx, JSValue value)
+{
+    JSValue funcs[2];
+    JSValue p = JS_NewPromiseCapability(ctx, funcs);
+    JSValueConst arg = value;
+    JSValue rr = JS_Call(ctx, funcs[0], JS_UNDEFINED, 1, &arg);
+    JS_FreeValue(ctx, rr);
+    JS_FreeValue(ctx, funcs[0]);
+    JS_FreeValue(ctx, funcs[1]);
+    JS_FreeValue(ctx, value);
+    return p;
+}
+static JSValue resp_text(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    JSValue b = JS_GetPropertyStr(ctx, this_val, "_body");
+    return resolved_promise(ctx, b);
+}
+static JSValue resp_json(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc; (void)argv;
+    JSValue b = JS_GetPropertyStr(ctx, this_val, "_body");
+    const char *s = JS_ToCString(ctx, b);
+    JSValue parsed = JS_ParseJSON(ctx, s ? s : "null", s ? strlen(s) : 4, "<json>");
+    if (s) JS_FreeCString(ctx, s);
+    JS_FreeValue(ctx, b);
+    return resolved_promise(ctx, parsed);
+}
+static char g_fetch_buf[131072];   /* 128 KB response cap for JS fetch */
+static JSValue js_fetch(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc;
+    const char *url = JS_ToCString(ctx, argv[0]);
+    int status = -1;
+    int rc = url ? zeos_http_fetch(url, g_fetch_buf, sizeof g_fetch_buf, &status) : -1;
+    if (url) JS_FreeCString(ctx, url);
+    JSValue resp = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, resp, "status", JS_NewInt32(ctx, status));
+    JS_SetPropertyStr(ctx, resp, "ok", JS_NewBool(ctx, status >= 200 && status < 300));
+    JS_SetPropertyStr(ctx, resp, "_body", JS_NewString(ctx, rc == 0 ? g_fetch_buf : ""));
+    JS_SetPropertyStr(ctx, resp, "text", JS_NewCFunction(ctx, resp_text, "text", 0));
+    JS_SetPropertyStr(ctx, resp, "json", JS_NewCFunction(ctx, resp_json, "json", 0));
+    return resolved_promise(ctx, resp);
+}
+
+/* Run the microtask queue (Promise .then callbacks). */
+static void drain_jobs(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JSContext *c1;
+    int guard = 0;
+    while (JS_ExecutePendingJob(rt, &c1) > 0 && ++guard < 100000) { }
+}
+
 static JSValue console_log(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
     (void)this_val;
@@ -215,6 +271,8 @@ static void dom_setup(JSContext *ctx)
     JS_SetPropertyStr(ctx, console, "warn",  JS_NewCFunction(ctx, console_log, "warn", 1));
     JS_SetPropertyStr(ctx, global, "console", console);
 
+    JS_SetPropertyStr(ctx, global, "fetch", JS_NewCFunction(ctx, js_fetch, "fetch", 1));
+
     JSValue document = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, document, "getElementById",
                       JS_NewCFunction(ctx, doc_getElementById, "getElementById", 1));
@@ -244,6 +302,7 @@ static void run_scripts(JSContext *ctx, dom_node_t *node)
                 JS_FreeValue(ctx, e);
             }
             JS_FreeValue(ctx, v);
+            drain_jobs(ctx);          /* run Promise .then chains (fetch, etc.) */
         }
         run_scripts(ctx, c);
     }
