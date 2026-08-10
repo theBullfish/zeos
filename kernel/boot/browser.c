@@ -345,6 +345,63 @@ void dom_get_inner_html(dom_node_t *el, char *buf, int max) {
     if (buf && max > 0) buf[pos < max ? pos : max - 1] = 0;
 }
 
+/* ── classList ── (operate on the space-separated attr_class) */
+int dom_class_contains(dom_node_t *el, const char *cls) {
+    return el ? dom_class_has(el->attr_class, cls) : 0;
+}
+void dom_class_add(dom_node_t *el, const char *cls) {
+    if (!el || !cls || !cls[0] || dom_class_has(el->attr_class, cls)) return;
+    int len = 0; while (el->attr_class[len]) len++;
+    if (len && len < 255) el->attr_class[len++] = ' ';
+    for (int i = 0; cls[i] && len < 255; i++) el->attr_class[len++] = cls[i];
+    el->attr_class[len] = 0;
+    g_dom_dirty = 1;
+}
+void dom_class_remove(dom_node_t *el, const char *cls) {
+    if (!el || !cls) return;
+    int cl = 0; while (cls[cl]) cl++;
+    char out[256]; int o = 0;
+    const char *p = el->attr_class;
+    while (*p) {
+        while (*p == ' ') p++;
+        const char *start = p;
+        while (*p && *p != ' ') p++;
+        int tlen = (int)(p - start);
+        if (tlen == 0) continue;
+        int match = (tlen == cl);
+        if (match) for (int i = 0; i < tlen; i++) if (start[i] != cls[i]) { match = 0; break; }
+        if (!match) {
+            if (o && o < 255) out[o++] = ' ';
+            for (int i = 0; i < tlen && o < 255; i++) out[o++] = start[i];
+        }
+    }
+    out[o] = 0;
+    int i = 0; for (; out[i] && i < 255; i++) el->attr_class[i] = out[i];
+    el->attr_class[i] = 0;
+    g_dom_dirty = 1;
+}
+void dom_class_toggle(dom_node_t *el, const char *cls) {
+    if (dom_class_contains(el, cls)) dom_class_remove(el, cls);
+    else dom_class_add(el, cls);
+}
+
+/* Detach an element from its parent (Element.remove / removeChild). */
+void dom_remove(dom_node_t *el) {
+    if (!el || !el->parent) return;
+    dom_node_t *p = el->parent;
+    if (p->first_child == el) {
+        p->first_child = el->next_sibling;
+    } else {
+        dom_node_t *s = p->first_child;
+        while (s && s->next_sibling != el) s = s->next_sibling;
+        if (s) s->next_sibling = el->next_sibling;
+    }
+    el->parent = 0; el->next_sibling = 0;
+    g_dom_dirty = 1;
+}
+
+dom_node_t *dom_parent(dom_node_t *el) { return el ? el->parent : 0; }
+
 /* document.body */
 dom_node_t *dom_get_body(dom_node_t *root) {
     if (!root) return 0;
@@ -1693,6 +1750,28 @@ int browser_navigate(browser_t *b, const char *url)
                    "document.getElementById('app').innerHTML = '<h2 class=\"hdr\">Built via innerHTML</h2><p>found ' + n + ' items</p>';"
                    "var h = document.querySelector('.hdr'); h.className = 'hdr done';"
                    "console.log('qsa items', n, 'hdr class', document.querySelector('.hdr').className);"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:dom3")) {
+            /* I.7: classList / remove() / .value / .children / .parentNode. */
+            html = "<html><head><title>DOM3</title></head><body>"
+                   "<h1 id=\"h\">DOM3 Demo</h1>"
+                   "<div id=\"box\" class=\"card\">"
+                     "<p class=\"one\">alpha</p><p class=\"two gone\">beta</p><p>gamma</p>"
+                   "</div>"
+                   "<input id=\"fld\" value=\"typed\">"
+                   "<p id=\"out\">out</p>"
+                   "<script>"
+                   "var box = document.getElementById('box');"
+                   "box.classList.add('active'); box.classList.toggle('card');"   /* card off, active on */
+                   "document.querySelector('.gone').remove();"                     /* drop 'beta' */
+                   "var kids = box.children.length;"
+                   "var val = document.getElementById('fld').value;"
+                   "var par = document.querySelector('.one').parentNode.id;"
+                   "var has = box.classList.contains('active');"
+                   "document.getElementById('out').textContent = "
+                     "'class=' + box.className + ' kids=' + kids + ' val=' + val + ' parent=' + par + ' active=' + has;"
+                   "console.log('dom3', box.className, 'kids', kids, 'val', val, 'parent', par, 'active', has);"
                    "</script>"
                    "</body></html>";
         } else if (str_eq(url, "test:fetch")) {

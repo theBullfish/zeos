@@ -45,12 +45,19 @@ extern void         dom_query_all(dom_node_t *node, const char *sel,
                                   void (*visit)(dom_node_t *, void *), void *ctx);
 extern void         dom_set_inner_html(dom_node_t *el, const char *html);
 extern void         dom_get_inner_html(dom_node_t *el, char *buf, int max);
+extern int          dom_class_contains(dom_node_t *el, const char *cls);
+extern void         dom_class_add(dom_node_t *el, const char *cls);
+extern void         dom_class_remove(dom_node_t *el, const char *cls);
+extern void         dom_class_toggle(dom_node_t *el, const char *cls);
+extern void         dom_remove(dom_node_t *el);
+extern dom_node_t  *dom_parent(dom_node_t *el);
 
 extern JSContext *zeos_js_context(void);
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
 static JSClassID  js_element_class_id;
+static JSClassID  js_classlist_class_id;
 static int        g_dom_setup;
 static dom_node_t *g_dom_root;
 static JSValue     g_document;
@@ -198,6 +205,66 @@ static JSValue el_querySelectorAll(JSContext *ctx, JSValueConst this_val, int ar
     return q.arr;
 }
 
+/* ── classList (opaque = the owning dom_node_t*) ── */
+static JSValue cl_add(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; dom_node_t *el = JS_GetOpaque(this_val, js_classlist_class_id);
+    const char *s = JS_ToCString(ctx, argv[0]); dom_class_add(el, s ? s : "");
+    if (s) JS_FreeCString(ctx, s); return JS_UNDEFINED;
+}
+static JSValue cl_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; dom_node_t *el = JS_GetOpaque(this_val, js_classlist_class_id);
+    const char *s = JS_ToCString(ctx, argv[0]); dom_class_remove(el, s ? s : "");
+    if (s) JS_FreeCString(ctx, s); return JS_UNDEFINED;
+}
+static JSValue cl_toggle(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; dom_node_t *el = JS_GetOpaque(this_val, js_classlist_class_id);
+    const char *s = JS_ToCString(ctx, argv[0]); dom_class_toggle(el, s ? s : "");
+    if (s) JS_FreeCString(ctx, s); return JS_UNDEFINED;
+}
+static JSValue cl_contains(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; dom_node_t *el = JS_GetOpaque(this_val, js_classlist_class_id);
+    const char *s = JS_ToCString(ctx, argv[0]); int r = dom_class_contains(el, s ? s : "");
+    if (s) JS_FreeCString(ctx, s); return JS_NewBool(ctx, r);
+}
+static const JSCFunctionListEntry classlist_proto_funcs[] = {
+    JS_CFUNC_DEF("add", 1, cl_add),
+    JS_CFUNC_DEF("remove", 1, cl_remove),
+    JS_CFUNC_DEF("toggle", 1, cl_toggle),
+    JS_CFUNC_DEF("contains", 1, cl_contains),
+};
+
+static JSValue el_get_classList(JSContext *ctx, JSValueConst this_val) {
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    JSValue obj = JS_NewObjectClass(ctx, js_classlist_class_id);
+    JS_SetOpaque(obj, el);
+    return obj;
+}
+static JSValue el_remove(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)argc; (void)argv; dom_remove(JS_GetOpaque(this_val, js_element_class_id));
+    return JS_UNDEFINED;
+}
+static JSValue el_get_value(JSContext *ctx, JSValueConst this_val) {
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *v = dom_get_attr(el, "value");
+    return JS_NewString(ctx, v ? v : "");
+}
+static JSValue el_set_value(JSContext *ctx, JSValueConst this_val, JSValueConst val) {
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *s = JS_ToCString(ctx, val); dom_set_attr(el, "value", s ? s : "");
+    if (s) JS_FreeCString(ctx, s); return JS_UNDEFINED;
+}
+static JSValue el_get_parentNode(JSContext *ctx, JSValueConst this_val) {
+    return wrap_element(ctx, dom_parent(JS_GetOpaque(this_val, js_element_class_id)));
+}
+static JSValue el_get_children(JSContext *ctx, JSValueConst this_val) {
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    JSValue arr = JS_NewArray(ctx); uint32_t n = 0;
+    for (dom_node_t *c = dom_first_child(el); c; c = dom_next_sibling(c))
+        if (dom_node_tag(c)[0])   /* element (text nodes have empty tag) */
+            JS_SetPropertyUint32(ctx, arr, n++, wrap_element(ctx, c));
+    return arr;
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("textContent", el_get_textContent, el_set_textContent),
     JS_CGETSET_DEF("innerText",   el_get_textContent, el_set_textContent),
@@ -211,6 +278,12 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CFUNC_DEF("appendChild", 1, el_appendChild),
     JS_CFUNC_DEF("querySelector", 1, el_querySelector),
     JS_CFUNC_DEF("querySelectorAll", 1, el_querySelectorAll),
+    JS_CGETSET_DEF("classList",   el_get_classList, NULL),
+    JS_CGETSET_DEF("value",       el_get_value, el_set_value),
+    JS_CGETSET_DEF("parentNode",  el_get_parentNode, NULL),
+    JS_CGETSET_DEF("parentElement", el_get_parentNode, NULL),
+    JS_CGETSET_DEF("children",    el_get_children, NULL),
+    JS_CFUNC_DEF("remove", 0, el_remove),
 };
 
 static JSValue wrap_element(JSContext *ctx, dom_node_t *el)
@@ -346,6 +419,14 @@ static void dom_setup(JSContext *ctx)
     JSValue proto = JS_NewObject(ctx);
     JS_SetPropertyFunctionList(ctx, proto, element_proto_funcs, countof(element_proto_funcs));
     JS_SetClassProto(ctx, js_element_class_id, proto);
+
+    JS_NewClassID(&js_classlist_class_id);
+    JSClassDef cldef; cldef.class_name = "DOMTokenList"; cldef.finalizer = 0;
+    cldef.gc_mark = 0; cldef.call = 0; cldef.exotic = 0;
+    JS_NewClass(rt, js_classlist_class_id, &cldef);
+    JSValue clproto = JS_NewObject(ctx);
+    JS_SetPropertyFunctionList(ctx, clproto, classlist_proto_funcs, countof(classlist_proto_funcs));
+    JS_SetClassProto(ctx, js_classlist_class_id, clproto);
 
     JSValue global = JS_GetGlobalObject(ctx);
 
