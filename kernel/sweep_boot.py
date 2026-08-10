@@ -93,6 +93,14 @@ print("desktop shell up:", ready, flush=True)
 time.sleep(3.0)
 shot("desktop")
 
+# E.7: set-1 scancode -> ASCII. Type a UNIQUE marker (plain keys, no modifiers)
+# into the live shell; each char echoes to serial via shell_pump_char->kputc.
+# Observable = the marker appears in-order in the serial log (the Terminal window
+# itself is a static font_draw mockup, so serial is the real echo channel).
+for ch in list("kbtest7"):
+    key(ch)
+time.sleep(0.4); key("ret"); time.sleep(0.6)
+
 # ── Interaction battery (each screenshot is an evidence artifact) ──
 # Cursor motion + click feedback (E.2/E.3)
 rel(-200,-150); shot("cursor-moved")

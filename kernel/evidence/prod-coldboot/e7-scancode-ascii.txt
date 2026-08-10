@@ -1,0 +1,5 @@
+E.7 set-1 scancode->ASCII, production cold-boot, 2-boot settled oracle:
+--- boot 1 ---
+unknown command: kbtest7  (type 'help')
+--- boot 2 ---
+unknown command: kbtest7  (type 'help')
