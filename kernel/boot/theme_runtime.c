@@ -158,13 +158,14 @@ void theme_apply_night_shift(void)
     fb_rect_blend(0, 0, (int)w, (int)h, NIGHT_SHIFT_TINT);
 }
 
-#ifdef ZEOS_DIAG_G4
 /* G.4 selftest: dark/light scheme switching yields distinct, correctly-ordered
  * palettes (light surface brighter than dark; text inverts). theme_get_scheme
  * round-trips. (AUTO is a known TSC placeholder; night-shift is a gated
- * whole-screen tint blend, source-verified.) */
+ * whole-screen tint blend, source-verified.) Un-gated so the production
+ * `selftest` shell command can run it; saves/restores the live scheme. Returns
+ * 1 on PASS. */
 static uint32_t lum_z(uint32_t c){ return ((c>>16)&0xff)+((c>>8)&0xff)+(c&0xff); }
-void theme_g4_selftest(void)
+int theme_g4_selftest(void)
 {
     color_scheme_t saved = theme_get_scheme();
 
@@ -192,5 +193,5 @@ void theme_g4_selftest(void)
     kputs(" light_brighter="); kput_dec((uint64_t)light_brighter);
     kputs(" text_inverts="); kput_dec((uint64_t)text_inverts);
     kputs(pass ? " -> PASS (auto=placeholder; night-shift=gated tint)\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

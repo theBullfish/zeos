@@ -1,0 +1,5 @@
+G.4 dark/light theme tokens via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+[G4] rt(dark/light)=11 surf(d/l)=ff0d1117/fffafaf8 light_brighter=1 text_inverts=1 -> PASS
+--- boot 2 ---
+[G4] rt(dark/light)=11 surf(d/l)=ff0d1117/fffafaf8 light_brighter=1 text_inverts=1 -> PASS

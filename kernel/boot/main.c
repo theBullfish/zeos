@@ -1377,7 +1377,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_G4
         /* G.4 selftest: dark/light scheme switching yields distinct palettes. */
-        { extern void theme_g4_selftest(void); theme_g4_selftest(); }
+        { extern int theme_g4_selftest(void); (void)theme_g4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_G12

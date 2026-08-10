@@ -4890,6 +4890,14 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* G.4: dark/light scheme tokens distinct + correctly ordered + round-trip.
+     * Reuses the real theme_g4_selftest (un-gated): sets DARK then LIGHT, checks
+     * surfaces distinct, light brighter, text inverts, scheme round-trips, then
+     * RESTORES the saved scheme (synchronous, no frame rendered). Prints [G4]. */
+    {
+        extern int theme_g4_selftest(void);
+        if (theme_g4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
