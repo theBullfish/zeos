@@ -24,10 +24,53 @@ static uint64_t s_first_tsc;  /* TSC at first kprint_log_prefix call -- "boot" a
  * while we hold the lock. */
 static zeos_spinlock_t g_kprint_lock = ZEOS_SPINLOCK_INIT;
 
+/* ── Terminal console ring (see kprint.h) ──────────────────────────────
+ * Captures output for the desktop Terminal window. Written under
+ * g_kprint_lock (inside kputc/kputs). Kernel-log lines beginning with '['
+ * are suppressed so the window shows the shell session, not debug spam. */
+static char g_term[TERM_CONSOLE_ROWS][TERM_CONSOLE_COLS + 1];
+static int  g_term_row = 0;
+static int  g_term_col = 0;
+static int  g_term_on  = 0;
+static int  g_term_shell = 0;      /* >0 while shell I/O is being printed */
+
+void term_console_capture(int on) { g_term_on = on ? 1 : 0; }
+void term_console_shell(int on)   { g_term_shell += on ? 1 : -1;
+                                    if (g_term_shell < 0) g_term_shell = 0; }
+int  term_console_cur_row(void)   { return g_term_row; }
+const char *term_console_row(int idx)
+{
+    if (idx < 0 || idx >= TERM_CONSOLE_ROWS) return "";
+    return g_term[idx];
+}
+
+/* Append one char to the ring. Caller holds g_kprint_lock. Captures ONLY shell
+ * I/O (g_term_shell set around the shell prompt/echo/dispatch), so the window
+ * shows the live shell session with zero kernel-log spam -- no fragile filter,
+ * no shared-kputs interference. Serial still gets everything. */
+static void term_console_putc(char c)
+{
+    if (!g_term_on || !g_term_shell || c == '\r') return;
+    if (c == '\n') {
+        g_term_row = (g_term_row + 1) % TERM_CONSOLE_ROWS;
+        g_term_col = 0;
+        g_term[g_term_row][0] = '\0';
+        return;
+    }
+    if (g_term_col >= TERM_CONSOLE_COLS) {
+        g_term_row = (g_term_row + 1) % TERM_CONSOLE_ROWS;
+        g_term_col = 0;
+        g_term[g_term_row][0] = '\0';
+    }
+    g_term[g_term_row][g_term_col++] = c;
+    g_term[g_term_row][g_term_col] = '\0';
+}
+
 void kprint_init(void)
 {
     serial_ready = 1;
     splash_mode = 0;
+    g_term_on = 1;   /* capture the console for the Terminal window */
 }
 
 void kprint_set_splash_mode(int on)
@@ -42,6 +85,7 @@ void kputc(char c)
         fb_putc(c);
     if (serial_ready)
         serial_putc(c);
+    term_console_putc(c);
     spin_unlock_irqrestore(&g_kprint_lock, f);
 }
 
@@ -53,6 +97,7 @@ void kputs(const char *s)
             fb_putc(*s);
         if (serial_ready)
             serial_putc(*s);
+        term_console_putc(*s);
         s++;
     }
     spin_unlock_irqrestore(&g_kprint_lock, f);

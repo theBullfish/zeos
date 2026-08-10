@@ -99,10 +99,13 @@ shot("desktop")
 # itself is a static font_draw mockup, so serial is the real echo channel).
 for ch in list("kbtest7"):
     key(ch)
-time.sleep(0.4); key("ret"); time.sleep(0.6)
+time.sleep(0.4); key("ret"); time.sleep(0.8)
+shot("term-live")   # non-blocking cmd -> scheduler continues -> Terminal re-renders the live session
 # B.8 (pure-logic via the production shell): run `selftest`; the material-ladder
 # check prints FIRST in cmd_selftest (before any network test), so grep serial
-# for it even if later network sub-tests stall under -net none.
+# for it even if later network sub-tests stall under -net none. (selftest can
+# block the scheduler on the -net none DNS/HTTPS sub-tests, so run it AFTER the
+# term-live capture.)
 for ch in list("selftest"):
     key(ch)
 time.sleep(0.4); key("ret"); time.sleep(2.0)

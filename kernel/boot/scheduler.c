@@ -866,6 +866,13 @@ void scheduler_run(void)
             dispatched++;
             if (dispatched >= 128) break;  /* fairness */
         }
+        /* Shell I/O this tick updated the Terminal console ring; mark the scene
+         * dirty so the Terminal window re-renders the live session (the ring
+         * write alone doesn't request a recomposite). */
+        if (dispatched > 0) {
+            extern void compositor_dirty_all(void);
+            compositor_dirty_all();
+        }
 
         /* 7. If nothing happened this tick, idle until an IRQ wakes us. Do NOT
          *    HLT while a spring is animating -- it would freeze between IRQs. */

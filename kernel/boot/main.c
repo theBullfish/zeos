@@ -57,17 +57,28 @@
 static struct zeos_boot_info boot_info;
 
 /* Content-draw callbacks so the two boot windows aren't empty chrome.
- * wm calls these with the chrome-stripped content rect. Honest content:
- * the Z+ shell prompt and the VAULT root listing. */
+ * wm calls these with the chrome-stripped content rect. */
+
+/* Terminal window: render the LIVE console ring (the real Z+ shell session),
+ * not a static mockup. kprint tees kputc/kputs into term_console_*; we draw the
+ * tail that fits, oldest→newest, so typed input + command output appear here. */
 static void boot_term_draw_content(int id, int x, int y, int w, int h)
 {
-    (void)id; (void)w; (void)h;
-    int lh = 20, ty = y + 14;
-    font_draw(x + 14, ty,        "Zeos Terminal - Z+ shell",            FONT_UI, 13, 0xFF8FB6C9);
-    font_draw(x + 14, ty + lh,   "zeos> help",                          FONT_UI, 14, 0xFFDDE6EC);
-    font_draw(x + 14, ty + lh*2, "  chains    list live signal chains", FONT_UI, 13, 0xFFAAB4BC);
-    font_draw(x + 14, ty + lh*3, "  zp <file> run a Z+ program",        FONT_UI, 13, 0xFFAAB4BC);
-    font_draw(x + 14, ty + lh*4, "zeos> _",                             FONT_UI, 14, 0xFFDDE6EC);
+    (void)id; (void)w;
+    int lh = 16;
+    font_draw(x + 12, y + 4, "Zeos Terminal - Z+ shell (live)", FONT_UI, 12, 0xFF8FB6C9);
+    int top = y + 4 + lh + 4;
+    int rows_fit = (h - (top - y) - 6) / lh;
+    if (rows_fit < 1) rows_fit = 1;
+    if (rows_fit > TERM_CONSOLE_ROWS) rows_fit = TERM_CONSOLE_ROWS;
+    int cur = term_console_cur_row();
+    for (int i = 0; i < rows_fit; i++) {
+        int ring = ((cur - (rows_fit - 1) + i) % TERM_CONSOLE_ROWS + TERM_CONSOLE_ROWS)
+                   % TERM_CONSOLE_ROWS;
+        const char *line = term_console_row(ring);
+        if (line && line[0])
+            font_draw(x + 12, top + i * lh, line, FONT_UI, 12, 0xFFDDE6EC);
+    }
 }
 
 static void boot_files_draw_content(int id, int x, int y, int w, int h)
