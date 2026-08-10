@@ -4898,6 +4898,14 @@ static void cmd_selftest(const char *args)
         extern int theme_g4_selftest(void);
         if (theme_g4_selftest()) passes++; else fails++;
     }
+    /* L.5: context menu springs open (full+visible immediately) and close DEFERS
+     * teardown until the spring settles (items retained while animating out, input
+     * off immediately). Reuses the real context_menu_l5_selftest (un-gated): opens
+     * + closes a menu, ticks to settle, verifies teardown; menu gone after. [L5]. */
+    {
+        extern int context_menu_l5_selftest(void);
+        if (context_menu_l5_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

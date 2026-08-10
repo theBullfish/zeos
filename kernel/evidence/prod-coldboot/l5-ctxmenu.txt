@@ -1,0 +1,5 @@
+L.5 context-menu spring via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+[L5] opened=1 input_off=1 deferred=1 torndown=1 -> PASS
+--- boot 2 ---
+[L5] opened=1 input_off=1 deferred=1 torndown=1 -> PASS

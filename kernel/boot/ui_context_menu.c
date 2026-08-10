@@ -252,12 +252,13 @@ void context_menu_draw(void)
 
 uint32_t context_menu_total_opens(void) { return g_total_opens; }
 
-#ifdef ZEOS_DIAG_L5
 #include "kprint.h"
-/* L.5 selftest: prove the context menu springs open (not instant) and that
- * close DEFERS teardown until the spring settles (items retained while
- * animating out, input off immediately). */
-void context_menu_l5_selftest(void)
+/* L.5 selftest: prove the context menu opens full+visible immediately, and that
+ * CLOSE springs out with DEFERRED teardown until the spring settles (items
+ * retained while animating out, input off immediately). Un-gated so the production `selftest`
+ * shell can run it; opens+closes a menu then tears it down (synchronous, no
+ * frame rendered, so invisible). Returns 1 on PASS. */
+int context_menu_l5_selftest(void)
 {
     ctx_menu_item_t items[2];
     for (int i = 0; i < 2; i++) {
@@ -279,8 +280,8 @@ void context_menu_l5_selftest(void)
     kputs(" deferred="); kput_dec((uint64_t)still_drawing);
     kputs(" torndown="); kput_dec((uint64_t)torn_down);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 /* ── C.11: Popover (non-modal, anchor-attached) ──────────────────────────────
  * Unlike the context menu (modal — owns input until dismissed), a popover is

@@ -1130,7 +1130,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_L5
         /* L.5 selftest: context menu spring open + deferred-teardown close. */
-        { extern void context_menu_l5_selftest(void); context_menu_l5_selftest(); }
+        { extern int context_menu_l5_selftest(void); (void)context_menu_l5_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_L1
