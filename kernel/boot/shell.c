@@ -5081,6 +5081,14 @@ static void cmd_selftest(const char *args)
         extern int settings_j1_selftest(void);
         if (settings_j1_selftest()) passes++; else fails++;
     }
+    /* J.4: "Settings for this…" opens Settings on the element's page + re-routes
+     * while open. Reuses the real settings_j4_selftest (un-gated, production-safe:
+     * settles the Settings surface close spring so no ghost panel, drains the
+     * save_all confirm-cursor flash, restores UI state). [J4]. */
+    {
+        extern int settings_j4_selftest(void);
+        if (settings_j4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

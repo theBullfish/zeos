@@ -810,19 +810,49 @@ int settings_j1_selftest(void)
 int settings_current_page(void) { return g_settings.page; }
 int settings_is_open(void) { return g_open; }
 
-#ifdef ZEOS_DIAG_J4
-void settings_j4_selftest(void)
+/* J.4 selftest: "Settings for this…" opens Settings jumped to the element's
+ * page, and re-routes to a different page while already open.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * settings_open() creates a real WM surface and settings_close() detaches it
+ * (springs it closed) — so after the final close we tick anim to full settle so
+ * surface_scale_cb removes the Settings surface (no ghost panel left mid-close);
+ * settings_close()->save_all() also fires the E.4 confirm-cursor flash, drained
+ * by the same cursor_tick loop + cursor_set(DEFAULT). g_settings page/item/scroll
+ * are snapshotted+restored. Assumes Settings is CLOSED at selftest time (true at
+ * the shell); save_all writes only current (unchanged) values so VAULT is
+ * net-neutral. Returns 1 on PASS. */
+int settings_j4_selftest(void)
 {
-    /* "Settings for this…" opens Settings jumped to the element's page. */
+    extern void anim_tick(float);
+    extern void cursor_tick(float);
+    extern void cursor_set(int /* cursor_state_t; CURSOR_DEFAULT == 0 */);
+
+    int saved_page   = g_settings.page;
+    int saved_item   = g_settings.selected_item;
+    int saved_scroll = g_settings.scroll_y;
+
     settings_close();
     settings_open_page(SETTINGS_PAGE_INPUT);
-    int open_input = settings_is_open() && (settings_current_page() == SETTINGS_PAGE_INPUT);
+    int p_input = settings_current_page();
+    int open_input = settings_is_open() && (p_input == SETTINGS_PAGE_INPUT);
     settings_open_page(SETTINGS_PAGE_ACCESSIBILITY);   /* re-route while open */
-    int reroute = (settings_current_page() == SETTINGS_PAGE_ACCESSIBILITY);
+    int p_a11y = settings_current_page();
+    int reroute = (p_a11y == SETTINGS_PAGE_ACCESSIBILITY);
     settings_close();
+
+    /* Teardown: settle the Settings surface close spring so surface_scale_cb
+     * removes it (no ghost), and drain the save_all() confirm-cursor flash; then
+     * force the cursor clean and restore the settings UI state. */
+    for (int i = 0; i < 600; i++) { anim_tick(1.0f/240.0f); cursor_tick(1.0f/240.0f); }
+    cursor_set(0); cursor_set(0);   /* CURSOR_DEFAULT (state + prev_state) */
+    g_settings.page = saved_page;
+    g_settings.selected_item = saved_item;
+    g_settings.scroll_y = saved_scroll;
+
     int pass = open_input && reroute;
     kputs("[J4] open_on_input="); kput_dec((uint64_t)open_input);
     kputs(" reroute_to_a11y="); kput_dec((uint64_t)reroute);
+    kputs(" page(input/a11y)="); kput_dec((uint64_t)p_input); kputs("/"); kput_dec((uint64_t)p_a11y);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

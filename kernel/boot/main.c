@@ -1302,7 +1302,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_J4
         /* J.4 selftest: Settings-for-this opens Settings on the element page. */
-        { extern void settings_j4_selftest(void); settings_j4_selftest(); }
+        { extern int settings_j4_selftest(void); settings_j4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_L6
