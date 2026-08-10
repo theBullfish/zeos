@@ -175,7 +175,12 @@ def hc_corner(dx,dy,tag):
     rel(600,400); time.sleep(0.2)   # exit any corner zone (reset)
     rel(dx,dy);   time.sleep(0.4)   # slam to target corner + dwell >150ms
     shot(tag)
-hc_corner(-4000,-4000,"hc-tl"); key("esc"); time.sleep(0.3)  # TL -> palette
+hc_corner(-4000,-4000,"hc-tl")                                # TL -> palette (mouse-driven, reliable)
+# PALETTE.INPUT: with the palette open, type "mem" with REAL i8042 keystrokes ->
+# exercises post-preempt keyboard IRQ delivery (sti-on-longjmp) + palette_type +
+# repaint. Capture should show the query "mem" + filtered results.
+for _c in ("m","e","m"): key(_c)
+time.sleep(0.5); shot("palette-typed"); key("esc"); time.sleep(0.3)
 hc_corner(-4000, 4000,"hc-bl")                                 # BL -> workspace next
 hc_corner( 4000, 4000,"hc-br")                                 # BR -> show desktop
 hc_corner( 4000,-4000,"hc-tr")                                 # TR -> notifications

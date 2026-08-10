@@ -1,0 +1,2 @@
+[HC] TL fire -> palette_toggle
+[sched] preempted chain 14 "palette" after 496152us
