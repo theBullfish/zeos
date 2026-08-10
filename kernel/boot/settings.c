@@ -701,14 +701,28 @@ const access_config_t *settings_get_access(void)
     return access_get();
 }
 
-#ifdef ZEOS_DIAG_J2
 #include "kprint.h"
 /* J.2 selftest: prove the settings GUI now mutates the ONE real access config
  * (access_get()) rather than a private duplicate. Drive the accessibility page's
  * cycle_value and confirm the live subsystem reflects each change. Also confirm
- * settings_get_access() IS access_get() (same pointer = same state). */
-void settings_j2_selftest(void)
+ * settings_get_access() IS access_get() (same pointer = same state).
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the
+ * cycle_value calls route through access_set_sensory/reduced_motion/focus_mode
+ * (which persist to VAULT), so this saves the originals (page, selected_item, and
+ * all 3 access fields) up front and restores them via the same setters at the end
+ * -- net no change (the FINAL setter writes return each field to its boot value).
+ * s0/r0/f0 are the true originals (each field is only touched by its own cycle).
+ * color_temp rides along: access_set_sensory recomputes it from the mode, so
+ * restoring sensory=STANDARD resets color_temp=0 (valid while night_shift=0, the
+ * boot default; if night_shift ever ships enabled, save/restore color_temp too).
+ * VAULT persists 6x (3 mutate + 3 restore), net-restored -- accepted G.4/M.7
+ * pattern. Returns 1 on PASS. */
+int settings_j2_selftest(void)
 {
+    /* snapshot everything this selftest mutates */
+    int          saved_page = g_settings.page;
+    int          saved_item = g_settings.selected_item;
+
     int shared_ptr = (settings_get_access() == access_get());
 
     g_settings.page = SETTINGS_PAGE_ACCESSIBILITY;
@@ -725,14 +739,24 @@ void settings_j2_selftest(void)
     g_settings.selected_item = 5; cycle_value(1);
     int focus_live = (access_get()->focus_mode == !f0);
 
+    /* restore the exact pre-test state via the real setters (net-restored VAULT) */
+    access_set_sensory((sensory_mode_t)s0);
+    access_set_reduced_motion(r0);
+    access_set_focus_mode(f0);
+    g_settings.page = saved_page;
+    g_settings.selected_item = saved_item;
+
     int pass = shared_ptr && sensory_live && rm_live && focus_live;
     kputs("[J2] shared_ptr="); kput_dec((uint64_t)shared_ptr);
     kputs(" sensory_live="); kput_dec((uint64_t)sensory_live);
     kputs(" reduced_motion_live="); kput_dec((uint64_t)rm_live);
     kputs(" focus_live="); kput_dec((uint64_t)focus_live);
+    kputs(" s0="); kput_dec((uint64_t)s0);
+    kputs(" r0="); kput_dec((uint64_t)r0);
+    kputs(" f0="); kput_dec((uint64_t)f0);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 #ifdef ZEOS_DIAG_J1
 /* J.1 selftest: the Settings app persists to VAULT and reloads correctly.

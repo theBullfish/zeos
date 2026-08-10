@@ -5061,6 +5061,16 @@ static void cmd_selftest(const char *args)
         extern int palette_j3_selftest(void);
         if (palette_j3_selftest()) passes++; else fails++;
     }
+    /* J.2: settings GUI mutates the ONE real access config (no private copy).
+     * Reuses the real settings_j2_selftest (un-gated, production-safe: cycle_value
+     * routes through the persisting access_set_* setters, so it saves+restores
+     * page/selected_item + sensory/reduced_motion/focus_mode = net no change;
+     * VAULT persists 6x net-restored, G.4/M.7 pattern). shared_ptr + each field
+     * changes live via cycle_value. [J2]. */
+    {
+        extern int settings_j2_selftest(void);
+        if (settings_j2_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
