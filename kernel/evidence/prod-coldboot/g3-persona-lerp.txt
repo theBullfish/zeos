@@ -1,0 +1,5 @@
+G.3 persona crossfade lerp via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+G.3 persona lerp (src=ff09bc8a mid=ff1ba19a dst=ff2e86ab endpoints=1 between=1): PASS
+--- boot 2 ---
+G.3 persona lerp (src=ff09bc8a mid=ff1ba19a dst=ff2e86ab endpoints=1 between=1): PASS

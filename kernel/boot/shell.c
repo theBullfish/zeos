@@ -4864,6 +4864,32 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* G.3: persona crossfade is a real per-channel color LERP, not a hard swap.
+     * persona_lerp(ZEROS,FULL,t): t=0 -> src accent, t=1 -> dst accent, and the
+     * midpoint differs from both endpoints with EACH channel between src/dst.
+     * (Read-only lerp math; the spring-driven live transition stays harness id=430.) */
+    {
+        extern uint32_t persona_lerp(int, int, float);
+        extern uint32_t persona_accent_of(int);
+        uint32_t src = persona_accent_of(0), dst = persona_accent_of(2);   /* ZEROS, FULL */
+        uint32_t start = persona_lerp(0, 2, 0.0f);
+        uint32_t mid   = persona_lerp(0, 2, 0.5f);
+        uint32_t fin   = persona_lerp(0, 2, 1.0f);
+        int endpoints = (start == src) && (fin == dst);
+        int is_lerp   = (mid != src) && (mid != dst);
+        int mid_between = 1;
+        for (int sh = 0; sh <= 16; sh += 8) {   /* B, G, R channels */
+            int cs = (src >> sh) & 0xFF, cd = (dst >> sh) & 0xFF, cm = (mid >> sh) & 0xFF;
+            int lo = cs < cd ? cs : cd, hi = cs < cd ? cd : cs;
+            if (cm < lo || cm > hi) mid_between = 0;
+        }
+        int ok = endpoints && is_lerp && mid_between;
+        kputs("  G.3 persona lerp (src="); kput_hex(src); kputs(" mid="); kput_hex(mid);
+        kputs(" dst="); kput_hex(dst); kputs(" endpoints="); kput_dec((uint64_t)endpoints);
+        kputs(" between="); kput_dec((uint64_t)mid_between); kputs("): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

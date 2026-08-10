@@ -93,6 +93,15 @@ static uint32_t color_lerp(uint32_t from, uint32_t to, float t)
     return ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }
 
+/* Read-only lerp accessor for the production selftest (G.3): interpolate between
+ * two personas' accents at t without touching live transition state. */
+uint32_t persona_lerp(int from, int to, float t)
+{
+    if (from < 0 || from > 2) from = 2;
+    if (to   < 0 || to   > 2) to   = 2;
+    return color_lerp(accent_table[from], accent_table[to], t);
+}
+
 /* ── Spring callback ── */
 
 static void on_transition_update(int anim_id, float position, void *ctx)
