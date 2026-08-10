@@ -402,6 +402,12 @@ void dom_remove(dom_node_t *el) {
 
 dom_node_t *dom_parent(dom_node_t *el) { return el ? el->parent : 0; }
 
+/* Computed layout box (offsetLeft/Top/Width/Height for JS). */
+int dom_box_x(dom_node_t *el) { return el ? el->box.x : 0; }
+int dom_box_y(dom_node_t *el) { return el ? el->box.y : 0; }
+int dom_box_w(dom_node_t *el) { return el ? el->box.w : 0; }
+int dom_box_h(dom_node_t *el) { return el ? el->box.h : 0; }
+
 /* document.body */
 dom_node_t *dom_get_body(dom_node_t *root) {
     if (!root) return 0;
@@ -875,6 +881,9 @@ void css_apply_defaults(dom_node_t *node) {
     node->style.font_size = TYPE_BODY;
     node->style.font_weight = 400;
     node->style.display = 0;  /* block */
+    node->style.flex_dir = 0; node->style.justify = 0;
+    node->style.align = 0;    node->style.gap = 0;
+    node->style.flex_grow = 0;
 
     /* Tag-specific defaults */
     if (str_eq(node->tag, "h1")) {
@@ -1079,11 +1088,51 @@ static void css_apply_property(dom_node_t *node, const char *prop,
         return;
     }
 
-    /* display: none|block|inline */
+    /* display: none|block|inline|flex */
     if (css_prop_eq(pbuf, "display")) {
-        if (str_starts(v, "block"))  node->style.display = 0;
-        if (str_starts(v, "inline")) node->style.display = 1;
-        if (str_starts(v, "none"))   node->style.display = 2;
+        if (str_starts(v, "flex"))        node->style.display = 3;
+        else if (str_starts(v, "block"))  node->style.display = 0;
+        else if (str_starts(v, "inline")) node->style.display = 1;
+        else if (str_starts(v, "none"))   node->style.display = 2;
+        return;
+    }
+
+    /* flex-direction: row|column */
+    if (css_prop_eq(pbuf, "flex-direction")) {
+        node->style.flex_dir = str_starts(v, "column") ? 1 : 0;
+        return;
+    }
+
+    /* justify-content: main-axis distribution */
+    if (css_prop_eq(pbuf, "justify-content")) {
+        if      (str_starts(v, "space-between")) node->style.justify = 3;
+        else if (str_starts(v, "space-around"))  node->style.justify = 4;
+        else if (str_starts(v, "center"))        node->style.justify = 1;
+        else if (str_starts(v, "flex-end") || str_starts(v, "end")) node->style.justify = 2;
+        else                                     node->style.justify = 0; /* start */
+        return;
+    }
+
+    /* align-items: cross-axis alignment */
+    if (css_prop_eq(pbuf, "align-items")) {
+        if      (str_starts(v, "center"))   node->style.align = 2;
+        else if (str_starts(v, "flex-end") || str_starts(v, "end")) node->style.align = 3;
+        else if (str_starts(v, "flex-start") || str_starts(v, "start")) node->style.align = 1;
+        else                                node->style.align = 0; /* stretch */
+        return;
+    }
+
+    /* gap: Npx (between flex items) */
+    if (css_prop_eq(pbuf, "gap")) {
+        const char *vp = v; int g = parse_int(&vp);
+        if (g >= 0) node->style.gap = g;
+        return;
+    }
+
+    /* flex / flex-grow: N (grow factor; flex:1 => grow to fill) */
+    if (css_prop_eq(pbuf, "flex") || css_prop_eq(pbuf, "flex-grow")) {
+        const char *vp = v; int g = parse_int(&vp);
+        if (g >= 0) node->style.flex_grow = g;
         return;
     }
 
@@ -1160,9 +1209,138 @@ static font_id_t text_font(dom_node_t *text_node) {
 
 /* ── Layout Engine ── */
 
+/* Shrink-to-fit intrinsic content width (border-box: includes the node's own
+ * L/R padding, excludes its margins). Used to size flex items on the main axis. */
+static int intrinsic_w(dom_node_t *n, int avail) {
+    if (!n || n->style.display == 2) return 0;
+    int pad_lr = n->style.padding[1] + n->style.padding[3];
+    if (n->type == DOM_TEXT)
+        return font_measure(n->text, text_font(n), n->style.font_size) + pad_lr;
+    if (str_eq(n->tag, "img"))
+        return ((n->img_pixels && n->img_w > 0) ? n->img_w : 200) + pad_lr;
+    if (str_eq(n->tag, "input") || str_eq(n->tag, "textarea"))
+        return 200 + pad_lr;
+    if (str_eq(n->tag, "button")) {
+        const char *label = n->attr_value[0] ? n->attr_value :
+            ((n->first_child && n->first_child->type == DOM_TEXT) ? n->first_child->text : "");
+        return font_measure(label, FONT_UI_BOLD, TYPE_BODY) + pad_lr;
+    }
+    /* Container: flex-row => sum of children; otherwise widest child. */
+    int row = (n->style.display == 3 && n->style.flex_dir == 0);
+    int total = 0, maxw = 0, cnt = 0;
+    for (dom_node_t *c = n->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int cw = intrinsic_w(c, avail) + c->style.margin[1] + c->style.margin[3];
+        total += cw;
+        if (cw > maxw) maxw = cw;
+        cnt++;
+    }
+    int inner = row ? (total + (cnt > 1 ? n->style.gap * (cnt - 1) : 0)) : maxw;
+    int w = inner + pad_lr;
+    if (avail > 0 && w > avail) w = avail;
+    return w;
+}
+
+/* CSS flexbox: lay out `box`'s children along the main axis (row or column),
+ * distribute free space per justify-content, align on the cross axis per
+ * align-items, honor gap and per-item flex-grow. Standard single-line flex. */
+static void layout_flex(dom_node_t *box, int content_w, int content_h) {
+    int row = (box->style.flex_dir == 0);
+    int gap = box->style.gap;
+
+    /* Pass 1: measure each visible child's width + height. */
+    int n = 0, used = 0, grow_total = 0, max_cross = 0;
+    for (dom_node_t *c = box->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int cw = intrinsic_w(c, content_w), ch;
+        if (c->type == DOM_TEXT) {
+            ch = font_line_height(text_font(c), c->style.font_size);
+            if (ch < 1) ch = c->style.font_size * 3 / 2;
+        } else if (str_eq(c->tag, "img")) {
+            ch = (c->img_pixels && c->img_h > 0) ? c->img_h : 80;
+        } else if (str_eq(c->tag, "input") || str_eq(c->tag, "button") || str_eq(c->tag, "textarea")) {
+            font_id_t fid = str_eq(c->tag, "button") ? FONT_UI_BOLD : FONT_UI;
+            int lh = font_line_height(fid, TYPE_BODY); if (lh < 1) lh = TYPE_BODY * 3 / 2;
+            ch = lh + c->style.padding[0] + c->style.padding[2];
+            if (str_eq(c->tag, "textarea")) ch = lh * 4 + c->style.padding[0] + c->style.padding[2];
+        } else {
+            layout_compute(c, cw - c->style.padding[1] - c->style.padding[3], content_h);
+            int inner_h = 0;
+            for (dom_node_t *gc = c->first_child; gc; gc = gc->next_sibling) {
+                if (gc->style.display == 2) continue;
+                int b = gc->box.y + gc->box.h + gc->style.margin[2];
+                if (b > inner_h) inner_h = b;
+            }
+            ch = inner_h + c->style.padding[0] + c->style.padding[2];
+        }
+        c->box.w = cw; c->box.h = ch;
+        used += (row ? cw + c->style.margin[1] + c->style.margin[3]
+                     : ch + c->style.margin[0] + c->style.margin[2]);
+        grow_total += c->style.flex_grow;
+        int cross = row ? ch + c->style.margin[0] + c->style.margin[2]
+                        : cw + c->style.margin[1] + c->style.margin[3];
+        if (cross > max_cross) max_cross = cross;
+        n++;
+    }
+    if (n == 0) return;
+    used += gap * (n - 1);
+
+    /* Row cross = tallest item; column cross = available width. */
+    int cross_size = row ? max_cross : content_w;
+    /* Row main = container width; column main = auto (content) => no free space. */
+    int main_size = row ? content_w : used;
+    int free = main_size - used;
+    if (free < 0) free = 0;
+
+    int cursor = 0, between = gap;
+    if (grow_total == 0) {
+        switch (box->style.justify) {
+            case 1: cursor = free / 2; break;                              /* center */
+            case 2: cursor = free; break;                                  /* end */
+            case 3: if (n > 1) between = gap + free / (n - 1); break;      /* space-between */
+            case 4: cursor = free / (2 * n); between = gap + free / n; break; /* space-around */
+            default: break;                                               /* flex-start */
+        }
+    }
+
+    /* Pass 2: position along main axis, align on cross axis. */
+    for (dom_node_t *c = box->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int grow_extra = (grow_total > 0) ? (free * c->style.flex_grow / grow_total) : 0;
+        if (row) {
+            c->box.w += grow_extra;
+            c->box.x = cursor + c->style.margin[3];
+            int ext = c->box.h + c->style.margin[0] + c->style.margin[2], cy;
+            switch (box->style.align) {
+                case 2: cy = (cross_size - ext) / 2; break;                /* center */
+                case 3: cy = cross_size - ext; break;                      /* flex-end */
+                case 0: c->box.h = cross_size - c->style.margin[0] - c->style.margin[2]; cy = 0; break; /* stretch */
+                default: cy = 0; break;                                    /* flex-start */
+            }
+            if (cy < 0) cy = 0;
+            c->box.y = cy + c->style.margin[0];
+            cursor += c->box.w + c->style.margin[1] + c->style.margin[3] + between;
+        } else {
+            c->box.h += grow_extra;
+            c->box.y = cursor + c->style.margin[0];
+            int ext = c->box.w + c->style.margin[1] + c->style.margin[3], cx;
+            switch (box->style.align) {
+                case 2: cx = (cross_size - ext) / 2; break;
+                case 3: cx = cross_size - ext; break;
+                case 0: c->box.w = cross_size - c->style.margin[1] - c->style.margin[3]; cx = 0; break;
+                default: cx = 0; break;
+            }
+            if (cx < 0) cx = 0;
+            c->box.x = cx + c->style.margin[3];
+            cursor += c->box.h + c->style.margin[0] + c->style.margin[2] + between;
+        }
+    }
+}
+
 void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
-    (void)viewport_h;
     if (!root) return;
+    if (root->style.display == 3) { layout_flex(root, viewport_w, viewport_h); return; }
+    (void)viewport_h;
 
     /* Simple block layout: stack blocks vertically, inline flows horizontally */
     int cursor_y = 0;
@@ -1776,6 +1954,33 @@ int browser_navigate(browser_t *b, const char *url)
                      "'class=' + box.className + ' kids=' + kids + ' val=' + val + ' parent=' + par + ' active=' + has "
                      "+ ' first=' + first + ' last=' + last + ' next=' + nxt;"
                    "console.log('dom3', box.className, 'kids', kids, 'val', val, 'parent', par, 'active', has, 'first', first, 'last', last, 'next', nxt);"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:flex")) {
+            /* I.7: CSS flexbox — row with justify-content, gap; column; align. */
+            html = "<html><head><title>Flex</title></head><body>"
+                   "<h1>Flex Demo</h1>"
+                   "<div id=\"row\" style=\"display:flex; gap:10px; justify-content:space-between;\">"
+                     "<div id=\"a\" style=\"background:#204060; padding:8px;\">A</div>"
+                     "<div id=\"b\" style=\"background:#206040; padding:8px;\">B</div>"
+                     "<div id=\"c\" style=\"background:#604020; padding:8px;\">C</div>"
+                   "</div>"
+                   "<div id=\"col\" style=\"display:flex; flex-direction:column; gap:6px;\">"
+                     "<div id=\"x\" style=\"background:#402060; padding:6px;\">X</div>"
+                     "<div id=\"y\" style=\"background:#602040; padding:6px;\">Y</div>"
+                   "</div>"
+                   "<p id=\"out\">out</p>"
+                   "<script>"
+                   "function L(id){return document.getElementById(id).offsetLeft;}"
+                   "function T(id){return document.getElementById(id).offsetTop;}"
+                   "var rowSame = (T('a')==T('b') && T('b')==T('c'));"          /* row: same top */
+                   "var ordered = (L('a') < L('b') && L('b') < L('c'));"        /* left to right */
+                   "var spread  = (L('c') - L('a'));"                           /* space-between spreads them */
+                   "var colStacked = (T('y') > T('x') && L('x')==L('y'));"       /* col: stacked, same left */
+                   "document.getElementById('out').textContent = "
+                     "'rowSame=' + rowSame + ' ordered=' + ordered + ' spread=' + spread + ' colStacked=' + colStacked;"
+                   "console.log('flex rowSame', rowSame, 'ordered', ordered, 'spread', spread, "
+                     "'La', L('a'), 'Lb', L('b'), 'Lc', L('c'), 'colStacked', colStacked, 'Tx', T('x'), 'Ty', T('y'));"
                    "</script>"
                    "</body></html>";
         } else if (str_eq(url, "test:fetch")) {

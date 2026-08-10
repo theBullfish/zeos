@@ -78,8 +78,15 @@ typedef struct dom_node {
         int      font_weight;      /* 400=normal, 700=bold */
         int      margin[4];        /* top, right, bottom, left */
         int      padding[4];
-        int      display;          /* 0=block, 1=inline, 2=none */
+        int      display;          /* 0=block, 1=inline, 2=none, 3=flex */
         int      text_align;       /* 0=left, 1=center, 2=right */
+        /* Flexbox (only meaningful when display==3 on the container; flex_grow
+         * is a per-item property read by the parent's flex layout). */
+        int      flex_dir;         /* 0=row, 1=column */
+        int      justify;          /* main axis: 0=start 1=center 2=end 3=between 4=around */
+        int      align;            /* cross axis: 0=stretch 1=start 2=center 3=end */
+        int      gap;              /* px between flex items */
+        int      flex_grow;        /* item: 0=fixed, >0 grows to fill free space */
     } style;
 
     /* Layout box (computed during layout pass) */

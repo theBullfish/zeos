@@ -51,6 +51,10 @@ extern void         dom_class_remove(dom_node_t *el, const char *cls);
 extern void         dom_class_toggle(dom_node_t *el, const char *cls);
 extern void         dom_remove(dom_node_t *el);
 extern dom_node_t  *dom_parent(dom_node_t *el);
+extern int          dom_box_x(dom_node_t *el);
+extern int          dom_box_y(dom_node_t *el);
+extern int          dom_box_w(dom_node_t *el);
+extern int          dom_box_h(dom_node_t *el);
 
 extern JSContext *zeos_js_context(void);
 
@@ -282,6 +286,18 @@ static JSValue el_get_previousElementSibling(JSContext *ctx, JSValueConst this_v
         if (dom_node_tag(c)[0]) prev = c;
     return wrap_element(ctx, prev);
 }
+static JSValue el_get_offsetLeft(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, dom_box_x(JS_GetOpaque(this_val, js_element_class_id)));
+}
+static JSValue el_get_offsetTop(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, dom_box_y(JS_GetOpaque(this_val, js_element_class_id)));
+}
+static JSValue el_get_offsetWidth(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, dom_box_w(JS_GetOpaque(this_val, js_element_class_id)));
+}
+static JSValue el_get_offsetHeight(JSContext *ctx, JSValueConst this_val) {
+    return JS_NewInt32(ctx, dom_box_h(JS_GetOpaque(this_val, js_element_class_id)));
+}
 static JSValue el_get_children(JSContext *ctx, JSValueConst this_val) {
     dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
     JSValue arr = JS_NewArray(ctx); uint32_t n = 0;
@@ -314,6 +330,10 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("lastElementChild",        el_get_lastElementChild, NULL),
     JS_CGETSET_DEF("nextElementSibling",      el_get_nextElementSibling, NULL),
     JS_CGETSET_DEF("previousElementSibling",  el_get_previousElementSibling, NULL),
+    JS_CGETSET_DEF("offsetLeft",   el_get_offsetLeft, NULL),
+    JS_CGETSET_DEF("offsetTop",    el_get_offsetTop, NULL),
+    JS_CGETSET_DEF("offsetWidth",  el_get_offsetWidth, NULL),
+    JS_CGETSET_DEF("offsetHeight", el_get_offsetHeight, NULL),
     JS_CFUNC_DEF("remove", 0, el_remove),
 };
 
