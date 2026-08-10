@@ -1769,9 +1769,13 @@ int browser_navigate(browser_t *b, const char *url)
                    "var val = document.getElementById('fld').value;"
                    "var par = document.querySelector('.one').parentNode.id;"
                    "var has = box.classList.contains('active');"
+                   "var first = box.firstElementChild.textContent;"           /* alpha */
+                   "var last = box.lastElementChild.textContent;"             /* gamma */
+                   "var nxt = box.firstElementChild.nextElementSibling.textContent;" /* gamma (beta gone) */
                    "document.getElementById('out').textContent = "
-                     "'class=' + box.className + ' kids=' + kids + ' val=' + val + ' parent=' + par + ' active=' + has;"
-                   "console.log('dom3', box.className, 'kids', kids, 'val', val, 'parent', par, 'active', has);"
+                     "'class=' + box.className + ' kids=' + kids + ' val=' + val + ' parent=' + par + ' active=' + has "
+                     "+ ' first=' + first + ' last=' + last + ' next=' + nxt;"
+                   "console.log('dom3', box.className, 'kids', kids, 'val', val, 'parent', par, 'active', has, 'first', first, 'last', last, 'next', nxt);"
                    "</script>"
                    "</body></html>";
         } else if (str_eq(url, "test:fetch")) {

@@ -256,6 +256,32 @@ static JSValue el_set_value(JSContext *ctx, JSValueConst this_val, JSValueConst 
 static JSValue el_get_parentNode(JSContext *ctx, JSValueConst this_val) {
     return wrap_element(ctx, dom_parent(JS_GetOpaque(this_val, js_element_class_id)));
 }
+static JSValue el_get_firstChild(JSContext *ctx, JSValueConst this_val) {
+    return wrap_element(ctx, dom_first_child(JS_GetOpaque(this_val, js_element_class_id)));
+}
+static JSValue el_get_firstElementChild(JSContext *ctx, JSValueConst this_val) {
+    for (dom_node_t *c = dom_first_child(JS_GetOpaque(this_val, js_element_class_id)); c; c = dom_next_sibling(c))
+        if (dom_node_tag(c)[0]) return wrap_element(ctx, c);
+    return JS_NULL;
+}
+static JSValue el_get_lastElementChild(JSContext *ctx, JSValueConst this_val) {
+    dom_node_t *last = 0;
+    for (dom_node_t *c = dom_first_child(JS_GetOpaque(this_val, js_element_class_id)); c; c = dom_next_sibling(c))
+        if (dom_node_tag(c)[0]) last = c;
+    return wrap_element(ctx, last);
+}
+static JSValue el_get_nextElementSibling(JSContext *ctx, JSValueConst this_val) {
+    for (dom_node_t *c = dom_next_sibling(JS_GetOpaque(this_val, js_element_class_id)); c; c = dom_next_sibling(c))
+        if (dom_node_tag(c)[0]) return wrap_element(ctx, c);
+    return JS_NULL;
+}
+static JSValue el_get_previousElementSibling(JSContext *ctx, JSValueConst this_val) {
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    dom_node_t *prev = 0;
+    for (dom_node_t *c = dom_first_child(dom_parent(el)); c && c != el; c = dom_next_sibling(c))
+        if (dom_node_tag(c)[0]) prev = c;
+    return wrap_element(ctx, prev);
+}
 static JSValue el_get_children(JSContext *ctx, JSValueConst this_val) {
     dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
     JSValue arr = JS_NewArray(ctx); uint32_t n = 0;
@@ -283,6 +309,11 @@ static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("parentNode",  el_get_parentNode, NULL),
     JS_CGETSET_DEF("parentElement", el_get_parentNode, NULL),
     JS_CGETSET_DEF("children",    el_get_children, NULL),
+    JS_CGETSET_DEF("firstChild",  el_get_firstChild, NULL),
+    JS_CGETSET_DEF("firstElementChild",       el_get_firstElementChild, NULL),
+    JS_CGETSET_DEF("lastElementChild",        el_get_lastElementChild, NULL),
+    JS_CGETSET_DEF("nextElementSibling",      el_get_nextElementSibling, NULL),
+    JS_CGETSET_DEF("previousElementSibling",  el_get_previousElementSibling, NULL),
     JS_CFUNC_DEF("remove", 0, el_remove),
 };
 
