@@ -205,6 +205,10 @@ static void process_scancode(uint8_t scancode, int extended)
         extern int file_mgr_key(int);
         extern int activity_active(void);
         extern int activity_key(int);
+        extern int browser_app_has_field(void);
+        extern int browser_app_key_char(char);
+        extern int browser_app_focused(void);
+        extern int browser_app_key_scan(uint8_t);
         extern int  palette_is_visible(void);
         extern void palette_type(char);
         extern void palette_backspace(void);
@@ -296,6 +300,32 @@ static void process_scancode(uint8_t scancode, int extended)
             if (scancode == 0x2E) { editor_key(0x03); return; } /* Ctrl-C */
             if (scancode == 0x2F) { editor_key(0x16); return; } /* Ctrl-V */
             if (scancode == 0x2D) { editor_key(0x18); return; } /* Ctrl-X */
+        }
+
+        /* Browser text field: when a focused <input>/<textarea> owns keyboard
+         * input, route printable chars + Backspace + Enter into it. Gated on a
+         * focused field (set by clicking into the field), so it never steals
+         * keys from other apps. */
+        if (browser_app_focused() && browser_app_has_field()) {
+            char bch = sh ? scancode_to_ascii_shift[scancode]
+                          : scancode_to_ascii[scancode];
+            if (!bch) {
+                if (scancode == 0x0E) bch = 8;        /* backspace */
+                else if (scancode == 0x1C) bch = 13;  /* enter */
+            }
+            if (bch && browser_app_key_char(bch)) return;
+        }
+
+        /* Browser scrolling: arrows / PageUp / PageDown / Home / End when the
+         * Browser window is focused and no field is capturing text. */
+        if (browser_app_focused() && !browser_app_has_field()) {
+            switch (scancode) {
+            case 0x48: case 0x50: case 0x49:
+            case 0x51: case 0x47: case 0x4F:
+                if (browser_app_key_scan(scancode)) return;
+                break;
+            default: break;
+            }
         }
 
         /* Generic key dispatch into modal / quick look / context menu

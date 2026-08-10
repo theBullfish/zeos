@@ -2972,6 +2972,40 @@ static void browser_app_draw_content(int id, int x, int y, int w, int h)
 
 int browser_app_active(void) { return g_browser_active; }
 
+/* True when the Browser surface is the focused window (so it should receive
+ * keyboard input from the global dispatcher). */
+int browser_app_focused(void)
+{
+    extern int wm_get_focused(void);
+    return g_browser_active && g_browser_surface >= 0 &&
+           wm_get_focused() == g_browser_surface;
+}
+
+/* True when a text field inside the browser is focused (typing target). */
+int browser_app_has_field(void) { return g_browser_active && g_browser_app.focused_input != 0; }
+
+/* Route a printable character / Backspace(8) / Enter(13) into the focused
+ * browser field. Returns 1 if consumed. */
+int browser_app_key_char(char ch)
+{
+    if (!browser_app_has_field()) return 0;
+    if (ch == 8)                  browser_input_backspace(&g_browser_app);
+    else if (ch == 13 || ch == 10) browser_input_enter(&g_browser_app);  /* CR or LF */
+    else                          browser_input_char(&g_browser_app, ch);
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+    return 1;
+}
+
+/* Route a raw scancode (arrows / page keys) into the browser for scrolling.
+ * Returns 1 if consumed. */
+int browser_app_key_scan(uint8_t scancode)
+{
+    if (!browser_app_focused()) return 0;
+    browser_key(&g_browser_app, scancode);
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+    return 1;
+}
+
 /* Route a screen-space click into the active browser app. This is the entry
  * point the compositor input path should call for the Browser surface; the
  * `bclick` diagnostic command uses it to verify link hit-test → navigate. */
