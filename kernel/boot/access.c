@@ -471,18 +471,20 @@ void access_set_cvd_mode(cvd_mode_t mode)
 
 cvd_mode_t access_get_cvd_mode(void) { return (cvd_mode_t)g_access.cvd_mode; }
 
-#ifdef ZEOS_DIAG_M8
 #include "kprint.h"
 /* M.8 selftest: CVD transform. NONE is identity; DEUTERANOPIA collapses the
  * red/green axis so pure red and pure green map to MORE-similar colors than they
- * started (the confusion CVD simulates); output stays in 0..255; alpha preserved. */
+ * started (the confusion CVD simulates); output stays in 0..255; alpha preserved.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * cvd_transform is a PURE function (reads only its args + a const matrix, no
+ * VAULT, no global state, no surface) — zero side effects. Returns 1 on PASS. */
 static int chan_dist(uint32_t a, uint32_t b) {
     int dr=((a>>16)&0xFF)-((b>>16)&0xFF); if(dr<0)dr=-dr;
     int dg=((a>>8)&0xFF)-((b>>8)&0xFF);   if(dg<0)dg=-dg;
     int db=(a&0xFF)-(b&0xFF);             if(db<0)db=-db;
     return dr+dg+db;
 }
-void access_m8_selftest(void)
+int access_m8_selftest(void)
 {
     uint32_t red = 0xFFFF0000u, grn = 0xFF00FF00u;
     int identity = (cvd_transform(red, CVD_NONE) == red) && (cvd_transform(grn, CVD_NONE) == grn);
@@ -499,5 +501,5 @@ void access_m8_selftest(void)
     kputs(" dist(orig/sim)="); kput_dec((uint64_t)orig_dist); kputs("/"); kput_dec((uint64_t)sim_dist);
     kputs(" confuses="); kput_dec((uint64_t)confuses);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

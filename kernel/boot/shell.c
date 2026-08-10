@@ -4990,6 +4990,15 @@ static void cmd_selftest(const char *args)
         extern int notify_m7_selftest(void);
         if (notify_m7_selftest()) passes++; else fails++;
     }
+    /* M.8: CVD (color-vision-deficiency) simulation transform. Reuses the real
+     * access_m8_selftest (un-gated) — cvd_transform is a PURE function (no VAULT,
+     * no global state): CVD_NONE is identity; DEUTERANOPIA pulls pure red/green
+     * to more-similar colors (sim_dist < orig_dist); alpha preserved; both
+     * channels actually change. [M8]. */
+    {
+        extern int access_m8_selftest(void);
+        if (access_m8_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
