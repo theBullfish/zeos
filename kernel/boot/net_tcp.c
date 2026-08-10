@@ -18,29 +18,6 @@
 
 static struct tcp_conn connections[TCP_MAX_CONNECTIONS];
 
-/* RXDBG: non-serial ring recording every ESTABLISHED packet (serial drops lines
- * during the busy recv loop). Dumped via the `rxdbg` shell command afterwards. */
-struct rxdbg_ent { uint8_t flags; uint16_t dlen; uint32_t seq; uint32_t exp; uint8_t state; };
-static struct rxdbg_ent g_rxdbg[128];
-static volatile int g_rxdbg_n;
-static void rxdbg_rec(uint8_t flags, uint16_t dlen, uint32_t seq, uint32_t exp, uint8_t state) {
-    if (g_rxdbg_n < 128) {
-        g_rxdbg[g_rxdbg_n].flags = flags; g_rxdbg[g_rxdbg_n].dlen = dlen;
-        g_rxdbg[g_rxdbg_n].seq = seq; g_rxdbg[g_rxdbg_n].exp = exp;
-        g_rxdbg[g_rxdbg_n].state = (uint8_t)state; g_rxdbg_n++;
-    }
-}
-void rxdbg_dump(void) {
-    kputs("  [RXDBG] "); kput_dec(g_rxdbg_n); kputs(" ESTABLISHED packets:\n");
-    for (int i = 0; i < g_rxdbg_n; i++) {
-        kputs("   flags=0x"); kput_hex(g_rxdbg[i].flags);
-        kputs(" dlen="); kput_dec(g_rxdbg[i].dlen);
-        kputs(" seq_ok="); kput_dec(g_rxdbg[i].seq == g_rxdbg[i].exp ? 1 : 0);
-        kputs(" state="); kput_dec(g_rxdbg[i].state); kputc('\n');
-    }
-    g_rxdbg_n = 0;
-}
-
 /* ── Listener table ──────────────────────────── */
 
 struct tcp_listener {
@@ -1022,7 +999,6 @@ void tcp_process(const void *frame, uint16_t len)
         break;
 
     case TCP_ESTABLISHED:
-        rxdbg_rec(flags, data_len, seg_seq, conn->ack, (uint8_t)conn->state);
         /* H.5: DATA-path ACK handling — advance the send window + grow the
          * congestion window. Runs for pure ACKs too (data_len==0). This is
          * disjoint from the control-retx clearing above: that block fires only
@@ -1059,16 +1035,26 @@ void tcp_process(const void *frame, uint16_t len)
             }
             tcp_send_segment(conn, TCP_ACK, 0, 0);
         }
-        /* FIN from remote */
+        /* FIN — accept only when IN ORDER (RFC 793): every byte up to the FIN's
+         * sequence must already be received (the data block above advances
+         * conn->ack, so in-order ⇒ conn->ack == seg_seq + data_len). A reordered
+         * or early FIN (a data segment still missing/in-flight ahead of it) is
+         * NOT accepted — we dup-ACK our real rcv_nxt so the peer retransmits the
+         * gap, and close only once the stream completes. Without this, a server
+         * that FINs right after the body (HTTP/1.0, Cloudflare) intermittently
+         * lost the whole response to a FIN-before-data race. */
         if (flags & TCP_FIN) {
-            conn->ack = seg_seq + data_len + 1;
-            conn->remote_closed = 1;
-            tcp_send_segment(conn, TCP_ACK, 0, 0);
-            conn->state = TCP_CLOSE_WAIT;
-            /* Also close our side */
-            tcp_send_segment(conn, TCP_FIN | TCP_ACK, 0, 0);
-            conn->seq++;
-            conn->state = TCP_LAST_ACK;
+            if (conn->ack == seg_seq + data_len) {
+                conn->ack += 1;                 /* FIN consumes one sequence number */
+                conn->remote_closed = 1;
+                tcp_send_segment(conn, TCP_ACK, 0, 0);
+                conn->state = TCP_CLOSE_WAIT;
+                tcp_send_segment(conn, TCP_FIN | TCP_ACK, 0, 0);
+                conn->seq++;
+                conn->state = TCP_LAST_ACK;
+            } else {
+                tcp_send_segment(conn, TCP_ACK, 0, 0);  /* dup-ACK: resend the gap */
+            }
         }
         break;
 
