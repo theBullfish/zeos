@@ -1,5 +1,12 @@
 # Zeos AUTO_RUNBOOK — autonomous list-completion loop
 
+> ## 🛑 HALT — DO NOT RUN A CYCLE (set 2026-08-10 by Brad's live session)
+> A **major repository restructure is in progress**: the codebase is being split into
+> a chip-agnostic `os/` and per-arch `installers/{x86_64,arm64,riscv64}/`. File paths
+> under `kernel/` are moving. **If you are a cron-fired cycle: read no further, make NO
+> commits, touch NOTHING, and exit immediately.** Running a cycle now WILL collide with
+> the restructure and corrupt it. This block will be removed when the restructure lands.
+
 **Purpose:** drive `BUILD_MAP.md` items to PRODUCTION-scope VERIFIED, one per cycle,
 with an adversarial review of the **last two items** every cycle to contain drift.
 A fresh (cron-fired) context re-reads THIS FILE first, then executes ONE cycle.
