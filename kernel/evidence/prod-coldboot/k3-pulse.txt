@@ -1,0 +1,5 @@
+K.3 sigviz live pulse via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+[K3] frame_adv=1 pulse(0/15/30)=0/127/255 varies=1 bounded=1 -> PASS
+--- boot 2 ---
+[K3] frame_adv=1 pulse(0/15/30)=0/127/255 varies=1 bounded=1 -> PASS

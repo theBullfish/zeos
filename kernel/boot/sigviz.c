@@ -610,12 +610,13 @@ void sigviz_overlay_draw(void)
     sigviz_draw(-1, m, m, sw - 2 * m, sh - 2 * m);     /* all chains */
 }
 
-#ifdef ZEOS_DIAG_K3
-/* K.3 selftest: live pulse animation. sigviz_tick advances viz.frame (now called
- * each compositor frame while the overlay is open), and the node pulse is driven
- * by sine_pulse(frame): prove the frame counter advances and the pulse value
- * varies across frames (animated, not static) and stays bounded 0..255. */
-void sigviz_k3_selftest(void)
+/* K.3 selftest: live pulse animation. sigviz_tick advances viz.frame (called each
+ * compositor frame while the overlay is open), and the node pulse is driven by
+ * sine_pulse(frame): prove the frame counter advances and the pulse value varies
+ * across frames (animated, not static) and stays bounded 0..255. Un-gated so the
+ * production `selftest` shell can run it (advances a benign counter only, overlay
+ * closed -> no visible effect). Returns 1 on PASS. */
+int sigviz_k3_selftest(void)
 {
     uint32_t f0 = viz.frame;
     for (int i = 0; i < 10; i++) sigviz_tick();
@@ -634,5 +635,5 @@ void sigviz_k3_selftest(void)
     kputs(" varies="); kput_dec((uint64_t)varies);
     kputs(" bounded="); kput_dec((uint64_t)bounded);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

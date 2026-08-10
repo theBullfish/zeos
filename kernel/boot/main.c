@@ -1332,7 +1332,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_K3
         /* K.3 selftest: sigviz live pulse animation. */
-        { extern void sigviz_k3_selftest(void); sigviz_k3_selftest(); }
+        { extern int sigviz_k3_selftest(void); (void)sigviz_k3_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_E2

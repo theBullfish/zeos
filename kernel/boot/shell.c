@@ -4906,6 +4906,14 @@ static void cmd_selftest(const char *args)
         extern int context_menu_l5_selftest(void);
         if (context_menu_l5_selftest()) passes++; else fails++;
     }
+    /* K.3: sigviz live pulse — sigviz_tick advances viz.frame and sine_pulse(frame)
+     * varies across frames (animated, not static) and stays bounded 0..255. Reuses
+     * the real sigviz_k3_selftest (un-gated); advances a benign counter, overlay
+     * closed -> no visible effect. [K3]. */
+    {
+        extern int sigviz_k3_selftest(void);
+        if (sigviz_k3_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
