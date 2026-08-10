@@ -816,7 +816,6 @@ static int hit_control(chain_surface_t *s, int x, int y) {
     return best;
 }
 
-#ifdef ZEOS_DIAG_M5
 /*
  * M.5 selftest: prove the touch-target hit-slop actually widens a control's
  * clickable zone beyond its 22px glyph toward min_touch_target (44px). Drives
@@ -825,8 +824,12 @@ static int hit_control(chain_surface_t *s, int x, int y) {
  * the bare glyph still hits; the discriminating cases are clicks that MISS the
  * 22px glyph but land inside the 44px target (must now hit) and a click beyond
  * the target (must still miss).
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: pure
+ * geometry over a STACK-LOCAL chain_surface_t (no wm surface); the only touched
+ * global is g_wm.controls_side, saved+restored (net no change); no VAULT, no
+ * cursor, no compositor. Returns 1 on PASS.
  */
-void wm_m5_selftest(void) {
+int wm_m5_selftest(void) {
     int saved_side = g_wm.controls_side;
     g_wm.controls_side = WM_CONTROLS_RIGHT;
 
@@ -857,8 +860,8 @@ void wm_m5_selftest(void) {
     kputs(" beyond@+19="); kputs(c_beyond == -1 ? "miss" : "HIT");
     kputs(" offbar="); kputs(c_offbar == -1 ? "miss" : "HIT");
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif /* ZEOS_DIAG_M5 */
 
 /* Check if click is on a resize edge. Returns edge bitmask. */
 static int hit_resize_edge(chain_surface_t *s, int x, int y) {

@@ -1109,7 +1109,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #ifdef ZEOS_DIAG_M5
         /* M.5 touch-target selftest: hit_control catch-zone widened to 44px.
          * Passive (restores controls_side; drives a synthetic surface). */
-        { extern void wm_m5_selftest(void); wm_m5_selftest(); }
+        { extern int wm_m5_selftest(void); wm_m5_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_D5

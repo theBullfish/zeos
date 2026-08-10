@@ -5097,6 +5097,15 @@ static void cmd_selftest(const char *args)
         extern int wm_c4_selftest(void);
         if (wm_c4_selftest()) passes++; else fails++;
     }
+    /* M.5: 44px min touch targets. Reuses the real wm_m5_selftest (un-gated,
+     * production-safe: stack-local surface + real static hit_control; only
+     * g_wm.controls_side touched, saved+restored). A click on the glyph hits, a
+     * click in the hit-slop (past the 22px glyph, inside the 44px target) hits, a
+     * click beyond the target / off the titlebar misses. [M5]. */
+    {
+        extern int wm_m5_selftest(void);
+        if (wm_m5_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
