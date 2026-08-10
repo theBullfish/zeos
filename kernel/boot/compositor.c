@@ -213,15 +213,22 @@ void compositor_set_panel_h(int h) { if (h >= 16) g_comp.panel_h = h; }
  * regardless of which path frame_dt took): if frame_dt had silently fallen
  * back to 1/60, the sum would be DT_SELFTEST_WINDOW*16666us and would NOT
  * match real_us -- so a match rules out the fallback and confirms frame_dt is
- * genuinely TSC-derived. That, and only that, is what it verifies. Build with
- * -DZEOS_DIAG_B4_FRAMEDT_SELFTEST to observe it. */
-#ifdef ZEOS_DIAG_B4_FRAMEDT_SELFTEST
+ * genuinely TSC-derived. NOTE the real discriminator is structural, not the
+ * sum: the block is gated on freq>0 (the same condition that selects the TSC
+ * branch for frame_dt), so the mere EMISSION of this line proves the TSC path
+ * ran this boot, and real_us (~36ms/frame here) proves the TSC is calibrated and
+ * running -- the sum==real_us match is a telescoping identity (diff structurally
+ * ~0) and the MISMATCH branch is only a belt-and-suspenders guard. Un-gated: it
+ * runs once (DT_SELFTEST_WINDOW frames) early at boot on the production path and
+ * prints the [compositor] B.4 smoke-check line to serial. */
+/* B.4 smoke-check state — un-gated for production: it self-terminates after
+ * DT_SELFTEST_WINDOW compositor frames (once, early at boot) and thereafter costs
+ * one already-computed bool check per frame. */
 static uint32_t s_dt_selftest_ticks = 0;
 static float    s_dt_selftest_sum = 0.0f;
 static uint64_t s_dt_selftest_start_tsc = 0;
 static int      s_dt_selftest_done = 0;
 #define DT_SELFTEST_WINDOW 3
-#endif
 
 void compositor_advance(void) {
     uint64_t now = timer_read_tsc();
@@ -232,7 +239,6 @@ void compositor_advance(void) {
         g_comp.frame_dt = 1.0f / 60.0f;
     g_comp.last_frame_tsc = now;
 
-#ifdef ZEOS_DIAG_B4_FRAMEDT_SELFTEST
     if (!s_dt_selftest_done && freq > 0) {
         if (s_dt_selftest_start_tsc == 0) {
             s_dt_selftest_start_tsc = now;   /* baseline: second call onward */
@@ -266,7 +272,6 @@ void compositor_advance(void) {
             }
         }
     }
-#endif
 
     hotcorners_tick(mouse_get_x(), mouse_get_y());
     anim_tick(g_comp.frame_dt);
