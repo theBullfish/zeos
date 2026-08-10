@@ -758,33 +758,54 @@ int settings_j2_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_J1
 /* J.1 selftest: the Settings app persists to VAULT and reloads correctly.
  * Set known values -> save_all -> clobber in-memory -> load_all -> assert the
  * VAULT round-trip restored them (an independent read across the VAULT boundary,
- * G3). Restores the originals afterward. */
-void settings_j1_selftest(void)
+ * G3). Restores the originals afterward.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the
+ * settings vars (mouse_speed/key_repeat/wallpaper) are saved to locals and
+ * restored, with a final save_all() persisting the originals back -> net VAULT
+ * content is the boot value (accepted G.3/VAULT round-trip pattern; save_all
+ * also re-writes the current persona/controls/scheme unchanged). One caveat:
+ * save_all() calls cursor_confirm() (E.4 checkmark flash); this selftest calls
+ * save_all() TWICE synchronously, and two cursor_confirm calls without a
+ * cursor_tick between corrupt prev_state so the checkmark would STICK on the live
+ * desktop -- so after the round-trip we drain the confirm countdown and force the
+ * cursor back to DEFAULT. Returns 1 on PASS. */
+int settings_j1_selftest(void)
 {
+    extern void cursor_tick(float);
+    extern void cursor_set(int /* cursor_state_t; CURSOR_DEFAULT == 0 */);
+
     int o_ms = g_mouse_speed, o_kr = g_key_repeat, o_wp = g_wallpaper;
 
     g_mouse_speed = 7; g_key_repeat = 3; g_wallpaper = 2;
     save_all();
     g_mouse_speed = 99; g_key_repeat = 99; g_wallpaper = 99;   /* clobber */
     load_all();
-    int ms_ok = (g_mouse_speed == 7);
-    int kr_ok = (g_key_repeat == 3);
-    int wp_ok = (g_wallpaper == 2);
+    int lm = g_mouse_speed, lk = g_key_repeat, lw = g_wallpaper;  /* concrete values read back from VAULT */
+    int ms_ok = (lm == 7);
+    int kr_ok = (lk == 3);
+    int wp_ok = (lw == 2);
 
     /* restore */
     g_mouse_speed = o_ms; g_key_repeat = o_kr; g_wallpaper = o_wp; save_all();
+
+    /* Undo the two save_all() confirm-cursor flashes: drain the E.4 countdown
+     * (>CONFIRM_HOLD_FRAMES=18) then set the cursor to DEFAULT twice — the first
+     * set clears the stuck state, the second makes prev_state=DEFAULT too; with
+     * s_confirm_frames==0 there is no pending revert, so the arrow stays clean. */
+    for (int i = 0; i < 24; i++) cursor_tick(0.016f);
+    cursor_set(0); cursor_set(0);   /* CURSOR_DEFAULT (state + prev_state) */
 
     int pass = ms_ok && kr_ok && wp_ok;
     kputs("[J1] vault round-trip mouse_speed="); kput_dec((uint64_t)ms_ok);
     kputs(" key_repeat="); kput_dec((uint64_t)kr_ok);
     kputs(" wallpaper="); kput_dec((uint64_t)wp_ok);
+    kputs(" loaded(ms/kr/wp)="); kput_dec((uint64_t)lm); kputs("/"); kput_dec((uint64_t)lk); kputs("/"); kput_dec((uint64_t)lw);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 int settings_current_page(void) { return g_settings.page; }
 int settings_is_open(void) { return g_open; }

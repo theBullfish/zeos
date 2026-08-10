@@ -1342,7 +1342,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_J1
         /* J.1 selftest: Settings app VAULT persist round-trip. */
-        { extern void settings_j1_selftest(void); settings_j1_selftest(); }
+        { extern int settings_j1_selftest(void); settings_j1_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_O2

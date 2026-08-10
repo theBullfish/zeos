@@ -5071,6 +5071,16 @@ static void cmd_selftest(const char *args)
         extern int settings_j2_selftest(void);
         if (settings_j2_selftest()) passes++; else fails++;
     }
+    /* J.1: settings VAULT round-trip. Reuses the real settings_j1_selftest
+     * (un-gated, production-safe: sets known mouse_speed/key_repeat/wallpaper ->
+     * save_all -> clobber RAM -> load_all -> asserts the VAULT reload restored
+     * them, then restores originals + persists; net VAULT = boot value. Drains
+     * the E.4 confirm-cursor flash that save_all triggers so no stuck checkmark).
+     * [J1]. */
+    {
+        extern int settings_j1_selftest(void);
+        if (settings_j1_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
