@@ -85,8 +85,12 @@ typedef struct dom_node {
         int      flex_dir;         /* 0=row, 1=column */
         int      justify;          /* main axis: 0=start 1=center 2=end 3=between 4=around */
         int      align;            /* cross axis: 0=stretch 1=start 2=center 3=end */
-        int      gap;              /* px between flex items */
+        int      gap;              /* px between flex/grid items */
         int      flex_grow;        /* item: 0=fixed, >0 grows to fill free space */
+        /* CSS grid (display==4). grid_track[i] > 0 => fixed px column; == 0 =>
+         * flexible (1fr) column. grid_ncols = number of columns (row-major flow). */
+        int      grid_ncols;
+        int      grid_track[8];
     } style;
 
     /* Layout box (computed during layout pass) */

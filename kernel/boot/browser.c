@@ -883,7 +883,8 @@ void css_apply_defaults(dom_node_t *node) {
     node->style.display = 0;  /* block */
     node->style.flex_dir = 0; node->style.justify = 0;
     node->style.align = 0;    node->style.gap = 0;
-    node->style.flex_grow = 0;
+    node->style.flex_grow = 0; node->style.grid_ncols = 0;
+    for (int i = 0; i < 8; i++) node->style.grid_track[i] = 0;
 
     /* Tag-specific defaults */
     if (str_eq(node->tag, "h1")) {
@@ -1088,12 +1089,47 @@ static void css_apply_property(dom_node_t *node, const char *prop,
         return;
     }
 
-    /* display: none|block|inline|flex */
+    /* display: none|block|inline|flex|grid */
     if (css_prop_eq(pbuf, "display")) {
-        if (str_starts(v, "flex"))        node->style.display = 3;
+        if (str_starts(v, "grid"))        node->style.display = 4;
+        else if (str_starts(v, "flex"))   node->style.display = 3;
         else if (str_starts(v, "block"))  node->style.display = 0;
         else if (str_starts(v, "inline")) node->style.display = 1;
         else if (str_starts(v, "none"))   node->style.display = 2;
+        return;
+    }
+
+    /* grid-template-columns: repeat(N, <track>) | <track> <track> ...
+     * track = "Npx"/"N" (fixed) or "Nfr"/"fr"/"auto" (flexible → grid_track=0). */
+    if (css_prop_eq(pbuf, "grid-template-columns")) {
+        int nc = 0;
+        const char *p = v;
+        if (str_starts(p, "repeat(")) {
+            p += 7;
+            int count = parse_int(&p);          /* repeat(N, ...) */
+            while (*p && *p != ',') p++;
+            if (*p == ',') p++;
+            while (*p == ' ') p++;
+            int px = parse_int(&p);              /* track size (0 if "1fr"/"auto") */
+            int is_px = 0;
+            for (const char *q = p; *q && *q != ')'; q++)
+                if (*q == 'p' && *(q+1) == 'x') is_px = 1;
+            if (count > 8) count = 8;
+            for (int i = 0; i < count; i++)
+                node->style.grid_track[i] = is_px ? px : 0;
+            nc = count;
+        } else {
+            /* explicit track list separated by spaces */
+            while (*p && nc < 8) {
+                while (*p == ' ') p++;
+                if (!*p) break;
+                int val = parse_int(&p);
+                int is_px = (p[0] == 'p' && p[1] == 'x');
+                node->style.grid_track[nc++] = is_px ? val : 0;  /* fr/auto → flexible */
+                while (*p && *p != ' ') p++;    /* skip unit */
+            }
+        }
+        node->style.grid_ncols = nc;
         return;
     }
 
@@ -1122,8 +1158,8 @@ static void css_apply_property(dom_node_t *node, const char *prop,
         return;
     }
 
-    /* gap: Npx (between flex items) */
-    if (css_prop_eq(pbuf, "gap")) {
+    /* gap: Npx (between flex/grid items) */
+    if (css_prop_eq(pbuf, "gap") || css_prop_eq(pbuf, "grid-gap")) {
         const char *vp = v; int g = parse_int(&vp);
         if (g >= 0) node->style.gap = g;
         return;
@@ -1337,9 +1373,76 @@ static void layout_flex(dom_node_t *box, int content_w, int content_h) {
     }
 }
 
+/* CSS grid: fixed-column-count, row-major auto-placement. Column widths from
+ * grid-template-columns (fixed px tracks + flexible 1fr tracks share the rest);
+ * each grid row's height = tallest item in that row. Honors gap. */
+static void layout_grid(dom_node_t *box, int content_w, int content_h) {
+    int nc = box->style.grid_ncols;
+    if (nc < 1) nc = 1;
+    if (nc > 8) nc = 8;
+    int gap = box->style.gap;
+
+    /* Resolve column pixel widths: fixed tracks keep their px, flexible tracks
+     * split the remaining width equally. */
+    int fixed_sum = 0, fr_count = 0;
+    for (int i = 0; i < nc; i++) {
+        if (box->style.grid_track[i] > 0) fixed_sum += box->style.grid_track[i];
+        else fr_count++;
+    }
+    int avail = content_w - fixed_sum - gap * (nc - 1);
+    if (avail < 0) avail = 0;
+    int fr_w = fr_count > 0 ? avail / fr_count : 0;
+    int col_w[8], col_x[8], cx = 0;
+    for (int i = 0; i < nc; i++) {
+        col_w[i] = box->style.grid_track[i] > 0 ? box->style.grid_track[i] : fr_w;
+        col_x[i] = cx;
+        cx += col_w[i] + gap;
+    }
+
+    /* Place items row-major; a row's height = tallest item, then advance y. */
+    int idx = 0, row_y = 0, row_h = 0;
+    for (dom_node_t *c = box->first_child; c; c = c->next_sibling) {
+        if (c->style.display == 2) continue;
+        int col = idx % nc;
+        int cw = col_w[col];
+
+        /* Size the item to its column width, measure its height. */
+        int ch;
+        if (c->type == DOM_TEXT) {
+            ch = font_line_height(text_font(c), c->style.font_size);
+            if (ch < 1) ch = c->style.font_size * 3 / 2;
+        } else if (str_eq(c->tag, "img")) {
+            ch = (c->img_pixels && c->img_h > 0) ? c->img_h : 80;
+        } else if (str_eq(c->tag, "input") || str_eq(c->tag, "button") || str_eq(c->tag, "textarea")) {
+            font_id_t fid = str_eq(c->tag, "button") ? FONT_UI_BOLD : FONT_UI;
+            int lh = font_line_height(fid, TYPE_BODY); if (lh < 1) lh = TYPE_BODY * 3 / 2;
+            ch = lh + c->style.padding[0] + c->style.padding[2];
+            if (str_eq(c->tag, "textarea")) ch = lh * 4 + c->style.padding[0] + c->style.padding[2];
+        } else {
+            layout_compute(c, cw - c->style.padding[1] - c->style.padding[3], content_h);
+            int inner_h = 0;
+            for (dom_node_t *gc = c->first_child; gc; gc = gc->next_sibling) {
+                if (gc->style.display == 2) continue;
+                int b = gc->box.y + gc->box.h + gc->style.margin[2];
+                if (b > inner_h) inner_h = b;
+            }
+            ch = inner_h + c->style.padding[0] + c->style.padding[2];
+        }
+        c->box.w = cw;
+        c->box.h = ch;
+        c->box.x = col_x[col];
+        c->box.y = row_y;
+        if (ch > row_h) row_h = ch;
+
+        idx++;
+        if (idx % nc == 0) { row_y += row_h + gap; row_h = 0; }  /* end of row */
+    }
+}
+
 void layout_compute(dom_node_t *root, int viewport_w, int viewport_h) {
     if (!root) return;
     if (root->style.display == 3) { layout_flex(root, viewport_w, viewport_h); return; }
+    if (root->style.display == 4) { layout_grid(root, viewport_w, viewport_h); return; }
     (void)viewport_h;
 
     /* Simple block layout: stack blocks vertically, inline flows horizontally */
@@ -1981,6 +2084,32 @@ int browser_navigate(browser_t *b, const char *url)
                      "'rowSame=' + rowSame + ' ordered=' + ordered + ' spread=' + spread + ' colStacked=' + colStacked;"
                    "console.log('flex rowSame', rowSame, 'ordered', ordered, 'spread', spread, "
                      "'La', L('a'), 'Lb', L('b'), 'Lc', L('c'), 'colStacked', colStacked, 'Tx', T('x'), 'Ty', T('y'));"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:grid")) {
+            /* I.7: CSS grid — 3 columns, 6 items => 2 rows, row-major flow. */
+            html = "<html><head><title>Grid</title></head><body>"
+                   "<h1>Grid Demo</h1>"
+                   "<div id=\"g\" style=\"display:grid; grid-template-columns:repeat(3, 1fr); gap:8px;\">"
+                     "<div id=\"i0\" style=\"background:#204060; padding:8px;\">0</div>"
+                     "<div id=\"i1\" style=\"background:#206040; padding:8px;\">1</div>"
+                     "<div id=\"i2\" style=\"background:#604020; padding:8px;\">2</div>"
+                     "<div id=\"i3\" style=\"background:#402060; padding:8px;\">3</div>"
+                     "<div id=\"i4\" style=\"background:#602040; padding:8px;\">4</div>"
+                     "<div id=\"i5\" style=\"background:#206060; padding:8px;\">5</div>"
+                   "</div>"
+                   "<p id=\"out\">out</p>"
+                   "<script>"
+                   "function L(id){return document.getElementById(id).offsetLeft;}"
+                   "function T(id){return document.getElementById(id).offsetTop;}"
+                   "var row0 = (T('i0')==T('i1') && T('i1')==T('i2'));"          /* first row aligned */
+                   "var row1 = (T('i3')==T('i4') && T('i4')==T('i5'));"          /* second row aligned */
+                   "var wrapped = (T('i3') > T('i0'));"                          /* item 3 wrapped below */
+                   "var cols = (L('i0') < L('i1') && L('i1') < L('i2'));"        /* columns left to right */
+                   "var aligned = (L('i0')==L('i3') && L('i2')==L('i5'));"       /* same column same x */
+                   "document.getElementById('out').textContent = "
+                     "'row0=' + row0 + ' row1=' + row1 + ' wrapped=' + wrapped + ' cols=' + cols + ' aligned=' + aligned;"
+                   "console.log('grid row0', row0, 'row1', row1, 'wrapped', wrapped, 'cols', cols, 'aligned', aligned);"
                    "</script>"
                    "</body></html>";
         } else if (str_eq(url, "test:fetch")) {
