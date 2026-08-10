@@ -1292,7 +1292,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_C13
         /* C.13 selftest: same-chain magnetic adjacency. */
-        { extern void wm_c13_selftest(void); wm_c13_selftest(); }
+        { extern int wm_c13_selftest(void); wm_c13_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_D11

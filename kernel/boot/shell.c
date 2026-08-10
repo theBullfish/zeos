@@ -4933,6 +4933,15 @@ static void cmd_selftest(const char *args)
         extern int wm_l4_selftest(void);
         if (wm_l4_selftest()) passes++; else fails++;
     }
+    /* C.13: chain-adjacency snap. Reuses the real wm_c13_selftest (un-gated,
+     * production-safe: 3 probe surfaces persist_name=0, created+asserted+torn-down
+     * synchronously so never composited while visible). Two surfaces sharing a
+     * chain_id snap side-by-side (b docks to a's right edge, same y/h); a
+     * unique-chain surface finds no neighbor. All 3 torn down (no ghost). [C13]. */
+    {
+        extern int wm_c13_selftest(void);
+        if (wm_c13_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

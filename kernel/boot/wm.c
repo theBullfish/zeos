@@ -1588,11 +1588,18 @@ int wm_l4_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_C13
 /* C.13 selftest: two surfaces sharing a chain_id dock side-by-side; a surface
- * with a unique chain finds no neighbor. */
-void wm_c13_selftest(void)
+ * with a unique chain finds no neighbor.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the 3
+ * probe surfaces have persist_name=0 (no VAULT write on detach) and are created,
+ * asserted, and torn down (detach + tick to full settle so surface_scale_cb
+ * removes them, visible=0/DETACHED) synchronously inside one cmd_selftest call —
+ * so they never composite while visible (no on-screen flash) and leave NO ghost.
+ * chain_id 77/88 are probe-local; if a stray desktop surface shared them the
+ * neighbor_ok/no_neighbor asserts would FAIL (not false-pass). Returns 1 on PASS. */
+int wm_c13_selftest(void)
 {
+    extern void anim_tick(float);
     int a = wm_create_surface("C13a", 77, 100, 120, 300, 200, 0);
     int b = wm_create_surface("C13b", 77, 900, 400, 250, 180, 0);  /* same chain 77 */
     int c = wm_create_surface("C13c", 88, 500, 600, 200, 150, 0);  /* unique chain 88 */
@@ -1605,16 +1612,27 @@ void wm_c13_selftest(void)
     int neighbor_ok = (nb == a);
     int no_neighbor = (wm_snap_adjacent(c) == -1);
 
-    int pass = adjacent && neighbor_ok && no_neighbor;
+    /* teardown: detach all 3 and tick to full settle so surface_scale_cb removes
+     * them (no ghost surfaces left on the live desktop). */
+    wm_detach_surface(a); wm_detach_surface(b); wm_detach_surface(c);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f / 240.0f);
+    chain_surface_t *pa = wm_get_surface(a), *pb = wm_get_surface(b), *pc = wm_get_surface(c);
+    int torndown = pa && pb && pc &&
+                   pa->visible == 0 && pa->signal == SIGNAL_DETACHED &&
+                   pb->visible == 0 && pb->signal == SIGNAL_DETACHED &&
+                   pc->visible == 0 && pc->signal == SIGNAL_DETACHED;
+
+    int pass = adjacent && neighbor_ok && no_neighbor && torndown;
     kputs("[C13] a.x="); kput_dec((uint64_t)(sa?sa->x:-1));
     kputs(" a.w="); kput_dec((uint64_t)(sa?sa->w:-1));
     kputs(" b.x="); kput_dec((uint64_t)(sb?sb->x:-1));
     kputs(" adjacent="); kput_dec((uint64_t)adjacent);
     kputs(" neighbor="); kput_dec((uint64_t)neighbor_ok);
     kputs(" no_neighbor_for_unique="); kput_dec((uint64_t)no_neighbor);
+    kputs(" torndown="); kput_dec((uint64_t)torndown);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 #ifdef ZEOS_DIAG_C12
 /* C.12 selftest: a surface multiplexes chains as tabs; switching changes the
