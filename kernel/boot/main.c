@@ -1327,7 +1327,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_D6
         /* D.6 selftest: panel auto-hide reveal/hide. */
-        { extern void panel_d6_selftest(void); panel_d6_selftest(); }
+        { extern int panel_d6_selftest(void); panel_d6_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_K3

@@ -547,26 +547,31 @@ void panel_overlay_draw_camera_indicator(void)
     fb_circle_filled(rz_x + 6, ry_center, 4, COLOR_DANGER);
 }
 
-#ifdef ZEOS_DIAG_D6
 /* D.6 selftest: panel auto-hide. Enable -> panel hides; pointer at the top edge
  * (y<=REVEAL) reveals it; pointer below the bar hides it again; disable -> always
  * visible. (Vibrancy = translucent bg, observed via screendump; per-pill right-
- * click already verified id=416.) */
-void panel_d6_selftest(void)
+ * click already verified id=416.)
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * panel_set_auto_hide and panel_pointer_y are pure in-memory (touch only
+ * g_panel.auto_hide + .visible; no VAULT, no compositor dirty, no surface); the
+ * selftest saves BOTH fields and restores them (net no change). Synchronous, so
+ * the transient hidden/revealed panel never renders. Returns 1 on PASS. */
+int panel_d6_selftest(void)
 {
     int saved_ah = g_panel.auto_hide, saved_vis = g_panel.visible;
 
     panel_set_auto_hide(1);
-    int hid_on_enable = (g_panel.visible == 0);
-    int revealed = 0, rehid = 0;
+    int v_enable = g_panel.visible;                 /* 0 = hidden on enable */
+    int hid_on_enable = (v_enable == 0);
     (void)panel_pointer_y(0);                 int r1 = g_panel.visible;   /* top edge -> reveal */
-    revealed = (r1 == 1);
+    int revealed = (r1 == 1);
     (void)panel_pointer_y(g_panel.height + 50); int r2 = g_panel.visible; /* below bar -> hide */
-    rehid = (r2 == 0);
+    int rehid = (r2 == 0);
     panel_set_auto_hide(0);
-    int shown_on_disable = (g_panel.visible == 1);
+    int v_disable = g_panel.visible;                /* 1 = shown on disable */
+    int shown_on_disable = (v_disable == 1);
 
-    /* restore */
+    /* restore the exact pre-test panel state (the only two touched fields) */
     g_panel.auto_hide = saved_ah; g_panel.visible = saved_vis;
 
     int pass = hid_on_enable && revealed && rehid && shown_on_disable;
@@ -574,6 +579,7 @@ void panel_d6_selftest(void)
     kputs(" reveal_top="); kput_dec((uint64_t)revealed);
     kputs(" hide_below="); kput_dec((uint64_t)rehid);
     kputs(" show_on_disable="); kput_dec((uint64_t)shown_on_disable);
+    kputs(" visible_seq="); kput_dec((uint64_t)v_enable); kput_dec((uint64_t)r1); kput_dec((uint64_t)r2); kput_dec((uint64_t)v_disable);
     kputs(pass ? " -> PASS (vibrancy: screendump; per-pill: id=416)\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

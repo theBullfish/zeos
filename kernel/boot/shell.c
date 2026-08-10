@@ -5122,6 +5122,14 @@ static void cmd_selftest(const char *args)
         extern int dock_d13_selftest(void);
         if (dock_d13_selftest()) passes++; else fails++;
     }
+    /* D.6: panel auto-hide. Reuses the real panel_d6_selftest (un-gated,
+     * production-safe: pure in-memory auto_hide/visible, saved+restored). Enable
+     * hides the panel, pointer at the top edge reveals, pointer below the bar
+     * hides, disable always shows (visible seq 0/1/0/1). [D6]. */
+    {
+        extern int panel_d6_selftest(void);
+        if (panel_d6_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
