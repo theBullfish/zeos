@@ -4671,6 +4671,29 @@ static void cmd_selftest(const char *args)
         kputs("): "); kputs((io_ok && arch_ok) ? "PASS\n" : "FAIL\n");
         if (io_ok && arch_ok) passes++; else fails++;
     }
+    /* L.1: spring engine converges (semi-implicit Euler). A default spring
+     * 0->100 settles to ~100 and goes inactive within a bounded tick count.
+     * (anim_tick is global; when selftest runs the desktop is idle so no other
+     * spring is disturbed. The test spring is cancelled after.) */
+    {
+        extern int anim_spring_default(float, float, void(*)(int,float,void*), void*);
+        extern void anim_tick(float);
+        extern float anim_position(int);
+        extern int anim_is_active(int);
+        extern void anim_cancel(int);
+        int id = anim_spring_default(0.0f, 100.0f, 0, 0);
+        int ok = (id >= 0);
+        int ticks = 0;
+        while (id >= 0 && anim_is_active(id) && ticks < 3000) { anim_tick(1.0f/60.0f); ticks++; }
+        float pos = (id >= 0) ? anim_position(id) : 0.0f;
+        int converged = (id >= 0) && !anim_is_active(id) && pos > 99.0f && pos < 101.0f;
+        if (id >= 0) anim_cancel(id);
+        ok = ok && converged;
+        kputs("  L.1 spring converge (0->100 -> ~"); kput_dec((uint64_t)(pos + 0.5f));
+        kputs(" in "); kput_dec((uint64_t)ticks); kputs(" ticks, inactive): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

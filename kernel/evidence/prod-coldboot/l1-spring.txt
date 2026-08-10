@@ -1,0 +1,5 @@
+L.1 spring convergence via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  L.1 spring converge (0->100 -> ~100 in 45 ticks, inactive): PASS
+--- boot 2 ---
+  L.1 spring converge (0->100 -> ~100 in 45 ticks, inactive): PASS
