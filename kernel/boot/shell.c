@@ -5097,6 +5097,14 @@ static void cmd_selftest(const char *args)
         extern int wm_c4_selftest(void);
         if (wm_c4_selftest()) passes++; else fails++;
     }
+    /* C.9: window controls side L/R configurable. New production check driving the
+     * real wm_set_controls_side + hit_control (same btn_x formula the renderer
+     * uses): LEFT config -> button on the left titlebar edge, empty right; RIGHT
+     * -> mirror. Proves the side relocates the buttons. [C9]. */
+    {
+        extern int wm_c9_selftest(void);
+        if (wm_c9_selftest()) passes++; else fails++;
+    }
     /* M.5: 44px min touch targets. Reuses the real wm_m5_selftest (un-gated,
      * production-safe: stack-local surface + real static hit_control; only
      * g_wm.controls_side touched, saved+restored). A click on the glyph hits, a

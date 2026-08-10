@@ -863,6 +863,47 @@ int wm_m5_selftest(void) {
     return pass;
 }
 
+/* C.9 selftest: window controls side (LEFT/RIGHT) is configurable and relocates
+ * the control buttons. Drives the real wm_set_controls_side + the real static
+ * hit_control against a stack-local surface: with controls on the LEFT a click
+ * on the left titlebar edge hits a button and the right edge is empty; with
+ * RIGHT it is the mirror. The button DRAW path (wm.c ~1161) uses the IDENTICAL
+ * btn_x formula as hit_control (wm.c ~802), so this hit-test relocation
+ * faithfully reflects the VISUAL button placement.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: pure
+ * geometry over a STACK-LOCAL chain_surface_t; the only touched global is
+ * g_wm.controls_side, saved+restored via the real setter (net no change); no
+ * VAULT, no cursor, no compositor. Returns 1 on PASS. */
+int wm_c9_selftest(void) {
+    wm_controls_side_t saved_side = g_wm.controls_side;
+
+    chain_surface_t s;
+    for (unsigned i = 0; i < sizeof(s); i++) ((volatile char *)&s)[i] = 0;
+    s.x = 100; s.y = 100; s.w = 400; s.h = 300;
+    int ty = s.y + 18;                                         /* titlebar row */
+    int lx = s.x + WM_CONTROL_MARGIN + WM_CONTROL_SIZE/2;      /* left button 0 center = 125 */
+    int rx = s.x + s.w - WM_CONTROL_MARGIN
+             - (WM_CONTROL_SIZE + WM_CONTROL_SPACING) + WM_CONTROL_SIZE/2;  /* right button 3 center = 465 */
+
+    wm_set_controls_side(WM_CONTROLS_LEFT);
+    int L_left  = hit_control(&s, lx, ty);   /* button present on the left */
+    int L_right = hit_control(&s, rx, ty);   /* empty on the right */
+
+    wm_set_controls_side(WM_CONTROLS_RIGHT);
+    int R_left  = hit_control(&s, lx, ty);   /* empty on the left */
+    int R_right = hit_control(&s, rx, ty);   /* button present on the right */
+
+    wm_set_controls_side(saved_side);        /* restore the live config */
+
+    int pass = (L_left >= 0) && (L_right < 0) && (R_left < 0) && (R_right >= 0);
+    kputs("[C9] LEFT.l="); if (L_left  >= 0) kput_dec((uint64_t)L_left);  else kputs("miss");
+    kputs(" LEFT.r=");     if (L_right >= 0) kput_dec((uint64_t)L_right); else kputs("miss");
+    kputs(" RIGHT.l=");    if (R_left  >= 0) kput_dec((uint64_t)R_left);  else kputs("miss");
+    kputs(" RIGHT.r=");    if (R_right >= 0) kput_dec((uint64_t)R_right); else kputs("miss");
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
+}
+
 /* Check if click is on a resize edge. Returns edge bitmask. */
 static int hit_resize_edge(chain_surface_t *s, int x, int y) {
     int edge = 0;
