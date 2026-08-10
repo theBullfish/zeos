@@ -178,6 +178,9 @@ typedef struct {
     /* Chain surface integration */
     int     surface_x, surface_y;
     int     surface_w, surface_h;
+
+    /* Focused text field (input/textarea) for keyboard entry, or NULL. */
+    dom_node_t *focused_input;
 } browser_t;
 
 /* Initialize browser */

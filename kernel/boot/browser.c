@@ -2112,6 +2112,28 @@ int browser_navigate(browser_t *b, const char *url)
                    "console.log('grid row0', row0, 'row1', row1, 'wrapped', wrapped, 'cols', cols, 'aligned', aligned);"
                    "</script>"
                    "</body></html>";
+        } else if (str_eq(url, "test:type")) {
+            /* I.7: text entry — click focuses the input, typing fires input
+             * events + updates .value live, Enter fires change + submit. */
+            html = "<html><head><title>Type</title></head><body>"
+                   "<h1>Type Demo</h1>"
+                   "<form id=\"f\"><input id=\"box\" value=\"\"></form>"
+                   "<p id=\"live\">live: (empty)</p>"
+                   "<p id=\"done\">done: no</p>"
+                   "<script>"
+                   "var evs = 0;"
+                   "var inp = document.getElementById('box');"
+                   "inp.addEventListener('input', function(){"
+                   "  evs = evs + 1;"
+                   "  document.getElementById('live').textContent = 'live: ' + inp.value + ' (' + evs + ' input evs)';"
+                   "});"
+                   "document.getElementById('f').addEventListener('submit', function(){"
+                   "  document.getElementById('done').textContent = 'done: submitted ' + inp.value;"
+                   "  console.log('type submit value', inp.value, 'inputEvents', evs);"
+                   "});"
+                   "console.log('type-page ready');"
+                   "</script>"
+                   "</body></html>";
         } else if (str_eq(url, "test:submit")) {
             /* I.7: form submit event — clicking the submit button fires a
              * "submit" handler on the enclosing <form>, which mutates the DOM. */
@@ -2429,7 +2451,63 @@ void browser_scroll(browser_t *b, int delta_y) {
  * scancode: raw scancode from keyboard driver.
  * Up arrow = scroll up, Down arrow = scroll down,
  * Page Up/Down = scroll by viewport height. */
+/* Re-style + re-lay-out after a focused-field edit (the field text changed, and
+ * a JS input/change handler may also have mutated the DOM). */
+static void browser_input_relayout(browser_t *b) {
+    extern int dom_take_dirty(void);
+    dom_take_dirty();
+    css_apply_defaults(b->dom);
+    css_apply_inline(b->dom);
+    browser_layout(b);
+}
+
+/* Type one printable character into the focused text field, firing keydown +
+ * input (standard order). No-op if nothing is focused. */
+void browser_input_char(browser_t *b, char ch) {
+    dom_node_t *in = b->focused_input;
+    if (!in || ch < 0x20 || ch >= 0x7f) return;
+    int len = 0; while (in->attr_value[len]) len++;
+    if (len >= 255) return;
+    in->attr_value[len] = ch; in->attr_value[len + 1] = 0;
+    extern int zeos_js_dispatch_event(dom_node_t *node, const char *type);
+    zeos_js_dispatch_event(in, "keydown");
+    zeos_js_dispatch_event(in, "input");
+    browser_input_relayout(b);
+}
+
+/* Backspace in the focused field. */
+void browser_input_backspace(browser_t *b) {
+    dom_node_t *in = b->focused_input;
+    if (!in) return;
+    int len = 0; while (in->attr_value[len]) len++;
+    if (len == 0) return;
+    in->attr_value[len - 1] = 0;
+    extern int zeos_js_dispatch_event(dom_node_t *node, const char *type);
+    zeos_js_dispatch_event(in, "keydown");
+    zeos_js_dispatch_event(in, "input");
+    browser_input_relayout(b);
+}
+
+/* Enter in the focused field: fire "change", then submit the enclosing <form>. */
+void browser_input_enter(browser_t *b) {
+    dom_node_t *in = b->focused_input;
+    if (!in) return;
+    extern int zeos_js_dispatch_event(dom_node_t *node, const char *type);
+    zeos_js_dispatch_event(in, "keydown");
+    zeos_js_dispatch_event(in, "change");
+    for (dom_node_t *f = in; f; f = f->parent)
+        if (str_eq(f->tag, "form")) { zeos_js_dispatch_event(f, "submit"); break; }
+    browser_input_relayout(b);
+}
+
 void browser_key(browser_t *b, uint8_t scancode) {
+    /* If a text field is focused, Enter/Backspace edit it. Printable-key
+     * translation needs the scancode→ASCII keymap from the input lane; the
+     * shell `btype` path feeds ASCII directly for now. */
+    if (b->focused_input) {
+        if (scancode == 0x1C) { browser_input_enter(b); return; }      /* Enter */
+        if (scancode == 0x0E) { browser_input_backspace(b); return; }  /* Backspace */
+    }
     switch (scancode) {
     case 0x48: browser_scroll(b, -SCROLL_STEP); break;  /* Up arrow */
     case 0x50: browser_scroll(b, SCROLL_STEP);  break;  /* Down arrow */
@@ -2583,6 +2661,14 @@ void browser_click(browser_t *b, int x, int y) {
     if (el) {
         extern int zeos_js_dispatch_event(dom_node_t *node, const char *type);
         extern int dom_take_dirty(void);
+        /* Focus management: clicking a text field focuses it; clicking away
+         * blurs the previous field and fires its "change" event. */
+        dom_node_t *newf = 0;
+        for (dom_node_t *t = el; t; t = t->parent)
+            if (str_eq(t->tag, "input") || str_eq(t->tag, "textarea")) { newf = t; break; }
+        if (b->focused_input && b->focused_input != newf)
+            zeos_js_dispatch_event(b->focused_input, "change");
+        b->focused_input = newf;
         int fired = 0;
         for (dom_node_t *t = el; t; t = t->parent)
             fired += zeos_js_dispatch_event(t, "click");
@@ -2915,6 +3001,29 @@ void browser_app_click_page(int px, int py)
     int x = g_browser_app.surface_x + 8 + px;
     int y = g_browser_app.surface_y + 48 + py - g_browser_app.scroll_y;
     browser_app_click(x, y);
+}
+
+/* Type a string into the active browser's focused field (click a field first
+ * to focus it). Feeds ASCII directly — the diagnostic keyboard entry path. */
+void browser_app_type(const char *s)
+{
+    if (!g_browser_active || !s) return;
+    for (; *s; s++) browser_input_char(&g_browser_app, *s);
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+}
+
+/* Send Enter / Backspace to the active browser's focused field. */
+void browser_app_input_enter(void)
+{
+    if (!g_browser_active) return;
+    browser_input_enter(&g_browser_app);
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+}
+void browser_app_input_backspace(void)
+{
+    if (!g_browser_active) return;
+    browser_input_backspace(&g_browser_app);
+    { extern void compositor_dirty_all(void); compositor_dirty_all(); }
 }
 
 /* Open (or focus) the browser app and navigate to url. Returns

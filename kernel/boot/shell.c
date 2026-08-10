@@ -156,9 +156,13 @@ static void shell_prompt(void)
     /* Advance framebuffer cursor past the prompt */
     fb_set_cursor(col + (uint32_t)tag_len + 2, row);
 
-    /* Send plain text to serial */
-    serial_puts(tag);
-    serial_puts("> ");
+    /* Send plain text to serial AND the Terminal-window console ring (kputs
+     * routes to both; term_console_shell brackets it so the ring captures the
+     * prompt as part of the live shell session). */
+    term_console_shell(1);
+    kputs(tag);
+    kputs("> ");
+    term_console_shell(0);
 }
 
 /* ── String helpers ─────────────────────────────── */
@@ -274,6 +278,8 @@ static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
 static void cmd_bclickp(const char *args);
 static void cmd_bbox(const char *args);
+static void cmd_btype(const char *args);
+static void cmd_bkey(const char *args);
 static void cmd_tcpsend(const char *args);
 static void cmd_domsub(const char *args);
 static void cmd_js(const char *args);
@@ -790,6 +796,8 @@ static const struct shell_cmd commands[] = {
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
     {"bclickp", "browser click at page coords: bclickp <pageX> <pageY>", cmd_bclickp, VIS_DEREZ},
     {"bbox",    "browser element box: bbox <id>", cmd_bbox, VIS_DEREZ},
+    {"btype",   "type into focused browser field: btype <text>", cmd_btype, VIS_DEREZ},
+    {"bkey",    "browser field key: bkey <enter|back>", cmd_bkey, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
     {"domsub",  "Dom/Sub cohort: show + run election selftest", cmd_domsub, VIS_DEREZ},
     {"js",      "evaluate JavaScript (QuickJS): js <expr>", cmd_js, VIS_ALWAYS},
@@ -3217,6 +3225,32 @@ static void cmd_bclickp(const char *args)
     int y = cam_atoi(p);
     kputs("  bclickp: page-click ("); kput_dec(x); kputc(','); kput_dec(y); kputs(")\n");
     browser_app_click_page(x, y);
+}
+
+/* Type text into the focused browser field. Usage: btype <text> */
+static void cmd_btype(const char *args)
+{
+    extern int browser_app_active(void);
+    extern void browser_app_type(const char *s);
+    if (!browser_app_active()) { kputs("  btype: browser not open\n"); return; }
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    kputs("  btype: '"); kputs(p); kputs("'\n");
+    browser_app_type(p);
+}
+
+/* Send a special key to the focused browser field. Usage: bkey <enter|back> */
+static void cmd_bkey(const char *args)
+{
+    extern int browser_app_active(void);
+    extern void browser_app_input_enter(void);
+    extern void browser_app_input_backspace(void);
+    if (!browser_app_active()) { kputs("  bkey: browser not open\n"); return; }
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    if (p[0] == 'e') { kputs("  bkey: enter\n"); browser_app_input_enter(); }
+    else if (p[0] == 'b') { kputs("  bkey: back\n"); browser_app_input_backspace(); }
+    else kputs("  bkey: use enter|back\n");
 }
 
 /* Print an element's live (post-layout) page box. Usage: bbox <id> */
@@ -6230,7 +6264,7 @@ static void shell_dispatch(char *cmd)
     }
 }
 
-int shell_pump_char(char c)
+static int shell_pump_char_inner(char c)
 {
     if (c == '\n') {
         kputc('\n');
@@ -6254,6 +6288,16 @@ int shell_pump_char(char c)
         kputc(c);
     }
     return 0;
+}
+
+/* Bracket the whole pump (echo + dispatch output + prompt) so the Terminal-window
+ * console ring captures the live shell session and nothing else. */
+int shell_pump_char(char c)
+{
+    term_console_shell(1);
+    int r = shell_pump_char_inner(c);
+    term_console_shell(0);
+    return r;
 }
 
 /* Legacy entry: initialize and hand control to the scheduler. */
