@@ -5018,6 +5018,14 @@ static void cmd_selftest(const char *args)
         extern int cursor_e3_selftest(void);
         if (cursor_e3_selftest()) passes++; else fails++;
     }
+    /* E.4: confirm (checkmark) cursor. Reuses the real cursor_e4_selftest
+     * (un-gated, production-safe: saves+restores state/prev_state/s_confirm_frames,
+     * checkmark never composites). cursor_confirm() flashes CURSOR_CLICK_CONFIRM;
+     * cursor_tick reverts to the previous state after CONFIRM_HOLD_FRAMES. [E4]. */
+    {
+        extern int cursor_e4_selftest(void);
+        if (cursor_e4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

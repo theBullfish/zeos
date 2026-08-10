@@ -1120,7 +1120,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_E4
         /* E.4 selftest: cursor_confirm flashes + reverts. */
-        { extern void cursor_e4_selftest(void); cursor_e4_selftest(); }
+        { extern int cursor_e4_selftest(void); cursor_e4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_J3

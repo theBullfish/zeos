@@ -230,23 +230,40 @@ void cursor_tick(float dt) {
         g_cursor.state = g_cursor.prev_state;
 }
 
-#ifdef ZEOS_DIAG_E4
 #include "kprint.h"
 /* E.4 selftest: prove cursor_confirm() flashes the checkmark cursor and that
  * cursor_tick reverts it after the hold. (The wiring into settings save_all is
- * source-verifiable.) */
-void cursor_e4_selftest(void)
+ * source-verifiable.)
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: saves
+ * g_cursor.state, prev_state AND the s_confirm_frames static up front and
+ * restores all three (robust even if a confirm was in-flight when selftest ran),
+ * so the live cursor is byte-identical afterward. No VAULT, no surface; the
+ * checkmark never composites (synchronous flash+revert). Returns 1 on PASS. */
+int cursor_e4_selftest(void)
 {
+    cursor_state_t saved_state = g_cursor.state;
+    cursor_state_t saved_prev  = g_cursor.prev_state;
+    int saved_confirm = s_confirm_frames;
+
     cursor_state_t before = g_cursor.state;
     cursor_confirm();
     int flashed = (g_cursor.state == CURSOR_CLICK_CONFIRM);
     for (int i = 0; i < CONFIRM_HOLD_FRAMES; i++) cursor_tick(0.016f);
     int reverted = (g_cursor.state == before);
+
+    /* restore exact pre-test cursor (state + prev_state + confirm countdown) */
+    g_cursor.state = saved_state;
+    g_cursor.prev_state = saved_prev;
+    s_confirm_frames = saved_confirm;
+
+    int pass = flashed && reverted;
     kputs("[E4] cursor_confirm flash="); kput_dec((uint64_t)flashed);
     kputs(" reverted="); kput_dec((uint64_t)reverted);
-    kputs((flashed && reverted) ? " -> PASS\n" : " -> FAIL\n");
+    kputs(" states(before/confirm/after)="); kput_dec((uint64_t)before);
+    kputs("/"); kput_dec((uint64_t)CURSOR_CLICK_CONFIRM); kputs("/"); kput_dec((uint64_t)before);
+    kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 /* ── Drawing ── */
 
