@@ -4564,6 +4564,24 @@ static void cmd_selftest(const char *args)
         kputs(ok ? " -> PASS\n" : " -> FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* E.9: IME dead-key compose engine — ime_feed() composes accent+base into
+     * Unicode codepoints; a dead lead buffers (returns 0); plain passes through;
+     * a no-match sequence falls back to the base char. */
+    {
+        extern int ime_feed(int cp); extern void ime_reset(void); extern int ime_pending(void);
+        int ok = 1;
+        ime_reset();
+        if (ime_feed('\'') != 0 || ime_pending() != '\'') ok = 0;   /* dead lead buffers */
+        if (ime_feed('e') != 0x00E9 || ime_pending() != 0) ok = 0;  /* '+e -> é, cleared */
+        ime_reset(); ime_feed('`'); if (ime_feed('a') != 0x00E0) ok = 0;  /* `+a -> à */
+        ime_reset(); ime_feed('~'); if (ime_feed('n') != 0x00F1) ok = 0;  /* ~+n -> ñ */
+        ime_reset(); ime_feed('"'); if (ime_feed('u') != 0x00FC) ok = 0;  /* "+u -> ü */
+        ime_reset(); if (ime_feed('z') != 'z') ok = 0;                    /* plain passthrough */
+        ime_reset(); ime_feed('\''); if (ime_feed('z') != 'z') ok = 0;    /* no-match -> base */
+        kputs("  E.9 ime compose (acute/grave/tilde/diaeresis + passthrough + fallback): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

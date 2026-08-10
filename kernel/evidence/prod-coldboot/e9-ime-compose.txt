@@ -1,0 +1,5 @@
+E.9 IME dead-key compose via production 'selftest' shell command, settled 2-boot:
+--- boot 1 ---
+  E.9 ime compose (acute/grave/tilde/diaeresis + passthrough + fallback): PASS
+--- boot 2 ---
+  E.9 ime compose (acute/grave/tilde/diaeresis + passthrough + fallback): PASS
