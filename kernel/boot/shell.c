@@ -4923,6 +4923,16 @@ static void cmd_selftest(const char *args)
         extern int compositor_l3_selftest(void);
         if (compositor_l3_selftest()) passes++; else fails++;
     }
+    /* L.4: spring-driven surface open/close teardown. Reuses the real
+     * wm_l4_selftest (un-gated, production-safe: probe persist_name=0 so no VAULT
+     * write, created+sprung+torn-down synchronously so never composited while
+     * visible). Opens a surface (scale 0.8->1.0, opacity 0->255), detaches
+     * (closing flag + spring back), ticks to full settle so surface_scale_cb
+     * removes it (visible=0, DETACHED) — no ghost surface left. [L4]. */
+    {
+        extern int wm_l4_selftest(void);
+        if (wm_l4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

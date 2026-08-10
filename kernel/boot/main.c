@@ -1392,7 +1392,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_L4
         /* L.4 selftest: surface open/close spring (dock-slide proven by D.12). */
-        { extern void wm_l4_selftest(void); wm_l4_selftest(); }
+        { extern int wm_l4_selftest(void); wm_l4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_D12

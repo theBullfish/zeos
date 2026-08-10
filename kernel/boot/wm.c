@@ -1546,12 +1546,17 @@ int wm_visible_count(void) {
     return count;
 }
 
-#ifdef ZEOS_DIAG_L4
 /* L.4 selftest: spring-driven surface open/close. Create a surface -> its scale
  * springs 0.8->1.0 and opacity 0->255 (gradual, SNAPPY); detach -> closing set
- * and scale/opacity spring back toward 0.8/0. (Dock auto-hide slide is proven
- * separately by D.12 [D12] slide[show/hide/reshow]=111.) */
-void wm_l4_selftest(void)
+ * and scale/opacity spring back toward 0.8/0; once the close spring SETTLES the
+ * surface_scale_cb (wm.c:145-149) removes it (visible=0, signal=DETACHED). Ticks
+ * to full settle so no ghost surface is left mid-close. (Dock auto-hide slide is
+ * proven separately by D.12 [D12] slide[show/hide/reshow]=111.)
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the
+ * probe surface has persist_name=0 (no VAULT write on detach), is created +
+ * sprung + torn down synchronously inside one cmd_selftest call (never composited
+ * while visible -> no on-screen flash), and ends fully detached. Returns 1 on PASS. */
+int wm_l4_selftest(void)
 {
     extern void anim_tick(float);
     int id = wm_create_surface("L4probe", -1, 100, 100, 300, 200, 0);
@@ -1569,13 +1574,19 @@ void wm_l4_selftest(void)
     int closing_set = have && (s->closing == 1);
     for (int i = 0; i < 4; i++) anim_tick(1.0f / 240.0f);
     int closing = have && (s->anim_scale < 1.0f) && (s->anim_opacity < 255.0f);
+    /* tick to full settle: surface_scale_cb removes the surface once the close
+     * spring deactivates (anim.c sets active=0 BEFORE the final callback). */
+    for (int i = 0; i < 600; i++) anim_tick(1.0f / 240.0f);
+    int torndown = have && (s->visible == 0) && (s->closing == 0) &&
+                   (s->signal == SIGNAL_DETACHED);
 
-    int pass = have && opening && opened && closing_set && closing;
+    int pass = have && opening && opened && closing_set && closing && torndown;
     kputs("[L4] open[grad/full]="); kput_dec((uint64_t)opening); kput_dec((uint64_t)opened);
     kputs(" close[flag/anim]="); kput_dec((uint64_t)closing_set); kput_dec((uint64_t)closing);
+    kputs(" torndown="); kput_dec((uint64_t)torndown);
     kputs(pass ? " -> PASS (dock-slide: see D.12)\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 #ifdef ZEOS_DIAG_C13
 /* C.13 selftest: two surfaces sharing a chain_id dock side-by-side; a surface
