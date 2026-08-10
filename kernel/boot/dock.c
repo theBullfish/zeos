@@ -717,12 +717,22 @@ int dock_g5_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_D13
 /* D.13 selftest: density-size (via access density), drag-reorder, poof-remove.
- * (Hover-thumbnail needs window-snapshot infra -- not implemented; noted.) */
-void dock_d13_selftest(void)
+ * (Hover-thumbnail needs window-snapshot infra -- not implemented; noted.)
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: it
+ * mutates BOTH the access density (via the persisting access_set_density setter)
+ * AND rewrites g_dock's pinned set (pin/reorder/poof A,B,C -> B,A). So it saves
+ * the original density + snapshots the WHOLE g_dock struct up front, then
+ * restores density via the setter (re-lays panel/compositor/dock + recomputes
+ * s_dock_item_px; net VAULT = boot value, G.4/M.7 pattern) and restores g_dock
+ * byte-for-byte. Synchronous (no composite between) so transient dock states
+ * never render. Returns 1 on PASS. */
+int dock_d13_selftest(void)
 {
     extern void access_set_density(density_mode_t);
+    int          saved_density = access_get()->density;
+    dock_state_t saved_dock    = g_dock;
+
     access_set_density(DENSITY_COMFORTABLE); int big   = s_dock_item_px;
     access_set_density(DENSITY_COMPACT);      int small = s_dock_item_px;
     access_set_density(DENSITY_STANDARD);     int std   = s_dock_item_px;
@@ -731,15 +741,22 @@ void dock_d13_selftest(void)
     g_dock.pinned_count = 0;
     dock_pin("A", -1); dock_pin("B", -1); dock_pin("C", -1);
     int rr = dock_reorder(0, 2);   /* A,B,C -> B,C,A */
-    int order_ok = (rr==0) && g_dock.pinned[0].name[0]=='B' && g_dock.pinned[1].name[0]=='C' && g_dock.pinned[2].name[0]=='A';
+    char ord[4] = { g_dock.pinned[0].name[0], g_dock.pinned[1].name[0], g_dock.pinned[2].name[0], 0 };
+    int order_ok = (rr==0) && ord[0]=='B' && ord[1]=='C' && ord[2]=='A';
     int nb = g_dock.pinned_count;
     dock_poof(1);                  /* remove C -> B,A */
-    int poof_ok = (g_dock.pinned_count == nb-1) && g_dock.pinned[0].name[0]=='B' && g_dock.pinned[1].name[0]=='A';
+    char pf[3] = { g_dock.pinned[0].name[0], g_dock.pinned[1].name[0], 0 };
+    int poof_ok = (g_dock.pinned_count == nb-1) && pf[0]=='B' && pf[1]=='A';
+
+    /* restore: density (net-restored VAULT + re-layout + s_dock_item_px) then the
+     * exact pre-test dock struct (pinned set + sizing) -- live dock unchanged. */
+    access_set_density((density_mode_t)saved_density);
+    g_dock = saved_dock;
 
     int pass = density_ok && order_ok && poof_ok;
     kputs("[D13] density(big/std/small)="); kput_dec((uint64_t)big); kputs("/"); kput_dec((uint64_t)std); kputs("/"); kput_dec((uint64_t)small);
-    kputs(" reorder="); kput_dec((uint64_t)order_ok);
-    kputs(" poof="); kput_dec((uint64_t)poof_ok);
+    kputs(" reorder="); kput_dec((uint64_t)order_ok); kputs("("); kputs(ord); kputs(")");
+    kputs(" poof="); kput_dec((uint64_t)poof_ok); kputs("("); kputs(pf); kputs(")");
     kputs(pass ? " -> PASS (hover-thumbnail: needs snapshot infra, N/I)\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

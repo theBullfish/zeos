@@ -5114,6 +5114,14 @@ static void cmd_selftest(const char *args)
         extern int dock_g5_selftest(void);
         if (dock_g5_selftest()) passes++; else fails++;
     }
+    /* D.13: dock density-size + drag-reorder + poof-remove. Reuses the real
+     * dock_d13_selftest (un-gated, production-safe: saves density + snapshots the
+     * whole g_dock, restores both). density big>std>small (via access density),
+     * reorder A,B,C->B,C,A, poof removes C->B,A. [D13]. */
+    {
+        extern int dock_d13_selftest(void);
+        if (dock_d13_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

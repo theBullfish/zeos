@@ -1350,7 +1350,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #endif
 
 #ifdef ZEOS_DIAG_D13
-        { extern void dock_d13_selftest(void); dock_d13_selftest(); dock_apply_density(); }
+        { extern int dock_d13_selftest(void); dock_d13_selftest(); dock_apply_density(); }
 #endif
 
 #ifdef ZEOS_DIAG_A7
