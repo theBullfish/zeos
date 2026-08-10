@@ -1,0 +1,762 @@
+[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01H[2J[01;01H[=3h[2J[01;01HBdsDxe: failed to load Boot0001 "UEFI QEMU NVMe Ctrl ZEOSVAULT 1" from PciRoot(0x0)/Pci(0x2,0x0)/NVMe(0x1,00-00-00-00-00-00-00-00): Not Found
+BdsDxe: loading Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+BdsDxe: starting Boot0002 "UEFI QEMU HARDDISK QM00001 " from PciRoot(0x0)/Pci(0x1F,0x2)/Sata(0x0,0xFFFF,0x0)
+Zeos kernel bootstrap
+UEFI firmware: Ubuntu distribution of EDK II
+Acquiring GOP framebuffer... EDID not exposed
+1920x1080 pitch=1920
+Locating ACPI RSDP... found at ?
+Getting memory map and exiting boot services...
+FONT: initializing TTF system
+FONT: Inter Regular loaded
+FONT: JetBrains Mono Regular loaded
+FONT: Noto Sans fallback tier loaded
+FONT: TTF engine ready (stb_truetype)
+[splash] active
+[splash] boot services released 4%
+================================================
+  Zeos
+  The first operating system with proprioception.
+================================================
+
+Boot services released. We own the machine.
+
+Framebuffer: 1920x1080 pitch=1920
+ACPI RSDP:   found at 0x1fb7e014
+Memory map:  124 entries, 464 MB usable
+
+TSC:         0x1208f555e
+             Zixel embryo — first timing delta on bare metal.
+
+Zeos is alive.
+
+[splash] PMM 8%
+Initializing PMM... 431 MB free / 1048576 MB total.
+[splash] VMM 16%
+Setting up VMM... done (4GB identity + higher-half).
+VMM: framebuffer mapped write-combining (B.7 fix).
+[splash] heap 24%
+Initializing heap... 2048 KB.
+[splash] GDT+IDT 32%
+Loading GDT+TSS... done.
+Setting up IDT... done (vectors 0x00-0x14 + 0x20-0x2F).
+[splash] PCI scan 40%
+Scanning PCI bus... 7 devices found.
+[splash] ACPI / LAPIC / IOAPIC 48%
+ACPI MADT... ok (1 CPU, 1 IOAPIC).
+AML catalog... 22 symbols.
+EC .................... not present (no _HID PNP0C09)
+LAPIC init... id=0, 62 ticks/us.
+IOAPIC init... 1 mapped.
+[splash] USB xHCI 56%
+[xhci] found controller at 0:3.0 vid=1b36 did=d
+[xhci] hciver=100 caplen=64 slots=64 ports=8 ctx=32
+[xhci] port 5 device speed=3
+[xhci]   VID=627 PID=1 class=0 mps0=64
+[xhci] ready, 8 port(s), 1 device(s) found (first VID:PID 627:1)
+USB xHCI: ready (1 device(s))
+[hid] attached mouse iface=0 ep=81 mps=4 interval=6
+[hid] 1 device(s) ready
+[usb-cdc] no USB serial devices detected
+[splash] block + audio + FAT32 64%
+[nvme] scanning PCI for NVMe controllers...
+[nvme] drive 0: PCI 0:2.0 v=1b36 d=10
+[nvme] BAR0 above 4GB, mapping MMIO
+[nvme] mqes=2048 dstrd=0
+[nvme] sn=ZEOSVAULT model=QEMU NVMe Ctrl
+[nvme] ns1: 16384 x 512 = 8 MB
+[nvme] drive 0 MSI-X vec=40
+[nvme] drive 0 ready, 4 I/O queue(s)
+[nvme] 1 drive(s) ready
+ahci: drive 0 on port 0, 1032192 sectors (504 MB)
+BLOCK: 2 drive(s) ready
+Audio: HDA not available
+FAT32: no volume auto-mounted
+[splash] input devices 72%
+Initializing keyboard... done.
+Initializing mouse... done.
+IOAPIC: routed IRQ1(kbd)+IRQ12(mouse) -> LAPIC vec, masked on 8259
+[splash] timer calibration 80%
+Calibrating timer... TSC freq: 1995 MHz.
+[smp] enumerated 1 CPUs (BSP lapic=0)
+[smp] only 1 CPU enumerated — single-core mode
+[DBG]selftest
+SMP ................... 1 cores online (BSP + 0 APs), partition not yet active
+Wall clock ............ 2026-08-10 17:54:49 UTC (CMOS read OK)
+[splash] signals + VAULT 88%
+Signal chain engine... ready.
+
+[vault] formatted fresh region (no prior image)
+[persistence] init: journal=0 entries, snapshot=0 chain records pending
+[splash] chain registry 95%
+[chain_registry] initializing system chain graph
+[chain] registry initialized (128 slots)
+[mde] routing engine initialized (16384 route slots)
+hw: discovering hardware...
+[chain] created "cpu:0" id=0 depth=1
+[chain] created "memory:0" id=1 depth=2
+hw: PCI devices found: 7
+[chain] created "gpu:1234:1111" id=2 depth=2
+  chain 2: gpu:1234:1111 [VGA Controller] render_command -> framebuffer
+[chain] created "storage:1b36:0010" id=3 depth=2
+  chain 3: storage:1b36:0010 [NVMe Controller] block_request -> block_data
+[chain] created "usb:1b36:000d" id=4 depth=2
+  chain 4: usb:1b36:000d [USB Controller] usb_transfer -> usb_data
+[chain] created "storage:8086:2922" id=5 depth=2
+  chain 5: storage:8086:2922 [SATA Controller] block_request -> block_data
+[chain] created "unknown:8086:2930" id=6 depth=2
+  chain 6: unknown:8086:2930 [SMBus Controller] raw_data -> raw_data
+hw: 7 chains created in 16643 us
+hw: chain graph:
+  [0] cpu:0 (sovereign)
+    +-- [1] memory:0 (sovereign)
+    +-- [2] gpu:1234:1111 (internal)
+    +-- [3] storage:1b36:0010 (internal)
+    +-- [4] usb:1b36:000d (internal)
+    +-- [5] storage:8086:2922 (internal)
+    +-- [6] unknown:8086:2930 (internal)
+[chain_registry] hardware chains: 7
+[chain] created "compositor" id=7 depth=2
+[chain] created "panel" id=8 depth=3
+[chain] created "dock" id=9 depth=3
+[chain] created "desktop" id=10 depth=3
+[chain] created "shell" id=11 depth=1
+[chain] created "browser" id=12 depth=1
+[chain] created "inspector" id=13 depth=1
+[chain] created "palette" id=14 depth=1
+[chain] created "keyboard" id=15 depth=2
+[chain] created "serial_in" id=16 depth=2
+[chain] created "mouse" id=17 depth=2
+[chain] created "audio" id=18 depth=2
+[chain] created "video_in" id=19 depth=2
+[chain] created "video_preview" id=20 depth=3
+[chain] created "firewall" id=21 depth=2
+[chain] created "net_tx" id=22 depth=2
+[chain] created "net_rx" id=23 depth=2
+[chain] created "wifi" id=24 depth=2
+[chain] created "bluetooth" id=25 depth=2
+[chain] created "bt_l2cap" id=26 depth=3
+[chain] created "block" id=27 depth=2
+[gpu_compute] registered backend: cpu
+[chain] created "mde" id=28 depth=2
+[chain] created "display.gop" id=29 depth=2
+[gpu_virtio] no virtio-gpu found -- GOP fallback chain registered
+  Dom/Sub: cohort seeded, 0 cooperative chip(s)
+[chain] created "hotplug.pci" id=30 depth=2
+[chain] created "hotplug.usb" id=31 depth=2
+[chain] created "hotplug.display" id=32 depth=2
+[hotplug] pumps live: pci=1 usb=1 display=1
+[chain_registry] hotplug pumps: 3
+[chain] created "power" id=33 depth=2
+[battery] init: 0 battery device(s), AC=not detected
+[chain] created "battery" id=34 depth=2
+[power] init: pwrbtn=fixed-only slpbtn=no lid=no actions: btn=suspend close=lock open=wake
+[chain] created "power_input" id=35 depth=2
+[chain] created "trash_gc" id=36 depth=2
+[lockscreen] no PIN set; enrollment will run at next cold-boot gate or via `pin <new>`.
+[chain] created "idle" id=37 depth=2
+[chain] created "notify" id=38 depth=2
+[chain] created "settings" id=39 depth=2
+[chain] created "brightness" id=40 depth=2
+[chain] created "clock" id=41 depth=2
+[chain] created "text_edit" id=42 depth=2
+[chain] created "text_autosave" id=43 depth=2
+[chain] created "text_history" id=44 depth=2
+[chain] created "text_spell" id=45 depth=2
+[chain] created "text_autocomplete" id=46 depth=2
+[chain] created "fs_event" id=47 depth=2
+[chain] created "fs_trash_react" id=48 depth=2
+[chain] created "fs_index" id=49 depth=2
+[chain] created "fs_undo" id=50 depth=2
+[chain] created "fs_notify" id=51 depth=2
+[chain] created "system_state" id=52 depth=2
+[chain] created "activity_anomaly" id=53 depth=2
+[chain] created "print" id=54 depth=2
+[chain] created "print_queue" id=55 depth=2
+[mde] auto-route: 401 routes created
+[chain_registry] MDE auto-routed 401 connections
+── MDE Route Graph ──
+  routes: 401  auto_route: ON
+  [0] panel[0] --{surface_output}--> compositor[0]
+  [1] dock[0] --{surface_output}--> compositor[0]
+  [2] desktop[0] --{surface_output}--> compositor[0]
+  [3] inspector[0] --{surface_output}--> compositor[0]
+  [4] palette[0] --{surface_output}--> compositor[0]
+  [5] keyboard[2] --{input_event}--> shell[0]
+  [6] keyboard[2] --{input_event}--> palette[0]
+  [7] serial_in[2] --{input_event}--> shell[0]
+  [8] serial_in[2] --{input_event}--> palette[0]
+  [9] audio[3] --{tx_completion}--> block[5]
+  [10] video_in[2] --{video_frame}--> video_preview[0]
+  [11] video_in[3] --{video_frame}--> video_preview[0]
+  [12] video_preview[0] --{tx_completion}--> block[5]
+  [13] net_tx[0] --{ethernet_frame}--> net_rx[1]
+  [14] net_tx[0] --{ethernet_frame}--> net_rx[2]
+  [15] net_tx[0] --{ethernet_frame}--> net_rx[3]
+  [16] net_tx[1] --{ethernet_frame}--> net_rx[1]
+  [17] net_tx[1] --{ethernet_frame}--> net_rx[2]
+  [18] net_tx[1] --{ethernet_frame}--> net_rx[3]
+  [19] net_tx[2] --{ethernet_frame}--> net_rx[1]
+  [20] net_tx[2] --{ethernet_frame}--> net_rx[2]
+  [21] net_tx[2] --{ethernet_frame}--> net_rx[3]
+  [22] net_tx[3] --{tx_completion}--> block[5]
+  [23] net_rx[0] --{ethernet_frame}--> net_tx[1]
+  [24] net_rx[0] --{ethernet_frame}--> net_tx[2]
+  [25] net_rx[0] --{ethernet_frame}--> net_tx[3]
+  [26] net_rx[1] --{ethernet_frame}--> net_tx[1]
+  [27] net_rx[1] --{ethernet_frame}--> net_tx[2]
+  [28] net_rx[1] --{ethernet_frame}--> net_tx[3]
+  [29] net_rx[2] --{ethernet_frame}--> net_tx[1]
+  [30] net_rx[2] --{ethernet_frame}--> net_tx[2]
+  [31] net_rx[2] --{ethernet_frame}--> net_tx[3]
+  [32] mde[4] --{tx_completion}--> block[5]
+  [33] battery[3] --{power_event}--> power_input[3]
+  [34] text_edit[0] --{text_edit}--> text_autosave[0]
+  [35] text_edit[0] --{text_edit}--> text_autosave[1]
+  [36] text_edit[0] --{text_edit}--> text_autosave[2]
+  [37] text_edit[0] --{text_edit}--> text_history[0]
+  [38] text_edit[0] --{text_edit}--> text_history[1]
+  [39] text_edit[0] --{text_edit}--> text_history[2]
+  [40] text_edit[0] --{text_edit}--> text_spell[0]
+  [41] text_edit[0] --{text_edit}--> text_spell[1]
+  [42] text_edit[0] --{text_edit}--> text_spell[2]
+  [43] text_edit[0] --{text_edit}--> text_autocomplete[0]
+  [44] text_edit[0] --{text_edit}--> text_autocomplete[1]
+  [45] text_edit[1] --{text_edit}--> text_autosave[0]
+  [46] text_edit[1] --{text_edit}--> text_autosave[1]
+  [47] text_edit[1] --{text_edit}--> text_autosave[2]
+  [48] text_edit[1] --{text_edit}--> text_history[0]
+  [49] text_edit[1] --{text_edit}--> text_history[1]
+  [50] text_edit[1] --{text_edit}--> text_history[2]
+  [51] text_edit[1] --{text_edit}--> text_spell[0]
+  [52] text_edit[1] --{text_edit}--> text_spell[1]
+  [53] text_edit[1] --{text_edit}--> text_spell[2]
+  [54] text_edit[1] --{text_edit}--> text_autocomplete[0]
+  [55] text_edit[1] --{text_edit}--> text_autocomplete[1]
+  [56] text_edit[2] --{text_edit}--> text_autosave[0]
+  [57] text_edit[2] --{text_edit}--> text_autosave[1]
+  [58] text_edit[2] --{text_edit}--> text_autosave[2]
+  [59] text_edit[2] --{text_edit}--> text_history[0]
+  [60] text_edit[2] --{text_edit}--> text_history[1]
+  [61] text_edit[2] --{text_edit}--> text_history[2]
+  [62] text_edit[2] --{text_edit}--> text_spell[0]
+  [63] text_edit[2] --{text_edit}--> text_spell[1]
+  [64] text_edit[2] --{text_edit}--> text_spell[2]
+  [65] text_edit[2] --{text_edit}--> text_autocomplete[0]
+  [66] text_edit[2] --{text_edit}--> text_autocomplete[1]
+  [67] text_autosave[0] --{text_edit}--> text_edit[1]
+  [68] text_autosave[0] --{text_edit}--> text_edit[2]
+  [69] text_autosave[0] --{text_edit}--> text_history[0]
+  [70] text_autosave[0] --{text_edit}--> text_history[1]
+  [71] text_autosave[0] --{text_edit}--> text_history[2]
+  [72] text_autosave[0] --{text_edit}--> text_spell[0]
+  [73] text_autosave[0] --{text_edit}--> text_spell[1]
+  [74] text_autosave[0] --{text_edit}--> text_spell[2]
+  [75] text_autosave[0] --{text_edit}--> text_autocomplete[0]
+  [76] text_autosave[0] --{text_edit}--> text_autocomplete[1]
+  [77] text_autosave[1] --{text_edit}--> text_edit[1]
+  [78] text_autosave[1] --{text_edit}--> text_edit[2]
+  [79] text_autosave[1] --{text_edit}--> text_history[0]
+  [80] text_autosave[1] --{text_edit}--> text_history[1]
+  [81] text_autosave[1] --{text_edit}--> text_history[2]
+  [82] text_autosave[1] --{text_edit}--> text_spell[0]
+  [83] text_autosave[1] --{text_edit}--> text_spell[1]
+  [84] text_autosave[1] --{text_edit}--> text_spell[2]
+  [85] text_autosave[1] --{text_edit}--> text_autocomplete[0]
+  [86] text_autosave[1] --{text_edit}--> text_autocomplete[1]
+  [87] text_autosave[2] --{text_edit}--> text_edit[1]
+  [88] text_autosave[2] --{text_edit}--> text_edit[2]
+  [89] text_autosave[2] --{text_edit}--> text_history[0]
+  [90] text_autosave[2] --{text_edit}--> text_history[1]
+  [91] text_autosave[2] --{text_edit}--> text_history[2]
+  [92] text_autosave[2] --{text_edit}--> text_spell[0]
+  [93] text_autosave[2] --{text_edit}--> text_spell[1]
+  [94] text_autosave[2] --{text_edit}--> text_spell[2]
+  [95] text_autosave[2] --{text_edit}--> text_autocomplete[0]
+  [96] text_autosave[2] --{text_edit}--> text_autocomplete[1]
+  [97] text_history[0] --{text_edit}--> text_edit[1]
+  [98] text_history[0] --{text_edit}--> text_edit[2]
+  [99] text_history[0] --{text_edit}--> text_autosave[0]
+  [100] text_history[0] --{text_edit}--> text_autosave[1]
+  [101] text_history[0] --{text_edit}--> text_autosave[2]
+  [102] text_history[0] --{text_edit}--> text_spell[0]
+  [103] text_history[0] --{text_edit}--> text_spell[1]
+  [104] text_history[0] --{text_edit}--> text_spell[2]
+  [105] text_history[0] --{text_edit}--> text_autocomplete[0]
+  [106] text_history[0] --{text_edit}--> text_autocomplete[1]
+  [107] text_history[1] --{text_edit}--> text_edit[1]
+  [108] text_history[1] --{text_edit}--> text_edit[2]
+  [109] text_history[1] --{text_edit}--> text_autosave[0]
+  [110] text_history[1] --{text_edit}--> text_autosave[1]
+  [111] text_history[1] --{text_edit}--> text_autosave[2]
+  [112] text_history[1] --{text_edit}--> text_spell[0]
+  [113] text_history[1] --{text_edit}--> text_spell[1]
+  [114] text_history[1] --{text_edit}--> text_spell[2]
+  [115] text_history[1] --{text_edit}--> text_autocomplete[0]
+  [116] text_history[1] --{text_edit}--> text_autocomplete[1]
+  [117] text_history[2] --{text_edit}--> text_edit[1]
+  [118] text_history[2] --{text_edit}--> text_edit[2]
+  [119] text_history[2] --{text_edit}--> text_autosave[0]
+  [120] text_history[2] --{text_edit}--> text_autosave[1]
+  [121] text_history[2] --{text_edit}--> text_autosave[2]
+  [122] text_history[2] --{text_edit}--> text_spell[0]
+  [123] text_history[2] --{text_edit}--> text_spell[1]
+  [124] text_history[2] --{text_edit}--> text_spell[2]
+  [125] text_history[2] --{text_edit}--> text_autocomplete[0]
+  [126] text_history[2] --{text_edit}--> text_autocomplete[1]
+  [127] text_spell[0] --{text_edit}--> text_edit[1]
+  [128] text_spell[0] --{text_edit}--> text_edit[2]
+  [129] text_spell[0] --{text_edit}--> text_autosave[0]
+  [130] text_spell[0] --{text_edit}--> text_autosave[1]
+  [131] text_spell[0] --{text_edit}--> text_autosave[2]
+  [132] text_spell[0] --{text_edit}--> text_history[0]
+  [133] text_spell[0] --{text_edit}--> text_history[1]
+  [134] text_spell[0] --{text_edit}--> text_history[2]
+  [135] text_spell[0] --{text_edit}--> text_autocomplete[0]
+  [136] text_spell[0] --{text_edit}--> text_autocomplete[1]
+  [137] text_spell[1] --{text_edit}--> text_edit[1]
+  [138] text_spell[1] --{text_edit}--> text_edit[2]
+  [139] text_spell[1] --{text_edit}--> text_autosave[0]
+  [140] text_spell[1] --{text_edit}--> text_autosave[1]
+  [141] text_spell[1] --{text_edit}--> text_autosave[2]
+  [142] text_spell[1] --{text_edit}--> text_history[0]
+  [143] text_spell[1] --{text_edit}--> text_history[1]
+  [144] text_spell[1] --{text_edit}--> text_history[2]
+  [145] text_spell[1] --{text_edit}--> text_autocomplete[0]
+  [146] text_spell[1] --{text_edit}--> text_autocomplete[1]
+  [147] text_spell[2] --{text_edit}--> text_edit[1]
+  [148] text_spell[2] --{text_edit}--> text_edit[2]
+  [149] text_spell[2] --{text_edit}--> text_autosave[0]
+  [150] text_spell[2] --{text_edit}--> text_autosave[1]
+  [151] text_spell[2] --{text_edit}--> text_autosave[2]
+  [152] text_spell[2] --{text_edit}--> text_history[0]
+  [153] text_spell[2] --{text_edit}--> text_history[1]
+  [154] text_spell[2] --{text_edit}--> text_history[2]
+  [155] text_spell[2] --{text_edit}--> text_autocomplete[0]
+  [156] text_spell[2] --{text_edit}--> text_autocomplete[1]
+  [157] text_autocomplete[0] --{text_edit}--> text_edit[1]
+  [158] text_autocomplete[0] --{text_edit}--> text_edit[2]
+  [159] text_autocomplete[0] --{text_edit}--> text_autosave[0]
+  [160] text_autocomplete[0] --{text_edit}--> text_autosave[1]
+  [161] text_autocomplete[0] --{text_edit}--> text_autosave[2]
+  [162] text_autocomplete[0] --{text_edit}--> text_history[0]
+  [163] text_autocomplete[0] --{text_edit}--> text_history[1]
+  [164] text_autocomplete[0] --{text_edit}--> text_history[2]
+  [165] text_autocomplete[0] --{text_edit}--> text_spell[0]
+  [166] text_autocomplete[0] --{text_edit}--> text_spell[1]
+  [167] text_autocomplete[0] --{text_edit}--> text_spell[2]
+  [168] text_autocomplete[1] --{text_edit}--> text_edit[1]
+  [169] text_autocomplete[1] --{text_edit}--> text_edit[2]
+  [170] text_autocomplete[1] --{text_edit}--> text_autosave[0]
+  [171] text_autocomplete[1] --{text_edit}--> text_autosave[1]
+  [172] text_autocomplete[1] --{text_edit}--> text_autosave[2]
+  [173] text_autocomplete[1] --{text_edit}--> text_history[0]
+  [174] text_autocomplete[1] --{text_edit}--> text_history[1]
+  [175] text_autocomplete[1] --{text_edit}--> text_history[2]
+  [176] text_autocomplete[1] --{text_edit}--> text_spell[0]
+  [177] text_autocomplete[1] --{text_edit}--> text_spell[1]
+  [178] text_autocomplete[1] --{text_edit}--> text_spell[2]
+  [179] fs_event[0] --{fs_event}--> fs_trash_react[0]
+  [180] fs_event[0] --{fs_event}--> fs_trash_react[1]
+  [181] fs_event[0] --{fs_event}--> fs_trash_react[2]
+  [182] fs_event[0] --{fs_event}--> fs_index[0]
+  [183] fs_event[0] --{fs_event}--> fs_index[1]
+  [184] fs_event[0] --{fs_event}--> fs_index[2]
+  [185] fs_event[0] --{fs_event}--> fs_undo[0]
+  [186] fs_event[0] --{fs_event}--> fs_undo[1]
+  [187] fs_event[0] --{fs_event}--> fs_undo[2]
+  [188] fs_event[0] --{fs_event}--> fs_notify[0]
+  [189] fs_event[0] --{fs_event}--> fs_notify[1]
+  [190] fs_event[0] --{fs_event}--> fs_notify[2]
+  [191] fs_event[1] --{fs_event}--> fs_trash_react[0]
+  [192] fs_event[1] --{fs_event}--> fs_trash_react[1]
+  [193] fs_event[1] --{fs_event}--> fs_trash_react[2]
+  [194] fs_event[1] --{fs_event}--> fs_index[0]
+  [195] fs_event[1] --{fs_event}--> fs_index[1]
+  [196] fs_event[1] --{fs_event}--> fs_index[2]
+  [197] fs_event[1] --{fs_event}--> fs_undo[0]
+  [198] fs_event[1] --{fs_event}--> fs_undo[1]
+  [199] fs_event[1] --{fs_event}--> fs_undo[2]
+  [200] fs_event[1] --{fs_event}--> fs_notify[0]
+  [201] fs_event[1] --{fs_event}--> fs_notify[1]
+  [202] fs_event[1] --{fs_event}--> fs_notify[2]
+  [203] fs_event[2] --{fs_event}--> fs_trash_react[0]
+  [204] fs_event[2] --{fs_event}--> fs_trash_react[1]
+  [205] fs_event[2] --{fs_event}--> fs_trash_react[2]
+  [206] fs_event[2] --{fs_event}--> fs_index[0]
+  [207] fs_event[2] --{fs_event}--> fs_index[1]
+  [208] fs_event[2] --{fs_event}--> fs_index[2]
+  [209] fs_event[2] --{fs_event}--> fs_undo[0]
+  [210] fs_event[2] --{fs_event}--> fs_undo[1]
+  [211] fs_event[2] --{fs_event}--> fs_undo[2]
+  [212] fs_event[2] --{fs_event}--> fs_notify[0]
+  [213] fs_event[2] --{fs_event}--> fs_notify[1]
+  [214] fs_event[2] --{fs_event}--> fs_notify[2]
+  [215] fs_event[3] --{fs_event}--> fs_trash_react[0]
+  [216] fs_event[3] --{fs_event}--> fs_trash_react[1]
+  [217] fs_event[3] --{fs_event}--> fs_trash_react[2]
+  [218] fs_event[3] --{fs_event}--> fs_index[0]
+  [219] fs_event[3] --{fs_event}--> fs_index[1]
+  [220] fs_event[3] --{fs_event}--> fs_index[2]
+  [221] fs_event[3] --{fs_event}--> fs_undo[0]
+  [222] fs_event[3] --{fs_event}--> fs_undo[1]
+  [223] fs_event[3] --{fs_event}--> fs_undo[2]
+  [224] fs_event[3] --{fs_event}--> fs_notify[0]
+  [225] fs_event[3] --{fs_event}--> fs_notify[1]
+  [226] fs_event[3] --{fs_event}--> fs_notify[2]
+  [227] fs_trash_react[0] --{fs_event}--> fs_event[1]
+  [228] fs_trash_react[0] --{fs_event}--> fs_event[2]
+  [229] fs_trash_react[0] --{fs_event}--> fs_event[3]
+  [230] fs_trash_react[0] --{fs_event}--> fs_index[0]
+  [231] fs_trash_react[0] --{fs_event}--> fs_index[1]
+  [232] fs_trash_react[0] --{fs_event}--> fs_index[2]
+  [233] fs_trash_react[0] --{fs_event}--> fs_undo[0]
+  [234] fs_trash_react[0] --{fs_event}--> fs_undo[1]
+  [235] fs_trash_react[0] --{fs_event}--> fs_undo[2]
+  [236] fs_trash_react[0] --{fs_event}--> fs_notify[0]
+  [237] fs_trash_react[0] --{fs_event}--> fs_notify[1]
+  [238] fs_trash_react[0] --{fs_event}--> fs_notify[2]
+  [239] fs_trash_react[1] --{fs_event}--> fs_event[1]
+  [240] fs_trash_react[1] --{fs_event}--> fs_event[2]
+  [241] fs_trash_react[1] --{fs_event}--> fs_event[3]
+  [242] fs_trash_react[1] --{fs_event}--> fs_index[0]
+  [243] fs_trash_react[1] --{fs_event}--> fs_index[1]
+  [244] fs_trash_react[1] --{fs_event}--> fs_index[2]
+  [245] fs_trash_react[1] --{fs_event}--> fs_undo[0]
+  [246] fs_trash_react[1] --{fs_event}--> fs_undo[1]
+  [247] fs_trash_react[1] --{fs_event}--> fs_undo[2]
+  [248] fs_trash_react[1] --{fs_event}--> fs_notify[0]
+  [249] fs_trash_react[1] --{fs_event}--> fs_notify[1]
+  [250] fs_trash_react[1] --{fs_event}--> fs_notify[2]
+  [251] fs_trash_react[2] --{fs_event}--> fs_event[1]
+  [252] fs_trash_react[2] --{fs_event}--> fs_event[2]
+  [253] fs_trash_react[2] --{fs_event}--> fs_event[3]
+  [254] fs_trash_react[2] --{fs_event}--> fs_index[0]
+  [255] fs_trash_react[2] --{fs_event}--> fs_index[1]
+  [256] fs_trash_react[2] --{fs_event}--> fs_index[2]
+  [257] fs_trash_react[2] --{fs_event}--> fs_undo[0]
+  [258] fs_trash_react[2] --{fs_event}--> fs_undo[1]
+  [259] fs_trash_react[2] --{fs_event}--> fs_undo[2]
+  [260] fs_trash_react[2] --{fs_event}--> fs_notify[0]
+  [261] fs_trash_react[2] --{fs_event}--> fs_notify[1]
+  [262] fs_trash_react[2] --{fs_event}--> fs_notify[2]
+  [263] fs_index[0] --{fs_event}--> fs_event[1]
+  [264] fs_index[0] --{fs_event}--> fs_event[2]
+  [265] fs_index[0] --{fs_event}--> fs_event[3]
+  [266] fs_index[0] --{fs_event}--> fs_trash_react[0]
+  [267] fs_index[0] --{fs_event}--> fs_trash_react[1]
+  [268] fs_index[0] --{fs_event}--> fs_trash_react[2]
+  [269] fs_index[0] --{fs_event}--> fs_undo[0]
+  [270] fs_index[0] --{fs_event}--> fs_undo[1]
+  [271] fs_index[0] --{fs_event}--> fs_undo[2]
+  [272] fs_index[0] --{fs_event}--> fs_notify[0]
+  [273] fs_index[0] --{fs_event}--> fs_notify[1]
+  [274] fs_index[0] --{fs_event}--> fs_notify[2]
+  [275] fs_index[1] --{fs_event}--> fs_event[1]
+  [276] fs_index[1] --{fs_event}--> fs_event[2]
+  [277] fs_index[1] --{fs_event}--> fs_event[3]
+  [278] fs_index[1] --{fs_event}--> fs_trash_react[0]
+  [279] fs_index[1] --{fs_event}--> fs_trash_react[1]
+  [280] fs_index[1] --{fs_event}--> fs_trash_react[2]
+  [281] fs_index[1] --{fs_event}--> fs_undo[0]
+  [282] fs_index[1] --{fs_event}--> fs_undo[1]
+  [283] fs_index[1] --{fs_event}--> fs_undo[2]
+  [284] fs_index[1] --{fs_event}--> fs_notify[0]
+  [285] fs_index[1] --{fs_event}--> fs_notify[1]
+  [286] fs_index[1] --{fs_event}--> fs_notify[2]
+  [287] fs_index[2] --{fs_event}--> fs_event[1]
+  [288] fs_index[2] --{fs_event}--> fs_event[2]
+  [289] fs_index[2] --{fs_event}--> fs_event[3]
+  [290] fs_index[2] --{fs_event}--> fs_trash_react[0]
+  [291] fs_index[2] --{fs_event}--> fs_trash_react[1]
+  [292] fs_index[2] --{fs_event}--> fs_trash_react[2]
+  [293] fs_index[2] --{fs_event}--> fs_undo[0]
+  [294] fs_index[2] --{fs_event}--> fs_undo[1]
+  [295] fs_index[2] --{fs_event}--> fs_undo[2]
+  [296] fs_index[2] --{fs_event}--> fs_notify[0]
+  [297] fs_index[2] --{fs_event}--> fs_notify[1]
+  [298] fs_index[2] --{fs_event}--> fs_notify[2]
+  [299] fs_undo[0] --{fs_event}--> fs_event[1]
+  [300] fs_undo[0] --{fs_event}--> fs_event[2]
+  [301] fs_undo[0] --{fs_event}--> fs_event[3]
+  [302] fs_undo[0] --{fs_event}--> fs_trash_react[0]
+  [303] fs_undo[0] --{fs_event}--> fs_trash_react[1]
+  [304] fs_undo[0] --{fs_event}--> fs_trash_react[2]
+  [305] fs_undo[0] --{fs_event}--> fs_index[0]
+  [306] fs_undo[0] --{fs_event}--> fs_index[1]
+  [307] fs_undo[0] --{fs_event}--> fs_index[2]
+  [308] fs_undo[0] --{fs_event}--> fs_notify[0]
+  [309] fs_undo[0] --{fs_event}--> fs_notify[1]
+  [310] fs_undo[0] --{fs_event}--> fs_notify[2]
+  [311] fs_undo[1] --{fs_event}--> fs_event[1]
+  [312] fs_undo[1] --{fs_event}--> fs_event[2]
+  [313] fs_undo[1] --{fs_event}--> fs_event[3]
+  [314] fs_undo[1] --{fs_event}--> fs_trash_react[0]
+  [315] fs_undo[1] --{fs_event}--> fs_trash_react[1]
+  [316] fs_undo[1] --{fs_event}--> fs_trash_react[2]
+  [317] fs_undo[1] --{fs_event}--> fs_index[0]
+  [318] fs_undo[1] --{fs_event}--> fs_index[1]
+  [319] fs_undo[1] --{fs_event}--> fs_index[2]
+  [320] fs_undo[1] --{fs_event}--> fs_notify[0]
+  [321] fs_undo[1] --{fs_event}--> fs_notify[1]
+  [322] fs_undo[1] --{fs_event}--> fs_notify[2]
+  [323] fs_undo[2] --{fs_event}--> fs_event[1]
+  [324] fs_undo[2] --{fs_event}--> fs_event[2]
+  [325] fs_undo[2] --{fs_event}--> fs_event[3]
+  [326] fs_undo[2] --{fs_event}--> fs_trash_react[0]
+  [327] fs_undo[2] --{fs_event}--> fs_trash_react[1]
+  [328] fs_undo[2] --{fs_event}--> fs_trash_react[2]
+  [329] fs_undo[2] --{fs_event}--> fs_index[0]
+  [330] fs_undo[2] --{fs_event}--> fs_index[1]
+  [331] fs_undo[2] --{fs_event}--> fs_index[2]
+  [332] fs_undo[2] --{fs_event}--> fs_notify[0]
+  [333] fs_undo[2] --{fs_event}--> fs_notify[1]
+  [334] fs_undo[2] --{fs_event}--> fs_notify[2]
+  [335] fs_notify[0] --{fs_event}--> fs_event[1]
+  [336] fs_notify[0] --{fs_event}--> fs_event[2]
+  [337] fs_notify[0] --{fs_event}--> fs_event[3]
+  [338] fs_notify[0] --{fs_event}--> fs_trash_react[0]
+  [339] fs_notify[0] --{fs_event}--> fs_trash_react[1]
+  [340] fs_notify[0] --{fs_event}--> fs_trash_react[2]
+  [341] fs_notify[0] --{fs_event}--> fs_index[0]
+  [342] fs_notify[0] --{fs_event}--> fs_index[1]
+  [343] fs_notify[0] --{fs_event}--> fs_index[2]
+  [344] fs_notify[0] --{fs_event}--> fs_undo[0]
+  [345] fs_notify[0] --{fs_event}--> fs_undo[1]
+  [346] fs_notify[0] --{fs_event}--> fs_undo[2]
+  [347] fs_notify[1] --{fs_event}--> fs_event[1]
+  [348] fs_notify[1] --{fs_event}--> fs_event[2]
+  [349] fs_notify[1] --{fs_event}--> fs_event[3]
+  [350] fs_notify[1] --{fs_event}--> fs_trash_react[0]
+  [351] fs_notify[1] --{fs_event}--> fs_trash_react[1]
+  [352] fs_notify[1] --{fs_event}--> fs_trash_react[2]
+  [353] fs_notify[1] --{fs_event}--> fs_index[0]
+  [354] fs_notify[1] --{fs_event}--> fs_index[1]
+  [355] fs_notify[1] --{fs_event}--> fs_index[2]
+  [356] fs_notify[1] --{fs_event}--> fs_undo[0]
+  [357] fs_notify[1] --{fs_event}--> fs_undo[1]
+  [358] fs_notify[1] --{fs_event}--> fs_undo[2]
+  [359] fs_notify[2] --{fs_event}--> fs_event[1]
+  [360] fs_notify[2] --{fs_event}--> fs_event[2]
+  [361] fs_notify[2] --{fs_event}--> fs_event[3]
+  [362] fs_notify[2] --{fs_event}--> fs_trash_react[0]
+  [363] fs_notify[2] --{fs_event}--> fs_trash_react[1]
+  [364] fs_notify[2] --{fs_event}--> fs_trash_react[2]
+  [365] fs_notify[2] --{fs_event}--> fs_index[0]
+  [366] fs_notify[2] --{fs_event}--> fs_index[1]
+  [367] fs_notify[2] --{fs_event}--> fs_index[2]
+  [368] fs_notify[2] --{fs_event}--> fs_undo[0]
+  [369] fs_notify[2] --{fs_event}--> fs_undo[1]
+  [370] fs_notify[2] --{fs_event}--> fs_undo[2]
+  [371] system_state[0] --{system_state}--> activity_anomaly[0]
+  [372] system_state[0] --{system_state}--> activity_anomaly[1]
+  [373] system_state[0] --{system_state}--> activity_anomaly[2]
+  [374] system_state[1] --{system_state}--> activity_anomaly[0]
+  [375] system_state[1] --{system_state}--> activity_anomaly[1]
+  [376] system_state[1] --{system_state}--> activity_anomaly[2]
+  [377] system_state[2] --{system_state}--> activity_anomaly[0]
+  [378] system_state[2] --{system_state}--> activity_anomaly[1]
+  [379] system_state[2] --{system_state}--> activity_anomaly[2]
+  [380] system_state[3] --{system_state}--> activity_anomaly[0]
+  [381] system_state[3] --{system_state}--> activity_anomaly[1]
+  [382] system_state[3] --{system_state}--> activity_anomaly[2]
+  [383] system_state[4] --{system_state}--> activity_anomaly[0]
+  [384] system_state[4] --{system_state}--> activity_anomaly[1]
+  [385] system_state[4] --{system_state}--> activity_anomaly[2]
+  [386] activity_anomaly[0] --{system_state}--> system_state[1]
+  [387] activity_anomaly[0] --{system_state}--> system_state[2]
+  [388] activity_anomaly[0] --{system_state}--> system_state[3]
+  [389] activity_anomaly[0] --{system_state}--> system_state[4]
+  [390] activity_anomaly[1] --{system_state}--> system_state[1]
+  [391] activity_anomaly[1] --{system_state}--> system_state[2]
+  [392] activity_anomaly[1] --{system_state}--> system_state[3]
+  [393] activity_anomaly[1] --{system_state}--> system_state[4]
+  [394] activity_anomaly[2] --{system_state}--> system_state[1]
+  [395] activity_anomaly[2] --{system_state}--> system_state[2]
+  [396] activity_anomaly[2] --{system_state}--> system_state[3]
+  [397] activity_anomaly[2] --{system_state}--> system_state[4]
+  [398] print[2] --{print_completion}--> print_queue[0]
+  [399] print[3] --{print_completion}--> print_queue[0]
+  [400] print_queue[0] --{print_completion}--> print[3]
+── end ──
+[chain_registry] system ready: 56 chains, 401 routes
+[splash] ready 100%
+[splash] dismissed
+[brightness] no _BCL package located (desktop or virtio-gpu)
+  
+ZIR: selftest loaded+ran (emit->gate->print), 3 nodes fired
+  Settings .............. 26 keys registered, 24 from current modules, chain applies=0
+Calendar/clock ........ 0 alarms armed, 0 events, 4 world clocks
+File manager ......... 4 chains (event + trash_react + index + undo + notify), 0 events tracked
+Activity Monitor ..... CHAIN_SYSTEM_STATE @1Hz, anomaly subscriber armed, history=0 samples
+  Firewall .............. enabled, 8 rules, 0 active connections, 0 drops/min
+Cameras ............... not present
+kv-zeos polish ....... REPL ready, 0 keys, 0 contexts isolated
+web-zeos polish ...... admin UI ready, 2 routes, 0 certs
+build-zeos polish .... DAG view ready, rules: 2, last build: 0 ms
+notes-zeos polish .... graph view ready, 0 notes, 0 backlinks
+chat-zeos polish ..... 3-pane UI ready, 1 rooms visible to active ctx, E2EE rooms: 0
+[main] cold-boot login required
+[lockscreen] cold-boot gate: PIN enrollment
+[lockscreen] PIN enrolled
+[lockscreen] cold-boot gate: cleared
+[crypto] armed (AES-XTS-256, 0 regions, key=SOVEREIGN-wrapped)
+  Disk encryption ....... CFA-native, 0 regions, key=SOVEREIGN-wrapped, AES-XTS-256, 0 accesses, 0 denied
+[identity] created context "owner" id=1
+[identity] migrated legacy single-PIN -> owner (id=1)
+[identity] init: 0 context(s) loaded, active=1
+  Identity contexts ..... 1 contexts, active="owner", CFA root 0xc0de0001
+[N1] screen 1/5 welcome
+[N1] screen 2/5 persona
+[N1] screen 3/5 controls
+[N1] screen 4/5 appearance
+[N1] screen 5/5 done
+[N1] first-run applied: persona=2 controls=0 theme=1 density=1
+[scheduler] chain resolution as scheduling primitive
+[scheduler] quantum=1000us, B3 backoff enabled (per-chain tunable)
+[scheduler] preemption=LAPIC timer vec 0xEF + setjmp/longjmp
+[scheduler] watchdog=post-hoc (defensive secondary path)
+[DBG]selftest
+SMP ................... 1 cores online, RESOLVING — BSP=0tps — 4/56 chains lifted
+TLB shootdown ......... wired (BSP→APs broadcast, range+full)
+COMP: double buffer active (composite -> WC flip)
+COMP: initialized 1920x1080 @ 60fps
+HC: hot corners active (zone=8px, dwell=150ms)
+WM: initialized 1920x1080
+WS: initialized count=4 active=0
+PANEL: initialized persona=Zeos h=40
+DESK: wallpaper loaded from VAULT 480x270 (31485 bytes)
+DESK: initialized, 3 icons, size=40px
+DOCK: initialized, auto_hide=0
+[main] graphical desktop shell up (wallpaper + panel + dock + windows)
+VAULT: 2MB ramdisk mounted. 16 programs loaded.
+virtio-net: device not found
+e1000: no Intel NIC found
+rtl8169: no RTL8169-family NIC found
+rtl8139: no RTL8139 found
+NET: no network device found
+Type 'help' for commands.
+Switch modes: 'zeros' (robotics) | 'derez' (dev) | 'raise' (full)
+
+zeos> [scheduler] entering chain-resolution main loop
+NOTIFY: initialized (batch mode, 30s interval, history=0, DND=off)
+[mde] WARNING: cycle detected at chain 22 (one-shot; further cycles silenced)
+[scheduler] tick 1 exceeded budget by 36ms; composite=33ms persist=0ms; top: id=30(9ms) id=31(0ms) id=43(0ms)
+[scheduler] tick 2 exceeded budget by 30ms; composite=28ms persist=0ms; top: id=30(9ms) id=31(0ms) id=16(0ms)
+[scheduler] tick 3 exceeded budget by 32ms; composite=31ms persist=0ms; top: id=30(9ms) id=31(0ms) id=16(0ms)
+[compositor] B.4 smoke-check: summed frame_dt=110728us vs raw-TSC delta=110728us (1/60 fallback would read ~49998us, diff=0us) -> on TSC path
+[scheduler] tick 4 exceeded budget by 42ms; composite=33ms persist=0ms; top: id=30(7ms) id=31(0ms) id=16(0ms)
+[scheduler] tick 64 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[idle] state -> ACTIVE
+[scheduler] tick 128 exceeded budget by 41ms; composite=30ms persist=0ms; top: id=30(9ms) id=37(0ms) id=31(0ms)
+[scheduler] tick 192 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=37(0ms) id=31(0ms)
+[scheduler] tick 256 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 320 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 384 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 448 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 512 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 576 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 640 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 704 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=16(0ms)
+[scheduler] tick 768 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 832 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 896 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 960 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 1024 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 1088 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 1152 exceeded budget by 48ms; composite=0ms persist=38ms; top: id=30(8ms) id=31(0ms) id=27(0ms)
+[scheduler] tick 1216 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1280 exceeded budget by 11ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1344 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1408 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1472 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1536 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1600 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1664 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1728 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1792 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1856 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1920 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 1984 exceeded budget by 75ms; composite=0ms persist=0ms; top: id=30(73ms) id=31(0ms) id=52(0ms)
+DESK: fed 'Files' -> surface 1
+[scheduler] tick 2048 exceeded budget by 44ms; composite=31ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2112 exceeded budget by 11ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2176 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2240 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2304 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2368 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2432 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2496 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2560 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2624 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2688 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2752 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2816 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2880 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 2944 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3008 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3072 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3136 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3200 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3264 exceeded budget by 49ms; composite=0ms persist=39ms; top: id=30(8ms) id=31(0ms) id=27(0ms)
+[scheduler] tick 3328 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3392 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3456 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3520 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3584 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3648 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3712 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3776 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3840 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3904 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 3968 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4032 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] slow resolve(s) this tick: 1
+[scheduler] tick 4096 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4160 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4224 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4288 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4352 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4416 exceeded budget by 11ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4480 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4544 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4608 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4672 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4736 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4800 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4864 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4928 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 4992 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5056 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5120 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5184 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5248 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5312 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[HC] TL fire -> palette_toggle
+[sched] preempted chain 14 "palette" after 496142us
+[scheduler] tick 5376 exceeded budget by 11ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5440 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5504 exceeded budget by 115ms; composite=65ms persist=39ms; top: id=30(9ms) id=31(0ms) id=27(0ms)
+[scheduler] tick 5568 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5632 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5696 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[HC] BL fire -> workspace 0 -> 1
+[scheduler] tick 5760 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5824 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5888 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 5952 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6016 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6080 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6144 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[HC] BR fire -> show desktop
+[scheduler] tick 6208 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6272 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=35(0ms)
+[scheduler] tick 6336 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6400 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6464 exceeded budget by 49ms; composite=0ms persist=39ms; top: id=30(8ms) id=31(0ms) id=27(0ms)
+[HC] TR fire -> notify_show_all
+[scheduler] tick 6528 exceeded budget by 72ms; composite=63ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6592 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6656 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(8ms) id=31(0ms) id=52(0ms)
+[scheduler] tick 6720 exceeded budget by 10ms; composite=0ms persist=0ms; top: id=30(9ms) id=31(0ms) id=52(0ms)
+
