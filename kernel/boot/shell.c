@@ -5089,6 +5089,14 @@ static void cmd_selftest(const char *args)
         extern int settings_j4_selftest(void);
         if (settings_j4_selftest()) passes++; else fails++;
     }
+    /* C.4: resize edge/corner hit-detection (8px grab band). Reuses the real
+     * wm_c4_selftest (un-gated, production-safe: pure geometry over a stack-local
+     * surface, zero side effects). corner=6 right=2 left=8 top=1 center=0
+     * 12px-in=0 against the real static hit_resize_edge. [C4]. */
+    {
+        extern int wm_c4_selftest(void);
+        if (wm_c4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

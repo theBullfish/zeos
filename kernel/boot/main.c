@@ -1161,7 +1161,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_C4
         /* C.4 selftest: resize edge/corner hit-detection (8px band). */
-        { extern void wm_c4_selftest(void); wm_c4_selftest(); }
+        { extern int wm_c4_selftest(void); wm_c4_selftest(); }
 #endif
 
 

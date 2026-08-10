@@ -874,11 +874,13 @@ static int hit_resize_edge(chain_surface_t *s, int x, int y) {
     return edge;
 }
 
-#ifdef ZEOS_DIAG_C4
 /* C.4 selftest: resize edge/corner hit-detection with the widened 8px grab band.
  * Deterministic (drives the real static hit_resize_edge) since pixel-precise
- * mouse-to-corner is unreliable. bitmask: top=1, right=2, bottom=4, left=8. */
-void wm_c4_selftest(void)
+ * mouse-to-corner is unreliable. bitmask: top=1, right=2, bottom=4, left=8.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: pure
+ * geometry over a STACK-LOCAL chain_surface_t — no wm surface, no g_* mutation,
+ * no VAULT, no cursor, no compositor. Zero side effects. Returns 1 on PASS. */
+int wm_c4_selftest(void)
 {
     chain_surface_t s;
     for (unsigned i = 0; i < sizeof(s); i++) ((volatile char *)&s)[i] = 0;
@@ -899,8 +901,8 @@ void wm_c4_selftest(void)
     kputs(" center="); kput_dec((uint64_t)(uint32_t)mid);
     kputs(" in12="); kput_dec((uint64_t)(uint32_t)in12);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 /* Detect snap zone from cursor position. Display-aware: zones are
  * relative to the display containing the cursor. */
