@@ -4838,6 +4838,32 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* G.2: shell prompt differs per persona AND the cursor colorway switches per
+     * persona. persona_prompt is pure (read-only); cursor_select_colorway is
+     * exercised 0/1/2 then restored to the FULL default (synchronous, no frame
+     * rendered between, so no visible change). */
+    {
+        extern void cursor_select_colorway(int);
+        extern uint32_t cursor_get_accent(void);
+        const char *p0 = persona_prompt(PERSONA_ZEROS);
+        const char *p1 = persona_prompt(PERSONA_DEREZ);
+        const char *p2 = persona_prompt(PERSONA_FULL);
+        int prompt_distinct = 1;
+        { const char *a=p0,*b=p1; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+        { const char *a=p1,*b=p2; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+        { const char *a=p0,*b=p2; while(*a&&*b&&*a==*b){a++;b++;} if(*a==*b) prompt_distinct=0; }
+        cursor_select_colorway(0); uint32_t c0 = cursor_get_accent();
+        cursor_select_colorway(1); uint32_t c1 = cursor_get_accent();
+        cursor_select_colorway(2); uint32_t c2 = cursor_get_accent();
+        int cursor_switches = (c0 != c1) && (c1 != c2) && (c0 != c2);
+        cursor_select_colorway(2);   /* restore FULL default */
+        int ok = prompt_distinct && cursor_switches;
+        kputs("  G.2 persona (prompt_distinct="); kput_dec((uint64_t)prompt_distinct);
+        kputs(" cursor_switches="); kput_dec((uint64_t)cursor_switches);
+        kputs(" ["); kputs(p0); kputs("/"); kputs(p1); kputs("/"); kputs(p2); kputs("]): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
