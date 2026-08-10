@@ -1,0 +1,5 @@
+L.2 preset physics via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  L.2 presets peak(sn/sm/bo/in)=103/101/128/103 ticks(sm/in)=226/104 -> PASS
+--- boot 2 ---
+  L.2 presets peak(sn/sm/bo/in)=103/101/128/103 ticks(sm/in)=226/104 -> PASS

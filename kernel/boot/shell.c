@@ -4694,6 +4694,42 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* L.2: the 4 spring presets produce DISTINCT, name-appropriate physics (not
+     * just distinct constants). Run each 0->100 via the real anim system; measure
+     * peak (overshoot) + ticks-to-settle. Expect: BOUNCY overshoots (low damping),
+     * SMOOTH peaks below bouncy, INTERACTIVE settles faster than smooth (stiffest),
+     * all converge to ~100. Presets from theme.h. */
+    {
+        extern int anim_spring(float,float,float,float,void(*)(int,float,void*),void*);
+        extern void anim_tick(float);
+        extern float anim_position(int);
+        extern int anim_is_active(int);
+        extern void anim_cancel(int);
+        float S[4] = {SPRING_SNAPPY_S, SPRING_SMOOTH_S, SPRING_BOUNCY_S, SPRING_INTERACTIVE_S};
+        float D[4] = {SPRING_SNAPPY_D, SPRING_SMOOTH_D, SPRING_BOUNCY_D, SPRING_INTERACTIVE_D};
+        float peak[4]; int tk[4];
+        for (int k = 0; k < 4; k++) {
+            int id = anim_spring(0.0f, 100.0f, S[k], D[k], 0, 0);
+            float pk = 0.0f; int t = 0;
+            while (id >= 0 && anim_is_active(id) && t < 6000) {
+                anim_tick(1.0f/240.0f); t++;
+                float p = anim_position(id); if (p > pk) pk = p;
+            }
+            peak[k] = (id >= 0) ? pk : 0.0f; tk[k] = t;
+            if (id >= 0) anim_cancel(id);
+        }
+        int bouncy_overshoots  = (peak[2] > 101.0f);
+        int smooth_below_bouncy= (peak[1] < peak[2]);
+        int interactive_faster = (tk[3] < tk[1]);
+        int all_converge = (peak[0] > 99.0f && peak[1] > 99.0f && peak[2] > 99.0f && peak[3] > 99.0f);
+        int ok = bouncy_overshoots && smooth_below_bouncy && interactive_faster && all_converge;
+        kputs("  L.2 presets peak(sn/sm/bo/in)=");
+        kput_dec((uint64_t)peak[0]); kputs("/"); kput_dec((uint64_t)peak[1]); kputs("/");
+        kput_dec((uint64_t)peak[2]); kputs("/"); kput_dec((uint64_t)peak[3]);
+        kputs(" ticks(sm/in)="); kput_dec((uint64_t)tk[1]); kputs("/"); kput_dec((uint64_t)tk[3]);
+        kputs(ok ? " -> PASS\n" : " -> FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
