@@ -1115,7 +1115,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #ifdef ZEOS_DIAG_D5
         /* D.5 selftest: panel height follows density (48/40/32) live.
          * Restores original density. */
-        { extern void access_d5_selftest(void); access_d5_selftest(); }
+        { extern int access_d5_selftest(void); access_d5_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_E4

@@ -5043,6 +5043,16 @@ static void cmd_selftest(const char *args)
         extern int access_m4_selftest(void);
         if (access_m4_selftest()) passes++; else fails++;
     }
+    /* D.5: density -> panel height, wired end-to-end. Reuses the real
+     * access_d5_selftest (un-gated). Drives real access_set_density across
+     * COMFORTABLE/STANDARD/COMPACT and checks BOTH the density->height map AND
+     * the panel's actually-applied live height == 48/40/32; restores density
+     * (net no change; access_save persists to VAULT, final write restores boot
+     * value — G.4/M.7 pattern). [D5]. */
+    {
+        extern int access_d5_selftest(void);
+        if (access_d5_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

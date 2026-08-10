@@ -165,16 +165,21 @@ int access_m4_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_D5
-#include "kprint.h"
 /*
  * D.5 selftest: prove panel height follows density live (48/40/32 for
  * COMFORTABLE/STANDARD/COMPACT). Drives the real access_set_density() and reads
  * back both the density->height map and the panel's actually-applied height,
  * proving the mapping is wired end-to-end (not just an init param). Restores
  * the original density. Measured + printed to serial (observed on real boot).
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: uses
+ * the REAL access_set_density (that is the point — it proves end-to-end
+ * propagation to panel/compositor/dock) and saves+restores the density (net no
+ * change). NOTE: access_set_density calls access_save() -> VAULT write, so this
+ * persists 4x (3 modes + restore) with the FINAL write returning density to its
+ * boot value (net-restored) — same accepted VAULT pattern as G.4/M.7. Returns 1
+ * on PASS.
  */
-void access_d5_selftest(void)
+int access_d5_selftest(void)
 {
     extern int panel_get_height(void);
     density_mode_t saved = g_access.density;
@@ -194,8 +199,8 @@ void access_d5_selftest(void)
 
     access_set_density(saved);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif /* ZEOS_DIAG_D5 */
 
 /* ── Init ── */
 
