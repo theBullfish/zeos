@@ -105,6 +105,16 @@ time.sleep(0.4); key("ret"); time.sleep(0.6)
 # Cursor motion + click feedback (E.2/E.3)
 rel(-200,-150); shot("cursor-moved")
 btn(True); time.sleep(0.15); btn(False); shot("cursor-click")
+# D.11: drag the Files desktop icon (grid 0,0 ~= (35,75)) onto the Files window
+# (~400,400) -> desktop_drag_end feeds that surface its payload. Un-gated serial:
+# "DESK: fed 'Files' -> surface N". Cursor is at (760,390) here (init center +
+# cursor-moved rel); known-position rel to the icon, press, drag, release, then
+# return the cursor to (760,390) so the later K.2 block's math stays valid.
+rel(-725,-315)                                   # (760,390) -> Files icon (35,75)
+btn(True); time.sleep(0.2)                        # desktop_drag_start on Files icon
+rel(365,325); time.sleep(0.2)                     # drag over the Files window (400,400)
+btn(False); time.sleep(0.45); shot("d11-drop")   # desktop_drag_end -> wm_feed_surface
+rel(360,-10); time.sleep(0.1)                     # return cursor to (760,390)
 # Command palette via Super+Space (E.8 keybinds, J.3 search palette)
 def combo(mods, k):
     # Inter-event settles: firing modifier-down, key, and releases back-to-back

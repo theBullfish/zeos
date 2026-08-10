@@ -1,0 +1,5 @@
+D.11 drag desktop icon -> chain surface, production cold-boot, settled 2-boot:
+--- boot 1 ---
+DESK: fed 'Files' -> surface 1
+--- boot 2 ---
+DESK: fed 'Files' -> surface 1
