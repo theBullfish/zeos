@@ -1,0 +1,5 @@
+A.7 AES-XTS-256 round-trip via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  A.7 aes-xts (armed=1 cipher_differs=1 recovered=1): PASS
+--- boot 2 ---
+  A.7 aes-xts (armed=1 cipher_differs=1 recovered=1): PASS

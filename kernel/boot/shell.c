@@ -4730,6 +4730,37 @@ static void cmd_selftest(const char *args)
         kputs(ok ? " -> PASS\n" : " -> FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* A.7: PIN-gated AES-XTS-256 disk crypto round-trips. Uses the LIVE armed key
+     * (armed at boot -- we do NOT call crypto_disk_init, which would re-key the
+     * master and risk VAULT). Create a region, encrypt a known sector (cipher
+     * must differ), decrypt it back (must recover). In-memory buffers only; the
+     * transient region is destroyed after. */
+    {
+        extern int crypto_disk_armed(void);
+        extern int crypto_disk_create_region(const char*, int, uint64_t, uint64_t);
+        extern int crypto_disk_transform(int,int,uint64_t,uint32_t,uint32_t,const void*,void*);
+        extern int crypto_disk_destroy_region(const char*);
+        int armed = crypto_disk_armed();
+        int rid = armed ? crypto_disk_create_region("a7prod", 0, 2048, 64) : -1;
+        int region_ok = (rid >= 0);
+        static uint8_t plain[512], cipher[512], back[512];
+        for (int i = 0; i < 512; i++) plain[i] = (uint8_t)(i * 7 + 3);
+        int enc = -99, dec = -99, differs = 0, recovered = 0;
+        if (region_ok) {
+            enc = crypto_disk_transform(rid, 1, 2048, 1, 512, plain, cipher);   /* encrypt */
+            for (int i = 0; i < 512; i++) if (cipher[i] != plain[i]) { differs = 1; break; }
+            dec = crypto_disk_transform(rid, 0, 2048, 1, 512, cipher, back);    /* decrypt */
+            recovered = 1;
+            for (int i = 0; i < 512; i++) if (back[i] != plain[i]) { recovered = 0; break; }
+            crypto_disk_destroy_region("a7prod");
+        }
+        int ok = armed && region_ok && (enc == 0) && differs && (dec == 0) && recovered;
+        kputs("  A.7 aes-xts (armed="); kput_dec((uint64_t)armed);
+        kputs(" cipher_differs="); kput_dec((uint64_t)differs);
+        kputs(" recovered="); kput_dec((uint64_t)recovered); kputs("): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
