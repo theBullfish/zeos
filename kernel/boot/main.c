@@ -1337,7 +1337,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_E2
         /* E.2 selftest: 22 cursor sprites + hotspot table. */
-        { extern void cursor_e2_selftest(void); cursor_e2_selftest(); }
+        { extern int cursor_e2_selftest(void); cursor_e2_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_J1

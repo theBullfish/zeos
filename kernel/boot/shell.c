@@ -4999,6 +4999,15 @@ static void cmd_selftest(const char *args)
         extern int access_m8_selftest(void);
         if (access_m8_selftest()) passes++; else fails++;
     }
+    /* E.2: cursor states + sprites + hotspots. Reuses the real cursor_e2_selftest
+     * (un-gated, production-safe: cursor_set is pure in-memory, saves+restores
+     * both g_cursor.state and prev_state = no net change). All 22 states have a
+     * non-empty 24x24 sprite, hotspots are per-cursor distinct, cursor_set accepts
+     * every state. [E2]. */
+    {
+        extern int cursor_e2_selftest(void);
+        if (cursor_e2_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
