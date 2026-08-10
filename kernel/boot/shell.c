@@ -5034,6 +5034,15 @@ static void cmd_selftest(const char *args)
         extern int font_f4_selftest(void);
         if (font_f4_selftest()) passes++; else fails++;
     }
+    /* M.4: sensory-mode consumer transforms. Reuses the real access_m4_selftest
+     * (un-gated, production-safe: sets g_access.sensory directly = no VAULT write,
+     * saved+restored; helpers read-only). STANDARD is a pure passthrough
+     * (baseline), LOW_STIMULI mutes the accent + border=1 + deco off,
+     * HIGH_CONTRAST forces white text + border=2. [M4]. */
+    {
+        extern int access_m4_selftest(void);
+        if (access_m4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

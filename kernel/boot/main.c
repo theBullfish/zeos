@@ -1103,7 +1103,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #ifdef ZEOS_DIAG_M4
         /* M.4 sensory-mode consumer selftest: accent muting/boost + border/
          * decorative-anim queries. Passive (no state mutation persists). */
-        { extern void access_m4_selftest(void); access_m4_selftest(); }
+        { extern int access_m4_selftest(void); access_m4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_M5

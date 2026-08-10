@@ -118,7 +118,6 @@ static void apply_sensory_mode(sensory_mode_t mode)
     compositor_dirty_all();
 }
 
-#ifdef ZEOS_DIAG_M4
 #include "kprint.h"
 /*
  * M.4 selftest: prove the sensory-mode consumer layer actually transforms a
@@ -126,8 +125,12 @@ static void apply_sensory_mode(sensory_mode_t mode)
  * Measured (real access_apply_sensory over the real COLOR_FULL_ACCENT constant)
  * and printed to serial so the transform is observable against a stable
  * baseline (the STANDARD passthrough must equal the input).
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: sets
+ * g_access.sensory DIRECTLY (not via the persisting setter) so NO VAULT write,
+ * and saves+restores it (net no change); the transform helpers are read-only.
+ * Returns 1 on PASS.
  */
-void access_m4_selftest(void)
+int access_m4_selftest(void)
 {
     sensory_mode_t saved = g_access.sensory;
     uint32_t in = COLOR_FULL_ACCENT;
@@ -159,8 +162,8 @@ void access_m4_selftest(void)
     kputs("/");                      kput_dec((uint64_t)high_border);
     kputs(" deco(low)=");            kput_dec((uint64_t)low_deco);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif /* ZEOS_DIAG_M4 */
 
 #ifdef ZEOS_DIAG_D5
 #include "kprint.h"
