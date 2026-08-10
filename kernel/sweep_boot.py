@@ -101,6 +101,15 @@ for ch in list("kbtest7"):
     key(ch)
 time.sleep(0.4); key("ret"); time.sleep(0.8)
 shot("term-live")   # non-blocking cmd -> scheduler continues -> Terminal re-renders the live session
+# A.5 (VAULT ramdisk mount + program load, live-query via the production shell):
+# run `ls /programs` -> cmd_ls (shell.c:6473, gated on vault_ready) live-lists the
+# MOUNTED vault's /programs dir to serial, proving the seeded builtin .zp programs
+# actually landed in the mounted filesystem (NOT the static Files-window mockup at
+# main.c:89). Run BEFORE selftest, whose -net none sub-tests can stall the scheduler.
+for q in ["l","s","spc","slash","p","r","o","g","r","a","m","s"]:
+    key(q)
+time.sleep(0.4); key("ret"); time.sleep(1.2); shot("ls-programs")
+
 # B.8 (pure-logic via the production shell): run `selftest`; the material-ladder
 # check prints FIRST in cmd_selftest (before any network test), so grep serial
 # for it even if later network sub-tests stall under -net none. (selftest can
