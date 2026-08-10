@@ -181,6 +181,11 @@ typedef struct {
 
     /* Focused text field (input/textarea) for keyboard entry, or NULL. */
     dom_node_t *focused_input;
+
+    /* Set when a page's <script> tags must run but the surface has no real
+     * width yet — deferred to the first real-width layout so offsetLeft/etc.
+     * and any layout-reading script see correct geometry. */
+    int scripts_pending;
 } browser_t;
 
 /* Initialize browser */

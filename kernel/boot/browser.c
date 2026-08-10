@@ -1989,6 +1989,23 @@ void browser_layout(browser_t *b)
     }
 }
 
+/* Run the current page's <script> tags, then re-style + re-lay-out if a script
+ * mutated the DOM. Assumes the DOM is already laid out at the real surface width
+ * so layout-reading scripts (offsetLeft, etc.) see correct geometry. */
+void browser_run_pending_scripts(browser_t *b)
+{
+    extern void browser_run_scripts(dom_node_t *root);
+    extern int  dom_take_dirty(void);
+    if (!b->dom) return;
+    b->scripts_pending = 0;
+    browser_run_scripts(b->dom);
+    if (dom_take_dirty()) {
+        css_apply_defaults(b->dom);   /* style JS-created nodes */
+        css_apply_inline(b->dom);
+        browser_layout(b);
+    }
+}
+
 int browser_navigate(browser_t *b, const char *url)
 {
     str_copy(b->url, url);
@@ -2304,18 +2321,16 @@ int browser_navigate(browser_t *b, const char *url)
      * once the real width arrives, which is when links get correct box widths. */
     browser_layout(b);
 
-    /* I.7: run the page's <script> tags now that the DOM + layout exist. If a
-     * script mutated the DOM (textContent/setAttribute), re-lay-out so the
-     * change is visible. */
-    {
-        extern void browser_run_scripts(dom_node_t *root);
-        extern int  dom_take_dirty(void);
-        browser_run_scripts(b->dom);
-        if (dom_take_dirty()) {
-            css_apply_defaults(b->dom);   /* style JS-created nodes */
-            css_apply_inline(b->dom);
-            browser_layout(b);
-        }
+    /* I.7: run the page's <script> tags now that the DOM + layout exist — BUT
+     * only if the surface already has a real width. At first open surface_w == 0
+     * (WM sizes it after navigate), so a layout-reading script (offsetLeft,
+     * getBoundingClientRect-style) would see width-0 geometry. In that case
+     * defer: browser_app_draw_content runs the scripts after the first
+     * real-width layout. On later navigations surface_w is known, so run now. */
+    if (b->surface_w > 0) {
+        browser_run_pending_scripts(b);
+    } else {
+        b->scripts_pending = 1;
     }
 
     b->scroll_y = 0;
@@ -2944,6 +2959,11 @@ static void browser_app_draw_content(int id, int x, int y, int w, int h)
         browser_layout(&g_browser_app);
         g_browser_laid_w = w;
         g_browser_laid_h = h;
+        /* First real-width layout is now in place — run any scripts that were
+         * deferred at navigate time (surface_w was 0), so offsetLeft/etc. and
+         * layout-reading scripts see correct geometry. */
+        if (g_browser_app.scripts_pending && w > 0)
+            browser_run_pending_scripts(&g_browser_app);
     }
     browser_draw(&g_browser_app);
     browser_draw_toolbar(&g_browser_app);
