@@ -1678,11 +1678,17 @@ int wm_c12_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_C14
 /* C.14 selftest: parent/child chain stacking — a child links to a parent, the
- * ancestor query walks the chain, self-parent is rejected. */
-void wm_c14_selftest(void)
+ * ancestor query walks the chain, self-parent is rejected.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the 3
+ * probe surfaces have persist_name=0 (no VAULT write on detach) and are created,
+ * asserted, and torn down (detach + tick to full settle so surface_scale_cb
+ * removes them, visible=0/DETACHED) synchronously inside one cmd_selftest call —
+ * so they never composite while visible (no on-screen flash) and leave NO ghost.
+ * Returns 1 on PASS. */
+int wm_c14_selftest(void)
 {
+    extern void anim_tick(float);
     int p  = wm_create_surface("C14p",  -1, 100, 100, 300, 200, 0);
     int c1 = wm_create_surface("C14c1", -1, 150, 150, 280, 180, 0);
     int c2 = wm_create_surface("C14c2", -1, 180, 180, 260, 160, 0);
@@ -1694,12 +1700,24 @@ void wm_c14_selftest(void)
     int anc_trans  = wm_is_ancestor(p, c2);                /* p is ancestor of grandchild */
     int self_reject = (wm_set_parent(p, p) == -1);
     int toplevel = (wm_get_parent(p) == -1);
-    int pass = set1 && set2 && link_ok && anc_direct && anc_trans && self_reject && toplevel;
+
+    /* teardown: detach all 3 and tick to full settle so surface_scale_cb removes
+     * them (no ghost surfaces left on the live desktop). */
+    wm_detach_surface(p); wm_detach_surface(c1); wm_detach_surface(c2);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f / 240.0f);
+    chain_surface_t *pp = wm_get_surface(p), *pc1 = wm_get_surface(c1), *pc2 = wm_get_surface(c2);
+    int torndown = pp && pc1 && pc2 &&
+                   pp->visible == 0 && pp->signal == SIGNAL_DETACHED &&
+                   pc1->visible == 0 && pc1->signal == SIGNAL_DETACHED &&
+                   pc2->visible == 0 && pc2->signal == SIGNAL_DETACHED;
+
+    int pass = set1 && set2 && link_ok && anc_direct && anc_trans && self_reject && toplevel && torndown;
     kputs("[C14] link="); kput_dec((uint64_t)link_ok);
     kputs(" anc_direct="); kput_dec((uint64_t)anc_direct);
     kputs(" anc_transitive="); kput_dec((uint64_t)anc_trans);
     kputs(" self_reject="); kput_dec((uint64_t)self_reject);
     kputs(" toplevel="); kput_dec((uint64_t)toplevel);
+    kputs(" torndown="); kput_dec((uint64_t)torndown);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

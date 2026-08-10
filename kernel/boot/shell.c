@@ -4952,6 +4952,16 @@ static void cmd_selftest(const char *args)
         extern int wm_c12_selftest(void);
         if (wm_c12_selftest()) passes++; else fails++;
     }
+    /* C.14: parent/child chain stacking. Reuses the real wm_c14_selftest
+     * (un-gated, production-safe: 3 probes persist_name=0, created+asserted+
+     * torn-down synchronously so never composited while visible). A child links
+     * to a parent, a grandchild to the child; the ancestor query walks the chain
+     * transitively; self-parent is rejected; top-level has no parent. All 3 torn
+     * down (no ghost). [C14]. */
+    {
+        extern int wm_c14_selftest(void);
+        if (wm_c14_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
