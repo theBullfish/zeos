@@ -4962,6 +4962,15 @@ static void cmd_selftest(const char *args)
         extern int wm_c14_selftest(void);
         if (wm_c14_selftest()) passes++; else fails++;
     }
+    /* C.11: non-modal popover. Reuses the real popover_c11_selftest (un-gated,
+     * production-safe: popover is a g_pv global, opened+closed synchronously so
+     * never composited while active). Opens near the right edge (must clamp
+     * on-screen), stays NON-modal (context_menu_active==0), holds its 3 lines,
+     * closes cleanly. [C11]. */
+    {
+        extern int popover_c11_selftest(void);
+        if (popover_c11_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

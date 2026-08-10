@@ -347,12 +347,14 @@ void popover_draw(void)
         fb_text(g_pv.x + PV_PAD, g_pv.y + PV_PAD + i * PV_LINE_H, g_pv.lines[i], COLOR_ON_SURFACE);
 }
 
-#ifdef ZEOS_DIAG_C11
-#include "kprint.h"
 /* C.11 selftest: popover opens attached (clamped on-screen), is NON-modal
  * (context_menu_active stays 0 — it does not grab modal input), holds its lines,
- * and closes cleanly. */
-void popover_c11_selftest(void)
+ * and closes cleanly.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the
+ * popover is a g_pv global (NOT a wm surface), opened and closed synchronously
+ * inside one cmd_selftest call (never composited while active -> no on-screen
+ * flash), and popover_close leaves g_pv.active=0. Returns 1 on PASS. */
+int popover_c11_selftest(void)
 {
     const char *lines[3] = { "cpu:0  LIVE", "12 chains", "0 errors" };
     popover_open(1850, 30, lines, 3);   /* near right edge -> must clamp left */
@@ -370,8 +372,8 @@ void popover_c11_selftest(void)
     kputs(" lines_ok="); kput_dec((uint64_t)lines_ok);
     kputs(" closed="); kput_dec((uint64_t)closed);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 /* ── C.10: Sheet (modal, slides down from a window titlebar) ─────────────────
  * A sheet is attached to a parent surface and is MODAL to that surface only

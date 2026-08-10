@@ -1287,7 +1287,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_C11
         /* C.11 selftest: non-modal popover. */
-        { extern void popover_c11_selftest(void); popover_c11_selftest(); }
+        { extern int popover_c11_selftest(void); popover_c11_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_C13
