@@ -4779,6 +4779,19 @@ static void cmd_selftest(const char *args)
         kputs("): "); kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* P.2: the Z+ REPL core (zp_run = parse->compile->EXECUTE) runs real Z+
+     * transform programs -- the exact syntax the shell's `zp` command uses.
+     * (Covers the execute path P.3's parse+compile check did not.) */
+    {
+        extern int zp_run(const char*);
+        int rc_dbl = zp_run("double : input -> * 2 -> output\n");
+        int rc_add = zp_run("adder : input -> + 100 -> output\n");
+        int ok = (rc_dbl >= 0) && (rc_add >= 0);
+        kputs("  P.2 zplus REPL (zp_run double="); kput_dec((uint64_t)(rc_dbl >= 0));
+        kputs(" adder="); kput_dec((uint64_t)(rc_add >= 0));
+        kputs("): "); kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

@@ -1,0 +1,5 @@
+P.2 Z+ REPL zp_run via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  P.2 zplus REPL (zp_run double=1 adder=1): PASS
+--- boot 2 ---
+  P.2 zplus REPL (zp_run double=1 adder=1): PASS
