@@ -4971,6 +4971,16 @@ static void cmd_selftest(const char *args)
         extern int popover_c11_selftest(void);
         if (popover_c11_selftest()) passes++; else fails++;
     }
+    /* C.10: modal sheet slide-from-titlebar. Reuses the real sheet_c10_selftest
+     * (un-gated, production-safe: 2 probe surfaces persist_name=0, created+
+     * asserted+torn-down synchronously; sheet slide-out ticked to settle so
+     * sheet_draw early-returns). Sheet attaches to a parent, springs down
+     * gradually, is MODAL to that parent only (not to another surface), closes;
+     * both surfaces torn down + sheet tucked (no ghost). [C10]. */
+    {
+        extern int sheet_c10_selftest(void);
+        if (sheet_c10_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

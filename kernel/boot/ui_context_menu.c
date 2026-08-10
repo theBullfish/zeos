@@ -437,15 +437,21 @@ void sheet_draw(void)
         fb_text(g_sheet.x + 12, g_sheet.y + 8, g_sheet.title, COLOR_ON_SURFACE);
 }
 
-#ifdef ZEOS_DIAG_C10
-#include "kprint.h"
 /* C.10 selftest: sheet attaches to a parent surface, springs down (gradual),
- * is modal to that parent only, and closes. */
-void sheet_c10_selftest(void)
+ * is modal to that parent only, and closes.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the 2
+ * probe surfaces have persist_name=0 (no VAULT write on detach) and are created,
+ * asserted, and torn down (detach + tick to settle so surface_scale_cb removes
+ * them) synchronously inside one cmd_selftest call; after sheet_close the slide
+ * spring is ticked to full settle (slide->0) so sheet_draw early-returns — no
+ * ghost sheet or ghost surface left on the live desktop. Returns 1 on PASS. */
+int sheet_c10_selftest(void)
 {
     extern int  wm_create_surface(const char*, int, int, int, int, int, void(*)(int,int,int,int,int));
     extern void wm_force_visible(int);
     extern void anim_tick(float);
+    extern void wm_detach_surface(int);
+    extern chain_surface_t *wm_get_surface(int);
     int p = wm_create_surface("C10parent", -1, 300, 200, 500, 400, 0);
     wm_force_visible(p);
     int other = wm_create_surface("C10other", -1, 50, 50, 200, 150, 0);
@@ -461,13 +467,26 @@ void sheet_c10_selftest(void)
     sheet_close();
     int closed = (sheet_active() == 0);
 
-    int pass = opened && modal_parent && not_modal_other && sliding && down && closed;
+    /* teardown: tick the sheet slide-out to settle (slide->0 so sheet_draw
+     * early-returns) AND detach both probe surfaces so surface_scale_cb removes
+     * them — no ghost sheet/surface left on the live desktop. */
+    wm_detach_surface(p); wm_detach_surface(other);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f/240.0f);
+    int sheet_tucked = (g_sheet.slide <= 0.01f);
+    chain_surface_t *pp = wm_get_surface(p), *po = wm_get_surface(other);
+    int torndown = pp && po &&
+                   pp->visible == 0 && pp->signal == SIGNAL_DETACHED &&
+                   po->visible == 0 && po->signal == SIGNAL_DETACHED &&
+                   sheet_tucked;
+
+    int pass = opened && modal_parent && not_modal_other && sliding && down && closed && torndown;
     kputs("[C10] opened="); kput_dec((uint64_t)opened);
     kputs(" modal_parent="); kput_dec((uint64_t)modal_parent);
     kputs(" not_modal_other="); kput_dec((uint64_t)not_modal_other);
     kputs(" sliding="); kput_dec((uint64_t)sliding);
     kputs(" down="); kput_dec((uint64_t)down);
     kputs(" closed="); kput_dec((uint64_t)closed);
+    kputs(" torndown="); kput_dec((uint64_t)torndown);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
