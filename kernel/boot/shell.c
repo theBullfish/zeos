@@ -5053,6 +5053,14 @@ static void cmd_selftest(const char *args)
         extern int access_d5_selftest(void);
         if (access_d5_selftest()) passes++; else fails++;
     }
+    /* J.3: search-first — the command palette enumerates every registry setting.
+     * Reuses the real palette_j3_selftest (un-gated, production-safe: refreshes
+     * the hidden palette's settings items and restores pal.item_count; never
+     * shown, no compositor dirty). settings items == settings_count(). [J3]. */
+    {
+        extern int palette_j3_selftest(void);
+        if (palette_j3_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

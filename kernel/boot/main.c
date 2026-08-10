@@ -1125,7 +1125,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_J3
         /* J.3 selftest: palette enumerates every registered setting. */
-        { extern void palette_j3_selftest(void); palette_j3_selftest(); }
+        { extern int palette_j3_selftest(void); palette_j3_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_L5

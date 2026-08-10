@@ -430,9 +430,22 @@ static void palette_refresh_settings(void)
         kputs("[palette] NOTE: settings truncated (palette full)\n");
 }
 
-#ifdef ZEOS_DIAG_J3
-void palette_j3_selftest(void)
+/* J.3 selftest: the command palette enumerates EVERY registry setting (search-
+ * first settings). Refreshes the palette's settings items and asserts the count
+ * matches settings_count() (or the palette hit its cap).
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * palette_refresh_settings only mutates the palette's item list, which is never
+ * rendered while the palette is hidden (pal.visible=0 at the shell) and is fully
+ * rebuilt on the next palette_show — a benign internal recompute (F.4 class). It
+ * does NOT set pal.visible or dirty the compositor. Safety rests on the
+ * render-gate (nothing reads pal.items[] while hidden) + the full rebuild on the
+ * next palette_show; we also restore pal.item_count so a hidden enumeration
+ * leaves no observable change. (Not byte-identical: items[] content beyond the
+ * restored count is stale, but unreferenced and overwritten on next show.)
+ * Returns 1 on PASS. */
+int palette_j3_selftest(void)
 {
+    int saved_item_count = pal.item_count;
     palette_refresh_settings();
     int settings_items = 0;
     for (int i = 0; i < pal.item_count; i++) {
@@ -442,11 +455,12 @@ void palette_j3_selftest(void)
     }
     int reg = settings_count();
     int pass = (reg > 0) && (settings_items == reg || pal.item_count >= PALETTE_MAX_ITEMS);
+    pal.item_count = saved_item_count;   /* restore: leave the hidden palette list untouched */
     kputs("[J3] palette settings items="); kput_dec((uint64_t)settings_items);
     kputs(" registry="); kput_dec((uint64_t)reg);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 void palette_show(void)
 {
