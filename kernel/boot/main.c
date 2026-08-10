@@ -1274,7 +1274,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 #endif
 
 #ifdef ZEOS_DIAG_C12
-        { extern void wm_c12_selftest(void); wm_c12_selftest(); }
+        { extern int wm_c12_selftest(void); wm_c12_selftest(); }
 #endif
 #ifdef ZEOS_DIAG_C14
         { extern void wm_c14_selftest(void); wm_c14_selftest(); }

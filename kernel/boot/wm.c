@@ -1634,11 +1634,17 @@ int wm_c13_selftest(void)
     return pass;
 }
 
-#ifdef ZEOS_DIAG_C12
 /* C.12 selftest: a surface multiplexes chains as tabs; switching changes the
- * active tab AND the chain the surface renders. */
-void wm_c12_selftest(void)
+ * active tab AND the chain the surface renders.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: the
+ * probe surface has persist_name=0 (no VAULT write on detach) and is created,
+ * asserted, and torn down (detach + tick to full settle so surface_scale_cb
+ * removes it, visible=0/DETACHED) synchronously inside one cmd_selftest call —
+ * so it never composites while visible (no on-screen flash) and leaves NO ghost.
+ * Returns 1 on PASS. */
+int wm_c12_selftest(void)
 {
+    extern void anim_tick(float);
     int s = wm_create_surface("C12", -1, 200, 200, 500, 350, 0);
     wm_force_visible(s);
     int t0 = wm_tab_add(s, 10, "cpu");
@@ -1652,16 +1658,25 @@ void wm_c12_selftest(void)
     int active2 = (wm_tab_active(s) == 2);
     int chain2 = sf && (sf->chain_id == 30);               /* now renders gpu */
     int reject = (wm_tab_switch(s, 9) == -1);              /* out of range */
-    int pass = count_ok && active0 && chain0 && active2 && chain2 && reject;
+
+    /* teardown: detach + tick to full settle so surface_scale_cb removes the
+     * surface (no ghost left on the live desktop). */
+    wm_detach_surface(s);
+    for (int i = 0; i < 600; i++) anim_tick(1.0f / 240.0f);
+    chain_surface_t *ps = wm_get_surface(s);
+    int torndown = ps && (ps->visible == 0) && (ps->signal == SIGNAL_DETACHED);
+
+    int pass = count_ok && active0 && chain0 && active2 && chain2 && reject && torndown;
     kputs("[C12] count="); kput_dec((uint64_t)wm_tab_count(s));
     kputs(" active0="); kput_dec((uint64_t)active0);
     kputs(" chain0="); kput_dec((uint64_t)chain0);
     kputs(" switch2="); kput_dec((uint64_t)active2);
     kputs(" chain2="); kput_dec((uint64_t)chain2);
     kputs(" reject_oob="); kput_dec((uint64_t)reject);
+    kputs(" torndown="); kput_dec((uint64_t)torndown);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 #ifdef ZEOS_DIAG_C14
 /* C.14 selftest: parent/child chain stacking — a child links to a parent, the

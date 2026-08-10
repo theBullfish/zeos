@@ -4942,6 +4942,16 @@ static void cmd_selftest(const char *args)
         extern int wm_c13_selftest(void);
         if (wm_c13_selftest()) passes++; else fails++;
     }
+    /* C.12: chain-tab multiplex. Reuses the real wm_c12_selftest (un-gated,
+     * production-safe: probe persist_name=0, created+asserted+torn-down
+     * synchronously so never composited while visible). A surface multiplexes 3
+     * chains as tabs; the first add is active (renders chain 10); switching to
+     * tab 2 rebinds the rendered chain (30); an out-of-range switch is rejected;
+     * surface torn down (no ghost). [C12]. */
+    {
+        extern int wm_c12_selftest(void);
+        if (wm_c12_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
