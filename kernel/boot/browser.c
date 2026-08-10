@@ -2112,6 +2112,28 @@ int browser_navigate(browser_t *b, const char *url)
                    "console.log('grid row0', row0, 'row1', row1, 'wrapped', wrapped, 'cols', cols, 'aligned', aligned);"
                    "</script>"
                    "</body></html>";
+        } else if (str_eq(url, "test:submit")) {
+            /* I.7: form submit event — clicking the submit button fires a
+             * "submit" handler on the enclosing <form>, which mutates the DOM. */
+            html = "<html><head><title>Submit</title></head><body>"
+                   "<h1>Submit Demo</h1>"
+                   "<form id=\"f\">"
+                     "<input id=\"name\" value=\"robot\">"
+                     "<button id=\"go\">Send</button>"
+                   "</form>"
+                   "<p id=\"out\">not submitted</p>"
+                   "<script>"
+                   "var count = 0;"
+                   "document.getElementById('f').addEventListener('submit', function(e){"
+                   "  count = count + 1;"
+                   "  var v = document.getElementById('name').value;"
+                   "  document.getElementById('out').textContent = 'submitted #' + count + ' name=' + v;"
+                   "  console.log('submit fired count', count, 'name', v, 'target', e.target.tagName);"
+                   "});"
+                   "console.log('submit-page ready; go at', "
+                     "document.getElementById('go').offsetLeft, document.getElementById('go').offsetTop);"
+                   "</script>"
+                   "</body></html>";
         } else if (str_eq(url, "test:fetch")) {
             /* I.7 fetch(): a script pulls a real URL over the net stack and
              * writes the result into the DOM from a Promise .then chain. */
@@ -2564,6 +2586,16 @@ void browser_click(browser_t *b, int x, int y) {
         int fired = 0;
         for (dom_node_t *t = el; t; t = t->parent)
             fired += zeos_js_dispatch_event(t, "click");
+        /* If the click hit a submit control, fire "submit" on the enclosing
+         * <form> (standard form submission; a handler may preventDefault-style
+         * just mutate the DOM). Default <button> type is submit. */
+        dom_node_t *btn = 0;
+        for (dom_node_t *t = el; t; t = t->parent)
+            if (str_eq(t->tag, "button") ||
+                (str_eq(t->tag, "input") && str_eq(t->attr_type, "submit"))) { btn = t; break; }
+        if (btn)
+            for (dom_node_t *f = btn; f; f = f->parent)
+                if (str_eq(f->tag, "form")) { fired += zeos_js_dispatch_event(f, "submit"); break; }
         if (fired && dom_take_dirty()) {
             css_apply_defaults(b->dom);   /* style JS-created nodes */
             css_apply_inline(b->dom);
@@ -2849,6 +2881,40 @@ void browser_app_click(int x, int y)
      * a JS click handler may have mutated + re-laid-out the current page. The
      * compositor only redraws dirty regions at idle, so force a full repaint. */
     { extern void compositor_dirty_all(void); compositor_dirty_all(); }
+}
+
+/* Click at PAGE coordinates (content-relative, scroll-adjusted) rather than
+ * screen coordinates — deterministic for tests that know an element's
+ * offsetLeft/offsetTop. Converts to screen space and routes through the
+ * normal click path. */
+/* Look up an element by id in the live (post-layout) DOM and return its
+ * page-space box. Returns 1 on hit. Used by the `bbox` diagnostic so tests
+ * click the element at its ACTUAL rendered position, not a stale offset. */
+int browser_app_node_box(const char *id, int *x, int *y, int *w, int *h)
+{
+    if (!g_browser_active || !g_browser_app.dom) return 0;
+    extern dom_node_t *dom_get_by_id(dom_node_t *root, const char *id);
+    dom_node_t *el = dom_get_by_id(g_browser_app.dom, id);
+    if (!el) return 0;
+    /* Accumulate ancestor offsets (box.x/y are parent-relative). */
+    int ax = 0, ay = 0;
+    for (dom_node_t *p = el->parent; p; p = p->parent) {
+        ax += p->box.x + p->style.padding[3];
+        ay += p->box.y + p->style.padding[0];
+    }
+    if (x) *x = ax + el->box.x;
+    if (y) *y = ay + el->box.y;
+    if (w) *w = el->box.w;
+    if (h) *h = el->box.h;
+    return 1;
+}
+
+void browser_app_click_page(int px, int py)
+{
+    if (!g_browser_active) return;
+    int x = g_browser_app.surface_x + 8 + px;
+    int y = g_browser_app.surface_y + 48 + py - g_browser_app.scroll_y;
+    browser_app_click(x, y);
 }
 
 /* Open (or focus) the browser app and navigate to url. Returns

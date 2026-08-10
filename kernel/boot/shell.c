@@ -272,6 +272,8 @@ static void cmd_web(const char *args);
 static void cmd_browse(const char *args);
 static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
+static void cmd_bclickp(const char *args);
+static void cmd_bbox(const char *args);
 static void cmd_tcpsend(const char *args);
 static void cmd_domsub(const char *args);
 static void cmd_js(const char *args);
@@ -786,6 +788,8 @@ static const struct shell_cmd commands[] = {
     {"browse",  "open a URL in the Zeos browser (browse <url>)", cmd_browse, VIS_ALWAYS},
     {"ws",      "WebSocket echo test: ws <host> [path] [message]", cmd_ws, VIS_ALWAYS},
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
+    {"bclickp", "browser click at page coords: bclickp <pageX> <pageY>", cmd_bclickp, VIS_DEREZ},
+    {"bbox",    "browser element box: bbox <id>", cmd_bbox, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
     {"domsub",  "Dom/Sub cohort: show + run election selftest", cmd_domsub, VIS_DEREZ},
     {"js",      "evaluate JavaScript (QuickJS): js <expr>", cmd_js, VIS_ALWAYS},
@@ -3193,6 +3197,43 @@ static void cmd_bclick(const char *args)
     int y = cam_atoi(p);
     kputs("  bclick: click ("); kput_dec(x); kputc(','); kput_dec(y); kputs(")\n");
     browser_app_click(x, y);
+}
+
+/* Click at PAGE coordinates (content-relative) — deterministic for tests that
+ * read an element's offsetLeft/offsetTop. Usage: bclickp <pageX> <pageY> */
+static void cmd_bclickp(const char *args)
+{
+    extern int browser_app_active(void);
+    extern void browser_app_click_page(int px, int py);
+    if (!browser_app_active()) {
+        kputs("  bclickp: browser not open (run `browse` first)\n");
+        return;
+    }
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    int x = cam_atoi(p);
+    while (*p && *p != ' ') p++;
+    while (*p == ' ') p++;
+    int y = cam_atoi(p);
+    kputs("  bclickp: page-click ("); kput_dec(x); kputc(','); kput_dec(y); kputs(")\n");
+    browser_app_click_page(x, y);
+}
+
+/* Print an element's live (post-layout) page box. Usage: bbox <id> */
+static void cmd_bbox(const char *args)
+{
+    extern int browser_app_node_box(const char *id, int *x, int *y, int *w, int *h);
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    char id[128]; int i = 0;
+    while (p[i] && p[i] != ' ' && i < 127) { id[i] = p[i]; i++; }
+    id[i] = 0;
+    int x, y, w, h;
+    if (browser_app_node_box(id, &x, &y, &w, &h))
+        { kputs("  bbox "); kputs(id); kputs(" x="); kput_dec(x); kputs(" y="); kput_dec(y);
+          kputs(" w="); kput_dec(w); kputs(" h="); kput_dec(h); kputc('\n'); }
+    else
+        kputs("  bbox: not found\n");
 }
 
 /* Diagnostic: send N bytes to a raw-TCP echo server in ONE tcp_send_on call,
