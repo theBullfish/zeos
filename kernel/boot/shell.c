@@ -4820,6 +4820,24 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* G.1: the 3 personas (Zeros/DereZ/Full) have DISTINCT accent AND dim tokens,
+     * and each persona's dim differs from its accent. Reads the real color tables
+     * via persona_accent_of/persona_dim_of (read-only, no live-state change). */
+    {
+        extern uint32_t persona_accent_of(int);
+        extern uint32_t persona_dim_of(int);
+        uint32_t a0 = persona_accent_of(0), a1 = persona_accent_of(1), a2 = persona_accent_of(2);
+        uint32_t d0 = persona_dim_of(0),    d1 = persona_dim_of(1),    d2 = persona_dim_of(2);
+        int acc_distinct = (a0 != a1) && (a1 != a2) && (a0 != a2);
+        int dim_distinct = (d0 != d1) && (d1 != d2) && (d0 != d2);
+        int dim_ne_acc   = (d0 != a0) && (d1 != a1) && (d2 != a2);
+        int ok = acc_distinct && dim_distinct && dim_ne_acc;
+        kputs("  G.1 persona tokens (acc_distinct="); kput_dec((uint64_t)acc_distinct);
+        kputs(" dim_distinct="); kput_dec((uint64_t)dim_distinct);
+        kputs(" dim!=acc="); kput_dec((uint64_t)dim_ne_acc); kputs("): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

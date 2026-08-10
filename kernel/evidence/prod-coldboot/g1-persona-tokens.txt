@@ -1,0 +1,5 @@
+G.1 persona accent/dim tokens via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  G.1 persona tokens (acc_distinct=1 dim_distinct=1 dim!=acc=1): PASS
+--- boot 2 ---
+  G.1 persona tokens (acc_distinct=1 dim_distinct=1 dim!=acc=1): PASS

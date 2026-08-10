@@ -42,6 +42,11 @@ static const uint32_t dim_table[] = {
     COLOR_FULL_DIM,       /* PERSONA_FULL */
 };
 
+/* Read-only accessors so the production selftest can verify G.1 (accent/dim
+ * tokens distinct per persona) without touching live transition state. */
+uint32_t persona_accent_of(int p) { if (p < 0 || p > 2) p = 2; return accent_table[p]; }
+uint32_t persona_dim_of(int p)    { if (p < 0 || p > 2) p = 2; return dim_table[p]; }
+
 /* ── Transition state ── */
 
 static struct {
