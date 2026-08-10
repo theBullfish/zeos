@@ -1,0 +1,5 @@
+P.3 Z+ compile via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  P.3 zplus (parse->nodes=2 compile->chain_id=1): PASS
+--- boot 2 ---
+  P.3 zplus (parse->nodes=2 compile->chain_id=1): PASS

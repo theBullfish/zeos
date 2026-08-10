@@ -4761,6 +4761,24 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* P.3: Z+ structurally expresses a signal chain — parsing a Z+ program yields
+     * transform nodes, and zp_compile creates a chain in the engine (chain_id>=0).
+     * Config/UI-layout share the same node/chain pipeline. Real zplus, no diag. */
+    {
+        extern int zp_parse(const char*, struct zp_program*);
+        extern int zp_compile(struct zp_program*);
+        static struct zp_program p3;
+        int parsed = zp_parse("dbl : input -> * 2 -> output\n"
+                              "show : input -> print(\"v={value}\")\n", &p3);
+        int has_nodes = (p3.node_count > 0);
+        int cid = zp_compile(&p3);
+        int compiled = (cid >= 0);
+        int ok = (parsed == 0) && has_nodes && compiled;
+        kputs("  P.3 zplus (parse->nodes="); kput_dec((uint64_t)p3.node_count);
+        kputs(" compile->chain_id="); kput_dec((uint64_t)(cid >= 0 ? cid : 0));
+        kputs("): "); kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
