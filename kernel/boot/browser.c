@@ -1592,7 +1592,7 @@ int browser_navigate(browser_t *b, const char *url)
                    "<h1>Fetch Demo</h1>"
                    "<p id=\"out\">loading...</p>"
                    "<script>"
-                   "fetch('http://neverssl.com/').then(function(r){"
+                   "fetch('http://example.com/').then(function(r){"
                    "  console.log('fetch status', r.status, 'ok', r.ok);"
                    "  return r.text();"
                    "}).then(function(t){"
