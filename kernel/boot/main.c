@@ -1145,7 +1145,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_E3
         /* E.3 selftest: cursor click feedback (scale pulse / ripple / burst). */
-        { extern void cursor_e3_selftest(void); cursor_e3_selftest(); }
+        { extern int cursor_e3_selftest(void); cursor_e3_selftest(); }
 #endif
 
 

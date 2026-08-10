@@ -5008,6 +5008,16 @@ static void cmd_selftest(const char *args)
         extern int cursor_e2_selftest(void);
         if (cursor_e2_selftest()) passes++; else fails++;
     }
+    /* E.3: cursor click-feedback physics. Reuses the real cursor_e3_selftest
+     * (un-gated, production-safe: snapshots the whole g_cursor struct, cancels
+     * the springs it spawns, and restores byte-identically = no ghost ripple/
+     * scale, no moved cursor). SCALE press shrinks + release restores; RIPPLE
+     * press spawns a growing/fading ripple; BURST press swaps sprite + release
+     * restores. [E3]. */
+    {
+        extern int cursor_e3_selftest(void);
+        if (cursor_e3_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

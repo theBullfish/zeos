@@ -328,13 +328,22 @@ void cursor_draw(void) {
     }
 }
 
-#ifdef ZEOS_DIAG_E3
+#include "kprint.h"   /* header-guarded; E.3/E.2 selftests print to serial */
 /* E.3 selftest: prove all three click-feedback physics fire.
  *  SCALE:  press springs scale toward SCALE_PRESSED (0.85), release restores ~1.0
  *  RIPPLE: press spawns an active ripple whose radius grows and opacity fades
- *  BURST:  press swaps to CURSOR_CLICK_BURST sprite, release restores previous */
-void cursor_e3_selftest(void)
+ *  BURST:  press swaps to CURSOR_CLICK_BURST sprite, release restores previous
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: this
+ * heavily mutates live cursor state (position via cursor_move, ripples, scale,
+ * springs, state/prev_state, click_anim), so it snapshots the WHOLE g_cursor
+ * struct up front, then before returning CANCELS every spring the test spawned
+ * (scale + ripple radius/opacity — else their orphaned callbacks would re-corrupt
+ * the restored state and render a ghost ripple at 500,500 on the live desktop)
+ * and restores g_cursor byte-identically. No VAULT, no surface. Returns 1 on PASS. */
+int cursor_e3_selftest(void)
 {
+    cursor_t saved = g_cursor;      /* full snapshot of the live cursor */
+
     cursor_move(500, 500);
 
     /* SCALE (default). Tick BOTH anim_tick + cursor_tick to mirror the real
@@ -343,7 +352,8 @@ void cursor_e3_selftest(void)
     g_cursor.anim_scale = -1; g_cursor.scale = SCALE_NORMAL;
     cursor_press();
     for (int i = 0; i < 3; i++) { anim_tick(1.0f / 240.0f); }  /* mid-pulse, pre-settle */
-    int scale_shrank = (g_cursor.scale < SCALE_NORMAL - 0.01f);
+    float scale_min = g_cursor.scale;
+    int scale_shrank = (scale_min < SCALE_NORMAL - 0.01f);
     cursor_release();
     for (int i = 0; i < 400; i++) { anim_tick(1.0f / 240.0f); cursor_tick(1.0f / 240.0f); }
     int scale_restored = (g_cursor.scale > SCALE_NORMAL - 0.02f);
@@ -371,18 +381,34 @@ void cursor_e3_selftest(void)
     cursor_release();
     int burst_off = (g_cursor.state == CURSOR_DEFAULT);
 
-    /* restore default feedback mode */
-    g_cursor.click_anim = CLICK_ANIM_SCALE;
-    g_cursor.scale = SCALE_NORMAL;
+    /* Cancel every spring THIS selftest spawned before restoring — otherwise their
+     * callbacks would fire on the next anim_tick and re-write the restored cursor
+     * fields (live ghost ripple/scale). anim_scale has a real -1 sentinel
+     * (cursor_init); the ripple anim-id fields do NOT (zero-initialized), so guard
+     * ripple cancels on .active (only spawned ripples are active) — never on the
+     * id value, else we'd anim_cancel(slot 0) for the 3 un-spawned ripples and
+     * kill an unrelated spring. Then restore the snapshot and force ALL ripples
+     * inactive so no ghost ring can render even if a click was in-flight when the
+     * selftest ran. */
+    if (g_cursor.anim_scale >= 0) anim_cancel(g_cursor.anim_scale);
+    for (int i = 0; i < MAX_RIPPLES; i++)
+        if (g_cursor.ripples[i].active) {
+            anim_cancel(g_cursor.ripples[i].anim_radius);
+            anim_cancel(g_cursor.ripples[i].anim_opacity);
+        }
+    g_cursor = saved;               /* restore the pre-test cursor */
+    for (int i = 0; i < MAX_RIPPLES; i++) g_cursor.ripples[i].active = 0;  /* no ghost ring */
 
     int pass = scale_shrank && scale_restored && ripple_active && ripple_grew
              && burst_on && burst_off;
     kputs("[E3] scale[press/restore]="); kput_dec((uint64_t)scale_shrank); kput_dec((uint64_t)scale_restored);
+    kputs(" scale_min_x100="); kput_dec((uint64_t)(scale_min * 100.0f));   /* ~85 = 0.85 pressed */
     kputs(" ripple[active/grew]="); kput_dec((uint64_t)ripple_active); kput_dec((uint64_t)ripple_grew);
+    kputs(" r="); kput_dec((uint64_t)rr); kputs(" o="); kput_dec((uint64_t)ro);   /* radius grew, opacity<180 */
     kputs(" burst[on/off]="); kput_dec((uint64_t)burst_on); kput_dec((uint64_t)burst_off);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 uint32_t cursor_get_accent(void) { return g_cursor.accent; }
 
