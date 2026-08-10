@@ -1250,11 +1250,15 @@ void notify_cmd_send(const char *args) {
     kputs(")\n");
 }
 
-#ifdef ZEOS_DIAG_M7
 /* M.7 selftest: Focus Mode suppresses non-CRITICAL notifications and lets
  * CRITICAL through; OFF suppresses nothing. Drives the real access_set_focus_mode
- * and the real suppression predicate used by the notify tick. */
-void notify_m7_selftest(void)
+ * and the real suppression predicate used by the notify tick.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE: saves
+ * the live focus_mode and restores it at the end (net no change). NOTE:
+ * access_set_focus_mode calls access_save() -> VAULT write, so this persists 3x
+ * (0, 1, restore) with the final write returning focus_mode to its boot value —
+ * same net-restored VAULT pattern as G.4's theme_set_scheme. Returns 1 on PASS. */
+int notify_m7_selftest(void)
 {
     extern void access_set_focus_mode(int);
     access_config_t *cfg = access_get();
@@ -1277,5 +1281,5 @@ void notify_m7_selftest(void)
     kputs(" on(info/warn/err/crit)="); kput_dec((uint64_t)on_info); kput_dec((uint64_t)on_warn);
     kput_dec((uint64_t)on_err); kput_dec((uint64_t)on_crit);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif

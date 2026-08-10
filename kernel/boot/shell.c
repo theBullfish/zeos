@@ -4981,6 +4981,15 @@ static void cmd_selftest(const char *args)
         extern int sheet_c10_selftest(void);
         if (sheet_c10_selftest()) passes++; else fails++;
     }
+    /* M.7: Focus Mode notification suppression. Reuses the real notify_m7_selftest
+     * (un-gated). Drives the real access_set_focus_mode + notify_focus_suppresses:
+     * OFF suppresses nothing; ON suppresses INFO/WARN/ERROR but CRITICAL always
+     * passes. Saves+restores focus_mode (net no change; access_save persists to
+     * VAULT 3x, final write restores boot value — G.4 pattern). [M7]. */
+    {
+        extern int notify_m7_selftest(void);
+        if (notify_m7_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
