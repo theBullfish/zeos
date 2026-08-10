@@ -4914,6 +4914,15 @@ static void cmd_selftest(const char *args)
         extern int sigviz_k3_selftest(void);
         if (sigviz_k3_selftest()) passes++; else fails++;
     }
+    /* L.3: compositor ticks anims per frame + re-arms compositing while a spring
+     * is live. Reuses the real compositor_l3_selftest (un-gated, production-safe:
+     * cancels only its own probe spring, no anim_init global reset). Spawns a
+     * spring, runs ONE compositor_advance, asserts the spring advanced (compositor
+     * drove anim_tick) AND dirty re-armed. [L3]. */
+    {
+        extern int compositor_l3_selftest(void);
+        if (compositor_l3_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
