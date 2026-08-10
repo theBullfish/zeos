@@ -137,6 +137,18 @@ key("esc"); time.sleep(0.3)
 combo(["meta_l"], "d");   time.sleep(0.6); shot("show-desktop"); combo(["meta_l"], "d"); time.sleep(0.3)
 # Palette LAST (modal): Super+Space
 combo(["meta_l"], "spc"); time.sleep(0.6); shot("palette"); key("esc"); time.sleep(0.3)
+# E.5 hot corners: slam the cursor into each 8px corner, dwell >150ms. Corner
+# actions print un-gated [HC] serial markers + visible effects. rel() clamps at
+# edges so corner positioning is exact. Move toward center between corners to
+# exit the zone (resets the triggered flag).
+def hc_corner(dx,dy,tag):
+    rel(600,400); time.sleep(0.2)   # exit any corner zone (reset)
+    rel(dx,dy);   time.sleep(0.4)   # slam to target corner + dwell >150ms
+    shot(tag)
+hc_corner(-4000,-4000,"hc-tl"); key("esc"); time.sleep(0.3)  # TL -> palette
+hc_corner(-4000, 4000,"hc-bl")                                 # BL -> workspace next
+hc_corner( 4000, 4000,"hc-br")                                 # BR -> show desktop
+hc_corner( 4000,-4000,"hc-tr")                                 # TR -> notifications
 
 cmd("quit")
 try: qemu.wait(timeout=5)

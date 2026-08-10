@@ -1,0 +1,13 @@
+E.5 hot corners, production cold-boot, settled 2-boot [HC] serial markers:
+--- init ---
+HC: hot corners active (zone=8px, dwell=150ms)
+--- boot 1 ---
+[HC] TL fire -> palette_toggle
+[HC] BL fire -> workspace 0 -> 1
+[HC] BR fire -> show desktop
+[HC] TR fire -> notify_show_all
+--- boot 2 ---
+[HC] TL fire -> palette_toggle
+[HC] BL fire -> workspace 0 -> 1
+[HC] BR fire -> show desktop
+[HC] TR fire -> notify_show_all

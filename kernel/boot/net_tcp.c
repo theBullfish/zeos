@@ -18,6 +18,29 @@
 
 static struct tcp_conn connections[TCP_MAX_CONNECTIONS];
 
+/* RXDBG: non-serial ring recording every ESTABLISHED packet (serial drops lines
+ * during the busy recv loop). Dumped via the `rxdbg` shell command afterwards. */
+struct rxdbg_ent { uint8_t flags; uint16_t dlen; uint32_t seq; uint32_t exp; uint8_t state; };
+static struct rxdbg_ent g_rxdbg[128];
+static volatile int g_rxdbg_n;
+static void rxdbg_rec(uint8_t flags, uint16_t dlen, uint32_t seq, uint32_t exp, uint8_t state) {
+    if (g_rxdbg_n < 128) {
+        g_rxdbg[g_rxdbg_n].flags = flags; g_rxdbg[g_rxdbg_n].dlen = dlen;
+        g_rxdbg[g_rxdbg_n].seq = seq; g_rxdbg[g_rxdbg_n].exp = exp;
+        g_rxdbg[g_rxdbg_n].state = (uint8_t)state; g_rxdbg_n++;
+    }
+}
+void rxdbg_dump(void) {
+    kputs("  [RXDBG] "); kput_dec(g_rxdbg_n); kputs(" ESTABLISHED packets:\n");
+    for (int i = 0; i < g_rxdbg_n; i++) {
+        kputs("   flags=0x"); kput_hex(g_rxdbg[i].flags);
+        kputs(" dlen="); kput_dec(g_rxdbg[i].dlen);
+        kputs(" seq_ok="); kput_dec(g_rxdbg[i].seq == g_rxdbg[i].exp ? 1 : 0);
+        kputs(" state="); kput_dec(g_rxdbg[i].state); kputc('\n');
+    }
+    g_rxdbg_n = 0;
+}
+
 /* ── Listener table ──────────────────────────── */
 
 struct tcp_listener {
@@ -999,6 +1022,7 @@ void tcp_process(const void *frame, uint16_t len)
         break;
 
     case TCP_ESTABLISHED:
+        rxdbg_rec(flags, data_len, seg_seq, conn->ack, (uint8_t)conn->state);
         /* H.5: DATA-path ACK handling — advance the send window + grow the
          * congestion window. Runs for pure ACKs too (data_len==0). This is
          * disjoint from the control-retx clearing above: that block fires only
