@@ -118,6 +118,17 @@ def combo(mods, k):
     for m in reversed(mods):
         cmd("input-send-event",events=[{"type":"key","data":{"down":False,"key":{"type":"qcode","data":m}}}]); time.sleep(0.03)
     time.sleep(0.4)
+
+# K.2: sigviz node-select via KNOWN-POSITION rel (no corner-anchor -> no hot-corner
+# conflict). Cursor is at (760,390) here = init center (960,540) + cursor-moved
+# rel(-200,-150). memory:0 node center ~ (163,210): rel(-597,-180). 1st click ->
+# select (border 1->3px + highlight), 2nd same node -> inspector, empty -> deselect.
+combo(["meta_l"],"g"); time.sleep(0.6); shot("k2-open")
+rel(-597,-180)
+btn(True); time.sleep(0.1); btn(False); time.sleep(0.45); shot("k2-select")
+btn(True); time.sleep(0.1); btn(False); time.sleep(0.45); shot("k2-inspector")
+rel(500,300); btn(True); time.sleep(0.1); btn(False); time.sleep(0.45); shot("k2-deselect")
+key("esc"); time.sleep(0.3)
 # Window-management keybinds FIRST (before the palette, which is modal and eats keys).
 # Each action captured from a CLEAN base: workspace switch first (Super+F2 -> empty ws,
 # Super+F1 -> back), then snap (Super+2), then maximize/restore.

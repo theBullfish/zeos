@@ -76,8 +76,8 @@ while time.time()-t0<75:
 print("desktop:",ready,flush=True)
 time.sleep(1.5)
 sw("\n");time.sleep(0.7)
-sw("browse http://example.com/\n");time.sleep(9.0)
-sw("rxdbg\n");time.sleep(2.0)
+for _ in range(5):
+    sw("browse http://example.com/\n"); time.sleep(6.0)
 shot("fetch")
 print("=== SERIAL (browse http) ===")
 print(ser().split("browse http")[-1][-700:])
