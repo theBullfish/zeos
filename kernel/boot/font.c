@@ -209,12 +209,15 @@ const glyph_t *font_get_glyph(font_id_t font, int size_px, uint32_t codepoint) {
     return cache_render(font, size_px, codepoint);
 }
 
-#ifdef ZEOS_DIAG_F4
 /* F.4 selftest: prove the Inter->Noto fallback chain delivers a glyph the
  * primary face lacks. Finds a codepoint where Inter's glyph index is 0 but the
  * Noto fallback has it, then confirms font_get_glyph(FONT_UI, ...) returns a
- * (necessarily fallback-sourced) glyph. */
-void font_f4_selftest(void)
+ * (necessarily fallback-sourced) glyph.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * read-only over the font tables; font_get_glyph's only side effect is a glyph
+ * cache warm (idempotent — normal rendering would populate it anyway). No VAULT,
+ * no surface, no visible state change. Returns 1 on PASS. */
+int font_f4_selftest(void)
 {
     int found_cp = -1;
     for (uint32_t cp = 0x00A0; cp < 0x2E00 && found_cp < 0; cp++) {
@@ -236,8 +239,8 @@ void font_f4_selftest(void)
     kputs(" gap_cp=0x"); kput_hex((uint64_t)(found_cp < 0 ? 0 : found_cp));
     kputs(" fell_back="); kput_dec((uint64_t)fell_back);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 int font_draw(int x, int y, const char *text, font_id_t font,
               int size_px, uint32_t color)

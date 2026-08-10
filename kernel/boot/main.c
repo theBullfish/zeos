@@ -1156,7 +1156,7 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
 
 #ifdef ZEOS_DIAG_F4
         /* F.4 selftest: Inter->Noto glyph fallback chain. */
-        { extern void font_f4_selftest(void); font_f4_selftest(); }
+        { extern int font_f4_selftest(void); font_f4_selftest(); }
 #endif
 
 #ifdef ZEOS_DIAG_C4

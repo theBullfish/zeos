@@ -5026,6 +5026,14 @@ static void cmd_selftest(const char *args)
         extern int cursor_e4_selftest(void);
         if (cursor_e4_selftest()) passes++; else fails++;
     }
+    /* F.4: Inter->Noto font fallback chain. Reuses the real font_f4_selftest
+     * (un-gated, production-safe: read-only over font tables, glyph-cache warm
+     * only). Finds a codepoint Inter lacks (glyph index 0) but Noto has, then
+     * confirms font_get_glyph(FONT_UI,...) returns a fallback-sourced glyph. [F4]. */
+    {
+        extern int font_f4_selftest(void);
+        if (font_f4_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {
