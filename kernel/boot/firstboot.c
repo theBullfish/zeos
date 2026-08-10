@@ -598,34 +598,26 @@ struct firstboot_config firstboot_run(void)
     if (kbd_irq_owned)
         ioapic_mask(1);
 
+    /* Screen progression traced to serial unconditionally (production evidence
+     * of the 5-screen first-run flow; pure output, no behavior change). */
     /* Screen 1: Welcome */
-#ifdef ZEOS_DIAG_N1
     kputs("[N1] screen 1/5 welcome\n");
-#endif
     screen_welcome();
 
     /* Screen 2: Persona */
-#ifdef ZEOS_DIAG_N1
     kputs("[N1] screen 2/5 persona\n");
-#endif
     cfg.persona = (uint8_t)screen_persona();
 
     /* Screen 3: Window Controls */
-#ifdef ZEOS_DIAG_N1
     kputs("[N1] screen 3/5 controls\n");
-#endif
     cfg.controls_side = (uint8_t)screen_controls();
 
     /* Screen 4: Appearance */
-#ifdef ZEOS_DIAG_N1
     kputs("[N1] screen 4/5 appearance\n");
-#endif
     screen_appearance(&cfg);
 
     /* Screen 5: Done */
-#ifdef ZEOS_DIAG_N1
     kputs("[N1] screen 5/5 done\n");
-#endif
     screen_done();
 
     /* Mark complete so it doesn't run again */

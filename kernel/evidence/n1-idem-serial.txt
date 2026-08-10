@@ -1,0 +1,5 @@
+[persistence] skipped 5 snapshot record(s) due to topology mismatch
+[lockscreen] cold-boot gate: PIN required
+[lockscreen] cold-boot gate: cleared
+[main] first-run: already complete, skipped
+[main] graphical desktop shell up (wallpaper + panel + dock + windows)
