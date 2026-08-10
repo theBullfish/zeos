@@ -40,6 +40,11 @@ extern dom_node_t  *dom_create_text(const char *s);
 extern void         dom_append_child(dom_node_t *parent, dom_node_t *child);
 extern dom_node_t  *dom_get_body(dom_node_t *root);
 extern int          zeos_http_fetch(const char *url, char *body_out, int max, int *status_out);
+extern dom_node_t  *dom_query(dom_node_t *root, const char *sel);
+extern void         dom_query_all(dom_node_t *node, const char *sel,
+                                  void (*visit)(dom_node_t *, void *), void *ctx);
+extern void         dom_set_inner_html(dom_node_t *el, const char *html);
+extern void         dom_get_inner_html(dom_node_t *el, char *buf, int max);
 
 extern JSContext *zeos_js_context(void);
 
@@ -135,15 +140,77 @@ static JSValue el_appendChild(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_DupValue(ctx, argv[0]);   /* DOM appendChild returns the child */
 }
 
+static JSValue el_get_className(JSContext *ctx, JSValueConst this_val)
+{
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *v = dom_get_attr(el, "class");
+    return JS_NewString(ctx, v ? v : "");
+}
+static JSValue el_set_className(JSContext *ctx, JSValueConst this_val, JSValueConst val)
+{
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *s = JS_ToCString(ctx, val);
+    dom_set_attr(el, "class", s ? s : "");
+    if (s) JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+static JSValue el_get_innerHTML(JSContext *ctx, JSValueConst this_val)
+{
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    static char buf[65536];
+    dom_get_inner_html(el, buf, sizeof buf);
+    return JS_NewString(ctx, buf);
+}
+static JSValue el_set_innerHTML(JSContext *ctx, JSValueConst this_val, JSValueConst val)
+{
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *s = JS_ToCString(ctx, val);
+    dom_set_inner_html(el, s ? s : "");
+    if (s) JS_FreeCString(ctx, s);
+    return JS_UNDEFINED;
+}
+
+/* querySelector on an element subtree (or document — see doc_querySelector). */
+static JSValue el_querySelector(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc;
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *sel = JS_ToCString(ctx, argv[0]);
+    dom_node_t *found = dom_query(el, sel ? sel : "");
+    if (sel) JS_FreeCString(ctx, sel);
+    return wrap_element(ctx, found);
+}
+
+struct qsa_ctx { JSContext *ctx; JSValue arr; uint32_t n; };
+static void qsa_visit(dom_node_t *node, void *vctx)
+{
+    struct qsa_ctx *q = (struct qsa_ctx *)vctx;
+    JS_SetPropertyUint32(q->ctx, q->arr, q->n++, wrap_element(q->ctx, node));
+}
+static JSValue el_querySelectorAll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)argc;
+    dom_node_t *el = JS_GetOpaque(this_val, js_element_class_id);
+    const char *sel = JS_ToCString(ctx, argv[0]);
+    struct qsa_ctx q = { ctx, JS_NewArray(ctx), 0 };
+    dom_query_all(el, sel ? sel : "", qsa_visit, &q);
+    if (sel) JS_FreeCString(ctx, sel);
+    return q.arr;
+}
+
 static const JSCFunctionListEntry element_proto_funcs[] = {
     JS_CGETSET_DEF("textContent", el_get_textContent, el_set_textContent),
     JS_CGETSET_DEF("innerText",   el_get_textContent, el_set_textContent),
+    JS_CGETSET_DEF("innerHTML",   el_get_innerHTML, el_set_innerHTML),
+    JS_CGETSET_DEF("className",   el_get_className, el_set_className),
     JS_CGETSET_DEF("tagName",     el_get_tagName, NULL),
     JS_CGETSET_DEF("id",          el_get_id, NULL),
     JS_CFUNC_DEF("getAttribute", 1, el_getAttribute),
     JS_CFUNC_DEF("setAttribute", 2, el_setAttribute),
     JS_CFUNC_DEF("addEventListener", 2, el_addEventListener),
     JS_CFUNC_DEF("appendChild", 1, el_appendChild),
+    JS_CFUNC_DEF("querySelector", 1, el_querySelector),
+    JS_CFUNC_DEF("querySelectorAll", 1, el_querySelectorAll),
 };
 
 static JSValue wrap_element(JSContext *ctx, dom_node_t *el)
@@ -163,6 +230,23 @@ static JSValue doc_getElementById(JSContext *ctx, JSValueConst this_val, int arg
     dom_node_t *el = dom_get_by_id(g_dom_root, id ? id : "");
     if (id) JS_FreeCString(ctx, id);
     return wrap_element(ctx, el);
+}
+static JSValue doc_querySelector(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc;
+    const char *sel = JS_ToCString(ctx, argv[0]);
+    dom_node_t *found = dom_query(g_dom_root, sel ? sel : "");
+    if (sel) JS_FreeCString(ctx, sel);
+    return wrap_element(ctx, found);
+}
+static JSValue doc_querySelectorAll(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
+{
+    (void)this_val; (void)argc;
+    const char *sel = JS_ToCString(ctx, argv[0]);
+    struct qsa_ctx q = { ctx, JS_NewArray(ctx), 0 };
+    dom_query_all(g_dom_root, sel ? sel : "", qsa_visit, &q);
+    if (sel) JS_FreeCString(ctx, sel);
+    return q.arr;
 }
 static JSValue doc_createElement(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
 {
@@ -276,6 +360,10 @@ static void dom_setup(JSContext *ctx)
     JSValue document = JS_NewObject(ctx);
     JS_SetPropertyStr(ctx, document, "getElementById",
                       JS_NewCFunction(ctx, doc_getElementById, "getElementById", 1));
+    JS_SetPropertyStr(ctx, document, "querySelector",
+                      JS_NewCFunction(ctx, doc_querySelector, "querySelector", 1));
+    JS_SetPropertyStr(ctx, document, "querySelectorAll",
+                      JS_NewCFunction(ctx, doc_querySelectorAll, "querySelectorAll", 1));
     JS_SetPropertyStr(ctx, document, "createElement",
                       JS_NewCFunction(ctx, doc_createElement, "createElement", 1));
     JS_SetPropertyStr(ctx, document, "createTextNode",

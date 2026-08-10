@@ -248,6 +248,103 @@ int zeos_http_fetch(const char *url, char *body_out, int max, int *status_out) {
     return status >= 100 ? 0 : -1;
 }
 
+/* Is `cls` one of the space-separated tokens in `classlist`? */
+static int dom_class_has(const char *classlist, const char *cls) {
+    if (!classlist || !cls || !cls[0]) return 0;
+    int cl = 0; while (cls[cl]) cl++;
+    const char *p = classlist;
+    while (*p) {
+        while (*p == ' ') p++;
+        const char *start = p;
+        while (*p && *p != ' ') p++;
+        int len = (int)(p - start);
+        if (len == cl) {
+            int m = 1;
+            for (int i = 0; i < cl; i++) if (start[i] != cls[i]) { m = 0; break; }
+            if (m) return 1;
+        }
+    }
+    return 0;
+}
+
+static int dom_matches(dom_node_t *c, char type, const char *val) {
+    if (c->type != DOM_ELEMENT) return 0;
+    if (type == '#') return c->attr_id[0] && str_eq(c->attr_id, val);
+    if (type == '.') return dom_class_has(c->attr_class, val);
+    return str_eq(c->tag, val);
+}
+
+static void dom_selparse(const char *sel, char *type, const char **val) {
+    if (sel[0] == '#') { *type = '#'; *val = sel + 1; }
+    else if (sel[0] == '.') { *type = '.'; *val = sel + 1; }
+    else { *type = 'T'; *val = sel; }
+}
+
+/* querySelector: first element matching a single #id / .class / tag selector. */
+static dom_node_t *dom_query_rec(dom_node_t *node, char type, const char *val) {
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (dom_matches(c, type, val)) return c;
+        dom_node_t *r = dom_query_rec(c, type, val);
+        if (r) return r;
+    }
+    return 0;
+}
+dom_node_t *dom_query(dom_node_t *root, const char *sel) {
+    if (!sel || !root) return 0;
+    char type; const char *val;
+    dom_selparse(sel, &type, &val);
+    return dom_query_rec(root, type, val);
+}
+
+/* querySelectorAll: walk in document order, calling visit() on each match.
+ * (Callback keeps the pool private to browser.c; qjs_dom builds the JS array.) */
+void dom_query_all(dom_node_t *node, const char *sel,
+                   void (*visit)(dom_node_t *, void *), void *ctx) {
+    char type; const char *val;
+    if (!sel || !node) return;
+    dom_selparse(sel, &type, &val);
+    /* recurse manually so we can pass the parsed selector down */
+    for (dom_node_t *c = node->first_child; c; c = c->next_sibling) {
+        if (dom_matches(c, type, val)) visit(c, ctx);
+        dom_query_all(c, sel, visit, ctx);
+    }
+}
+
+/* innerHTML = html : parse the fragment and replace the element's children. */
+void dom_set_inner_html(dom_node_t *el, const char *html) {
+    if (!el || !html) return;
+    int len = 0; while (html[len]) len++;
+    dom_node_t *frag = html_parse(html, len);   /* document node with children */
+    if (!frag) return;
+    el->first_child = frag->first_child;         /* replace children */
+    for (dom_node_t *c = el->first_child; c; c = c->next_sibling)
+        c->parent = el;
+    g_dom_dirty = 1;
+}
+
+/* Append raw text (bounded) to buf at *pos. */
+static void dom_emit(char *buf, int *pos, int max, const char *s) {
+    while (*s && *pos < max - 1) buf[(*pos)++] = *s++;
+}
+/* innerHTML getter: serialize an element's children into buf. */
+static void dom_serialize(dom_node_t *node, char *buf, int *pos, int max) {
+    for (dom_node_t *c = node->first_child; c && *pos < max - 1; c = c->next_sibling) {
+        if (c->type == DOM_TEXT) { dom_emit(buf, pos, max, c->text); continue; }
+        if (c->style.display == 2 && str_eq(c->tag, "script")) continue;
+        dom_emit(buf, pos, max, "<"); dom_emit(buf, pos, max, c->tag);
+        if (c->attr_id[0])    { dom_emit(buf, pos, max, " id=\""); dom_emit(buf, pos, max, c->attr_id); dom_emit(buf, pos, max, "\""); }
+        if (c->attr_class[0]) { dom_emit(buf, pos, max, " class=\""); dom_emit(buf, pos, max, c->attr_class); dom_emit(buf, pos, max, "\""); }
+        dom_emit(buf, pos, max, ">");
+        dom_serialize(c, buf, pos, max);
+        dom_emit(buf, pos, max, "</"); dom_emit(buf, pos, max, c->tag); dom_emit(buf, pos, max, ">");
+    }
+}
+void dom_get_inner_html(dom_node_t *el, char *buf, int max) {
+    int pos = 0;
+    if (el && buf && max > 0) dom_serialize(el, buf, &pos, max);
+    if (buf && max > 0) buf[pos < max ? pos : max - 1] = 0;
+}
+
 /* document.body */
 dom_node_t *dom_get_body(dom_node_t *root) {
     if (!root) return 0;
@@ -1585,7 +1682,20 @@ int browser_navigate(browser_t *b, const char *url)
     int builtin = (url[0]=='t'&&url[1]=='e'&&url[2]=='s'&&url[3]=='t'&&url[4]==':');
     if (builtin) {
         const char *html;
-        if (str_eq(url, "test:fetch")) {
+        if (str_eq(url, "test:dom2")) {
+            /* I.7: querySelector / querySelectorAll / innerHTML / className. */
+            html = "<html><head><title>DOM2</title></head><body>"
+                   "<h1>DOM2 Demo</h1>"
+                   "<div id=\"app\">placeholder</div>"
+                   "<ul><li class=\"item\">a</li><li class=\"item\">b</li><li class=\"item\">c</li></ul>"
+                   "<script>"
+                   "var n = document.querySelectorAll('.item').length;"
+                   "document.getElementById('app').innerHTML = '<h2 class=\"hdr\">Built via innerHTML</h2><p>found ' + n + ' items</p>';"
+                   "var h = document.querySelector('.hdr'); h.className = 'hdr done';"
+                   "console.log('qsa items', n, 'hdr class', document.querySelector('.hdr').className);"
+                   "</script>"
+                   "</body></html>";
+        } else if (str_eq(url, "test:fetch")) {
             /* I.7 fetch(): a script pulls a real URL over the net stack and
              * writes the result into the DOM from a Promise .then chain. */
             html = "<html><head><title>Fetch</title></head><body>"
