@@ -5106,6 +5106,14 @@ static void cmd_selftest(const char *args)
         extern int wm_m5_selftest(void);
         if (wm_m5_selftest()) passes++; else fails++;
     }
+    /* G.5: per-persona dock launcher defaults. Reuses the real dock_g5_selftest
+     * (un-gated, production-safe: snapshots+restores the whole g_dock struct).
+     * Each persona yields a distinct default pinned set (Zeros[2]=Build,
+     * DereZ[1]=Editor, Full[4]=Calculator), all 5 launchers. [G5]. */
+    {
+        extern int dock_g5_selftest(void);
+        if (dock_g5_selftest()) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

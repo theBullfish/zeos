@@ -678,29 +678,44 @@ void dock_d12_selftest(void)
 }
 #endif
 
-#ifdef ZEOS_DIAG_G5
-/* G.5 selftest: each persona yields a DISTINCT default dock launcher set. */
-void dock_g5_selftest(void)
+/* G.5 selftest: each persona yields a DISTINCT default dock launcher set.
+ * Un-gated so the production `selftest` shell can run it; PRODUCTION-SAFE:
+ * dock_apply_persona_defaults rewrites g_dock's pinned set + width, so this
+ * snapshots the WHOLE g_dock struct up front and restores it byte-for-byte at
+ * the end (dock_state_t is a value struct with inline name buffers) — the live
+ * dock is unchanged. All 3 applies run synchronously (no composite between), so
+ * the transient launcher sets never render. No VAULT/cursor/surface. Returns 1
+ * on PASS. */
+int dock_g5_selftest(void)
 {
-    extern int n_streq_g5(const char*, const char*);
+    dock_state_t saved = g_dock;   /* full snapshot of the live dock */
+
     dock_apply_persona_defaults(0); int nz = g_dock.pinned_count;
     char z1[32]; str_copy(z1, g_dock.pinned[2].name, 32);   /* Zeros[2]=Build */
     dock_apply_persona_defaults(1); int nd = g_dock.pinned_count;
     char d1[32]; str_copy(d1, g_dock.pinned[1].name, 32);   /* DereZ[1]=Editor */
+    char d3[32]; str_copy(d3, g_dock.pinned[3].name, 32);   /* DereZ[3]=Chains (DereZ-unique) */
     dock_apply_persona_defaults(2); int nf = g_dock.pinned_count;
     char f1[32]; str_copy(f1, g_dock.pinned[4].name, 32);   /* Full[4]=Calculator */
 
-    /* distinct: Zeros has "Build", DereZ has "Editor" at [1], Full has "Calculator" */
-    int zeros_build = (z1[0]=='B'&&z1[1]=='u'&&z1[2]=='i');
-    int derez_editor= (d1[0]=='E'&&d1[1]=='d'&&d1[2]=='i');
-    int full_calc   = (f1[0]=='C'&&f1[1]=='a'&&f1[2]=='l');
+    g_dock = saved;                /* restore the live dock byte-for-byte */
+
+    /* distinct per persona: Zeros[2]=Build (Zeros-unique), Full[4]=Calculator
+     * (Full-unique). DereZ[1]=Editor is shared with Full[1], so also assert
+     * DereZ[3]=Chains which is unique to DereZ (Zeros[3]=Inspector, Full[3]=
+     * Settings) -> DereZ is distinguished from BOTH others. */
+    int zeros_build  = (z1[0]=='B'&&z1[1]=='u'&&z1[2]=='i');
+    int derez_editor = (d1[0]=='E'&&d1[1]=='d'&&d1[2]=='i');
+    int derez_chains = (d3[0]=='C'&&d3[1]=='h'&&d3[2]=='a');
+    int full_calc    = (f1[0]=='C'&&f1[1]=='a'&&f1[2]=='l');
     int counts_ok = (nz==5 && nd==5 && nf==5);
-    int pass = zeros_build && derez_editor && full_calc && counts_ok;
-    kputs("[G5] zeros[2]="); kputs(z1); kputs(" derez[1]="); kputs(d1);
+    int pass = zeros_build && derez_editor && derez_chains && full_calc && counts_ok;
+    kputs("[G5] zeros[2]="); kputs(z1); kputs(" derez[1]="); kputs(d1); kputs(" derez[3]="); kputs(d3);
     kputs(" full[4]="); kputs(f1);
+    kputs(" counts="); kput_dec((uint64_t)nz); kputs("/"); kput_dec((uint64_t)nd); kputs("/"); kput_dec((uint64_t)nf);
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
+    return pass;
 }
-#endif
 
 #ifdef ZEOS_DIAG_D13
 /* D.13 selftest: density-size (via access density), drag-reorder, poof-remove.
