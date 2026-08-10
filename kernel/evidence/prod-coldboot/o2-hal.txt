@@ -1,0 +1,5 @@
+O.2 HAL forwarding via production 'selftest' shell command, settled 2-boot:
+--- boot 1 ---
+  O.2 hal (hal_in8==inb 0x64, arch=x86-64): PASS
+--- boot 2 ---
+  O.2 hal (hal_in8==inb 0x64, arch=x86-64): PASS

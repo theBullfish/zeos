@@ -4582,6 +4582,20 @@ static void cmd_selftest(const char *args)
         kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
+    /* O.2: HAL x86 backend forwards to the real machine primitives. hal_in8 on
+     * the PS/2 status port (0x64, read-only, safe) must equal a raw inb of the
+     * same port (proves the façade forwards, not stubs); arch name is x86-64. */
+    {
+        extern unsigned char hal_in8(unsigned short); extern const char *hal_arch_name(void);
+        unsigned char via_hal = hal_in8(0x64);
+        unsigned char via_raw; __asm__ volatile("inb %1,%0":"=a"(via_raw):"Nd"((unsigned short)0x64));
+        const char *arch = hal_arch_name();
+        int io_ok = (via_hal == via_raw);
+        int arch_ok = arch && arch[0]=='x' && arch[1]=='8' && arch[2]=='6';
+        kputs("  O.2 hal (hal_in8==inb 0x64, arch="); kputs(arch ? arch : "?");
+        kputs("): "); kputs((io_ok && arch_ok) ? "PASS\n" : "FAIL\n");
+        if (io_ok && arch_ok) passes++; else fails++;
+    }
 
     /* Storage census before any disk operation */
     {

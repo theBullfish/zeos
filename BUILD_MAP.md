@@ -314,7 +314,7 @@ the OS. When in doubt it's the OS.
 
 ## O. Hardware Targets
 - [x] **O.1** x86-64 target (current) — `[observed]` boots + runs.
-- [x] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[VERIFIED/harness]` hal.h façade + hal_x86.c backend (O2 selftest: io_forwards/arch PASS); PCI config-io migrated behind it (enumeration verified). Full caller migration incremental. bible id=464. `[source hal.h; hal_x86.c]`.
+- [x] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[VERIFIED/production]` hal.h façade + hal_x86.c backend: real hal_in8(0x64)==raw inb (forwards, not stubs) + arch=x86-64 via the production `selftest` shell (serial `O.2 hal (...): PASS`, settled 2-boot, adversarial review confirmed); PCI config-io migrated behind hal_out32/in32 exercised at boot (sigviz device nodes). Full caller migration incremental. bible id=491. `[source hal.h; hal_x86.c]`.
 - [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`. `[PARTIAL 2026-08-03]` first brick: hal_arm64.c (ARM64 HAL backend — GICv2/generic-timer/PL011/DAIF/ECAM) compiles cross-arch with aarch64-linux-gnu-gcc, proving O.2's HAL is portable. Full boot path (EFI aarch64 stub, page tables, GIC dispatch, framebuffer) remaining. bible id=466.
 
 ## P. Z+ Language
