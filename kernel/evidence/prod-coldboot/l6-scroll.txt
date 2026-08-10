@@ -1,0 +1,5 @@
+L.6 scroll physics via production 'selftest' shell, settled 2-boot:
+--- boot 1 ---
+  L.6 scroll (moved=1 decel=1 settled=1 rubberband=1): PASS
+--- boot 2 ---
+  L.6 scroll (moved=1 decel=1 settled=1 rubberband=1): PASS

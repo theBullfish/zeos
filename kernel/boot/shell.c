@@ -49,6 +49,7 @@
 #include "pmm.h"
 #include "heap.h"
 #include "zplus.h"
+#include "anim.h"   /* scroll_phys_t for the L.6 selftest */
 #include "sigviz.h"
 #include "vault.h"
 #include "net.h"
@@ -4790,6 +4791,33 @@ static void cmd_selftest(const char *args)
         kputs("  P.2 zplus REPL (zp_run double="); kput_dec((uint64_t)(rc_dbl >= 0));
         kputs(" adder="); kput_dec((uint64_t)(rc_add >= 0));
         kputs("): "); kputs(ok ? "PASS\n" : "FAIL\n");
+        if (ok) passes++; else fails++;
+    }
+    /* L.6: spring scroll physics — momentum+friction, settle, and edge
+     * rubber-band. A flick moves + decelerates; it settles; an overscroll past
+     * the bound springs BACK to the bound. Real scroll_phys, no diag. */
+    {
+        scroll_phys_t s;
+        scroll_phys_init(&s, 1000.0f);
+        scroll_phys_flick(&s, 800.0f);
+        scroll_phys_tick(&s, 1.0f/60.0f); float p1 = s.pos, v1 = s.vel;
+        for (int i = 0; i < 3; i++) scroll_phys_tick(&s, 1.0f/60.0f);
+        int moved = (p1 > 0.0f);
+        int decel = (s.vel < v1);
+        for (int i = 0; i < 600; i++) scroll_phys_tick(&s, 1.0f/60.0f);
+        int settled   = !scroll_phys_active(&s);
+        int in_bounds = (s.pos >= -0.5f && s.pos <= 1000.5f);
+        scroll_phys_init(&s, 1000.0f);
+        s.pos = 1200.0f;                       /* overscroll past max */
+        int overscrolled = (s.pos > 1000.0f);
+        for (int i = 0; i < 600; i++) scroll_phys_tick(&s, 1.0f/60.0f);
+        int rubber_back = (s.pos <= 1000.5f && s.pos >= 999.5f);
+        int ok = moved && decel && settled && in_bounds && overscrolled && rubber_back;
+        kputs("  L.6 scroll (moved="); kput_dec((uint64_t)moved);
+        kputs(" decel="); kput_dec((uint64_t)decel);
+        kputs(" settled="); kput_dec((uint64_t)settled);
+        kputs(" rubberband="); kput_dec((uint64_t)rubber_back); kputs("): ");
+        kputs(ok ? "PASS\n" : "FAIL\n");
         if (ok) passes++; else fails++;
     }
 
