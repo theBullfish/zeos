@@ -1,0 +1,5 @@
+B.8 material ladder via production 'selftest' shell command, settled 2-boot:
+--- boot 1 ---
+  B.8 material ladder: 140/179/209/230/247 -> PASS
+--- boot 2 ---
+  B.8 material ladder: 140/179/209/230/247 -> PASS

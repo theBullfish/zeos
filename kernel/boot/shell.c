@@ -4545,6 +4545,26 @@ static void cmd_selftest(const char *args)
     int passes = 0, fails = 0;
     kputs("\n  Zeos self-test\n  ──────────────\n");
 
+    /* Pure-logic checks: run the REAL production functions from the production
+     * shell path (no diag/bypass build) and print PASS/FAIL to serial. These are
+     * build-invariant, so invoking them here IS a production observation. */
+    /* B.8: material vibrancy ladder — fb_material_alpha() must yield the 5-tier
+     * ladder 140/179/209/230/247, strictly monotonic increasing. */
+    {
+        int expect[MATERIAL_COUNT] = {140,179,209,230,247};
+        int ok = (MATERIAL_COUNT == 5);
+        kputs("  B.8 material ladder: ");
+        for (int i = 0; i < MATERIAL_COUNT; i++) {
+            int a = fb_material_alpha((material_level_t)i);
+            kput_dec((uint64_t)a);
+            if (i < MATERIAL_COUNT - 1) kputs("/");
+            if (i < 5 && a != expect[i]) ok = 0;
+            if (i > 0 && a <= fb_material_alpha((material_level_t)(i-1))) ok = 0;
+        }
+        kputs(ok ? " -> PASS\n" : " -> FAIL\n");
+        if (ok) passes++; else fails++;
+    }
+
     /* Storage census before any disk operation */
     {
         int n = block_drive_count();

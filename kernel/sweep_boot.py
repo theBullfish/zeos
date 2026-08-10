@@ -100,6 +100,12 @@ shot("desktop")
 for ch in list("kbtest7"):
     key(ch)
 time.sleep(0.4); key("ret"); time.sleep(0.6)
+# B.8 (pure-logic via the production shell): run `selftest`; the material-ladder
+# check prints FIRST in cmd_selftest (before any network test), so grep serial
+# for it even if later network sub-tests stall under -net none.
+for ch in list("selftest"):
+    key(ch)
+time.sleep(0.4); key("ret"); time.sleep(2.0)
 
 # ── Interaction battery (each screenshot is an evidence artifact) ──
 # Cursor motion + click feedback (E.2/E.3)
