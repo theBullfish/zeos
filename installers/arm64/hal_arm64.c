@@ -6,18 +6,20 @@
  * masking, and ECAM PCI config space. This is the arch layer the portable
  * kernel routes through; the x86 backend is hal_x86.c.
  *
- * Base addresses match QEMU 'virt': GIC dist 0x08000000 / cpu 0x08010000,
- * PL011 UART 0x09000000, PCIe ECAM 0x4010000000. Compiled with the aarch64
+ * All hardware bases come from the device tree at runtime (see platform.c) —
+ * nothing here is board-specific. Compiled with the aarch64
  * cross toolchain; the full boot path (EFI aarch64 stub, page tables) is the
  * remaining O.3 work — this brick makes the HAL genuinely cross-arch.
  */
 #include "hal.h"
 
-/* QEMU 'virt' platform MMIO map. */
-#define ARM_GICD_BASE   0x08000000UL   /* GICv2 distributor */
-#define ARM_GICC_BASE   0x08010000UL   /* GICv2 CPU interface */
-#define ARM_UART0_BASE  0x09000000UL   /* PL011 */
-#define ARM_ECAM_BASE   0x4010000000UL /* PCIe ECAM */
+/* Hardware locations are DISCOVERED from the device tree (platform.c), never
+ * compiled in — the same image must work on any board that hands us a DTB. */
+#include "platform.h"
+#define ARM_GICD_BASE   (g_plat.gicd)
+#define ARM_GICC_BASE   (g_plat.gicc)
+#define ARM_UART0_BASE  (g_plat.uart)
+#define ARM_ECAM_BASE   (g_plat.ecam)
 
 static inline void     mmio_w32(unsigned long a, uint32_t v) { *(volatile uint32_t *)a = v; }
 static inline uint32_t mmio_r32(unsigned long a)             { return *(volatile uint32_t *)a; }
@@ -32,9 +34,9 @@ static inline uint8_t  mmio_r8(unsigned long a)              { return *(volatile
  * silently corrupts registers. Each legacy port range is dispatched to the real
  * ARM device with faithful register translation:
  *
- *   0x3F8-0x3FF  COM1 (16550)   -> PL011 @0x09000000, register-translated
- *   0xCF8/0xCFC  PCI config     -> ECAM @0x40_1000_0000 (address latch emulated)
- *   0x70/0x71    CMOS RTC       -> PL031 RTC @0x09010000 (index latch emulated)
+ *   0x3F8-0x3FF  COM1 (16550)   -> discovered UART, register-translated
+ *   0xCF8/0xCFC  PCI config     -> discovered ECAM (address latch emulated)
+ *   0x70/0x71    CMOS RTC       -> discovered RTC (index latch emulated)
  *   0x60/0x64    i8042 PS/2     -> DOES NOT EXIST on ARM virt (USB HID only):
  *                                  reports "no device / empty buffer" so probes
  *                                  fail cleanly instead of hanging or writing
@@ -43,7 +45,7 @@ static inline uint8_t  mmio_r8(unsigned long a)              { return *(volatile
  *   0x61, 0x92   speaker, A20   -> no-op; no such hardware
  *   other        PCI BAR io_base-> treated as MMIO (BARs are memory on ARM)
  * ══════════════════════════════════════════════════════════════════════════ */
-#define ARM_RTC_BASE    0x09010000UL   /* PL031 */
+#define ARM_RTC_BASE    (g_plat.rtc)
 
 uint32_t hal_arm_ecam_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint16_t off);
 

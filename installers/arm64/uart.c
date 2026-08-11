@@ -2,7 +2,8 @@
  * Exposes the real kprint.h API so portable modules link unchanged. */
 #include <stdint.h>
 
-#define UART0_BASE   0x09000000UL
+#include "platform.h"
+#define UART0_BASE   (g_plat.uart)
 #define UART_DR      (*(volatile uint32_t *)(UART0_BASE + 0x00))
 #define UART_FR      (*(volatile uint32_t *)(UART0_BASE + 0x18))
 #define UART_FR_TXFF (1u << 5)

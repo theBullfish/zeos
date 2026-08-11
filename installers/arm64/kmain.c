@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "hal.h"
+#include "platform.h"
+extern uint64_t g_dtb_ptr;
 extern void kputs(const char *);
 extern void kputc(char);
 extern void kput_hex(uint64_t);
@@ -86,8 +88,25 @@ static void draw_boot_screen(uint64_t ticks, int smp, int nodes)
 
 void kmain_aarch64(void)
 {
+    /* M-1 -- DISCOVER THE MACHINE. Before touching any register we read the
+     * device tree firmware handed us in x0, so every base address below is this
+     * board's real address. Nothing is compiled in: the same image is meant to
+     * come up on QEMU virt, a Snapdragon, a Rockchip, an Ampere. */
+    plat_init();
+
     kputs("\n================ ZEOS / aarch64 ================\n");
-    kputs("[M0] boot ok: EL1, PL011 UART, VBAR_EL1 installed.\n");
+    kputs("[M-1] device tree @"); kput_hex(g_dtb_ptr);
+    kputs(plat_discovered() ? "  PARSED -- hardware DISCOVERED\n"
+                            : "  ABSENT -- falling back to assumed bases\n");
+    kputs("[M-1]   uart="); kput_hex(g_plat.uart);
+    kputs(" ("); kputs(g_plat.uart_compat ? g_plat.uart_compat : "?"); kputs(")\n");
+    kputs("[M-1]   gicd="); kput_hex(g_plat.gicd);
+    kputs(" gicc/gicr="); kput_hex(g_plat.gicc);
+    kputs(" ("); kputs(g_plat.gic_compat ? g_plat.gic_compat : "?"); kputs(")\n");
+    kputs("[M-1]   ecam="); kput_hex(g_plat.ecam);
+    kputs(" rtc="); kput_hex(g_plat.rtc); kputs("\n");
+
+    kputs("[M0] boot ok: EL1, UART, VBAR_EL1 installed.\n");
 
     kputs("[M1] enabling MMU (identity map, 39-bit VA, 4KB)...\n");
     mmu_init();

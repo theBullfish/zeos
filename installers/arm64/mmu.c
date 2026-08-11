@@ -5,6 +5,8 @@
 
 static uint64_t l1_table[512] __attribute__((aligned(4096)));
 
+#include "platform.h"
+
 #define DESC_BLOCK  (1UL << 0)      /* valid block at L1: bits[1:0]=0b01 */
 #define DESC_AF     (1UL << 10)
 #define DESC_SH_IS  (3UL << 8)      /* inner shareable */
@@ -26,15 +28,22 @@ void mmu_init(void)
         uint64_t pa = (uint64_t)i * 0x40000000UL;
         l1_table[i] = pa | DESC_BLOCK | DESC_AF | DESC_SH_IS | ATTR(0);
     }
-    /* PCIe ECAM config space -> device. QEMU virt puts ECAM at 0x40_1000_0000
-     * (256 GB), which is NOT covered by the low identity map above: touching it
-     * without this entry takes a level-1 translation fault (ESR DFSC=0x05,
-     * FAR=0x4010000000). The 1GB L1 block at index 256 spans
-     * 0x40_0000_0000..0x40_4000_0000, which contains it. Device memory (ATTR 1),
-     * never cacheable — these are registers, not RAM. */
-    #define ECAM_L1_INDEX 256   /* 0x4010000000 / 0x40000000 */
-    l1_table[ECAM_L1_INDEX] = ((uint64_t)ECAM_L1_INDEX * 0x40000000UL)
-                            | DESC_BLOCK | DESC_AF | ATTR(1);
+    /* Map the DISCOVERED device regions that fall outside the low identity map
+     * above (ECAM commonly sits far up — QEMU virt puts it at 256 GB, other SoCs
+     * elsewhere). Touching an unmapped region takes a level-1 translation fault
+     * (ESR DFSC=0x05), so each one gets its containing 1 GB block as device
+     * memory (ATTR 1, never cacheable — these are registers, not RAM).
+     * Board-specific addresses are NEVER hardcoded here; they come from the DTB. */
+    const uint64_t dev_regions[] = { g_plat.ecam, g_plat.uart, g_plat.gicd,
+                                     g_plat.gicc, g_plat.rtc };
+    for (unsigned i = 0; i < sizeof dev_regions / sizeof dev_regions[0]; i++) {
+        uint64_t pa = dev_regions[i];
+        if (!pa) continue;
+        uint64_t idx = pa / 0x40000000UL;             /* 1 GB L1 block index */
+        if (idx >= 512) continue;                     /* beyond 39-bit VA reach */
+        if (l1_table[idx]) continue;                  /* already mapped */
+        l1_table[idx] = (idx * 0x40000000UL) | DESC_BLOCK | DESC_AF | ATTR(1);
+    }
 
     uint64_t tcr = (25UL << 0)   /* T0SZ = 25 -> 39-bit VA */
                  | (1UL  << 8)   /* IRGN0 = WBWA */

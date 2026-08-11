@@ -17,6 +17,7 @@ qemu = subprocess.Popen([
     "-machine", "virt,gic-version=3",
     "-cpu", "cortex-a72", "-smp", "2", "-m", "512",
     "-kernel", ELF,
+    "-dtb", "/tmp/virt.dtb",
     "-device", "ramfb",
     "-serial", f"file:{SERIAL}",
     "-display", "none",

@@ -2,8 +2,9 @@
  * Single core, Group1 non-secure. System-register CPU interface (ICC_*). */
 #include <stdint.h>
 
-#define GICD       0x08000000UL
-#define GICR       0x080A0000UL
+#include "platform.h"
+#define GICD       (g_plat.gicd)
+#define GICR       (g_plat.gicc ? g_plat.gicc : g_plat.gicd + 0xA0000UL)
 #define GICR_SGI   (GICR + 0x10000)          /* SGI/PPI frame */
 #define REG(a)     (*(volatile uint32_t *)(a))
 

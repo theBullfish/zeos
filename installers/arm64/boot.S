@@ -3,6 +3,14 @@
 .section ".text.boot"
 .global _start
 _start:
+    // FIRST INSTRUCTION: firmware hands us the device tree in x0 (Linux/UEFI
+    // aarch64 boot protocol). It describes where THIS board's hardware actually
+    // is. Everything below clobbers x0, so stash it before touching anything —
+    // Zeos discovers hardware, it never assumes a memory map.
+    adrp    x1, g_dtb_ptr
+    add     x1, x1, :lo12:g_dtb_ptr
+    str     x0, [x1]
+
     mrs     x0, mpidr_el1
     and     x0, x0, #0xFF
     cbnz    x0, park                 // M1/M2: primary core only
