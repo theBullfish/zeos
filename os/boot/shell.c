@@ -6451,9 +6451,14 @@ void shell_vault_init(void)
         vault_mount(vault_ram, VAULT_RAM_SIZE) == 0) {
         vault_ready = 1;
 
-        vault_create("/programs", VAULT_TIER_REFERENCE);
-        vault_create("/home", VAULT_TIER_SOVEREIGN);
-        vault_create("/tmp", VAULT_TIER_INTERNAL);
+        /* These are DIRECTORIES — vault_mkdir (type=DIR), not vault_create
+         * (type=FILE). Using vault_create made /programs a file, so the seeded
+         * /programs/*.zp writes had no browsable parent and `ls /programs`
+         * reported "Not a directory". Every other dir in the system already
+         * uses vault_mkdir (editor, identity, notify, persistence, ...). */
+        vault_mkdir("/programs", VAULT_TIER_REFERENCE);
+        vault_mkdir("/home", VAULT_TIER_SOVEREIGN);
+        vault_mkdir("/tmp", VAULT_TIER_INTERNAL);
         vault_seed_builtins();
 
         /* Push the freshly-formatted, freshly-seeded image to disk so

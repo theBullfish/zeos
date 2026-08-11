@@ -1,0 +1,63 @@
+Formatting '/home/brad/zeos-repos/zeos/kernel/build/vault.img', fmt=raw size=8388608
+PIN gate: True
+[after-pin] 10005 bytes
+[wiz-0] 9618 bytes
+[wiz-1] 11878 bytes
+[wiz-2] 11463 bytes
+[wiz-3] 11822 bytes
+[wiz-4] 11920 bytes
+[wiz-5] 10960 bytes
+desktop shell up: True
+[desktop] 61827 bytes
+[term-live] 66089 bytes
+[ls-programs] 99764 bytes
+[cursor-moved] 127505 bytes
+[cursor-click] 126898 bytes
+[d11-drop] 126972 bytes
+[k2-open] 24205 bytes
+[k2-select] 24504 bytes
+[k2-inspector] 28842 bytes
+[k2-deselect] 28759 bytes
+[workspace-2] 67198 bytes
+[workspace-1] 125325 bytes
+[snap-tr] 131048 bytes
+[maximize] 163098 bytes
+[restore] 129917 bytes
+[sigviz] 28927 bytes
+[sigviz-zoom] 23007 bytes
+[sigviz-pan] 26248 bytes
+[show-desktop] 67799 bytes
+[palette] 87789 bytes
+[hc-tl] 138437 bytes
+[palette-typed] 125155 bytes
+[hc-bl] 129607 bytes
+[hc-br] 129566 bytes
+[hc-tr] 65582 bytes
+--- serial tail ---
+ budget by 15ms; composite=0ms persist=0ms; top: id=30(8ms) id=13(5ms) id=31(0ms)
+
+[scheduler] tick 3136 exceeded budget by 20ms; composite=0ms persist=0ms; top: id=30(10ms) id=13(7ms) id=31(0ms)
+
+[scheduler] tick 3200 exceeded budget by 19ms; composite=0ms persist=0ms; top: id=30(9ms) id=13(7ms) id=31(0ms)
+
+[scheduler] tick 3264 exceeded budget by 19ms; composite=0ms persist=0ms; top: id=30(9ms) id=13(7ms) id=31(0ms)
+
+[HC] BL fire -> workspace 0 -> 1
+
+[scheduler] tick 3328 exceeded budget by 17ms; composite=0ms persist=0ms; top: id=30(8ms) id=13(6ms) id=31(0ms)
+
+[scheduler] tick 3392 exceeded budget by 18ms; composite=0ms persist=0ms; top: id=30(9ms) id=13(7ms) id=31(0ms)
+
+[scheduler] tick 3456 exceeded budget by 18ms; composite=0ms persist=0ms; top: id=30(9ms) id=13(6ms) id=31(0ms)
+
+[HC] BR fire -> show desktop
+
+[scheduler] tick 3520 exceeded budget by 17ms; composite=0ms persist=0ms; top: id=30(9ms) id=13(6ms) id=31(0ms)
+
+[scheduler] tick 3584 exceeded budget by 16ms; composite=0ms persist=0ms; top: id=30(8ms) id=13(6ms) id=31(0ms)
+
+[HC] TR fire -> notify_show_all
+
+[scheduler] tick 3648 exceeded budget by 23ms; composite=0ms persist=0ms; top: id=30(11ms) id=13(10ms) id=31(0ms)
+
+
