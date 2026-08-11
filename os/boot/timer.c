@@ -7,7 +7,7 @@
 
 #include "timer.h"
 #include "idt.h"
-#include "io.h"
+#include "hal.h"
 #include "fb.h"
 
 #define PIT_CH0_DATA  0x40
@@ -75,9 +75,9 @@ void timer_init(uint32_t hz)
     /* Program PIT channel 0: rate generator, lo/hi byte */
     uint16_t divisor = PIT_BASE_FREQ / hz;
 
-    outb(PIT_CMD, 0x36);      /* Channel 0, lo/hi, rate generator */
-    outb(PIT_CH0_DATA, divisor & 0xFF);
-    outb(PIT_CH0_DATA, (divisor >> 8) & 0xFF);
+    hal_out8(PIT_CMD, 0x36);      /* Channel 0, lo/hi, rate generator */
+    hal_out8(PIT_CH0_DATA, divisor & 0xFF);
+    hal_out8(PIT_CH0_DATA, (divisor >> 8) & 0xFF);
 
     /* Unmask IRQ0 */
     pic_unmask(0);

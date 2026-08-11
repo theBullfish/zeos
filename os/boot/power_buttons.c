@@ -27,7 +27,7 @@
 #include "power_buttons.h"
 #include "acpi.h"
 #include "aml.h"
-#include "io.h"
+#include "hal.h"
 #include "kprint.h"
 #include "vault.h"
 #include "suspend.h"
@@ -242,17 +242,17 @@ static uint16_t read_clear_pm1_evt(void)
 
     uint16_t merged = 0;
     if (f->pm1a_evt_blk) {
-        uint16_t v = inw(f->pm1a_evt_blk);
+        uint16_t v = hal_in16(f->pm1a_evt_blk);
         merged |= v;
         /* Write-1-to-clear sticky status bits we care about. */
         uint16_t clr = v & (PM1_STS_PWRBTN | PM1_STS_SLPBTN);
-        if (clr) outw(f->pm1a_evt_blk, clr);
+        if (clr) hal_out16(f->pm1a_evt_blk, clr);
     }
     if (f->pm1b_evt_blk) {
-        uint16_t v = inw(f->pm1b_evt_blk);
+        uint16_t v = hal_in16(f->pm1b_evt_blk);
         merged |= v;
         uint16_t clr = v & (PM1_STS_PWRBTN | PM1_STS_SLPBTN);
-        if (clr) outw(f->pm1b_evt_blk, clr);
+        if (clr) hal_out16(f->pm1b_evt_blk, clr);
     }
     return merged;
 }
@@ -419,18 +419,18 @@ static void do_shutdown(void)
     kput_hex(b);
     kputs(")\n");
 
-    uint16_t pm1a = inw(f->pm1a_cnt_blk);
+    uint16_t pm1a = hal_in16(f->pm1a_cnt_blk);
     pm1a &= ~(0x7u << 10);
     pm1a |= ((uint16_t)a << 10);
     pm1a |= PM1_CNT_SLP_EN;
-    outw(f->pm1a_cnt_blk, pm1a);
+    hal_out16(f->pm1a_cnt_blk, pm1a);
 
     if (f->pm1b_cnt_blk) {
-        uint16_t pm1b = inw(f->pm1b_cnt_blk);
+        uint16_t pm1b = hal_in16(f->pm1b_cnt_blk);
         pm1b &= ~(0x7u << 10);
         pm1b |= ((uint16_t)b << 10);
         pm1b |= PM1_CNT_SLP_EN;
-        outw(f->pm1b_cnt_blk, pm1b);
+        hal_out16(f->pm1b_cnt_blk, pm1b);
     }
 
     /* If SLP_EN took, we never get here. */

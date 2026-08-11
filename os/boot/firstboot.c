@@ -16,7 +16,7 @@
 #include "vault.h"   /* persist "system/firstboot_complete" (N.3) */
 #include "keyboard.h"
 #include "timer.h"
-#include "io.h"
+#include "hal.h"
 #include "kprint.h"
 
 /* ── State ── */
@@ -58,17 +58,17 @@ static int fb_getkey(void)
 {
     for (;;) {
         /* Wait for keyboard data */
-        while (!(inb(0x64) & 0x01))
+        while (!(hal_in8(0x64) & 0x01))
             __asm__ volatile("hlt");
 
-        uint8_t sc = inb(0x60);
+        uint8_t sc = hal_in8(0x60);
 
         /* Skip key releases (bit 7 set), except E0 */
         if (sc == SC_E0) {
             /* Next scancode is the actual key */
-            while (!(inb(0x64) & 0x01))
+            while (!(hal_in8(0x64) & 0x01))
                 __asm__ volatile("hlt");
-            sc = inb(0x60);
+            sc = hal_in8(0x60);
             /* Skip release of extended key */
             if (sc & 0x80)
                 continue;

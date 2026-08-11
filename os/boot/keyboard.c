@@ -9,7 +9,7 @@
 #include "hal.h"   /* O.2: port I/O via the HAL */
 #include "keybinds.h"
 #include "idt.h"
-#include "io.h"
+#include "hal.h"
 #include "hda.h"
 #include "brightness.h"
 #include "idle.h"
@@ -522,10 +522,10 @@ static void keyboard_isr(uint64_t vector, uint64_t error_code)
      * 8042 has a KEYBOARD byte (status OBF=bit0 set, AUX=bit5 clear -- leave
      * mouse bytes for mouse_isr). Bounded to avoid a wedge on stuck hardware. */
     for (int guard = 0; guard < 32; guard++) {
-        uint8_t status = inb(KB_STATUS_PORT);
+        uint8_t status = hal_in8(KB_STATUS_PORT);
         if (!(status & 0x01) || (status & 0x20))   /* no data, or it's a mouse byte */
             break;
-        uint8_t scancode = inb(KB_DATA_PORT);
+        uint8_t scancode = hal_in8(KB_DATA_PORT);
         if (scancode == 0xE0) {
             e0_prefix = 1;
             continue;

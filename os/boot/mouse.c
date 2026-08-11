@@ -20,7 +20,7 @@
 
 #include "mouse.h"
 #include "idt.h"
-#include "io.h"
+#include "hal.h"
 #include "fb.h"
 #include "cursor.h"
 #include "idle.h"
@@ -305,7 +305,7 @@ static void ps2_wait_write(void)
 {
     int timeout = 100000;
     while (timeout-- > 0) {
-        if (!(inb(PS2_STATUS_PORT) & PS2_STATUS_IBF))
+        if (!(hal_in8(PS2_STATUS_PORT) & PS2_STATUS_IBF))
             return;
     }
 }
@@ -318,7 +318,7 @@ static void ps2_wait_read(void)
 {
     int timeout = 100000;
     while (timeout-- > 0) {
-        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF)
+        if (hal_in8(PS2_STATUS_PORT) & PS2_STATUS_OBF)
             return;
     }
 }
@@ -329,7 +329,7 @@ static void ps2_wait_read(void)
 static void ps2_cmd(uint8_t cmd)
 {
     ps2_wait_write();
-    outb(PS2_CMD_PORT, cmd);
+    hal_out8(PS2_CMD_PORT, cmd);
 }
 
 /*
@@ -338,7 +338,7 @@ static void ps2_cmd(uint8_t cmd)
 static void ps2_data_write(uint8_t data)
 {
     ps2_wait_write();
-    outb(PS2_DATA_PORT, data);
+    hal_out8(PS2_DATA_PORT, data);
 }
 
 /*
@@ -347,7 +347,7 @@ static void ps2_data_write(uint8_t data)
 static uint8_t ps2_data_read(void)
 {
     ps2_wait_read();
-    return inb(PS2_DATA_PORT);
+    return hal_in8(PS2_DATA_PORT);
 }
 
 /*
@@ -362,8 +362,8 @@ static void mouse_write(uint8_t cmd)
     /* Wait for ACK — mouse responds with 0xFA */
     int timeout = 100000;
     while (timeout-- > 0) {
-        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF) {
-            uint8_t resp = inb(PS2_DATA_PORT);
+        if (hal_in8(PS2_STATUS_PORT) & PS2_STATUS_OBF) {
+            uint8_t resp = hal_in8(PS2_DATA_PORT);
             if (resp == MOUSE_ACK)
                 return;
         }
@@ -377,8 +377,8 @@ static void ps2_flush(void)
 {
     int timeout = 1000;
     while (timeout-- > 0) {
-        if (inb(PS2_STATUS_PORT) & PS2_STATUS_OBF)
-            inb(PS2_DATA_PORT);
+        if (hal_in8(PS2_STATUS_PORT) & PS2_STATUS_OBF)
+            hal_in8(PS2_DATA_PORT);
         else
             break;
     }
@@ -455,7 +455,7 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
     (void)error_code;
     extern void lapic_eoi(void);
 
-    uint8_t status = inb(PS2_STATUS_PORT);
+    uint8_t status = hal_in8(PS2_STATUS_PORT);
 
     /* Explicit EOI on every path (defensive -- isr_dispatch in idt.c ALSO
      * auto-EOIs the 8259 for every 0x20-0x2F vector regardless of what the
@@ -472,7 +472,7 @@ static void mouse_isr(uint64_t vector, uint64_t error_code)
         return;
     }
 
-    uint8_t data = inb(PS2_DATA_PORT);
+    uint8_t data = hal_in8(PS2_DATA_PORT);
 
     switch (packet_index) {
     case 0:
@@ -608,9 +608,9 @@ static void process_packet(void)
  */
 void mouse_poll(void)
 {
-    uint8_t status = inb(PS2_STATUS_PORT);
+    uint8_t status = hal_in8(PS2_STATUS_PORT);
     if ((status & PS2_STATUS_OBF) && (status & PS2_STATUS_AUX)) {
-        uint8_t data = inb(PS2_DATA_PORT);
+        uint8_t data = hal_in8(PS2_DATA_PORT);
 
         switch (packet_index) {
         case 0:

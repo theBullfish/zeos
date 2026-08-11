@@ -19,7 +19,7 @@
 #include "vault.h"
 #include "vault_disk.h"
 #include "timer.h"
-#include "io.h"
+#include "hal.h"
 #include "heap.h"
 
 /* ── Static state ─────────────────────────────────────────────── */
@@ -115,15 +115,15 @@ static void str_append(char *a, const char *b, int max)
 static int getkey(void)
 {
     for (;;) {
-        while (!(inb(0x64) & 0x01))
+        while (!(hal_in8(0x64) & 0x01))
             __asm__ volatile("hlt");
 
-        uint8_t sc = inb(0x60);
+        uint8_t sc = hal_in8(0x60);
 
         if (sc == SC_E0) {
-            while (!(inb(0x64) & 0x01))
+            while (!(hal_in8(0x64) & 0x01))
                 __asm__ volatile("hlt");
-            sc = inb(0x60);
+            sc = hal_in8(0x60);
             if (sc & 0x80) continue;
             switch (sc) {
             case SC_UP:    return KEY_UP;
@@ -1238,7 +1238,7 @@ static int step_done(int rx, int ry, int rw, int rh)
             if (sel == 0) {
                 /* Reboot via keyboard controller reset */
                 kputs("[installer] Rebooting...\n");
-                outb(0x64, 0xFE);
+                hal_out8(0x64, 0xFE);
                 /* If that fails, triple-fault */
                 for (;;)
                     __asm__ volatile("hlt");

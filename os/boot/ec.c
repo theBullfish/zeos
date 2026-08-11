@@ -21,7 +21,7 @@
  */
 
 #include "ec.h"
-#include "io.h"
+#include "hal.h"
 #include "kprint.h"
 #include "timer.h"
 #include "spinlock.h"
@@ -63,7 +63,7 @@ static int ec_wait_bit(uint8_t mask, uint8_t want)
     uint64_t deadline = timer_read_tsc() + (freq / 1000ULL) * EC_TIMEOUT_MS;
 
     while (timer_read_tsc() < deadline) {
-        uint8_t s = inb(g_ec.cmd);
+        uint8_t s = hal_in8(g_ec.cmd);
         if ((s & mask) == want) return 0;
         __asm__ volatile("pause");
     }
@@ -95,14 +95,14 @@ int ec_read(uint8_t offset, uint8_t *out)
     int rc = -1;
 
     /* Drain any stale OBF before issuing a new command. */
-    if (inb(g_ec.cmd) & EC_SR_OBF) (void)inb(g_ec.data);
+    if (hal_in8(g_ec.cmd) & EC_SR_OBF) (void)hal_in8(g_ec.data);
 
     if (ec_wait_ibf_clear() != 0) goto done;
-    outb(g_ec.cmd, EC_CMD_RD_EC);
+    hal_out8(g_ec.cmd, EC_CMD_RD_EC);
     if (ec_wait_ibf_clear() != 0) goto done;
-    outb(g_ec.data, offset);
+    hal_out8(g_ec.data, offset);
     if (ec_wait_obf_set() != 0) goto done;
-    *out = inb(g_ec.data);
+    *out = hal_in8(g_ec.data);
     g_ec.ops_read++;
     rc = 0;
 
@@ -118,11 +118,11 @@ int ec_write(uint8_t offset, uint8_t value)
     int rc = -1;
 
     if (ec_wait_ibf_clear() != 0) goto done;
-    outb(g_ec.cmd, EC_CMD_WR_EC);
+    hal_out8(g_ec.cmd, EC_CMD_WR_EC);
     if (ec_wait_ibf_clear() != 0) goto done;
-    outb(g_ec.data, offset);
+    hal_out8(g_ec.data, offset);
     if (ec_wait_ibf_clear() != 0) goto done;
-    outb(g_ec.data, value);
+    hal_out8(g_ec.data, value);
     if (ec_wait_ibf_clear() != 0) goto done;
     g_ec.ops_write++;
     rc = 0;

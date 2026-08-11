@@ -34,7 +34,7 @@
 #include "suspend.h"
 #include "acpi.h"
 #include "kprint.h"
-#include "io.h"
+#include "hal.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "timer.h"
@@ -255,14 +255,14 @@ void suspend_resume_entry(void)
 
 static uint8_t rtc_read(uint8_t reg)
 {
-    outb(RTC_INDEX, reg | 0x80);  /* NMI disable bit set while accessing */
-    return inb(RTC_DATA);
+    hal_out8(RTC_INDEX, reg | 0x80);  /* NMI disable bit set while accessing */
+    return hal_in8(RTC_DATA);
 }
 
 static void rtc_write(uint8_t reg, uint8_t val)
 {
-    outb(RTC_INDEX, reg | 0x80);
-    outb(RTC_DATA, val);
+    hal_out8(RTC_INDEX, reg | 0x80);
+    hal_out8(RTC_DATA, val);
 }
 
 static uint8_t bcd_to_bin(uint8_t v) { return (v & 0x0F) + ((v >> 4) * 10); }
@@ -321,7 +321,7 @@ static int rtc_arm_alarm(uint32_t seconds)
     (void)rtc_read(0x0C);  /* clear status */
 
     /* Re-enable NMI on next access by writing without 0x80. */
-    outb(RTC_INDEX, 0x0D);
+    hal_out8(RTC_INDEX, 0x0D);
     return 0;
 }
 
@@ -330,7 +330,7 @@ static void rtc_disarm_alarm(void)
     uint8_t regB = rtc_read(0x0B);
     rtc_write(0x0B, regB & ~0x20);
     (void)rtc_read(0x0C);
-    outb(RTC_INDEX, 0x0D);
+    hal_out8(RTC_INDEX, 0x0D);
 }
 
 /* ── Driver-side default hooks ─────────────────────────────────────── */
@@ -556,22 +556,22 @@ static int issue_s3_sleep(void)
 
     /* Read-modify-write: keep low bits (SCI_EN, BM_RLD), insert SLP_TYP
      * (bits 10-12) and assert SLP_EN (bit 13). */
-    uint16_t pm1a_val = inw(pm1a);
+    uint16_t pm1a_val = hal_in16(pm1a);
     pm1a_val &= ~(0x7u << 10);
     pm1a_val |= ((uint16_t)(f->slp_typa & 0x7) << 10);
     pm1a_val |= PM1_CNT_SLP_EN;
 
     uint16_t pm1b_val = 0;
     if (pm1b) {
-        pm1b_val = inw(pm1b);
+        pm1b_val = hal_in16(pm1b);
         pm1b_val &= ~(0x7u << 10);
         pm1b_val |= ((uint16_t)(f->slp_typb & 0x7) << 10);
         pm1b_val |= PM1_CNT_SLP_EN;
     }
 
     /* Spec says PM1a then PM1b, write same SLP_EN to both. */
-    outw(pm1a, pm1a_val);
-    if (pm1b) outw(pm1b, pm1b_val);
+    hal_out16(pm1a, pm1a_val);
+    if (pm1b) hal_out16(pm1b, pm1b_val);
 
     /* CPU continues executing for a small window before firmware
      * actually drops the cores. HLT until we lose power or the wake

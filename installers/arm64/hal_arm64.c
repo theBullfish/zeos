@@ -25,7 +25,14 @@ static inline void     mmio_w8(unsigned long a, uint8_t v)   { *(volatile uint8_
 static inline uint8_t  mmio_r8(unsigned long a)              { return *(volatile uint8_t *)a; }
 
 /* ── Port I/O: no port space on ARM; map the legacy PCI config ports
- * (0xCF8/0xCFC) onto ECAM, everything else is treated as MMIO offset. ── */
+ * everything is treated as an offset from the UART base.
+ *
+ * ⚠ STUB — NOT CORRECT YET. ARM has no port-I/O space, so these are placeholders
+ * that let the shared drivers COMPILE for aarch64; they do not yet dispatch by
+ * port to the right device. In particular PCI config (0xCF8/0xCFC) is NOT
+ * remapped onto ECAM here — use hal_arm_ecam_read32() below. Making this real
+ * means dispatching on the port number (or, better, giving the shared drivers a
+ * device handle instead of a bare port). Do not treat ARM I/O as working. ── */
 void hal_out8(uint16_t p, uint8_t v)   { mmio_w8(ARM_UART0_BASE + p, v); }
 uint8_t hal_in8(uint16_t p)            { return mmio_r8(ARM_UART0_BASE + p); }
 void hal_out16(uint16_t p, uint16_t v) { *(volatile uint16_t *)(ARM_UART0_BASE + p) = v; }
