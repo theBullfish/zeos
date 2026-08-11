@@ -139,6 +139,43 @@ first-light**. So ARM is not "a problem," and finishing on x86 is not lock-in �
 code is portable by construction. O.2 doesn't block features; it *formalizes* a line the code
 already mostly respects and relocates the handful of direct arch calls.
 
+### THE LINE IS NOW PHYSICAL (2026-08-10) — the repo enforces it
+
+`kernel/` no longer exists. The line is a directory boundary, so new work lands on the
+correct side by construction instead of by discipline:
+
+```
+os/                    ← THE chip-agnostic OS. All portable feature work goes here.
+                         Build: cd os && make all
+installers/x86_64/     ← x86 bring-up: gdt/idt, lapic/ioapic/msix, acpi/aml, smp +
+                         smp_trampoline.asm, hal_x86, vmm (MSR/CR page tables), suspend
+installers/arm64/      ← ARM bring-up: boot.S, vectors.S, gic, mmu, timer, uart,
+                         exceptions, fb, hal_arm64. Build: bash build.sh — it RECOMPILES
+                         the shared core out of os/boot. A recompile, not a fork.
+installers/riscv64/    ← eventually
+```
+
+**Rule:** never add arch-specific code (port I/O, MSRs, GDT/IDT, GIC) to `os/`. Route
+machine access through `os/boot/hal.h`. Where an interface is inherently arch-native, the
+**header stays in `os/`** as the portable contract and each installer supplies its own
+implementation (that is exactly how `vmm.h` works: 10 shared files call `vmm_*` to map
+MMIO; x86 implements it with CR3, ARM with TTBR0/1_EL1).
+
+**Measured state `[observed 2026-08-10]`:** `os/boot/*.c` contains **ZERO** raw
+`inb/outb/inw/outw/inl/outl` — 11 files / 74 call sites converted to the HAL façade
+(serial, timeofday, rtl8139, virtio, keyboard, mouse, timer, ec, power_buttons, firstboot,
+installer). Verified per batch on real cold boots: PIN entry, real IRQ keystrokes
+(`[js] type submit value hello inputEvents 5`), mouse hit-test, DHCP bind, and
+`fetch status 200` all green. x86 `BOOTZ.EFI` came out **byte-identical** across the
+`installers/x86_64` extraction, proving it was layout-only. ARM ELF builds green (rc=0,
+161,048 bytes) off the shared `os/` core.
+
+**NOT done, explicitly:** (1) `installers/arm64/hal_arm64.c` port-I/O is a **compile-only
+stub** — every port maps blindly to `ARM_UART0_BASE + port`; it does *not* dispatch by port
+and does *not* remap PCI config onto ECAM (a comment claiming it did was false and has been
+corrected). ARM I/O is NOT working. (2) `os/boot/mbedtls_platform.c` still uses `cpuid`
+(needs a `hal_cpu_features` op). (3) `riscv64` does not exist.
+
 ### DELIVERABLE 1 — The Portable OS (above the line; ships to every chip)
 The whole functional list: **A.2, A.5, A.6, A.7 · all of B · all of C · all of D (display +
 logic) · E.2–E.6, E.8, E.9 · all of F · all of G · H.2–H.6 (the stack) · all of I · all of J
