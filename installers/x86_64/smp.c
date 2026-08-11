@@ -50,6 +50,7 @@
 #include "io.h"
 #include "spinlock.h"
 #include "idt.h"
+#include "gdt.h"
 #include "chain.h"
 
 /* LAPIC register offsets we need for ICR. Other LAPIC regs live in lapic.c
@@ -352,6 +353,12 @@ void ap_main(uint64_t cpu_idx)
     /* Load the shared IDT on THIS CPU before enabling interrupts. Without it
      * an AP has no exception/interrupt handlers, so the first fault or IPI
      * triple-faults and resets the machine (the SMP reset-loop, A.3). */
+    /* Install THIS CPU's own GDT + TSS first. idt.c routes #DF/NMI/#MC through
+     * IST slots, and an AP with a null TR would fault while DELIVERING those
+     * faults -> triple fault. gdt_ap_prepare() already did the allocation on the
+     * BSP, so this is pure register loading — no allocator on the AP path. */
+    gdt_ap_load((int)cpu_idx);
+
     idt_load_ap();
 
     ap_lapic_init_local();
@@ -384,10 +391,27 @@ static void place_trampoline(uint64_t pml4_phys, uint64_t cpu_idx,
                                     _binary_smp_trampoline_bin_start);
     if (blob_size > TRAMPOLINE_SIZE) blob_size = TRAMPOLINE_SIZE;
 
-    /* Zero the page first. */
-    for (uint32_t i = 0; i < TRAMPOLINE_SIZE; i++) p[i] = 0;
-    /* Copy assembled blob verbatim. */
-    for (uint64_t i = 0; i < blob_size; i++) p[i] = _binary_smp_trampoline_bin_start[i];
+    /* Zero + copy the blob EXACTLY ONCE, not once per AP.
+     *
+     * This loop used to rewrite the whole 4 KiB page for every AP. The
+     * trampoline's own GDT lives in that page (selectors 0x18/0x20), and an AP
+     * keeps running on it from SIPI until it loads its per-CPU GDT in ap_main —
+     * which is AFTER it sets its alive flag and therefore AFTER the BSP has
+     * moved on to place the trampoline for the next AP. So bringing up AP N+1
+     * blanked and rewrote the GDT that AP N was still executing under. The bytes
+     * were re-copied identically, which is why it only ever showed up as a
+     * narrow window rather than a hard failure — but it is a genuine race.
+     *
+     * The per-AP parameter slots below are still patched every call; those are
+     * safe because the BSP waits for the previous AP's alive flag first, and by
+     * then that AP has consumed its parameters. */
+    static int trampoline_blob_placed;
+    if (!trampoline_blob_placed) {
+        for (uint32_t i = 0; i < TRAMPOLINE_SIZE; i++) p[i] = 0;
+        for (uint64_t i = 0; i < blob_size; i++)
+            p[i] = _binary_smp_trampoline_bin_start[i];
+        trampoline_blob_placed = 1;
+    }
 
     /* Patch parameter slots. */
     *(volatile uint32_t *)(p + TR_OFF_DIAG)     = 0;
@@ -493,6 +517,8 @@ int smp_init(void)
             s_cpus[i].stack_phys = 0;
             continue;
         }
+        /* Build this AP's GDT+TSS+IST stacks here, on the BSP, before any SIPI. */
+        gdt_ap_prepare(i);
         s_cpus[i].stack_phys = stack;
         s_cpus[i].stack_top_virt = stack + 4 * 4096;
         s_cpus[i].per_cpu_page = (void *)(uintptr_t)pmm_alloc();

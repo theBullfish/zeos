@@ -78,6 +78,28 @@ static struct gdt_entry gdt[7] __attribute__((aligned(16)));
 static struct tss tss __attribute__((aligned(16)));
 static struct gdtr gdtr;
 
+/* ── SMP: per-AP GDT + TSS ──────────────────────────────────────────────────
+ * Every AP needs its OWN TSS. RSP0 and the IST stacks are per-CPU state: idt.c
+ * assigns IST slots to #DF, NMI and #MC, so if an AP has a null TR (which it
+ * does with a shared BSP-only TSS) the CPU tries to read the IST from a
+ * nonexistent task register while DELIVERING the fault -> #GP during fault
+ * delivery -> triple fault, silently. Two cores sharing one IST stack would be
+ * just as bad: concurrent faults would stomp each other's exception frames.
+ *
+ * Split deliberately: the BSP builds every AP's tables single-threaded BEFORE
+ * any SIPI (gdt_ap_prepare), and the AP only loads them (gdt_ap_load). That
+ * keeps all PMM allocation on the BSP — no cross-core allocator race on the AP
+ * bring-up path. Selectors are identical to the BSP GDT, so kernel code/data
+ * addressing is the same on every core.
+ *
+ * Sized from SMP_MAX_CPUS rather than a private constant so the two can never
+ * drift apart (the upstream patch used a hand-kept 64 and a "keep in sync"
+ * comment; this removes that footgun). */
+#include "smp.h"
+static struct gdt_entry gdt_ap[SMP_MAX_CPUS][7] __attribute__((aligned(16)));
+static struct tss       tss_ap[SMP_MAX_CPUS]    __attribute__((aligned(16)));
+static struct gdtr      gdtr_ap[SMP_MAX_CPUS];
+
 /* IST stacks — allocated from PMM */
 static uint64_t ist_stack_1;  /* Double fault */
 static uint64_t ist_stack_2;  /* NMI */
@@ -198,6 +220,66 @@ void gdt_init(void)
         "ltr %%ax\n"
         : : : "rax"
     );
+}
+
+void gdt_ap_prepare(int cpu)
+{
+    if (cpu <= 0 || cpu >= SMP_MAX_CPUS) return;
+
+    /* Copy the BSP GDT verbatim (null/code/data/user + the TSS slot). */
+    for (int i = 0; i < (int)sizeof(gdt); i++)
+        ((uint8_t *)gdt_ap[cpu])[i] = ((uint8_t *)gdt)[i];
+
+    /* This AP's own TSS with its own IST stacks. */
+    struct tss *t = &tss_ap[cpu];
+    for (int i = 0; i < (int)sizeof(*t); i++) ((uint8_t *)t)[i] = 0;
+    t->ist1 = alloc_ist_stack();   /* #DF  */
+    t->ist2 = alloc_ist_stack();   /* NMI  */
+    t->ist3 = alloc_ist_stack();   /* #MC  */
+    t->iomap_base = sizeof(*t);    /* no I/O bitmap */
+    if (!t->ist1 || !t->ist2 || !t->ist3) {
+        kputs("GDT(AP "); kput_dec((uint64_t)cpu);
+        kputs("): WARNING - could not allocate IST stacks\n");
+    }
+
+    /* Point THIS AP's TSS descriptor (entries 5-6) at its own TSS. */
+    struct gdt_tss_entry *te = (struct gdt_tss_entry *)&gdt_ap[cpu][5];
+    uint64_t base  = (uint64_t)t;
+    uint32_t limit = sizeof(*t) - 1;
+    te->limit_low   = limit & 0xFFFF;
+    te->base_low    = base & 0xFFFF;
+    te->base_mid    = (base >> 16) & 0xFF;
+    te->access      = 0x89;        /* present, DPL0, 64-bit TSS available */
+    te->granularity = (limit >> 16) & 0xF;
+    te->base_high   = (base >> 24) & 0xFF;
+    te->base_upper  = (uint32_t)(base >> 32);
+    te->reserved    = 0;
+
+    gdtr_ap[cpu].limit = sizeof(gdt_ap[cpu]) - 1;
+    gdtr_ap[cpu].base  = (uint64_t)gdt_ap[cpu];
+}
+
+void gdt_ap_load(int cpu)
+{
+    if (cpu <= 0 || cpu >= SMP_MAX_CPUS) return;
+
+    __asm__ volatile("lgdt %0" : : "m"(gdtr_ap[cpu]));
+    /* Reload CS via a far return (cannot mov to CS in long mode). */
+    __asm__ volatile(
+        "pushq $0x08\n"
+        "leaq 1f(%%rip), %%rax\n"
+        "pushq %%rax\n"
+        "lretq\n"
+        "1:\n"
+        "movw $0x10, %%ax\n"
+        "movw %%ax, %%ds\n"
+        "movw %%ax, %%es\n"
+        "movw %%ax, %%fs\n"
+        "movw %%ax, %%gs\n"
+        "movw %%ax, %%ss\n"
+        : : : "rax", "memory");
+    /* Load THIS AP's task register so IST-based faults have a real TSS. */
+    __asm__ volatile("movw $0x28, %%ax\n\tltr %%ax\n" : : : "rax");
 }
 
 uint16_t gdt_kernel_cs(void)

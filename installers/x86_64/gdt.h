@@ -40,4 +40,12 @@ void gdt_init(void);
  */
 uint16_t gdt_kernel_cs(void);
 
+/* SMP per-CPU descriptor tables.
+ * gdt_ap_prepare() runs on the BSP, single-threaded, BEFORE any SIPI — it does
+ * the PMM allocation so the AP path never allocates. gdt_ap_load() runs ON the
+ * AP and installs that CPU's own GDT + TSS (ltr), which is what makes IST-based
+ * #DF/NMI/#MC delivery survivable on a core other than the BSP. */
+void gdt_ap_prepare(int cpu);
+void gdt_ap_load(int cpu);
+
 #endif /* ZEOS_GDT_H */
