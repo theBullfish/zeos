@@ -76,18 +76,13 @@ while time.time()-t0<75:
 print("desktop:",ready,flush=True)
 time.sleep(1.5)
 sw("\n");time.sleep(0.7)
-sw("hwid
-");time.sleep(1.5)
-sw("hwid pci 8086 15b8
-");time.sleep(1.2)
-sw("hwid pci 17cb 0308
-");time.sleep(1.2)
-sw("hwclass 01 08 02
-");time.sleep(1.2)
-sw("hwclass 0c 03 30
-");time.sleep(1.2)
-sw("hwclass 01 06 01
-");time.sleep(1.2)
+sw('hwid\n');time.sleep(1.3)
+sw('hwid pci 8086 15b8\n');time.sleep(1.3)
+sw('hwid pci 17cb 0308\n');time.sleep(1.3)
+sw('hwclass 01 08 02\n');time.sleep(1.3)
+sw('hwclass 0c 03 30\n');time.sleep(1.3)
+sw('hwclass 01 06 01\n');time.sleep(1.3)
+sw('lspci\n');time.sleep(1.3)
 shot("jsdom")
 print("=== SERIAL (browse test:dom3) ===")
 print(ser().split("browse test:dom3")[-1][-600:])
