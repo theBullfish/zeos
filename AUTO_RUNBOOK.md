@@ -22,6 +22,20 @@ A claim counts only when it is **measured AND observed** against a stable baseli
   cold-boot path (`sweep_boot.py`: PIN→wizard→live desktop). Harness scope ≠ production.
 - Verify with a SETTLED oracle (repeat the observation), not a single racy capture.
 
+## REPO STRUCTURE (changed 2026-08-10 — `kernel/` NO LONGER EXISTS)
+- **`os/`** — the **chip-agnostic OS**. All portable feature work goes HERE
+  (browser, net, JS/DOM, apps, fs, compositor). Build: `cd os && make all`.
+- **`installers/x86_64/`** — x86-only bring-up: gdt/idt, lapic/ioapic/msix,
+  acpi/aml, smp + smp_trampoline.asm, hal_x86. Compiled into the x86 image via
+  the Makefile's `../installers/x86_64` paths.
+- **`installers/arm64/`** — ARM bring-up (boot.S, vectors.S, gic, mmu, timer,
+  uart, exceptions, fb). Builds with `bash build.sh`, recompiling the SHARED
+  core out of `os/boot` — it is a recompile, NOT a fork.
+- **RULE:** never add arch-specific code (port I/O, MSRs, GDT/IDT, GIC) to `os/`.
+  Route machine access through the HAL façade (`os/boot/hal.h`:
+  `hal_in8/out8/in16/out16/in32/out32`, IRQ, timer) so one source builds on both.
+  Files still holding x86-isms in `os/`: `pci.c` (0xCF8/0xCFC config mechanism).
+
 ## SCOPE — what this loop may touch
 ELIGIBLE (software-reachable):
 - The ~57 `harness`-scope ledger items → re-verify on the PRODUCTION path, upgrade to
@@ -38,14 +52,14 @@ EXCLUDED — never touch autonomously:
 2. Pick the NEXT eligible item (top of STATE.queue; if empty, rebuild queue from
    `python3 ~/bible-db/bible.py lint zeos` harness-scope list, interactive items first).
 3. Do the work to verify it on the PRODUCTION path:
-   - `cd kernel && make clean && make all` (plain = traces/diag OFF). Confirm `build/BOOTZ.EFI`.
+   - `cd os && make clean && make all` (plain = traces/diag OFF). Confirm `build/BOOTZ.EFI`.
    - If the item is observable, ensure `sweep_boot.py` exercises it (add a capture if needed).
    - `pkill -9 -f 'qemu-sys[t]em'; sleep 2` (bracket avoids self-kill), then run `sweep_boot.py`.
    - Read the actual screenshot(s) with the Read tool + confirm the pixel change. SETTLED oracle:
      if flaky, re-run; a single racy capture is NOT evidence.
 4. If verified: `python3 ~/bible-db/bible.py append zeos <ITEM> --state VERIFIED
    --provenance observed --scope production --claim "..." --evidence "evidence/... + what was seen"
-   --supersedes <ITEM>`. Flip the `BUILD_MAP.md` box only now. Copy artifacts to `kernel/evidence/`.
+   --supersedes <ITEM>`. Flip the `BUILD_MAP.md` box only now. Copy artifacts to `os/evidence/`.
    If NOT verifiable this cycle: append `--state BROKEN` (or PARTIAL) with the real failure output,
    DO NOT flip the box, and leave a STATE note. Never fake a green check.
 5. **ADVERSARIAL REVIEW OF THE LAST TWO ITEMS** (the drift guard) — see next section.
