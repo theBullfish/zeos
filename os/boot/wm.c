@@ -396,6 +396,23 @@ void wm_restore_surface(int id) {
     wm_focus_surface(id);
 }
 
+/* Is the focused surface covering the ENTIRE display? One authority, used by both
+ * the compositor (to stand the panel down) and the network indicator (to stand
+ * itself down) — two independent checks would eventually disagree, and then a
+ * fullscreen movie would have a panel across it or the guardrail would vanish when
+ * it should not. Judged by COVERAGE, not by a state flag, so however a surface got
+ * there is irrelevant. */
+int wm_fullscreen_active(void)
+{
+    int id = wm_get_focused();
+    if (id < 0) return 0;
+    chain_surface_t *s = wm_get_surface(id);
+    if (!s) return 0;
+    if (s->state == SURFACE_MINIMIZED) return 0;
+    return (s->x <= 0 && s->y <= 0 &&
+            s->w >= g_wm.screen_w && s->h >= g_wm.screen_h);
+}
+
 /* TRUE fullscreen: cover the entire display, panel included. Distinct from
  * maximize, which deliberately stops below the panel. This is the movie/game
  * case — "show me only this" — and it is the one state in which the always-on

@@ -109,7 +109,10 @@ static void delta_add(int x, int y, int w, int h)
 static void draw_panel(void) {
     if (!g_comp.panel_visible) return;
     panel_update();
-    panel_draw();
+    /* Panel stands down for a truly fullscreen surface: the user asked for one
+     * thing on the screen, and "fullscreen" that still has a clock across it is
+     * not fullscreen. Same authority the network indicator uses. */
+    { extern int wm_fullscreen_active(void); if (!wm_fullscreen_active()) panel_draw(); }
 }
 
 /* ── Dock drawing ── */
@@ -325,7 +328,10 @@ static void composite_draw(void)
 
     desktop_draw();       /* wallpaper + icons (bottom) */
     wm_draw_all();        /* windows */
-    panel_draw();
+    /* Panel stands down for a truly fullscreen surface: the user asked for one
+     * thing on the screen, and "fullscreen" that still has a clock across it is
+     * not fullscreen. Same authority the network indicator uses. */
+    { extern int wm_fullscreen_active(void); if (!wm_fullscreen_active()) panel_draw(); }
     dock_draw();
 
     if (g_comp.layer_visible[COMP_LAYER_OVERLAYS]) {

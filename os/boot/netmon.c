@@ -136,17 +136,10 @@ void netmon_sample(void)
  * account for every byte. */
 static int fullscreen_covering(void)
 {
-    extern int wm_get_focused(void);
-    extern chain_surface_t *wm_get_surface(int id);
-    int id = wm_get_focused();
-    if (id < 0) return 0;
-    chain_surface_t *s = wm_get_surface(id);
-    if (!s) return 0;
-    /* Judge by COVERAGE, not by a flag: anything that actually spans the display
-     * counts, however it got there. */
-    int sw = (int)fb_width(), sh = (int)fb_height();
-    if (sw <= 0 || sh <= 0) return 0;
-    return (s->x <= 0 && s->y <= 0 && s->w >= sw && s->h >= sh);
+    /* Shared authority (wm.c) — deliberately NOT a second implementation, so the
+     * panel and this indicator can never disagree about what fullscreen means. */
+    extern int wm_fullscreen_active(void);
+    return wm_fullscreen_active();
 }
 
 void netmon_draw_overlay(void)

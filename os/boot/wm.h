@@ -200,6 +200,9 @@ void wm_restore_surface(int id);
 void wm_maximize_surface(int id);
 /* True fullscreen (covers the panel too). Toggles. */
 void wm_fullscreen_surface(int id);
+/* 1 when the focused surface covers the whole display. THE authority for
+ * "fullscreen" — the compositor and the network indicator both use this. */
+int  wm_fullscreen_active(void);
 
 /* ── Focus ── */
 void wm_focus_surface(int id);
