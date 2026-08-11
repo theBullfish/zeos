@@ -15,7 +15,7 @@
  */
 
 #include "serial.h"
-#include "io.h"
+#include "hal.h"
 #include "idt.h"
 #include "idle.h"
 
@@ -56,8 +56,8 @@ static void serial_rx_drain_fifo(void)
     /* LSR bit 0 = Data Ready. Read up to 16 bytes per call to bound
      * IRQ latency, more than enough for 16-byte FIFO depth. */
     for (int i = 0; i < 16; i++) {
-        if (!(inb(COM1 + 5) & 0x01)) return;
-        uint8_t b = (uint8_t)inb(COM1 + 0);
+        if (!(hal_in8(COM1 + 5) & 0x01)) return;
+        uint8_t b = (uint8_t)hal_in8(COM1 + 0);
         rx_push(b);
     }
 }
@@ -68,7 +68,7 @@ static void serial_isr(uint64_t vector, uint64_t error_code)
     (void)vector;
     (void)error_code;
     s_isr_count++;
-    (void)inb(COM1 + 2);
+    (void)hal_in8(COM1 + 2);
     serial_rx_drain_fifo();
 }
 uint32_t serial_isr_count_get(void) { return s_isr_count; }
@@ -79,14 +79,14 @@ void serial_init(void)
     s_rx_tail = 0;
     s_rx_dropped = 0;
 
-    outb(COM1 + 1, 0x00);  /* IER: no IRQs during config */
-    outb(COM1 + 3, 0x80);  /* LCR: DLAB=1 */
-    outb(COM1 + 0, 0x01);  /* DLL: divisor lo = 1 (115200) */
-    outb(COM1 + 1, 0x00);  /* DLM: divisor hi = 0 */
-    outb(COM1 + 3, 0x03);  /* LCR: 8N1, DLAB=0 */
-    outb(COM1 + 2, 0x01);  /* FCR: enable FIFO only (no clear yet) */
-    outb(COM1 + 2, 0x07);  /* FCR: enable FIFO + clear RX/TX, 1B trig */
-    outb(COM1 + 4, 0x0F);  /* MCR: DTR|RTS|OUT1|OUT2.
+    hal_out8(COM1 + 1, 0x00);  /* IER: no IRQs during config */
+    hal_out8(COM1 + 3, 0x80);  /* LCR: DLAB=1 */
+    hal_out8(COM1 + 0, 0x01);  /* DLL: divisor lo = 1 (115200) */
+    hal_out8(COM1 + 1, 0x00);  /* DLM: divisor hi = 0 */
+    hal_out8(COM1 + 3, 0x03);  /* LCR: 8N1, DLAB=0 */
+    hal_out8(COM1 + 2, 0x01);  /* FCR: enable FIFO only (no clear yet) */
+    hal_out8(COM1 + 2, 0x07);  /* FCR: enable FIFO + clear RX/TX, 1B trig */
+    hal_out8(COM1 + 4, 0x0F);  /* MCR: DTR|RTS|OUT1|OUT2.
                               OUT2 routes UART IRQ to the PIC. */
 
     /* Drain anything left in the RX FIFO from the loopback test or
@@ -94,14 +94,14 @@ void serial_init(void)
      * stop forwarding stdin until the FIFO has been read at least
      * once. */
     for (int i = 0; i < 16; i++) {
-        if (!(inb(COM1 + 5) & 0x01)) break;
-        (void)inb(COM1 + 0);
+        if (!(hal_in8(COM1 + 5) & 0x01)) break;
+        (void)hal_in8(COM1 + 0);
     }
 
     /* Enable RX-data-available interrupt (bit 0 of IER). RX timeout
      * (bit 2) keeps us from sitting on a partial FIFO — the timeout
      * fires after ~4 char-times of idle. */
-    outb(COM1 + 1, 0x05);
+    hal_out8(COM1 + 1, 0x05);
 }
 
 /* IRQ4 (COM1) wiring is separate from serial_init() because the IDT
@@ -116,7 +116,7 @@ void serial_irq_init(void)
 
 static int serial_tx_ready(void)
 {
-    return inb(COM1 + 5) & 0x20;  /* THR empty */
+    return hal_in8(COM1 + 5) & 0x20;  /* THR empty */
 }
 
 void serial_putc(char c)
@@ -124,13 +124,13 @@ void serial_putc(char c)
     /* Wait for transmit buffer to be empty */
     while (!serial_tx_ready())
         ;
-    outb(COM1, c);
+    hal_out8(COM1, c);
 
     /* Send \r before \n for terminal compatibility */
     if (c == '\n') {
         while (!serial_tx_ready())
             ;
-        outb(COM1, '\r');
+        hal_out8(COM1, '\r');
     }
 }
 
@@ -161,8 +161,8 @@ void serial_put_hex(uint64_t val)
  * IRQ ring. New code uses serial_rx_pending / serial_rx_pop instead. */
 int serial_try_getc(char *out)
 {
-    if (!(inb(COM1 + 5) & 0x01)) return 0;  /* RX data ready? */
-    *out = (char)inb(COM1 + 0);
+    if (!(hal_in8(COM1 + 5) & 0x01)) return 0;  /* RX data ready? */
+    *out = (char)hal_in8(COM1 + 0);
     return 1;
 }
 
