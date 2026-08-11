@@ -81,10 +81,26 @@ prot32:
     ; Diagnostic: stage 2 reached.
     mov dword [DIAG_PHYS], 0x22222222
 
-    ; Set CR4.PAE | CR4.PSE.
+    ; Set CR4.PAE | CR4.PSE, and CR4.OSFXSR | CR4.OSXMMEXCPT.
+    ;
+    ; The SSE bits are NOT optional. An AP comes out of reset with CR4=0, so
+    ; unlike the BSP (which inherits OSFXSR from UEFI) it has SSE disabled. The
+    ; kernel is compiled for the x86-64 ABI with no -mno-sse, so GCC emits SSE
+    ; freely: chain_resolve() -- the very function an AP runs -- contains 14 SSE
+    ; instructions and mde.o contains 99. Without these bits the first one an AP
+    ; executes takes #UD, and with no per-AP TSS that becomes a silent triple
+    ; fault. Done here in asm rather than in C so there is NO window between
+    ; entering long mode and enabling SSE.
     mov eax, cr4
-    or  eax, (1 << 5) | (1 << 4)
+    or  eax, (1 << 5) | (1 << 4) | (1 << 9) | (1 << 10)
     mov cr4, eax
+
+    ; CR0: clear EM (bit 2, no x87 emulation), set MP (bit 1). Required
+    ; alongside OSFXSR for SSE to be usable.
+    mov eax, cr0
+    and eax, ~(1 << 2)
+    or  eax, (1 << 1)
+    mov cr0, eax
 
     ; Load CR3 from parameter slot.
     mov eax, [PML4_PHYS]
@@ -115,6 +131,9 @@ long64:
     mov fs, ax
     mov gs, ax
     mov ss, ax
+
+    ; Initialise the x87/SSE unit before any FP state is touched.
+    fninit
 
     ; Diagnostic: stage 3 reached.
     mov dword [DIAG_PHYS], 0x33333333
