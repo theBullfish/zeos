@@ -14,7 +14,7 @@
 
 #include "net_virtio.h"
 #include "pci.h"
-#include "io.h"
+#include "hal.h"
 #include "pmm.h"
 #include "kprint.h"
 #include "spinlock.h"
@@ -103,14 +103,14 @@ static uint8_t tx_buffers[TX_BUFS][NET_BUF_SIZE] __attribute__((aligned(16)));
 
 /* ── I/O helpers ──────────────────────────────── */
 
-static inline void vio_write8(uint16_t offset, uint8_t val)  { outb(io_base + offset, val); }
+static inline void vio_write8(uint16_t offset, uint8_t val)  { hal_out8(io_base + offset, val); }
 static inline void vio_write16(uint16_t offset, uint16_t val) {
     __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"((uint16_t)(io_base + offset)));
 }
 static inline void vio_write32(uint16_t offset, uint32_t val) {
     __asm__ volatile("outl %0, %1" : : "a"(val), "Nd"((uint16_t)(io_base + offset)));
 }
-static inline uint8_t vio_read8(uint16_t offset) { return inb(io_base + offset); }
+static inline uint8_t vio_read8(uint16_t offset) { return hal_in8(io_base + offset); }
 static inline uint16_t vio_read16(uint16_t offset) {
     uint16_t val;
     __asm__ volatile("inw %1, %0" : "=a"(val) : "Nd"((uint16_t)(io_base + offset)));

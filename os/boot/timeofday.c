@@ -29,7 +29,7 @@
  */
 
 #include "timeofday.h"
-#include "io.h"
+#include "hal.h"
 #include "timer.h"
 #include "kprint.h"
 #include "vault.h"
@@ -73,14 +73,14 @@ static uint8_t cmos_read(uint8_t reg)
      * preserve it as 0x80 here to avoid re-enabling NMIs unexpectedly
      * mid-read. (Modern systems mostly ignore this, but the cost is a
      * single OR.) */
-    outb(CMOS_INDEX, (uint8_t)(0x80 | (reg & 0x7F)));
-    return inb(CMOS_DATA);
+    hal_out8(CMOS_INDEX, (uint8_t)(0x80 | (reg & 0x7F)));
+    return hal_in8(CMOS_DATA);
 }
 
 static void cmos_write(uint8_t reg, uint8_t val)
 {
-    outb(CMOS_INDEX, (uint8_t)(0x80 | (reg & 0x7F)));
-    outb(CMOS_DATA, val);
+    hal_out8(CMOS_INDEX, (uint8_t)(0x80 | (reg & 0x7F)));
+    hal_out8(CMOS_DATA, val);
 }
 
 static int cmos_update_in_progress(void)

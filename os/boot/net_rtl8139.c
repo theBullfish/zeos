@@ -27,7 +27,7 @@
 
 #include "net_rtl8139.h"
 #include "pci.h"
-#include "io.h"
+#include "hal.h"
 #include "pmm.h"
 #include "kprint.h"
 
@@ -82,12 +82,12 @@ static uint16_t capr;        /* our read cursor into rx_buf */
 static int      tx_slot;     /* next TX descriptor to use */
 
 /* ---- Register helpers ---- */
-static inline void w8 (uint16_t r, uint8_t  v) { outb(io_base + r, v); }
-static inline void w16(uint16_t r, uint16_t v) { outw(io_base + r, v); }
-static inline void w32(uint16_t r, uint32_t v) { outl(io_base + r, v); }
-static inline uint8_t  r8 (uint16_t r) { return inb(io_base + r); }
-static inline uint16_t r16(uint16_t r) { return inw(io_base + r); }
-static inline uint32_t r32(uint16_t r) { return inl(io_base + r); }
+static inline void w8 (uint16_t r, uint8_t  v) { hal_out8(io_base + r, v); }
+static inline void w16(uint16_t r, uint16_t v) { hal_out16(io_base + r, v); }
+static inline void w32(uint16_t r, uint32_t v) { hal_out32(io_base + r, v); }
+static inline uint8_t  r8 (uint16_t r) { return hal_in8(io_base + r); }
+static inline uint16_t r16(uint16_t r) { return hal_in16(io_base + r); }
+static inline uint32_t r32(uint16_t r) { return hal_in32(io_base + r); }
 
 int rtl8139_init(void)
 {
