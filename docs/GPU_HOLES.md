@@ -120,7 +120,7 @@ everything is a hole until it's covered.
 
 | # | Hole | Chain shape |
 |---|------|-------------|
-| K1 | GuC / HuC (Intel scheduler/codec firmware) absent | embedded blob in kernel/lib/firmware/, loaded by Intel driver |
+| K1 | GuC / HuC (Intel scheduler/codec firmware) absent | embedded blob in os/lib/firmware/, loaded by Intel driver |
 | K2 | PSP / SOS (AMD secure processor) absent | embedded blob, required before AMD GPU init |
 | K3 | NVIDIA signed firmware (Turing+) absent | embedded blob; nouveau path |
 | K4 | VBIOS / GOP driver shadow not parsed | option-ROM at PCI BAR; decode for fallback mode tables |

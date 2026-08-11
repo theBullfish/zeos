@@ -67,7 +67,7 @@ void fb_vline(int x, int y, int h, uint32_t color);
 void fb_text(int x, int y, const char *s, uint32_t color);
 ```
 
-### New file: kernel/boot/sigviz.c
+### New file: os/boot/sigviz.c
 ```c
 /* Render a signal chain as a graphical diagram */
 void sigviz_draw(int chain_id, int x, int y);

@@ -5,7 +5,7 @@
 >
 > **Date**: July 24, 2026
 > **Status**: Specification — not yet implemented
-> **Owner**: kernel/boot (pci.c, hotplug.c, gpu_goya.c, chain_registry.c, smp.c)
+> **Owner**: os/boot (pci.c, hotplug.c, gpu_goya.c, chain_registry.c, smp.c)
 > **Naming**: "Dom/Sub" is the working name — deliberately informal, kept
 > because it's funny and it's unambiguous. Swap it later if it stops being
 > funny. The technical semantics below don't depend on the name.

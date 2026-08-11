@@ -47,7 +47,7 @@ This document is the queued plan to fix that.
 
 ### 1. Drivers register as chain nodes
 - Each device declares input/output signal ports + a contract
-- `kernel/boot/chain_registry.c` is the entry point; nodes get IDs that
+- `os/boot/chain_registry.c` is the entry point; nodes get IDs that
   match the existing `CHAIN_*` constants
 - Example contract for a NIC:
   - `in: frame_to_send`

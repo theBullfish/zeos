@@ -38,7 +38,7 @@ That's it. The full story is in `habana/linux/README.md`.
 
 The Zeos kernel-side bypass. Same wire format as the Linux version, but built into Zeos's kernel so the cards come up natively when a Zeos box boots.
 
-The kernel C lives at `kernel/boot/gpu_goya.c` and `kernel/boot/gpu_goya_mme.c` (kernel convention — every Zeos driver lives in `kernel/boot/`). The Z+ proof programs live in this folder. The full story is in `habana/zeos/README.md`.
+The kernel C lives at `os/boot/gpu_goya.c` and `os/boot/gpu_goya_mme.c` (kernel convention — every Zeos driver lives in `os/boot/`). The Z+ proof programs live in this folder. The full story is in `habana/zeos/README.md`.
 
 ## The architectural choice
 

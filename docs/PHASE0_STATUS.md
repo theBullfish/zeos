@@ -6,7 +6,7 @@
 ## Completed
 
 ### 1. Reserve kernel image in PMM
-- **File**: `kernel/boot/pmm.c`
+- **File**: `os/boot/pmm.c`
 - **What**: Added `pmm_reserve_range()` function. At end of `pmm_init()`, reserves:
   - Kernel `.text` through `.edata` (via linker symbols `_text`, `_edata`)
   - Falls back to 4MB at 1MB if linker symbols aren't usable
@@ -19,7 +19,7 @@
   than before (kernel + mmap buffer now reserved).
 
 ### 2. Create GDT + TSS
-- **Files**: `kernel/boot/gdt.c`, `kernel/boot/gdt.h` (NEW)
+- **Files**: `installers/x86_64/gdt.c`, `installers/x86_64/gdt.h` (NEW)
 - **What**:
   - 5-entry GDT: null, kernel code64, kernel data, user code64, user data, + TSS
   - TSS with 3 IST stacks (double fault, NMI, machine check) — 16KB each from PMM
@@ -29,7 +29,7 @@
   reaches the shell prompt, GDT is correct.
 
 ### 3. Exception handlers (vectors 0-20)
-- **File**: `kernel/boot/idt.c`
+- **File**: `installers/x86_64/idt.c`
 - **What**:
   - Added `ISR_STUB_ERR` macro for exceptions that push hardware error codes (8, 10-14, 17)
   - Added `ISR_STUB_NOERR` stubs for all other exceptions (0-7, 9, 15-16, 18-20)
@@ -40,7 +40,7 @@
   screen with register dump instead of silent reboot.
 
 ### 4. Panic with register dump
-- **Files**: `kernel/boot/panic.c`, `kernel/boot/panic.h` (NEW)
+- **Files**: `os/boot/panic.c`, `os/boot/panic.h` (NEW)
 - **What**:
   - `panic(msg)` — prints message, halts with infinite `hlt` loop
   - `panic_with_state(msg, vector, error_code, regs)` — prints exception name,
@@ -50,13 +50,13 @@
 - **Test**: Any exception should produce useful diagnostic output.
 
 ### 5. Disable UEFI watchdog
-- **File**: `kernel/boot/main.c`
+- **File**: `os/boot/main.c`
 - **What**: Added `SetWatchdogTimer(0, 0, 0, NULL)` call before ExitBootServices
 - **Why**: UEFI firmware sets a 5-minute watchdog. If kernel stalls during
   calibration or PCI scan, the watchdog resets the machine silently.
 
 ### 6. Fix heap coalesce adjacency check
-- **File**: `kernel/boot/heap.c`
+- **File**: `os/boot/heap.c`
 - **What**: Added `blocks_adjacent()` check before merging in `coalesce()`.
   Only merges blocks where `block + header + size == next_block`.
   Prevents corruption when heap expands to non-contiguous regions.
@@ -64,14 +64,14 @@
   linked them into the free list).
 
 ### 7. Fix mkdir to create directories
-- **Files**: `kernel/boot/vault.c`, `kernel/boot/vault.h`, `kernel/boot/shell.c`
+- **Files**: `os/boot/vault.c`, `os/boot/vault.h`, `os/boot/shell.c`
 - **What**: Added `vault_mkdir()` function that sets `VAULT_TYPE_DIR` instead of
   `VAULT_TYPE_FILE`. Shell's `cmd_mkdir` now calls `vault_mkdir()`.
 - **Before**: `mkdir /home/brad` created a file inode. Children couldn't be created.
 - **After**: Creates a proper directory inode. Path resolution works for children.
 
 ### 8. Panic safety net after shell
-- **File**: `kernel/boot/main.c`
+- **File**: `os/boot/main.c`
 - **What**: Added `panic("shell_run returned unexpectedly")` after `shell_run()`.
   Previously, if shell returned, execution fell through to `return EFI_SUCCESS`
   which jumped to the UEFI CRT0 stub — now in freed/overwritten memory.

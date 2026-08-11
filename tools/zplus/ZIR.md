@@ -13,7 +13,7 @@ Before ZIR there were **three separate Z+ brains** that did not connect:
 2. **`tools/zplus` (C)** — an AST→**SFG** (Signal Flow Graph) transpiler that emits
    C. Its `sfg.h` already says the truth: *"A Z+ program IS a signal flow graph …
    maps 1:1 to kernel `chain_create`/`chain_add_node` calls."*
-3. **`kernel/boot/zplus.c`** — the OS's own, **weaker** re-parser (32-node cap)
+3. **`os/boot/zplus.c`** — the OS's own, **weaker** re-parser (32-node cap)
    feeding the live kernel signal-chain engine, plus a rich stdlib verb set.
 
 Each re-parsed Z+ from source. Fixing the language meant fixing it in three
@@ -124,5 +124,5 @@ conforms if it consumes v1 ZIR and rejects unknown `zir` versions rather than
 guessing.
 
 Reference emitters: `tools/zplus/src/zir.rs` (Rust), `tools/zplus/sfg_serialize.c`
-(C). Reference consumer + host test: `kernel/boot/zplus_zir.c` +
-`kernel/boot/zplus_zir_test.c`.
+(C). Reference consumer + host test: `os/boot/zplus_zir.c` +
+`os/boot/zplus_zir_test.c`.

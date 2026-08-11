@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # Rasterize the mapped cursor SVGs to embedded RGBA sprites for the kernel.
 # White fill + dark outline (visible on any background), alpha-antialiased.
-# Emits kernel/boot/cursor_sprites.h aligned to cursor_state_t order.
+# Emits os/boot/cursor_sprites.h aligned to cursor_state_t order.
 import os, subprocess, sys
 from PIL import Image, ImageFilter
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SVG  = os.path.join(REPO, "assets/icons/cursors")
-OUT  = os.path.join(REPO, "kernel/boot/cursor_sprites.h")
+OUT  = os.path.join(REPO, "os/boot/cursor_sprites.h")
 SZ   = 24                      # sprite is SZ x SZ
 WHITE = (0xF5, 0xF8, 0xFF)
 DARK  = (0x0D, 0x11, 0x17)

@@ -34,7 +34,7 @@
 ## The Decision
 
 Zeos does **not** use SynapseAI to drive Goya HL-1000 cards. The Goya
-driver in `kernel/boot/gpu_goya.c` and the MME programmer in
+driver in `os/boot/gpu_goya.c` and the MME programmer in
 `kernel/boot/gpu_goya_mme.c` talk to the silicon through the same
 packet path the in-tree Linux `habanalabs` driver uses, without any
 SynapseAI runtime, graph compiler, or precompiled recipe in the loop.
@@ -136,7 +136,7 @@ What we may vendor as the proof ladder hardens:
   does not need it.
 - **`linux-firmware/goya/`** — the firmware blobs the existing
   `gpu_goya.c` already objcopy-embeds. No code change needed; just
-  drop the blobs at `kernel/lib/firmware/habanalabs/goya/`.
+  drop the blobs at `os/lib/firmware/habanalabs/goya/`.
 
 ## The Federation Implication
 
@@ -157,8 +157,8 @@ network becomes addressable as a graph node.
 
 ## Files
 
-- `kernel/boot/gpu_goya.h`         — Public bring-up surface
-- `kernel/boot/gpu_goya.c`         — PCI + FW + TPC ring + accessors
+- `os/boot/gpu_goya.h`         — Public bring-up surface
+- `os/boot/gpu_goya.c`         — PCI + FW + TPC ring + accessors
 - `kernel/boot/gpu_goya_mme.h`     — MME programmer public surface
 - `kernel/boot/gpu_goya_mme.c`     — MME descriptor packets + ladder
 - `programs/mme_proof.zp`          — T1 Z+ proof signal graph

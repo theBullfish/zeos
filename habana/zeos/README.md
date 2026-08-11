@@ -1,6 +1,6 @@
 # habana/zeos — Zeos-side Goya bypass
 
-> **2026-05-26 LSO.04 — KERNEL-SIDE NOT IN MAIN.** The referenced `kernel/boot/gpu_goya_mme.{c,h}` ships ONLY on the `claude/synapse-open-source-B3HRQ` branch. Held back from `main` because the cloud-Claude commit (a06aa0b) used fabricated MME register addresses (`0x0F000000` flat GEMM) instead of the real `0xD0000` MME_ARCH_* spatial-loop encoding. See `../GOYA_BYPASS.md` correction. The Z+ proof files below describe correct *intent* (smoke / roof / real ladder), but the C implementation that backs them needs replacement before any Zeos boot pass enables `goya_mme_run_ladder_all()`.
+> **2026-05-26 LSO.04 — KERNEL-SIDE NOT IN MAIN.** The referenced `os/boot/gpu_goya_mme.{c,h}` ships ONLY on the `claude/synapse-open-source-B3HRQ` branch. Held back from `main` because the cloud-Claude commit (a06aa0b) used fabricated MME register addresses (`0x0F000000` flat GEMM) instead of the real `0xD0000` MME_ARCH_* spatial-loop encoding. See `../GOYA_BYPASS.md` correction. The Z+ proof files below describe correct *intent* (smoke / roof / real ladder), but the C implementation that backs them needs replacement before any Zeos boot pass enables `goya_mme_run_ladder_all()`.
 
 The Zeos kernel drives Habana silicon natively when a Zeos box boots. Same wire format as `habana/linux/habana_proof`, just compiled into the kernel instead of a Linux userspace binary.
 
@@ -13,12 +13,12 @@ Z+ is the project's signal-graph language. T1 is verbose with diagrams; T3 is de
 
 ## Files elsewhere
 
-The kernel C lives where every other Zeos driver lives — `kernel/boot/`. That's project convention (see `kernel/boot/gpu_nvidia.c`, `kernel/boot/gpu_virtio.c`, etc., all in the same directory).
+The kernel C lives where every other Zeos driver lives — `os/boot/`. That's project convention (see `os/boot/gpu_nvidia.c`, `os/boot/gpu_virtio.c`, etc., all in the same directory).
 
-- `kernel/boot/gpu_goya.h` — Public bring-up surface (PCI, BARs, MSI-X, firmware FIT, TPC ring, accessors)
-- `kernel/boot/gpu_goya.c` — Bring-up implementation; calls `goya_mme_run_ladder_all()` at end of `gpu_goya_init`
-- `kernel/boot/gpu_goya_mme.h` — MME programmer public surface
-- `kernel/boot/gpu_goya_mme.c` — MME descriptor packet builder + submitter + smoke/roof/real ladder
+- `os/boot/gpu_goya.h` — Public bring-up surface (PCI, BARs, MSI-X, firmware FIT, TPC ring, accessors)
+- `os/boot/gpu_goya.c` — Bring-up implementation; calls `goya_mme_run_ladder_all()` at end of `gpu_goya_init`
+- `os/boot/gpu_goya_mme.h` — MME programmer public surface
+- `os/boot/gpu_goya_mme.c` — MME descriptor packet builder + submitter + smoke/roof/real ladder
 
 `gpu_goya_mme.c` is the load-bearing piece — same 14-packet command stream as the Linux binary, just submitted through Zeos's TPC ring instead of `HL_IOCTL_CS`.
 
@@ -39,4 +39,4 @@ If smoke ever fails on real silicon, the architectural claim is suspect and the 
 
 Open `mme_proof.zp` first. The whole proof ladder is in plain English with a flow diagram at the bottom. If you want the dense version, `mme_proof_t3.zp` is the same proof in 50 lines.
 
-These files describe the *intent* of the bypass in the language the OS itself is built around. The kernel C in `kernel/boot/` is what actually runs.
+These files describe the *intent* of the bypass in the language the OS itself is built around. The kernel C in `os/boot/` is what actually runs.

@@ -290,4 +290,4 @@ Priority order once basic boot works:
 - MrChromebox firmware: https://mrchromebox.tech
 - CN60 board name: `panther` (MrChromebox identifier)
 - Z-OS USB image: `/home/z13/zeos/kernel/build/zeos-usb.img`
-- Z-OS kernel: `/home/z13/zeos/kernel/build/BOOTZ.EFI`
+- Z-OS kernel: `/home/z13/zeos/os/build/BOOTZ.EFI`
