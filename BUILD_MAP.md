@@ -170,11 +170,32 @@ installer). Verified per batch on real cold boots: PIN entry, real IRQ keystroke
 `installers/x86_64` extraction, proving it was layout-only. ARM ELF builds green (rc=0,
 161,048 bytes) off the shared `os/` core.
 
-**NOT done, explicitly:** (1) `installers/arm64/hal_arm64.c` port-I/O is a **compile-only
-stub** — every port maps blindly to `ARM_UART0_BASE + port`; it does *not* dispatch by port
-and does *not* remap PCI config onto ECAM (a comment claiming it did was false and has been
-corrected). ARM I/O is NOT working. (2) `os/boot/mbedtls_platform.c` still uses `cpuid`
-(needs a `hal_cpu_features` op). (3) `riscv64` does not exist.
+**ARM HAL port-I/O: OBSERVED WORKING on live aarch64 `[observed 2026-08-11]`.** The former
+compile-only stub (every port → `UART_BASE + port`, which silently corrupts registers) is
+replaced by real per-device dispatch with faithful translation, and proven by RUNNING it —
+a new **M6** bring-up rung on QEMU `virt` (`installers/arm64/kmain.c`, serial evidence):
+```
+[M6] PCI cfg via CF8/CFC->ECAM: vendor=0x1b36 device=0x0008  REAL DEVICE
+[M6] RTC via CMOS ports->PL031: 2026-8-11 14:43
+[M6] i8042 (absent on ARM): status=0x00 data=0xff  correctly reports ABSENT
+[M6] COM1 via hal_out8(0x3F8)->PL011: HAL-ROUTED SERIAL OK
+[M6] LSR synthesized from PL011 FR: 0x20  THR-empty OK
+```
+`1b36:0008` is the QEMU PCIe Host Bridge — a genuine ECAM read. Mapping: COM1 16550→PL011
+(LSR synthesized from FR), `0xCF8/0xCFC`→ECAM (address latch emulated), CMOS→PL031 (index
+latch + epoch→field conversion), i8042/PIT/speaker/A20 → report absent instead of scribbling
+into the UART, everything else → MMIO (BARs are memory on ARM). Pure logic (ECAM decode, RTC
+conversion incl. the 2000 leap day) is host-tested green by `installers/arm64/test/hal_logic_test.c`.
+**Running it found a real bug inspection missed:** ECAM at `0x40_1000_0000` (256 GB) was
+outside `mmu.c`'s 0–8 GB identity map → level-1 translation fault (ESR DFSC=0x05,
+FAR=0x4010000000); fixed by mapping L1 block 256 as device memory.
+
+**NOT done, explicitly:** (1) the aarch64 **boot path is still bring-up-only** — M0–M6 climb
+(EL1/PL011/VBAR → MMU → GICv3+timer → SMP via PSCI → heap/libc → Z+ engine → ramfb pixels →
+HAL), but there is **no EFI aarch64 stub and no full Zeos OS image on ARM yet**: the ARM build
+links only 4 shared core modules (`std_btree`, `zplus`, `signal`, `zp_runtime`), not the
+browser/net/compositor. That is the remaining O.3 work. (2) `os/boot/mbedtls_platform.c` still
+uses `cpuid` (needs a `hal_cpu_features` op). (3) `riscv64` does not exist.
 
 ### DELIVERABLE 1 — The Portable OS (above the line; ships to every chip)
 The whole functional list: **A.2, A.5, A.6, A.7 · all of B · all of C · all of D (display +
