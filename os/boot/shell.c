@@ -15,6 +15,8 @@
  * "derez"  — drop into dev persona
  */
 
+#include "hwdb.h"
+#include "hwnotes.h"
 #include "shell.h"
 #include "settings_registry.h"
 #include "wm.h"
@@ -281,6 +283,7 @@ static void cmd_bclickp(const char *args);
 static void cmd_bbox(const char *args);
 static void cmd_hwid(const char *args);
 static void cmd_hwclass(const char *args);
+static void cmd_hwnote(const char *args);
 static void cmd_btype(const char *args);
 static void cmd_bkey(const char *args);
 static void cmd_tcpsend(const char *args);
@@ -801,6 +804,7 @@ static const struct shell_cmd commands[] = {
     {"bbox",    "browser element box: bbox <id>", cmd_bbox, VIS_DEREZ},
     {"hwid",    "identify hardware: hwid [pci|usb] <vend> <dev>", cmd_hwid, VIS_DEREZ},
     {"hwclass", "class -> spec + driver protocol: hwclass <cls> <sub> <pif>", cmd_hwclass, VIS_DEREZ},
+    {"hwnote",  "our hw observations: hwnote [list|add <v> <d> <proto> <text>]", cmd_hwnote, VIS_DEREZ},
     {"btype",   "type into focused browser field: btype <text>", cmd_btype, VIS_DEREZ},
     {"bkey",    "browser field key: bkey <enter|back>", cmd_bkey, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
@@ -3258,6 +3262,78 @@ static void cmd_bkey(const char *args)
     else kputs("  bkey: use enter|back\n");
 }
 
+/* Our own hardware observations — an APPEND-ONLY layer beside the vendor list,
+ * never overwriting it. Usage: hwnote [list] | hwnote add <vid> <did> <proto> <text> */
+static void cmd_hwnote(const char *args)
+{
+    extern void hwnote_init(void);
+    extern int  hwnote_count(void); extern int hwnote_ready(void);
+    extern const struct hwnote *hwnote_at(int);
+    extern int  hwnote_add(uint8_t,uint16_t,uint16_t,uint8_t,uint8_t,uint8_t,uint32_t,const char*,const char*);
+    extern const char *hwdb_pci_vendor(uint16_t);
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    if (p[0] == 'a') {                                  /* add */
+        while (*p && *p != ' ') p++; while (*p == ' ') p++;
+        unsigned v = 0, d = 0;
+        while (*p && *p != ' ') { char c=*p++; int x=(c>='0'&&c<='9')?c-'0':((c|32)>='a'&&(c|32)<='f')?(c|32)-'a'+10:-1; if(x<0)break; v=v*16+(unsigned)x; }
+        while (*p == ' ') p++;
+        while (*p && *p != ' ') { char c=*p++; int x=(c>='0'&&c<='9')?c-'0':((c|32)>='a'&&(c|32)<='f')?(c|32)-'a'+10:-1; if(x<0)break; d=d*16+(unsigned)x; }
+        while (*p == ' ') p++;
+        char proto[16]; int i = 0;
+        while (*p && *p != ' ' && i < 15) proto[i++] = *p++;
+        proto[i] = 0;
+        while (*p == ' ') p++;
+        int saved = hwnote_add(HWNOTE_BUS_PCI, (uint16_t)v, (uint16_t)d, 0,0,0,
+                              HWNOTE_F_PROBED | HWNOTE_F_WORKS, proto, p);
+        kputs("  hwnote: recorded "); fb_put_hex16((uint16_t)v); kputs(":");
+        fb_put_hex16((uint16_t)d);
+        kputs(saved ? "  (persisted to vault)\n" : "  (RAM only -- vault unavailable)\n");
+        kputs("  vendor list UNCHANGED; this is an appended sub-note.\n");
+        return;
+    }
+    if (p[0] == 's') {                                  /* share [on|off|status] */
+        extern int hwnote_share_enabled(void); extern int hwnote_share_set(int);
+        extern const char *hwnote_share_endpoint(void);
+        extern int hwnote_share_payload(char *, int);
+        while (*p && *p != ' ') p++; while (*p == ' ') p++;
+        if (p[0] == 'o' && p[1] == 'n') {
+            int ok = hwnote_share_set(1);
+            kputs("  sharing: ON"); kputs(ok ? " (choice persisted)\n" : " (session only)\n");
+        } else if (p[0] == 'o' && p[1] == 'f') {
+            int ok = hwnote_share_set(0);
+            kputs("  sharing: OFF"); kputs(ok ? " (choice persisted)\n" : " (session only)\n");
+        }
+        kputs("  status: sharing is ");
+        kputs(hwnote_share_enabled() ? "ON" : "OFF (default -- nothing is transmitted)");
+        kputs("\n  would send to: "); kputs(hwnote_share_endpoint()); kputs("\n");
+        /* Show EXACTLY what would leave the machine, so consent is informed. */
+        static char pay[2048];
+        int n = hwnote_share_payload(pay, sizeof pay);
+        if (n == -1) {
+            kputs("  payload: REFUSED -- consent not granted, nothing serialized\n");
+        } else if (n < 0) {
+            kputs("  payload: buffer too small\n");
+        } else {
+            kputs("  payload ("); kput_dec((uint64_t)n);
+            kputs(" bytes, hardware facts only):\n");
+            kputs(pay);
+        }
+        return;
+    }
+    kputs("  hw annotations: "); kput_dec((uint64_t)hwnote_count());
+    kputs(hwnote_ready() ? " (vault-backed)\n" : " (RAM only)\n");
+    for (int i = 0; i < hwnote_count(); i++) {
+        const struct hwnote *n = hwnote_at(i);
+        if (!n) continue;
+        const char *vn = hwdb_pci_vendor(n->vendor);
+        kputs("   "); fb_put_hex16(n->vendor); kputs(":"); fb_put_hex16(n->device);
+        kputs("  vendor="); kputs(vn ? vn : "<not in vendor list>");
+        kputs("  ours: proto='"); kputs(n->protocol); kputs("' seq=");
+        kput_dec((uint64_t)n->seq); kputs("  \""); kputs(n->text); kputs("\"\n");
+    }
+}
+
 /* Resolve a PCI class triple to its published meaning AND the protocol Zeos would
  * drive it with — the operational half of the knowledge base.
  * Usage: hwclass <class> <subclass> <progif>  (hex) */
@@ -3314,7 +3390,19 @@ static void cmd_hwid(const char *args)
     kputs(usb ? "  usb " : "  pci "); fb_put_hex16((uint16_t)vid); kputs(":");
     fb_put_hex16((uint16_t)did); kputs("  ");
     kputs(vn ? vn : "<unknown vendor>"); kputs("  |  ");
-    kputs(dn && dn[0] ? dn : "<unknown device>"); kputs("\n");
+    kputs(dn && dn[0] ? dn : "<unknown device>");
+    /* JOIN: vendor data above, OUR observations below — separate layers. */
+    {
+        extern const struct hwnote *hwnote_find(uint8_t, uint16_t, uint16_t);
+        const struct hwnote *nt = hwnote_find(usb ? HWNOTE_BUS_USB : HWNOTE_BUS_PCI,
+                                              (uint16_t)vid, (uint16_t)did);
+        if (nt) {
+            kputs("\n     +local: drove as '"); kputs(nt->protocol);
+            kputs("' flags=0x"); fb_put_hex8((uint8_t)nt->flags);
+            kputs("  \""); kputs(nt->text); kputs("\"");
+        }
+    }
+    kputs("\n");
 }
 
 /* Print an element's live (post-layout) page box. Usage: bbox <id> */

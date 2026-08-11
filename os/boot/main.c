@@ -818,6 +818,11 @@ efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st)
         shell_vault_init();
         persistence_init();
 
+        /* Hardware annotations: replay OUR observations (append-only log in the
+         * vault) so they join to the vendor database. Local-only; contribution
+         * to the shared fleet DB stays off until the user explicitly opts in. */
+        { extern void hwnote_init(void); hwnote_init(); }
+
         /* Accessibility config: set sane defaults + load persisted prefs. Was
          * NEVER called, so the whole a11y config sat zero-initialized
          * (anim_speed=0) and no consumer could honor it. Must run before the
