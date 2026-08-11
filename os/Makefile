@@ -27,6 +27,7 @@ CFLAGS   = -ffreestanding \
            -I$(EFI_INC) \
            -I$(EFI_INC2) \
            -Iboot \
+           -I../installers/x86_64 \
            -Ilib \
            -Ilib/mbedtls/include \
            -MMD -MP \
@@ -53,8 +54,8 @@ LIBGCC   = $(shell $(CC) -print-libgcc-file-name)
 SRCS     = lib/lodepng/lodepng.c \
            boot/icon_svg.c \
            boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/splash.c \
-           boot/panic.c boot/gdt.c boot/idt.c boot/hal_x86.c \
-           boot/acpi.c boot/aml.c boot/lapic.c boot/ioapic.c \
+           boot/panic.c ../installers/x86_64/gdt.c ../installers/x86_64/idt.c ../installers/x86_64/hal_x86.c \
+           ../installers/x86_64/acpi.c ../installers/x86_64/aml.c ../installers/x86_64/lapic.c ../installers/x86_64/ioapic.c \
            boot/keyboard.c boot/pci.c boot/pmm.c boot/vmm.c boot/heap.c \
            boot/timer.c boot/timeofday.c boot/signal.c boot/zplus.c boot/zplus_zir.c boot/zp_runtime.c \
            boot/std_btree.c boot/std_json.c boot/std_regex.c boot/std_http.c boot/std_tls_server.c \
@@ -78,7 +79,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/usb_ehci.c \
            boot/usb_hc.c \
            boot/usb_hub.c \
-           boot/msix.c \
+           ../installers/x86_64/msix.c \
            boot/usb_msc.c \
            boot/usb_hid.c \
            boot/usb_uvc.c \
@@ -110,7 +111,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/gpu_goya.c \
            boot/dom_sub.c \
            boot/scheduler.c \
-           boot/smp.c \
+           ../installers/x86_64/smp.c \
            boot/persistence.c \
            boot/hotplug.c \
            boot/suspend.c \
@@ -197,7 +198,7 @@ FW_OBJS      = lib/firmware/rtl8188eufw.o \
                $(FW_NV_GA102_OBJS)
 
 # AP bring-up trampoline (assembled flat binary embedded as ELF object).
-SMP_OBJS    = boot/smp_trampoline.o
+SMP_OBJS    = ../installers/x86_64/smp_trampoline.o
 
 # ── D.9: desktop icons (SVG -> 48x48 RGBA PNG at build time -> ELF via objcopy) ──
 # rsvg-convert rasterizes; objcopy embeds; icon_svg.c decodes (lodepng) + tints.
@@ -379,11 +380,11 @@ $(eval $(call NV_FW_RULE,$(FW_NV_GA102_DIR),ga102,gsp))
 # AP bring-up trampoline. NASM assembles the 16->32->64 trampoline
 # to a flat 4 KiB binary; objcopy embeds it as an ELF section so the
 # kernel can copy it verbatim to physical 0x8000 before SIPI.
-boot/smp_trampoline.bin: boot/smp_trampoline.asm
+../installers/x86_64/smp_trampoline.bin: ../installers/x86_64/smp_trampoline.asm
 	nasm -f bin -o $@ $<
 
-boot/smp_trampoline.o: boot/smp_trampoline.bin
-	cd boot && $(OBJCOPY) --input-target=binary \
+../installers/x86_64/smp_trampoline.o: ../installers/x86_64/smp_trampoline.bin
+	cd ../installers/x86_64 && $(OBJCOPY) --input-target=binary \
 		--output-target=elf64-x86-64 \
 		--binary-architecture=i386:x86-64 \
 		smp_trampoline.bin smp_trampoline.o
@@ -577,4 +578,4 @@ usb: $(BUILDDIR)/$(TARGET)
 
 clean:
 	rm -rf $(OBJS) $(OBJS:.o=.d) $(FONT_OBJS) $(FW_OBJS) $(SMP_OBJS) \
-	       boot/smp_trampoline.bin $(BUILDDIR)
+	       ../installers/x86_64/smp_trampoline.bin $(BUILDDIR)
