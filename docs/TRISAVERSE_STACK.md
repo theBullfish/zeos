@@ -243,9 +243,9 @@ edge/cloud builds.
 
 | Layer | Status |
 |-------|--------|
-| Silicon Awareness | Research phase on commodity x86; proven concept on dedicated silicon |
-| Signal Chain Execution | Working kernel, boots on real hardware, 38 reference programs |
-| Fractal Addressing | Working and validated |
+| Silicon Awareness | Research phase on commodity x86; dedicated-silicon work is design + register decode, not yet run on a card |
+| Signal Chain Execution | Working kernel, boots under QEMU/OVMF (KVM); **not yet booted on physical hardware**; 38 reference programs |
+| Fractal Addressing | Working; validated by test suite (not on physical hardware) |
 | Temporal Storage | In-memory implementation complete, persistence in progress |
 | Temporal Wayfinding | Specification complete, implementation planned |
 | Compute Orchestration | Production-grade (951 tests, 6 subsystems, all passing) |

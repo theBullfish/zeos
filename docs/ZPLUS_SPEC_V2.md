@@ -681,7 +681,7 @@ No imports. No main function. No boilerplate. The file is wiring. The wiring is 
 | Codex Box native | Graph cores + tensor cores |
 | WebAssembly | Browser simulator for classrooms |
 
-The WebAssembly target means kids can learn Z+ in a browser. When ready, the same `.zp` file runs on real hardware. Zero translation.
+The WebAssembly target means kids can learn Z+ in a browser. When ready, the same `.zp` file is intended to run on real hardware with zero translation (target, not yet demonstrated on a physical board).
 
 ---
 

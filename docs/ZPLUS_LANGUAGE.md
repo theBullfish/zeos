@@ -473,7 +473,7 @@ Z+ compiles to:
 | TRISA compat (Linux) | Development and testing on conventional OS |
 | WebAssembly | Simulator in browser for classrooms |
 
-The **WebAssembly target** means kids can learn Z+ in a browser before they ever touch a Pi. The simulator shows the signal graph resolving in real time. When they're ready, the same `.zp` file runs on real hardware. Zero translation.
+The **WebAssembly target** means kids can learn Z+ in a browser before they ever touch a Pi. The simulator shows the signal graph resolving in real time. When they're ready, the same `.zp` file is intended to run on real hardware with zero translation — the toolchain targets it, but running Z+ on a physical board has not been demonstrated yet.
 
 ---
 
