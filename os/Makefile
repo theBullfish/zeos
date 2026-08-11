@@ -56,7 +56,7 @@ SRCS     = lib/lodepng/lodepng.c \
            boot/main.c boot/fb.c boot/serial.c boot/kprint.c boot/splash.c \
            boot/panic.c ../installers/x86_64/gdt.c ../installers/x86_64/idt.c ../installers/x86_64/hal_x86.c \
            ../installers/x86_64/acpi.c ../installers/x86_64/aml.c ../installers/x86_64/lapic.c ../installers/x86_64/ioapic.c \
-           boot/keyboard.c boot/pci.c boot/pmm.c ../installers/x86_64/vmm.c boot/heap.c \
+           boot/keyboard.c boot/pci.c boot/hwdb.c boot/pmm.c ../installers/x86_64/vmm.c boot/heap.c \
            boot/timer.c boot/timeofday.c boot/signal.c boot/zplus.c boot/zplus_zir.c boot/zp_runtime.c \
            boot/std_btree.c boot/std_json.c boot/std_regex.c boot/std_http.c boot/std_tls_server.c \
            boot/sigviz.c boot/vault.c \

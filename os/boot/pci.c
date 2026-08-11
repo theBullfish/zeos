@@ -9,6 +9,7 @@
  */
 
 #include "pci.h"
+#include "hwdb.h"
 #include "io.h"
 #include "hal.h"   /* O.2: PCI config I/O via the HAL */
 #include "fb.h"
@@ -459,8 +460,12 @@ const char *pci_vendor_name(uint16_t vid)
         case 0x10EE: return "Xilinx (alt)";
         case 0x1957: return "Freescale/NXP";
         case 0x12B7: return "Cirrus Logic";
-        default:     return "Unknown";
+        default:     break;
     }
+    /* Not in the curated list: consult the preloaded hardware knowledge base
+     * (2378 vendors from pci.ids, compiled in — no network, no lookup service). */
+    { const char *n = hwdb_pci_vendor(vid); if (n) return n; }
+    return "Unknown";
 }
 
 const char *pci_device_name(uint16_t vid, uint16_t did)
@@ -501,5 +506,7 @@ const char *pci_device_name(uint16_t vid, uint16_t did)
     } else if (vid == 0x1DA3) {
         if (did == 0x0001) return "Goya HL-1000";
     }
+    /* 18685 device names from the preloaded knowledge base. */
+    { const char *n = hwdb_pci_device(vid, did); if (n) return n; }
     return "";
 }

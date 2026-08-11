@@ -11,6 +11,7 @@
 #include "hw_discover.h"
 #include "chain.h"
 #include "pci.h"
+#include "hwdb.h"
 #include "kprint.h"
 #include "timer.h"
 
@@ -48,6 +49,16 @@ static int hw_streq(const char *a, const char *b)
 }
 
 /* ── PCI class to hardware type mapping ─────────────────────────── */
+
+/* Precise protocol for this device, from the preloaded knowledge base: the
+ * class/subclass/prog-if triple is a published contract, so "01/08/02" means the
+ * chip speaks NVMe regardless of vendor or vintage. Knowing this BEFORE probing
+ * means the chain we build is right the first time instead of generic-then-guess. */
+const char *hw_protocol_of(uint8_t class_code, uint8_t subclass, uint8_t prog_if)
+{
+    const char *p = hwdb_pci_protocol(class_code, subclass, prog_if);
+    return p ? p : HW_TYPE_UNKNOWN;
+}
 
 static const char *pci_class_to_hw_type(uint8_t class_code, uint8_t subclass)
 {

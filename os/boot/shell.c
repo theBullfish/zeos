@@ -279,6 +279,8 @@ static void cmd_ws(const char *args);
 static void cmd_bclick(const char *args);
 static void cmd_bclickp(const char *args);
 static void cmd_bbox(const char *args);
+static void cmd_hwid(const char *args);
+static void cmd_hwclass(const char *args);
 static void cmd_btype(const char *args);
 static void cmd_bkey(const char *args);
 static void cmd_tcpsend(const char *args);
@@ -797,6 +799,8 @@ static const struct shell_cmd commands[] = {
     {"bclick",  "browser link hit-test: bclick <screenX> <screenY>", cmd_bclick, VIS_DEREZ},
     {"bclickp", "browser click at page coords: bclickp <pageX> <pageY>", cmd_bclickp, VIS_DEREZ},
     {"bbox",    "browser element box: bbox <id>", cmd_bbox, VIS_DEREZ},
+    {"hwid",    "identify hardware: hwid [pci|usb] <vend> <dev>", cmd_hwid, VIS_DEREZ},
+    {"hwclass", "class -> spec + driver protocol: hwclass <cls> <sub> <pif>", cmd_hwclass, VIS_DEREZ},
     {"btype",   "type into focused browser field: btype <text>", cmd_btype, VIS_DEREZ},
     {"bkey",    "browser field key: bkey <enter|back>", cmd_bkey, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
@@ -3252,6 +3256,65 @@ static void cmd_bkey(const char *args)
     if (p[0] == 'e') { kputs("  bkey: enter\n"); browser_app_input_enter(); }
     else if (p[0] == 'b') { kputs("  bkey: back\n"); browser_app_input_backspace(); }
     else kputs("  bkey: use enter|back\n");
+}
+
+/* Resolve a PCI class triple to its published meaning AND the protocol Zeos would
+ * drive it with — the operational half of the knowledge base.
+ * Usage: hwclass <class> <subclass> <progif>  (hex) */
+static void cmd_hwclass(const char *args)
+{
+    extern const char *hwdb_pci_class(uint8_t, uint8_t, uint8_t);
+    extern const char *hwdb_pci_protocol(uint8_t, uint8_t, uint8_t);
+    extern int hwdb_pci_class_count(void);
+    const char *p = args ? args : "";
+    unsigned v[3] = {0,0,0};
+    for (int i = 0; i < 3; i++) {
+        while (*p == ' ') p++;
+        if (!*p) { if (i == 0) { kputs("  hwdb classes: "); kput_dec(hwdb_pci_class_count());
+                                 kputs(" entries. usage: hwclass <cls> <sub> <pif>\n"); return; } break; }
+        while (*p && *p != ' ') { char c=*p++; int d=(c>='0'&&c<='9')?c-'0':((c|32)>='a'&&(c|32)<='f')?(c|32)-'a'+10:-1; if(d<0)break; v[i]=v[i]*16+(unsigned)d; }
+    }
+    const char *meaning = hwdb_pci_class((uint8_t)v[0],(uint8_t)v[1],(uint8_t)v[2]);
+    const char *proto   = hwdb_pci_protocol((uint8_t)v[0],(uint8_t)v[1],(uint8_t)v[2]);
+    kputs("  class "); fb_put_hex8((uint8_t)v[0]); kputs("/"); fb_put_hex8((uint8_t)v[1]);
+    kputs("/"); fb_put_hex8((uint8_t)v[2]); kputs("  ");
+    kputs(meaning ? meaning : "<unknown class>");
+    kputs("   -> drive as: "); kputs(proto ? proto : "<no standard protocol>"); kputs("\n");
+}
+
+/* Identify a device from the PRELOADED hardware knowledge base. Proves Zeos can
+ * name hardware it has never seen, offline. Usage: hwid [pci|usb] <vid> <did> */
+static void cmd_hwid(const char *args)
+{
+    extern const char *hwdb_pci_vendor(uint16_t);
+    extern const char *hwdb_pci_device(uint16_t, uint16_t);
+    extern const char *hwdb_usb_vendor(uint16_t);
+    extern const char *hwdb_usb_device(uint16_t, uint16_t);
+    extern int hwdb_pci_vendor_count(void); extern int hwdb_pci_device_count(void);
+    extern int hwdb_usb_vendor_count(void); extern int hwdb_usb_device_count(void);
+    const char *p = args ? args : "";
+    while (*p == ' ') p++;
+    int usb = (p[0] == 'u');
+    if (p[0] == 'p' || p[0] == 'u') { while (*p && *p != ' ') p++; while (*p == ' ') p++; }
+    if (!*p) {
+        kputs("  hwdb coverage: pci "); kput_dec(hwdb_pci_vendor_count());
+        kputs(" vendors / "); kput_dec(hwdb_pci_device_count()); kputs(" devices; usb ");
+        kput_dec(hwdb_usb_vendor_count()); kputs(" vendors / ");
+        kput_dec(hwdb_usb_device_count()); kputs(" devices\n");
+        kputs("  usage: hwid [pci|usb] <vendor-hex> <device-hex>\n");
+        return;
+    }
+    unsigned vid = 0, did = 0;
+    while (*p && *p != ' ') { char c=*p++; int d = (c>='0'&&c<='9')?c-'0':((c|32)>='a'&&(c|32)<='f')?(c|32)-'a'+10:-1; if(d<0)break; vid=vid*16+(unsigned)d; }
+    while (*p == ' ') p++;
+    while (*p && *p != ' ') { char c=*p++; int d = (c>='0'&&c<='9')?c-'0':((c|32)>='a'&&(c|32)<='f')?(c|32)-'a'+10:-1; if(d<0)break; did=did*16+(unsigned)d; }
+    const char *vn = usb ? hwdb_usb_vendor((uint16_t)vid) : hwdb_pci_vendor((uint16_t)vid);
+    const char *dn = usb ? hwdb_usb_device((uint16_t)vid,(uint16_t)did)
+                         : hwdb_pci_device((uint16_t)vid,(uint16_t)did);
+    kputs(usb ? "  usb " : "  pci "); fb_put_hex16((uint16_t)vid); kputs(":");
+    fb_put_hex16((uint16_t)did); kputs("  ");
+    kputs(vn ? vn : "<unknown vendor>"); kputs("  |  ");
+    kputs(dn && dn[0] ? dn : "<unknown device>"); kputs("\n");
 }
 
 /* Print an element's live (post-layout) page box. Usage: bbox <id> */
