@@ -131,7 +131,7 @@ int rtl8139_init(void)
     w8(R_CR, CR_RST);
     for (int i = 0; i < 100000; i++) {
         if (!(r8(R_CR) & CR_RST)) break;
-        io_wait();
+        hal_io_wait();
     }
     if (r8(R_CR) & CR_RST) {
         kputs("rtl8139: reset timeout\n");
@@ -188,7 +188,7 @@ int rtl8139_send(const void *frame, uint16_t len)
         uint32_t s = r32(tsd_off);
         if (s & TSD_OWN) break;
         if (i == 0 && (s & 0xFFFF) == 0) break;  /* fresh slot, never used */
-        io_wait();
+        hal_io_wait();
     }
 
     /* Copy into the slot's TX buffer */

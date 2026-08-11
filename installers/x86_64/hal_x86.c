@@ -18,6 +18,7 @@ void     hal_out16(uint16_t p, uint16_t v){ outw(p, v); }
 uint16_t hal_in16(uint16_t p)             { return inw(p); }
 void     hal_out32(uint16_t p, uint32_t v){ outl(p, v); }
 uint32_t hal_in32(uint16_t p)             { return inl(p); }
+void     hal_io_wait(void)                 { io_wait(); }
 
 /* CPU tables. */
 void hal_cpu_init_tables(void) { gdt_init(); idt_init(); }

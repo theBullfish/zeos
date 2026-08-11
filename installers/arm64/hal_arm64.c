@@ -149,6 +149,10 @@ uint8_t hal_in8(uint16_t p)
     return mmio_r8(ARM_UART0_BASE + p);
 }
 
+/* No port space to settle; ensure the preceding MMIO write is observed before
+ * the caller proceeds, which is the ordering guarantee drivers actually want. */
+void hal_io_wait(void) { __asm__ volatile("dsb sy" ::: "memory"); }
+
 void hal_out16(uint16_t p, uint16_t v)
 {
     if (IS_COM1(p) || IS_CMOS(p) || IS_I8042(p) || IS_PIT(p)) return;

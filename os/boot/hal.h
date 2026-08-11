@@ -23,6 +23,11 @@ uint16_t hal_in16(uint16_t port);
 void     hal_out32(uint16_t port, uint32_t val);
 uint32_t hal_in32(uint16_t port);
 
+/* Short bus settling delay after a register write. On x86 this is the classic
+ * write-to-port-0x80 trick; on ARM it is a memory barrier. Drivers need "wait a
+ * moment for the device to catch up" without knowing which machine they are on. */
+void     hal_io_wait(void);
+
 /* ── Descriptor tables / CPU tables ── */
 void hal_cpu_init_tables(void);          /* GDT + IDT (x86); page tables/EL setup (arm) */
 
