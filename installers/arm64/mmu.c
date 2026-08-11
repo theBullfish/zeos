@@ -26,6 +26,15 @@ void mmu_init(void)
         uint64_t pa = (uint64_t)i * 0x40000000UL;
         l1_table[i] = pa | DESC_BLOCK | DESC_AF | DESC_SH_IS | ATTR(0);
     }
+    /* PCIe ECAM config space -> device. QEMU virt puts ECAM at 0x40_1000_0000
+     * (256 GB), which is NOT covered by the low identity map above: touching it
+     * without this entry takes a level-1 translation fault (ESR DFSC=0x05,
+     * FAR=0x4010000000). The 1GB L1 block at index 256 spans
+     * 0x40_0000_0000..0x40_4000_0000, which contains it. Device memory (ATTR 1),
+     * never cacheable — these are registers, not RAM. */
+    #define ECAM_L1_INDEX 256   /* 0x4010000000 / 0x40000000 */
+    l1_table[ECAM_L1_INDEX] = ((uint64_t)ECAM_L1_INDEX * 0x40000000UL)
+                            | DESC_BLOCK | DESC_AF | ATTR(1);
 
     uint64_t tcr = (25UL << 0)   /* T0SZ = 25 -> 39-bit VA */
                  | (1UL  << 8)   /* IRGN0 = WBWA */

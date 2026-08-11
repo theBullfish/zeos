@@ -1,6 +1,7 @@
 /* Zeos aarch64 — bring-up orchestrator. Climbs the ladder, prints each rung. */
 #include <stdint.h>
 #include <stddef.h>
+#include "hal.h"
 extern void kputs(const char *);
 extern void kputc(char);
 extern void kput_hex(uint64_t);
@@ -154,5 +155,54 @@ void kmain_aarch64(void)
     } else {
         kputs("[M5] ramfb NOT available (no -device ramfb?).\n");
     }
+    /* M6 -- the HAL (O.2 contract) exercised on real aarch64. The shared OS in
+     * os/ reaches hardware ONLY through hal.h, so this proves the ARM backend's
+     * port dispatch actually works rather than merely compiling: PCI config
+     * really lands on ECAM, the RTC really reads PL031, COM1 really reaches the
+     * PL011, and absent legacy devices report absent instead of corrupting the
+     * UART. */
+    kputs("[M6] HAL (hal.h) on aarch64: ");
+    kputs(hal_arch_name()); kputs("\n");
+
+    /* PCI config space via the legacy 0xCF8/0xCFC path -> ECAM. Bus0/dev0/fn0
+     * on QEMU virt is the PCIe host bridge; a real vendor:device must appear
+     * (0xFFFFFFFF would mean "nothing there" = dispatch broken). */
+    hal_out32(0xCF8, 0x80000000);
+    uint32_t id = hal_in32(0xCFC);
+    kputs("[M6] PCI cfg via CF8/CFC->ECAM: vendor="); kput_hex(id & 0xFFFF);
+    kputs(" device="); kput_hex((id >> 16) & 0xFFFF);
+    kputs((id != 0xFFFFFFFF && (id & 0xFFFF) != 0xFFFF) ? "  REAL DEVICE\n"
+                                                        : "  (none found)\n");
+
+    /* RTC via the legacy CMOS index/data ports -> PL031. */
+    hal_out8(0x70, 0x09); uint8_t yy = hal_in8(0x71);
+    hal_out8(0x70, 0x08); uint8_t mo = hal_in8(0x71);
+    hal_out8(0x70, 0x07); uint8_t dd = hal_in8(0x71);
+    hal_out8(0x70, 0x04); uint8_t hh = hal_in8(0x71);
+    hal_out8(0x70, 0x02); uint8_t mi = hal_in8(0x71);
+    kputs("[M6] RTC via CMOS ports->PL031: 20"); kput_dec(yy);
+    kputs("-"); kput_dec(mo); kputs("-"); kput_dec(dd);
+    kputs(" "); kput_dec(hh); kputs(":"); kput_dec(mi); kputs("\n");
+
+    /* Absent legacy hardware must report absent (NOT scribble into the UART):
+     * i8042 status 0x64 == 0 (output buffer empty), data 0x60 == 0xFF. */
+    uint8_t k_st = hal_in8(0x64), k_dt = hal_in8(0x60);
+    kputs("[M6] i8042 (absent on ARM): status="); kput_hex(k_st);
+    kputs(" data="); kput_hex(k_dt);
+    kputs((k_st == 0x00 && k_dt == 0xFF) ? "  correctly reports ABSENT\n"
+                                         : "  WRONG\n");
+
+    /* COM1 through the 16550->PL011 translation: this text is printed by
+     * hal_out8(0x3F8,...), i.e. the same path the shared serial.c uses. If you
+     * can read the next line, the translation works. */
+    kputs("[M6] COM1 via hal_out8(0x3F8)->PL011: ");
+    const char *m6 = "HAL-ROUTED SERIAL OK";
+    for (const char *p = m6; *p; ++p) hal_out8(0x3F8, (uint8_t)*p);
+    hal_out8(0x3F8, '\n');
+    /* And the synthesized LSR must report THR-empty (bit 5) like a real 16550. */
+    uint8_t lsr = hal_in8(0x3FD);
+    kputs("[M6] LSR synthesized from PL011 FR: "); kput_hex(lsr);
+    kputs((lsr & 0x20) ? "  THR-empty OK\n" : "  WRONG\n");
+
     kputs("================================================\n");
 }
