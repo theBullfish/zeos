@@ -13,8 +13,13 @@
 #include "net_ipv6.h"
 #include "net_tls.h"
 #include "kprint.h"
+#include "timer.h"
+#include "net.h"
 
 #define HTTP_MAX_REDIRECTS 5
+/* Wall-clock cap on waiting for more response data when the peer has sent
+ * nothing yet (keep-alive servers never close, so we can't wait forever). */
+#define HTTP_RECV_TIMEOUT_S 8ULL
 
 static int str_len(const char *s) { int n = 0; while (s[n]) n++; return n; }
 
@@ -312,13 +317,57 @@ int http_get_once_loc(const char *host, const char *path,
     int total = 0;
     int cap = (int)sizeof(raw) - 1;
 
+    /* RFC 7230 §3.3.3 message-body length. tcp_recv returns 0 for "nothing
+     * available yet" (NOT end-of-message), so we must poll to a deadline rather
+     * than stop on the first empty read, and we must know when the message is
+     * COMPLETE — a keep-alive server never closes the connection:
+     *   1. Transfer-Encoding: chunked  -> complete at the "0\r\n\r\n" terminator
+     *   2. Content-Length: N           -> complete at header_len + N
+     *   3. neither                     -> complete when the peer closes (legacy)
+     * Without this a chunked/keep-alive response (every CDN today) hangs. */
+    uint64_t tsc_hz = timer_tsc_freq();
+    uint64_t deadline = timer_read_tsc() + (tsc_hz ? tsc_hz * HTTP_RECV_TIMEOUT_S : 0);
+    int hdr_end = -1, want_total = -1, is_chunked = 0;
+
     while (total < cap) {
         int remaining = cap - total;
         uint16_t chunk = remaining > 0xF000 ? 0xF000 : (uint16_t)remaining;
         int got = via_v6 ? tcp_recv_v6(v6h, raw + total, chunk)
                          : tcp_recv(&conn, raw + total, chunk);
-        if (got <= 0) break;
-        total += got;
+        if (got > 0) {
+            total += got;
+            raw[total] = '\0';
+
+            /* Once headers are in, decide how the body is delimited. */
+            if (hdr_end < 0) {
+                int bs = find_body_start(raw, total);
+                if (bs > 0) {
+                    hdr_end = bs;
+                    const char *te = find_header(raw, total, "transfer-encoding: ");
+                    if (te && (te[0] == 'c' || te[0] == 'C')) is_chunked = 1;
+                    if (!is_chunked) {
+                        const char *cl = find_header(raw, total, "content-length: ");
+                        if (cl) {
+                            int n = 0;
+                            while (*cl >= '0' && *cl <= '9') n = n * 10 + (*cl++ - '0');
+                            want_total = hdr_end + n;
+                        }
+                    }
+                }
+            }
+            /* Complete? */
+            if (want_total > 0 && total >= want_total) break;
+            if (is_chunked && total >= 5) {
+                const char *e = raw + total - 5;           /* "0\r\n\r\n" */
+                if (e[0] == '0' && e[1] == '\r' && e[2] == '\n' &&
+                    e[3] == '\r' && e[4] == '\n') break;
+            }
+            continue;   /* got data — keep reading without burning the deadline */
+        }
+        if (got < 0) break;                                    /* closed/error */
+        /* got == 0: nothing yet. Pump the stack and wait, up to the deadline. */
+        net_poll();
+        if (tsc_hz && timer_read_tsc() > deadline) break;
     }
     raw[total] = '\0';
 
@@ -355,13 +404,42 @@ int http_get_once_loc(const char *host, const char *path,
     /* Find body */
     int body_start = find_body_start(raw, total);
     if (body_start > 0) {
-        int body_len = total - body_start;
-        if (body_len > HTTP_MAX_BODY - 1)
-            body_len = HTTP_MAX_BODY - 1;
-        for (int i = 0; i < body_len; i++)
-            resp->body[i] = raw[body_start + i];
-        resp->body[body_len] = '\0';
-        resp->body_len = (uint32_t)body_len;
+        if (is_chunked) {
+            /* RFC 7230 §4.1 chunked decode: repeat [hex-size CRLF data CRLF]
+             * until a 0-size chunk. Ignores chunk extensions (";..." after the
+             * size) and any trailer section after the terminator. */
+            int src = body_start, out = 0;
+            while (src < total && out < HTTP_MAX_BODY - 1) {
+                int size = 0, digits = 0;
+                while (src < total) {                       /* hex chunk size */
+                    char c = raw[src];
+                    int v;
+                    if      (c >= '0' && c <= '9') v = c - '0';
+                    else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+                    else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+                    else break;
+                    size = size * 16 + v; digits++; src++;
+                }
+                if (!digits) break;                          /* malformed */
+                while (src < total && raw[src] != '\n') src++;  /* skip ext+CR */
+                src++;                                          /* past LF */
+                if (size == 0) break;                           /* terminator */
+                for (int i = 0; i < size && src < total && out < HTTP_MAX_BODY - 1; i++)
+                    resp->body[out++] = raw[src++];
+                if (src < total && raw[src] == '\r') src++;      /* trailing CRLF */
+                if (src < total && raw[src] == '\n') src++;
+            }
+            resp->body[out] = '\0';
+            resp->body_len = (uint32_t)out;
+        } else {
+            int body_len = total - body_start;
+            if (body_len > HTTP_MAX_BODY - 1)
+                body_len = HTTP_MAX_BODY - 1;
+            for (int i = 0; i < body_len; i++)
+                resp->body[i] = raw[body_start + i];
+            resp->body[body_len] = '\0';
+            resp->body_len = (uint32_t)body_len;
+        }
     }
 
     kputs("  HTTP: ");
