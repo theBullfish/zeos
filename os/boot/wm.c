@@ -396,6 +396,33 @@ void wm_restore_surface(int id) {
     wm_focus_surface(id);
 }
 
+/* TRUE fullscreen: cover the entire display, panel included. Distinct from
+ * maximize, which deliberately stops below the panel. This is the movie/game
+ * case — "show me only this" — and it is the one state in which the always-on
+ * network indicator stands down, because the user explicitly asked for a screen
+ * with nothing else on it. Call again to restore. */
+void wm_fullscreen_surface(int id)
+{
+    chain_surface_t *s = wm_get_surface(id);
+    if (!s) return;
+    if (s->state == SURFACE_MAXIMIZED &&
+        s->x == 0 && s->y == 0 &&
+        s->w == g_wm.screen_w && s->h == g_wm.screen_h) {
+        /* already fullscreen -> restore */
+        s->state = SURFACE_NORMAL;
+        s->x = s->saved_x; s->y = s->saved_y;
+        s->w = s->saved_w; s->h = s->saved_h;
+        return;
+    }
+    if (s->state != SURFACE_MAXIMIZED) {
+        s->saved_x = s->x; s->saved_y = s->y;
+        s->saved_w = s->w; s->saved_h = s->h;
+    }
+    s->x = 0; s->y = 0;
+    s->w = g_wm.screen_w; s->h = g_wm.screen_h;
+    s->state = SURFACE_MAXIMIZED;
+}
+
 void wm_maximize_surface(int id) {
     chain_surface_t *s = find_surface(id);
     if (!s) return;

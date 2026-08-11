@@ -7,6 +7,7 @@
  */
 
 #include "net.h"
+#include "netmon.h"
 #include "net_virtio.h"
 #include "net_e1000.h"
 #include "net_rtl8169.h"
@@ -84,6 +85,12 @@ int net_init(void)
     net_chain_set_hw(&hw);
     net_drv_send = net_chain_send;
     net_drv_recv = net_chain_recv;
+
+    /* GUARDRAIL: wrap the driver dispatch so EVERY byte in or out is counted and
+     * drawn on the desktop. Installed here, at the one place the pointers are
+     * assigned, so no caller — present or future, ours included — can move a
+     * packet without it showing. Not configurable, cannot be turned off. */
+    { extern void netmon_install(void); netmon_install(); }
 
     /* Get our MAC */
     net_drv_get_mac(&g_net.mac);

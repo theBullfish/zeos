@@ -748,6 +748,10 @@ void scheduler_run(void)
              * the later chain resolve just finds the ring already empty. */
             keyboard_chain_drain();
             net_service();          /* pump RX + async DHCP under the scheduler */
+            /* Advance the network-activity waveform one sample. Unconditional:
+             * the indicator must keep moving (and keep reading "quiet") whether
+             * or not anything is talking. */
+            { extern void netmon_sample(void); netmon_sample(); }
             uint64_t _ca = timer_read_tsc();
             compositor_advance();
             comp_cycles += timer_read_tsc() - _ca;

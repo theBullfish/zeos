@@ -198,6 +198,8 @@ void wm_restore_surface(int id);
 
 /* Maximize / restore toggle */
 void wm_maximize_surface(int id);
+/* True fullscreen (covers the panel too). Toggles. */
+void wm_fullscreen_surface(int id);
 
 /* ── Focus ── */
 void wm_focus_surface(int id);

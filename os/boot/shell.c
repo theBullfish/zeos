@@ -284,6 +284,9 @@ static void cmd_bbox(const char *args);
 static void cmd_hwid(const char *args);
 static void cmd_hwclass(const char *args);
 static void cmd_hwnote(const char *args);
+static void cmd_netmon(const char *args);
+static void cmd_wmax(const char *args);
+static void cmd_wfull(const char *args);
 static void cmd_btype(const char *args);
 static void cmd_bkey(const char *args);
 static void cmd_tcpsend(const char *args);
@@ -805,6 +808,9 @@ static const struct shell_cmd commands[] = {
     {"hwid",    "identify hardware: hwid [pci|usb] <vend> <dev>", cmd_hwid, VIS_DEREZ},
     {"hwclass", "class -> spec + driver protocol: hwclass <cls> <sub> <pif>", cmd_hwclass, VIS_DEREZ},
     {"hwnote",  "our hw observations: hwnote [list|add <v> <d> <proto> <text>]", cmd_hwnote, VIS_DEREZ},
+    {"netmon",  "network activity counters (the guardrail's raw numbers)", cmd_netmon, VIS_DEREZ},
+    {"wmax",    "maximize the focused window (below panel)", cmd_wmax, VIS_DEREZ},
+    {"wfull",   "TRUE fullscreen the focused window (covers panel)", cmd_wfull, VIS_DEREZ},
     {"btype",   "type into focused browser field: btype <text>", cmd_btype, VIS_DEREZ},
     {"bkey",    "browser field key: bkey <enter|back>", cmd_bkey, VIS_DEREZ},
     {"tcpsend", "TCP window test: tcpsend <ip:port> <nbytes>", cmd_tcpsend, VIS_DEREZ},
@@ -3260,6 +3266,61 @@ static void cmd_bkey(const char *args)
     if (p[0] == 'e') { kputs("  bkey: enter\n"); browser_app_input_enter(); }
     else if (p[0] == 'b') { kputs("  bkey: back\n"); browser_app_input_backspace(); }
     else kputs("  bkey: use enter|back\n");
+}
+
+/* True fullscreen (movie/game): covers the entire display including the panel. */
+static void cmd_wfull(const char *args)
+{
+    (void)args;
+    extern int wm_get_focused(void);
+    extern void wm_fullscreen_surface(int id);
+    extern void compositor_dirty_all(void);
+    int id = wm_get_focused();
+    if (id < 0) { kputs("  wfull: no focused window\n"); return; }
+    wm_fullscreen_surface(id);
+    compositor_dirty_all();
+    kputs("  wfull: fullscreen surface "); kput_dec((uint64_t)id); kputs("\n");
+}
+
+/* Maximize the focused window — deterministic, for testing the
+ * network-indicator yield without depending on flaky key combos. */
+static void cmd_wmax(const char *args)
+{
+    (void)args;
+    extern int wm_get_focused(void);
+    extern void wm_maximize_surface(int id);
+    extern void compositor_dirty_all(void);
+    int id = wm_get_focused();
+    if (id < 0) { kputs("  wmax: no focused window\n"); return; }
+    wm_maximize_surface(id);
+    compositor_dirty_all();
+    kputs("  wmax: maximized surface "); kput_dec((uint64_t)id); kputs("\n");
+}
+
+/* Raw numbers behind the always-on network indicator. Totals are since boot and
+ * never reset, so the on-screen wave can be cross-checked against them. */
+static void cmd_netmon(const char *args)
+{
+    (void)args;
+    extern uint64_t netmon_total_tx(void); extern uint64_t netmon_total_rx(void);
+    extern uint64_t netmon_pkts_tx(void);  extern uint64_t netmon_pkts_rx(void);
+    extern const uint32_t *netmon_hist_tx(void);
+    extern const uint32_t *netmon_hist_rx(void);
+    extern uint32_t netmon_hist_peak(void); extern int netmon_active(void);
+    kputs("  netmon  TX "); kput_dec(netmon_total_tx());
+    kputs(" bytes / "); kput_dec(netmon_pkts_tx()); kputs(" pkts");
+    kputs("   RX "); kput_dec(netmon_total_rx());
+    kputs(" bytes / "); kput_dec(netmon_pkts_rx()); kputs(" pkts\n");
+    kputs("  window peak "); kput_dec((uint64_t)netmon_hist_peak());
+    kputs(" B/sample, active="); kput_dec((uint64_t)netmon_active());
+    const uint32_t *t = netmon_hist_tx(), *r = netmon_hist_rx();
+    uint64_t wt = 0, wr = 0; int nonzero = 0;
+    for (int i = 0; i < 48; i++) {
+        wt += t[i]; wr += r[i];
+        if (t[i] || r[i]) nonzero++;
+    }
+    kputs("  window (12s): tx "); kput_dec(wt); kputs(" B, rx "); kput_dec(wr);
+    kputs(" B, "); kput_dec((uint64_t)nonzero); kputs("/48 slots with traffic\n");
 }
 
 /* Our own hardware observations — an APPEND-ONLY layer beside the vendor list,

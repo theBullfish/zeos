@@ -495,6 +495,18 @@ void compositor_present(void) {
         if (g_comp.layer_visible[COMP_LAYER_CURSOR] && !lockscreen_active())
             cursor_draw();
     }
+
+    /* NETWORK ACTIVITY — the last thing drawn, above EVERYTHING, every tick.
+     *
+     * Not a desktop widget and not a dock item: a fullscreen program would hide
+     * either one, and an indicator that can be covered is an indicator that can
+     * be defeated. This is composited after all windows, after the panel, after
+     * the cursor, with no layer_visible gate and no setting — the software
+     * equivalent of a link LED on the chassis.
+     *
+     * It exists so that traffic nobody asked for is visible to the person using
+     * the machine, immediately, without tools and without having to trust us. */
+    { extern void netmon_draw_overlay(void); netmon_draw_overlay(); }
 }
 
 void compositor_dirty(int x, int y, int w, int h) {
