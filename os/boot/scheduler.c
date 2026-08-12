@@ -280,8 +280,15 @@ void scheduler_init(void)
     s_tps_last = 0;
     s_tick_avg_us_last = 0;
     kputs("[scheduler] chain resolution as scheduling primitive\n");
-    kputs("[scheduler] quantum=1000us, B3 backoff enabled (per-chain tunable)\n");
-    kputs("[scheduler] preemption=LAPIC timer vec 0xEF + setjmp/longjmp\n");
+    /* Say what is actually true. s_quantum_us is a REPORTING threshold — it is
+     * read in exactly one place (the "exceeded budget" log) and nothing arms a
+     * timeslice from it, so a chain runs to completion or until its watchdog.
+     * The old line read "quantum=1000us, B3 backoff enabled", which announced a
+     * preemptive timeslice guarantee this scheduler does not make. */
+    kputs("[scheduler] budget=1000us (REPORTING threshold, not a timeslice), "
+          "B3 backoff enabled (per-chain tunable)\n");
+    kputs("[scheduler] preemption=per-chain watchdog via LAPIC timer vec 0xEF + "
+          "setjmp/longjmp (NOT quantum timeslicing)\n");
     kputs("[scheduler] watchdog=post-hoc (defensive secondary path)\n");
 
     /* Install LAPIC timer ISR for preemption. The handler runs from
