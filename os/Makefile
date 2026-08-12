@@ -562,17 +562,27 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo ""
 	@echo "  Creating $(USB_SIZE)MB USB boot image..."
 	dd if=/dev/zero of=$(USB_IMG) bs=1M count=$(USB_SIZE) 2>/dev/null
+	@# NEVER hide sgdisk errors. This used to be ">/dev/null 2>&1", which silently
+	@# swallowed "Invalid partition data!" and produced an image with NO GPT — it
+	@# looked like it built fine and would simply not boot on real hardware.
+	sgdisk --zap-all $(USB_IMG)
 	sgdisk --clear \
 		--new=1:2048:1046528 \
 		--typecode=1:ef00 \
 		--change-name=1:"EFI System" \
-		$(USB_IMG) >/dev/null 2>&1
+		$(USB_IMG)
 	MTOOLS_SKIP_CHECK=1 mformat -i $(USB_IMG)@@$(USB_OFF) -F -h 32 -t 128 -s 63 ::
 	MTOOLS_SKIP_CHECK=1 mmd -i $(USB_IMG)@@$(USB_OFF) ::/EFI
 	MTOOLS_SKIP_CHECK=1 mmd -i $(USB_IMG)@@$(USB_OFF) ::/EFI/BOOT
 	MTOOLS_SKIP_CHECK=1 mcopy -i $(USB_IMG)@@$(USB_OFF) \
 		$(BUILDDIR)/$(TARGET) ::/EFI/BOOT/BOOTX64.EFI
 	@echo ""
+	@# Fail LOUDLY if the image is not actually bootable-shaped.
+	@dd if=$(USB_IMG) bs=512 count=1 skip=1 2>/dev/null | head -c 8 | grep -q "EFI PART" \
+		|| { echo "  ERROR: no GPT header at LBA1 — image is NOT bootable"; exit 1; }
+	@MTOOLS_SKIP_CHECK=1 mdir -i $(USB_IMG)@@$(USB_OFF) ::/EFI/BOOT 2>/dev/null | grep -q BOOTX64 \
+		|| { echo "  ERROR: BOOTX64.EFI missing from the ESP"; exit 1; }
+	@echo "  verified: GPT present, BOOTX64.EFI in /EFI/BOOT"
 	@echo "  USB image: $(USB_IMG)"
 	@ls -lh $(USB_IMG) | awk '{print "  Size:      " $$5}'
 	@echo ""

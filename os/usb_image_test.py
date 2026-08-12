@@ -18,7 +18,12 @@ qemu=subprocess.Popen(["qemu-system-x86_64",*accel_args(),"-machine","q35","-m",
  "-drive","if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
  "-drive",f"if=pflash,format=raw,file={B}/OVMF_VARSusb.fd",
  # present the image as a real USB mass-storage stick, like the thumb drive
- "-drive",f"if=none,id=usbstick,format=raw,file={IMG}",
+ # READ-ONLY. Attaching the image writable let the guest (OVMF NvVars / Zeos
+ # persistence) write into it and ZERO the primary GPT at LBA1 — the image
+ # booted fine here, then every dd afterwards faithfully copied a corrupted
+ # image to the stick. A pre-flight test must never mutate the artifact it is
+ # certifying.
+ "-drive",f"if=none,id=usbstick,format=raw,file={IMG},readonly=on",
  "-device","qemu-xhci,id=xhci","-device","usb-storage,bus=xhci.0,drive=usbstick",
  "-device","virtio-net-pci,netdev=n0","-netdev","user,id=n0","-vga","std",
  "-chardev",f"socket,id=ss,path={SER},server=on,wait=off","-serial","chardev:ss",
