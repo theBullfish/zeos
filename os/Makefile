@@ -551,7 +551,11 @@ run-headless: $(BUILDDIR)/OVMF_VARS.fd
 # Flash with: sudo dd if=build/zeos-usb.img of=/dev/sdX bs=4M status=progress
 #
 USB_IMG  = $(BUILDDIR)/zeos-usb.img
-USB_SIZE = 64
+# 512 MB, not 64. BOOTX64.EFI is already ~45 MB (embedded fonts, icons, firmware
+# blobs, the 1.4 MB hardware knowledge base) and grows every session; a 63 MB ESP
+# left only ~20 MB of headroom. On any real thumb drive 512 MB is free, and it
+# keeps the ESP comfortably inside FAT32's happy range for picky vendor firmware.
+USB_SIZE = 512
 USB_OFF  = 1048576
 
 usb: $(BUILDDIR)/$(TARGET)
@@ -559,7 +563,7 @@ usb: $(BUILDDIR)/$(TARGET)
 	@echo "  Creating $(USB_SIZE)MB USB boot image..."
 	dd if=/dev/zero of=$(USB_IMG) bs=1M count=$(USB_SIZE) 2>/dev/null
 	sgdisk --clear \
-		--new=1:2048:131038 \
+		--new=1:2048:1046528 \
 		--typecode=1:ef00 \
 		--change-name=1:"EFI System" \
 		$(USB_IMG) >/dev/null 2>&1
