@@ -9,6 +9,7 @@
  * Per-source mute list. All decisions go through notify_should_silence().
  */
 
+#include <stddef.h>   /* NULL — was arriving by accident via fb.h -> zeos_boot.h -> efi.h */
 #include "notify.h"
 #include "fb.h"
 #include "font.h"

@@ -6,7 +6,14 @@
 #ifndef ZEOS_BOOT_H
 #define ZEOS_BOOT_H
 
-#include <efi.h>
+/* stdint only. This header describes what the firmware hands the kernel, but it
+ * is part of the ARCH- AND FIRMWARE-AGNOSTIC os/ layer, so it must not depend on
+ * a UEFI header to name its own field types. It previously included <efi.h> and
+ * compiled purely by luck of the x86 build's include order; on aarch64 (whose
+ * boot path is not UEFI at all) that broke every consumer of struct
+ * zeos_framebuffer. The EFI_ names that remain below are comments describing
+ * where a value originates on x86 — not types used here. */
+#include <stdint.h>
 
 struct zeos_framebuffer {
     uint32_t *base;          /* Pointer to pixel data */

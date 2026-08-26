@@ -28,12 +28,31 @@ extern int strcmp(const char *, const char *);
 
 
 extern int zp_run(const char *);
-/* framebuffer (ramfb) — the visual layer, brought up as part of bring-up */
-extern void fb_init(void);
-extern int  fb_is_ready(void);
-extern void fb_gradient(uint32_t, uint32_t);
-extern void fb_rect(int, int, int, int, uint32_t);
-extern int  fb_text(int, int, const char *, int, uint32_t);
+
+/* The visual layer. The drawing code is the SHARED one in os/boot/fb.c — the
+ * same engine the x86 compositor, dock and browser draw with — so anything that
+ * renders correctly there renders correctly here. This installer's only job is
+ * to find the surface (ramfb.c) and hand it over. */
+#include "fb.h"
+#include "zeos_boot.h"
+extern int ramfb_probe(struct zeos_framebuffer *out);
+
+static int fb_ready;
+
+/* Vertical gradient. Local to the boot screen rather than in the shared fb API:
+ * it is a splash flourish, not a framebuffer primitive, and os/boot/fb.c should
+ * not grow entry points that only one caller wants. */
+static void boot_gradient(uint32_t top, uint32_t bot)
+{
+    int h = (int)fb_height(), w = (int)fb_width();
+    int tr=(top>>16)&0xff, tg=(top>>8)&0xff, tb=top&0xff;
+    int br=(bot>>16)&0xff, bg=(bot>>8)&0xff, bb=bot&0xff;
+    for (int y = 0; y < h; y++) {
+        int r=tr+(br-tr)*y/h, g=tg+(bg-tg)*y/h, b=tb+(bb-tb)*y/h;
+        fb_rect(0, y, w, 1, (uint32_t)((r<<16)|(g<<8)|b));
+    }
+}
+
 static inline void irq_enable(void) { __asm__ volatile("msr daifclr, #2"); }
 
 /* Draw the Zeos boot screen: title + one status row per rung that passed.
@@ -44,19 +63,22 @@ static void draw_boot_screen(uint64_t ticks, int smp, int nodes)
     const uint32_t WHITE=0xf0f4ff, CYAN=0x38e0ff, DIM=0x6a7a95;
     const uint32_t GREEN=0x2ecc71, PANEL=0x101c30, ACCENT=0x38e0ff;
 
-    fb_gradient(BG_T, BG_B);
-    fb_rect(0, 0, 800, 6, ACCENT);                 /* top accent bar */
+    boot_gradient(BG_T, BG_B);
+    fb_rect(0, 0, (int)fb_width(), 6, ACCENT);     /* top accent bar */
 
-    fb_text(60, 48, "ZEOS", 9, WHITE);             /* big wordmark */
-    fb_rect(60, 128, 4*9*6, 4, CYAN);
-    fb_text(60, 140, "aarch64  bare-metal", 3, CYAN);
-    fb_text(60, 178, "the first os with proprioception", 2, DIM);
+    /* Scales are smaller than the old hand-rolled font's because the shared
+     * engine's glyphs are 8x16, not 5x7 — and it has real lowercase, so these
+     * strings finally render as written instead of folded to capitals. */
+    fb_text_scaled(60, 40, "ZEOS", WHITE, 5);      /* big wordmark */
+    fb_rect(60, 132, 4*5*8, 4, CYAN);              /* rule under the wordmark */
+    fb_text_scaled(60, 148, "aarch64  bare-metal", CYAN, 2);
+    fb_text_scaled(60, 192, "the first os with proprioception", DIM, 1);
 
     /* status panel */
     int px=60, py=230, pw=680, ph=290;
     fb_rect(px, py, pw, ph, PANEL);
     fb_rect(px, py, pw, 3, ACCENT);
-    fb_text(px+24, py+22, "bring-up ladder", 2, DIM);
+    fb_text_scaled(px+24, py+20, "bring-up ladder", DIM, 1);
 
     struct { const char *name; int ok; } rung[6] = {
         {"M0  BOOT   EL1 / PL011 / VBAR",         1},
@@ -70,8 +92,8 @@ static void draw_boot_screen(uint64_t ticks, int smp, int nodes)
         int ry = py + 60 + i*36;
         uint32_t col = rung[i].ok ? GREEN : 0xe74c3c;
         fb_rect(px+24, ry, 14, 14, col);           /* status LED */
-        fb_text(px+52, ry, rung[i].name, 2, WHITE);
-        fb_text(px+pw-90, ry, rung[i].ok ? "ok" : "--", 2, col);
+        fb_text_scaled(px+52, ry, rung[i].name, WHITE, 1);
+        fb_text_scaled(px+pw-90, ry, rung[i].ok ? "ok" : "--", col, 1);
     }
 
     char line[64];
@@ -81,9 +103,11 @@ static void draw_boot_screen(uint64_t ticks, int smp, int nodes)
     { uint64_t t=ticks; char tmp[16]; int m=0; if(!t)tmp[m++]='0'; while(t){tmp[m++]='0'+t%10;t/=10;} while(m)line[n++]=tmp[--m]; }
     const char *pre2="   z+ nodes="; for (const char *q=pre2;*q;q++) line[n++]=*q;
     line[n++]='0'+(nodes%10); line[n]=0;
-    fb_text(px+24, py+ph-34, line, 2, CYAN);
+    /* Clear of the last rung: rung 5 sits at py+60+5*36 = py+240 and is 16px
+     * tall with the 8x16 font, so anything above py+258 collides with it. */
+    fb_text_scaled(px+24, py+ph-24, line, CYAN, 1);
 
-    fb_text(60, 548, "codex labs  //  trisa correction tech  //  zeos alpha", 2, DIM);
+    fb_text_scaled(60, 552, "codex labs  //  trisa correction tech  //  zeos alpha", DIM, 1);
 }
 
 void kmain_aarch64(void)
@@ -166,8 +190,19 @@ void kmain_aarch64(void)
     /* M5 -- the VISUAL layer. Framebuffer up, boot screen drawn by the kernel.
      * This is now part of bring-up, tested with pixels, not deferred. */
     kputs("[M5] framebuffer: configuring ramfb via fw_cfg...\n");
-    fb_init();
-    if (fb_is_ready()) {
+    {
+        /* Installer finds the surface; the shared OS framebuffer drives it.
+         *
+         * STATIC, not a local: fb_init() BORROWS this pointer (g_fb = fb) and
+         * keeps writing through it for the life of the system — it even swaps
+         * ->base when a back buffer is presented. A stack local here compiles
+         * and boots and draws the first half of the screen, then dies silently
+         * the moment the frame is reused, with the serial log still reporting
+         * success. Cost me a render to find; it must outlive every caller. */
+        static struct zeos_framebuffer fbinfo;
+        if (ramfb_probe(&fbinfo) == 0) { fb_init(&fbinfo); fb_ready = 1; }
+    }
+    if (fb_ready) {
         kputs("[M5] ramfb LIVE 800x600 XRGB8888 -- drawing Zeos boot screen.\n");
         draw_boot_screen(timer_ticks(), g_sec_online, fired);
         kputs("[M5] boot screen rendered -- PIXELS ON SCREEN.\n");

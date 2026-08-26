@@ -15,6 +15,11 @@
  * "derez"  — drop into dev persona
  */
 
+/* This file walks the UEFI memory map (EFI_MEMORY_DESCRIPTOR et al), so it needs
+ * the firmware header directly. It used to get it by accident, transitively via
+ * zeos_boot.h — which is part of the arch-agnostic os/ layer and has no business
+ * pulling in a UEFI header on a port whose boot path is not UEFI at all. */
+#include <efi.h>
 #include "hwdb.h"
 #include "hwnotes.h"
 #include "shell.h"
