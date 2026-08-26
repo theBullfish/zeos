@@ -4,6 +4,13 @@
 # Test:     make run (launches QEMU with OVMF)
 #
 
+# MUST come before any other rule. The icon rules at ~line 211 are the first
+# targets in this file, so without this a bare `make` built boot/icon_folder.o,
+# printed "is up to date", and exited 0 — a build that compiled nothing and
+# looked like success. That is precisely how a stale binary gets certified as a
+# fresh one, which has already cost us a false baseline once.
+.DEFAULT_GOAL := all
+
 CC       = gcc
 LD       = ld
 OBJCOPY  = objcopy
