@@ -193,8 +193,22 @@ FAR=0x4010000000); fixed by mapping L1 block 256 as device memory.
 **NOT done, explicitly:** (1) the aarch64 **boot path is still bring-up-only** — M0–M6 climb
 (EL1/PL011/VBAR → MMU → GICv3+timer → SMP via PSCI → heap/libc → Z+ engine → ramfb pixels →
 HAL), but there is **no EFI aarch64 stub and no full Zeos OS image on ARM yet**: the ARM build
-links only 4 shared core modules (`std_btree`, `zplus`, `signal`, `zp_runtime`), not the
-browser/net/compositor. That is the remaining O.3 work. (2) `os/boot/mbedtls_platform.c` still
+links 5 shared modules (`std_btree`, `zplus`, `signal`, `zp_runtime`, and — as of 2026-08-26 —
+the real `fb`), not the browser/net/compositor. That is the remaining O.3 work.
+
+`[PROGRESS 2026-08-26]` ARM now draws with the **shared** `os/boot/fb.c` instead of a private
+151-line reimplementation (`installers/arm64/fb.c`, deleted → `ramfb.c`, surface discovery
+only). Three defects fixed on the way: `shim/fb.h` was an **empty header shadowing the real
+`fb.h`** (`-Ishim` precedes `-I../../os/boot`), so shared GUI modules compiled against a header
+declaring nothing and failed at link — a large part of the 108-compile/4-link gap;
+`zeos_boot.h` included `<efi.h>` to name `uint32_t` fields and compiled only by luck of the x86
+include order (now `<stdint.h>`, with `shell.c`/`notify.c` declaring what they actually use);
+and `fb_init()` **borrows** its pointer, so the framebuffer info must be static — a stack local
+renders the top half of the screen and then dies silently while the serial log still prints
+`PIXELS ON SCREEN`. **Measured + observed:** undefined symbols on a link-everything build
+**344 → 314, `fb_*` 25 → 0**; full boot screen (6 rungs, LEDs, live `timer ticks=5 / z+
+nodes=1`, both footers) **inspected as a screenshot**, not trusted from the serial marker —
+the serial marker is what lied. x86 rebuilt clean from the touched shared headers. (2) `os/boot/mbedtls_platform.c` still
 uses `cpuid` (needs a `hal_cpu_features` op). (3) `riscv64` does not exist.
 
 ### DELIVERABLE 1 — The Portable OS (above the line; ships to every chip)
@@ -373,7 +387,7 @@ the OS. When in doubt it's the OS.
 ## O. Hardware Targets
 - [x] **O.1** x86-64 target (current) — `[observed]` boots + runs.
 - [x] **O.2** HAL interface (hal.h; move asm/io/GDT/IDT/PIC/PIT behind it) — `[VERIFIED/production]` hal.h façade + hal_x86.c backend: real hal_in8(0x64)==raw inb (forwards, not stubs) + arch=x86-64 via the production `selftest` shell (serial `O.2 hal (...): PASS`, settled 2-boot, adversarial review confirmed); PCI config-io migrated behind hal_out32/in32 exercised at boot (sigviz device nodes). Full caller migration incremental. bible id=491. `[source hal.h; hal_x86.c]`.
-- [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`. `[PARTIAL 2026-08-03]` first brick: hal_arm64.c (ARM64 HAL backend — GICv2/generic-timer/PL011/DAIF/ECAM) compiles cross-arch with aarch64-linux-gnu-gcc, proving O.2's HAL is portable. Full boot path (EFI aarch64 stub, page tables, GIC dispatch, framebuffer) remaining. bible id=466.
+- [ ] **O.3** ARM64 backend (UEFI stub, generic timer, GIC, MMIO UART, ECAM PCI, page tables) — `[TODO]`. `[PARTIAL 2026-08-03]` first brick: hal_arm64.c (ARM64 HAL backend — GICv2/generic-timer/PL011/DAIF/ECAM) compiles cross-arch with aarch64-linux-gnu-gcc, proving O.2's HAL is portable. Full boot path (EFI aarch64 stub, page tables, GIC dispatch, framebuffer) remaining. bible id=466. `[PARTIAL 2026-08-26]` framebuffer is no longer remaining: ARM links and renders with the SHARED `os/boot/fb.c` (fb_* undefined 25 -> 0; boot screen screenshot-verified under QEMU virt). Deleted the empty `shim/fb.h` that was shadowing the real `fb.h` and hiding the whole GUI layer from the linker. Still remaining: EFI aarch64 stub, and pulling browser/net/compositor into the ARM image.
 
 ## P. Z+ Language
 - [x] **P.1** Decide role (user lang / compiled / glue) — `[DECIDED]` Z+ = compiled signal-chain/config/glue DSL (parse->compile->ZIR->execute into the chain engine), NOT a general user lang or native compiler. Embodied in code; verified via P.2/P.3. bible id=460.
