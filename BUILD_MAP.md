@@ -208,8 +208,28 @@ renders the top half of the screen and then dies silently while the serial log s
 `PIXELS ON SCREEN`. **Measured + observed:** undefined symbols on a link-everything build
 **344 → 314, `fb_*` 25 → 0**; full boot screen (6 rungs, LEDs, live `timer ticks=5 / z+
 nodes=1`, both footers) **inspected as a screenshot**, not trusted from the serial marker —
-the serial marker is what lied. x86 rebuilt clean from the touched shared headers. (2) `os/boot/mbedtls_platform.c` still
-uses `cpuid` (needs a `hal_cpu_features` op). (3) `riscv64` does not exist.
+the serial marker is what lied. x86 rebuilt clean from the touched shared headers. (2) ~~`os/boot/mbedtls_platform.c` still
+uses `cpuid`~~ **CLOSED 2026-08-26** — now `hal_hw_random()`, implemented per
+installer (x86 CPUID+RDRAND, aarch64 returns -1 since ARMv8.5-RNG is optional;
+the TSC-jitter fallback rewrites the whole buffer, so a partial fill is never
+consumed as entropy). (3) `riscv64` does not exist.
+
+`[PROGRESS 2026-08-26]` **Shared modules compiling for aarch64: 102 -> 132; failures 47 -> 17.**
+The failures were not missing ARM drivers — they were the agnostic layer reaching for x86
+instructions. Worst offender: `spinlock.h`, included all over `os/`, emitted a literal `pause`
+and a `pushfq; popq; cli`, so *any* agnostic module that took a lock failed to assemble on ARM;
+it now has **zero inline asm**. Four new HAL ops (`hal_cpu_relax`, `hal_irq_save/restore`,
+`hal_cpu_halt`, `hal_hw_random`) with `hal.h` still a pure contract. Also killed: the same
+private `rdtsc` helper copy-pasted into ten modules (now `timer_read_tsc()`); an
+`#if defined(__aarch64__)` inside `signal.c`; a half-done HAL conversion in `net_virtio.c`
+(writes converted, reads still raw `inw`/`inl`). All 17 remaining failures are honestly-x86
+modules blocked on x86 platform headers (`idt.h`, `lapic.h`, `acpi.h`, `msix.h`, `smp.h`,
+`efilib.h`, `aml.h`). **Verified:** x86 built AND booted to desktop with
+`4 cores online, RESOLVING — BSP=0tps, AP1=3tps, AP2=3tps, AP3=3tps` (runtime proof matters
+here — the changed lock is used by `kprint` and the ISR path); aarch64 boot screen re-rendered
+and inspected. Note: the x86 harnesses boot `/tmp/zeos-stable/BOOTZ.EFI`, which was **15 days
+stale** — refreshed before testing, or this refactor would have been "verified" against a
+binary that predated it.
 
 ### DELIVERABLE 1 — The Portable OS (above the line; ships to every chip)
 The whole functional list: **A.2, A.5, A.6, A.7 · all of B · all of C · all of D (display +
