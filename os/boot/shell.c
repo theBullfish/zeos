@@ -20,6 +20,7 @@
  * zeos_boot.h — which is part of the arch-agnostic os/ layer and has no business
  * pulling in a UEFI header on a port whose boot path is not UEFI at all. */
 #include <efi.h>
+#include "hal.h"
 #include "hwdb.h"
 #include "hwnotes.h"
 #include "shell.h"
@@ -654,7 +655,7 @@ static void preempt_test_hang_node(chain_node_t *self, void *in, void *out)
     (void)self; (void)in; (void)out;
     /* Spin forever; only the LAPIC preempt timer can break us out. */
     for (;;) {
-        __asm__ volatile("pause");
+        hal_cpu_relax();
     }
 }
 
@@ -1142,12 +1143,7 @@ static void cmd_display(const char *args)
     }
 }
 
-static uint64_t read_tsc(void)
-{
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
+static uint64_t read_tsc(void) { return timer_read_tsc(); }  /* HAL: was raw rdtsc */
 
 static void cmd_tsc(const char *args)
 {
@@ -6259,7 +6255,7 @@ vault_done:
         uint64_t deadline = timer_read_tsc() + (freq / 10ULL); /* 100ms */
         while (timer_read_tsc() < deadline) {
             (void)chain_resolve(CHAIN_SERIAL_IN);
-            __asm__ volatile("pause");
+            hal_cpu_relax();
         }
         uint32_t after = chain_serial_in_total();
         uint32_t delta = after - before;

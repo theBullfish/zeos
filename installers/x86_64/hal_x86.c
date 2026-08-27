@@ -60,3 +60,48 @@ void hal_o2_selftest(void)
     kputs(pass ? " -> PASS\n" : " -> FAIL\n");
 }
 #endif
+
+/* Spin-wait hint. PAUSE avoids the memory-order-violation pipeline flush when
+ * leaving a spin loop, and cuts power while spinning. */
+void hal_cpu_relax(void) { __asm__ volatile("pause"); }
+
+/* Save-and-disable / restore IRQs via RFLAGS.IF. */
+uint64_t hal_irq_save(void)
+{
+    uint64_t flags;
+    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
+    return flags;
+}
+
+void hal_irq_restore(uint64_t flags)
+{
+    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
+}
+
+/* Halt until an interrupt. */
+void hal_cpu_halt(void) { __asm__ volatile("hlt"); }
+
+/* Hardware RNG via RDRAND (Ivy Bridge+ / Excavator+), detected with
+ * CPUID.01:ECX bit 30. RDRAND can transiently fail under load; the spec's
+ * guidance is to retry up to 10 times before declaring it unavailable. */
+static int rdrand_supported(void)
+{
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    uint32_t eax, ebx, ecx, edx;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                             : "a"(1), "c"(0));
+    cached = (ecx & (1u << 30)) ? 1 : 0;
+    return cached;
+}
+
+int hal_hw_random(uint64_t *out)
+{
+    if (!rdrand_supported()) return -1;
+    for (int i = 0; i < 10; i++) {
+        uint64_t v; unsigned char ok;
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+        if (ok) { *out = v; return 0; }
+    }
+    return -1;
+}

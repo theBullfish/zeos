@@ -12,6 +12,7 @@
 #include "net_ipv6.h"
 #include "net.h"
 #include "kprint.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* ── Module state ─────────────────────────────── */
 
@@ -276,7 +277,7 @@ int dhcpv6_run(void)
 
     /* Generate XID from TSC */
     uint64_t t;
-    { uint32_t lo, hi; __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi)); t = ((uint64_t)hi<<32)|lo; }
+    t = timer_read_tsc();                /* HAL: was raw rdtsc */
     s_xid[0] = (uint8_t)(t >> 16);
     s_xid[1] = (uint8_t)(t >> 8);
     s_xid[2] = (uint8_t)(t);

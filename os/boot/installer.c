@@ -116,13 +116,13 @@ static int getkey(void)
 {
     for (;;) {
         while (!(hal_in8(0x64) & 0x01))
-            __asm__ volatile("hlt");
+            hal_cpu_halt();
 
         uint8_t sc = hal_in8(0x60);
 
         if (sc == SC_E0) {
             while (!(hal_in8(0x64) & 0x01))
-                __asm__ volatile("hlt");
+                hal_cpu_halt();
             sc = hal_in8(0x60);
             if (sc & 0x80) continue;
             switch (sc) {
@@ -1241,7 +1241,7 @@ static int step_done(int rx, int ry, int rw, int rh)
                 hal_out8(0x64, 0xFE);
                 /* If that fails, triple-fault */
                 for (;;)
-                    __asm__ volatile("hlt");
+                    hal_cpu_halt();
             }
             return 0; /* Continue live */
         }

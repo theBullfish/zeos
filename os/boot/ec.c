@@ -65,7 +65,7 @@ static int ec_wait_bit(uint8_t mask, uint8_t want)
     while (timer_read_tsc() < deadline) {
         uint8_t s = hal_in8(g_ec.cmd);
         if ((s & mask) == want) return 0;
-        __asm__ volatile("pause");
+        hal_cpu_relax();
     }
     g_ec.ops_timeout++;
     return -1;

@@ -6,6 +6,7 @@
 #include "net_arp.h"
 #include "net.h"
 #include "kprint.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* Forward declarations for protocol handlers */
 extern void tcp_process(const void *ip_pkt, uint16_t ip_len);
@@ -20,9 +21,7 @@ static uint64_t icmp_recv_tsc = 0;
 
 static uint64_t read_tsc_net(void)
 {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 int ip_send(struct ipv4_addr dst, uint8_t protocol, const void *payload, uint16_t len)

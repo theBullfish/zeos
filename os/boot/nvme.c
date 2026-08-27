@@ -13,6 +13,7 @@
  */
 
 #include "nvme.h"
+#include "hal.h"
 #include "pci.h"
 #include "io.h"
 #include "pmm.h"
@@ -234,7 +235,7 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
         uint64_t deadline_short = timer_read_tsc() + (tsc_hz / 1000000ULL) * 50ULL;
         while (timer_read_tsc() < deadline_short) {
             if (!q->pending_completion) return (int)q->last_status;
-            __asm__ volatile("pause");
+            hal_cpu_relax();
         }
         /* Long path: ~50µs slices up to 5 seconds. Each slice does
          * one cli-protected drain to recover from a missed interrupt
@@ -247,7 +248,7 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
              * doesn't deadlock against us if it fires here. */
             int n = drain_cq(d, q);
             if (n > 0) return (int)q->last_status;
-            for (int i = 0; i < 256; i++) __asm__ volatile("pause");
+            for (int i = 0; i < 256; i++) hal_cpu_relax();
         }
         kputs("[nvme] I/O timeout (msix)\n");
         return -1;
@@ -258,7 +259,7 @@ static int io_cmd(nvme_dev_t *d, nvme_ioq_t *q, nvme_cmd_t *cmd)
     for (uint32_t i = 0; i < NVME_POLL_LIMIT; i++) {
         int n = drain_cq(d, q);
         if (n > 0) return (int)q->last_status;
-        for (int j = 0; j < 16; j++) __asm__ volatile("pause");
+        for (int j = 0; j < 16; j++) hal_cpu_relax();
     }
     kputs("[nvme] I/O timeout\n");
     return -1;

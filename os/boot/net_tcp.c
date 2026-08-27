@@ -80,9 +80,7 @@ static int listener_pop(struct tcp_listener *L)
 
 static uint64_t read_tsc_tcp(void)
 {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 /* Approximate 1 second in TSC ticks. Falls back to ~3 GHz estimate

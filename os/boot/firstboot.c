@@ -59,7 +59,7 @@ static int fb_getkey(void)
     for (;;) {
         /* Wait for keyboard data */
         while (!(hal_in8(0x64) & 0x01))
-            __asm__ volatile("hlt");
+            hal_cpu_halt();
 
         uint8_t sc = hal_in8(0x60);
 
@@ -67,7 +67,7 @@ static int fb_getkey(void)
         if (sc == SC_E0) {
             /* Next scancode is the actual key */
             while (!(hal_in8(0x64) & 0x01))
-                __asm__ volatile("hlt");
+                hal_cpu_halt();
             sc = hal_in8(0x60);
             /* Skip release of extended key */
             if (sc & 0x80)

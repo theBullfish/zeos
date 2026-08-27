@@ -240,3 +240,34 @@ uint32_t hal_arm_ecam_read32(uint8_t bus, uint8_t dev, uint8_t fn, uint16_t off)
                     + (off & 0xFFC);
     return mmio_r32(a);
 }
+
+/* Spin-wait hint. YIELD is aarch64's PAUSE: a hint to the core that this thread
+ * is spinning, letting SMT/­power management give the cycles elsewhere. */
+void hal_cpu_relax(void) { __asm__ volatile("yield"); }
+
+/* Save-and-disable / restore IRQs. On aarch64 the interrupt masks live in DAIF;
+ * `daifset #2` sets the I bit (IRQ masked). Restoring writes the whole saved
+ * DAIF back, so a caller that was already masked stays masked. */
+uint64_t hal_irq_save(void)
+{
+    uint64_t f;
+    __asm__ volatile("mrs %0, daif" : "=r"(f) :: "memory");
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+    return f;
+}
+
+void hal_irq_restore(uint64_t f)
+{
+    __asm__ volatile("msr daif, %0" :: "r"(f) : "memory");
+}
+
+/* Halt until an interrupt. WFI is aarch64's HLT. */
+void hal_cpu_halt(void) { __asm__ volatile("wfi"); }
+
+/* Hardware RNG. ARMv8.5-RNG provides RNDR/RNDRRS, but it is OPTIONAL and this
+ * port targets cores (and a QEMU virt model) that need not implement it.
+ * Reporting -1 is the honest answer: it makes the caller fall back to its own
+ * entropy mixing instead of consuming an uninitialised value as "random",
+ * which is the failure mode that matters for anything touching the vault.
+ * Wiring RNDR properly means checking ID_AA64ISAR0_EL1.RNDR first. */
+int hal_hw_random(uint64_t *out) { (void)out; return -1; }

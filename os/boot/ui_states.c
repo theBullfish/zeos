@@ -16,9 +16,7 @@ static uint32_t g_total_renders = 0;
 
 /* Read TSC; cheap and monotonic. */
 static inline uint64_t ls_rdtsc(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 static int ls_strlen(const char *s) {

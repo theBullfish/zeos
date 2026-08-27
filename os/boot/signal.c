@@ -16,23 +16,18 @@
 
 #include "signal.h"
 #include "fb.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 static struct sig_chain chains[SIG_MAX_CHAINS];
 static int chain_count;
 
 /* Read the cycle/tick counter (arch-portable). */
-static inline uint64_t read_tsc(void)
-{
-#if defined(__aarch64__)
-    uint64_t v;
-    __asm__ volatile("mrs %0, cntpct_el0" : "=r"(v));
-    return v;
-#else
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-#endif
-}
+/* Cycle counter via the shared timer contract. This used to be an
+ * #if defined(__aarch64__) picking between rdtsc and cntpct_el0 — an arch
+ * conditional inside the chip-agnostic layer, which means every new arch edits
+ * this file. timer_read_tsc() is stateless on both arches and each installer
+ * supplies its own, so riscv64 will need no change here. */
+static inline uint64_t read_tsc(void) { return timer_read_tsc(); }
 
 /* Copy signal data */
 static void sig_data_copy(struct sig_data *dst, struct sig_data *src)

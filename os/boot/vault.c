@@ -17,6 +17,7 @@
 #include "block.h"
 #include "block_chain.h"
 #include "spinlock.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* Coarse VAULT lock. inode_ptr resolution behind cfa_handle already
  * serializes the MasQ check, but the underlying block writes do not.
@@ -85,9 +86,7 @@ static void v_memset(void *dst, uint8_t val, uint32_t n)
 
 static uint64_t read_tsc(void)
 {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 /* ── Block management ─────────────────────────── */

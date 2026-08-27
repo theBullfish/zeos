@@ -35,6 +35,7 @@
 #include "kprint.h"
 #include "timeofday.h"
 #include "fs_event.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* ── Local string / mem helpers (no libc) ─────────────────────── */
 
@@ -817,9 +818,7 @@ static int make_8_3(const char *name, uint8_t out[11])
 
 static uint64_t fat_tsc_seed(void)
 {
-    uint32_t lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 static void fat_fill_times(uint8_t *e)

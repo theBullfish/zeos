@@ -20,6 +20,7 @@
 #include "net_ipv6.h"
 #include "net.h"
 #include "kprint.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* External hooks for higher protocols */
 extern void udp6_process(const struct ipv6_addr *src, const struct ipv6_addr *dst,
@@ -47,9 +48,7 @@ static int           s_initialised   = 0;
 /* ── tiny libc ─────────────────────────────────── */
 
 static uint64_t rdtsc6(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 static void mz(void *p, int n)            { uint8_t *b = p; for (int i=0;i<n;i++) b[i]=0; }

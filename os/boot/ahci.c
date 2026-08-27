@@ -11,6 +11,7 @@
  */
 
 #include "ahci.h"
+#include "hal.h"   /* hal_cpu_relax() — was a literal x86 `pause` */
 #include "pci.h"
 #include "pmm.h"
 #include "kprint.h"
@@ -120,7 +121,7 @@ static inline void pw(struct ahci_drive *d, uint32_t off, uint32_t v) {
 }
 
 static void udelay(uint32_t loops) {
-    for (volatile uint32_t i = 0; i < loops; i++) __asm__ volatile("pause");
+    for (volatile uint32_t i = 0; i < loops; i++) hal_cpu_relax();
 }
 
 static int wait_clear(struct ahci_drive *d, uint32_t off, uint32_t mask, int max_loops) {

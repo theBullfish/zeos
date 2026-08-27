@@ -171,7 +171,7 @@ static inline uint8_t  mr8 (uint32_t r) { return *(volatile uint8_t  *)(mmio + r
 static inline uint16_t mr16(uint32_t r) { return *(volatile uint16_t *)(mmio + r); }
 static inline uint32_t mr32(uint32_t r) { return *(volatile uint32_t *)(mmio + r); }
 
-static inline void wmb(void) { __asm__ volatile("sfence" ::: "memory"); }
+static inline void wmb(void) { __sync_synchronize(); }
 
 /* ---- Ring init ---- */
 static void rx_ring_init(void)

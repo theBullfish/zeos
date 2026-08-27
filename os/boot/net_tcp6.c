@@ -45,9 +45,7 @@ struct tcp6_conn {
 static struct tcp6_conn s_pool[TCP6_MAX_CONNECTIONS];
 
 static uint64_t rdtsc6_tcp(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc":"=a"(lo),"=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 static uint64_t retx_timeout(void) {

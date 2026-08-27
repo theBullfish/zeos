@@ -6,6 +6,7 @@
  */
 
 #include "panic.h"
+#include "hal.h"
 #include "fb.h"
 #include "kprint.h"
 
@@ -69,7 +70,7 @@ static const char *exception_names[] = {
 __attribute__((noreturn))
 void panic(const char *msg)
 {
-    __asm__ volatile("cli");
+    hal_cli();
 
     kputs("\n\n");
     kputs("!!! KERNEL PANIC !!!\n");
@@ -78,14 +79,14 @@ void panic(const char *msg)
     kputs("System halted. Reboot to continue.\n");
 
     for (;;)
-        __asm__ volatile("hlt");
+        hal_cpu_halt();
 }
 
 __attribute__((noreturn))
 void panic_with_state(const char *msg, uint64_t vector, uint64_t error_code,
                       struct cpu_state *regs)
 {
-    __asm__ volatile("cli");
+    hal_cli();
 
     kputs("\n\n");
     kputs("!!! KERNEL PANIC !!!\n");
@@ -146,5 +147,5 @@ void panic_with_state(const char *msg, uint64_t vector, uint64_t error_code,
     kputs("\nSystem halted. Reboot to continue.\n");
 
     for (;;)
-        __asm__ volatile("hlt");
+        hal_cpu_halt();
 }

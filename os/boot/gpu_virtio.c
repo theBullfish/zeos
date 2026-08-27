@@ -41,6 +41,7 @@
  */
 
 #include "gpu_virtio.h"
+#include "hal.h"
 #include "chain.h"
 #include "chain_registry.h"
 #include "cfa_handle.h"
@@ -552,7 +553,7 @@ static int vq_submit_sync(gpu_dev_t *gd,
             spin_unlock_irqrestore(&vq->lock, lf);
             return -1;
         }
-        __asm__ volatile("pause" ::: "memory");
+        hal_cpu_relax();
     }
     vq->last_used = vq->used->idx;
     spin_unlock_irqrestore(&vq->lock, lf);
@@ -1123,7 +1124,7 @@ static int gpu_dev_bringup(gpu_dev_t *gd, struct pci_device *pci, int gpu_index)
     /* Reset, ACK, DRIVER. */
     mmio_w8(&gd->common->device_status, 0);
     /* Tiny spin so the device sees the reset. */
-    for (volatile int i = 0; i < 1000; i++) { __asm__ volatile("pause"); }
+    for (volatile int i = 0; i < 1000; i++) { hal_cpu_relax(); }
     mmio_w8(&gd->common->device_status, VS_ACK);
     mmio_w8(&gd->common->device_status, VS_ACK | VS_DRIVER);
 

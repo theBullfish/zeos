@@ -13,6 +13,7 @@
 #include "net_ip.h"
 #include "net.h"
 #include "kprint.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* ── State ── */
 static struct dhcp_lease g_lease;
@@ -35,8 +36,8 @@ static void mem_copy(void *dst, const void *src, int len) {
 
 /* Generate a pseudo-random transaction ID from TSC */
 static uint32_t dhcp_xid(void) {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    uint64_t t = timer_read_tsc();       /* HAL: was raw rdtsc */
+    uint32_t lo = (uint32_t)t, hi = (uint32_t)(t >> 32);
     return lo ^ (hi << 16) ^ 0x5A454F53;  /* 'ZEOS' */
 }
 

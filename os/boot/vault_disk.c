@@ -19,6 +19,7 @@
 #include "vault.h"
 #include "kprint.h"
 #include "heap.h"
+#include "timer.h"   /* timer_read_tsc() — portable cycle counter */
 
 /* ---- Internal helpers (duplicated to stay freestanding) ---- */
 
@@ -56,9 +57,7 @@ static void vd_memset(void *dst, uint8_t val, uint32_t n)
 
 static uint64_t vd_read_tsc(void)
 {
-    uint32_t lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
+    return timer_read_tsc();   /* HAL: was raw rdtsc */
 }
 
 /* ---- Static state ----------------------------------------- */

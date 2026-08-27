@@ -169,7 +169,7 @@ static inline uint32_t e1000_read(uint32_t reg)
 /* Memory barrier -- ensure writes are visible to hardware */
 static inline void e1000_wmb(void)
 {
-    __asm__ volatile("sfence" ::: "memory");
+    __sync_synchronize();
 }
 
 /* ---- EEPROM access ---- */

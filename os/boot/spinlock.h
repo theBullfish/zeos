@@ -24,6 +24,8 @@
 #ifndef ZEOS_SPINLOCK_H
 #define ZEOS_SPINLOCK_H
 
+#include "hal.h"   /* hal_cpu_relax() — was a literal x86 `pause` here */
+
 #include <stdint.h>
 
 typedef struct {
@@ -35,7 +37,7 @@ typedef struct {
 static inline void spin_lock(zeos_spinlock_t *l)
 {
     while (__sync_lock_test_and_set(&l->v, 1u)) {
-        while (l->v) __asm__ volatile("pause");
+        while (l->v) hal_cpu_relax();
     }
 }
 
@@ -49,17 +51,9 @@ static inline void spin_unlock(zeos_spinlock_t *l)
     __sync_lock_release(&l->v);
 }
 
-static inline uint64_t zeos_irq_save_disable(void)
-{
-    uint64_t flags;
-    __asm__ volatile("pushfq; popq %0; cli" : "=r"(flags) :: "memory");
-    return flags;
-}
+static inline uint64_t zeos_irq_save_disable(void) { return hal_irq_save(); }
 
-static inline void zeos_irq_restore(uint64_t flags)
-{
-    __asm__ volatile("pushq %0; popfq" :: "r"(flags) : "memory", "cc");
-}
+static inline void zeos_irq_restore(uint64_t flags) { hal_irq_restore(flags); }
 
 /* IRQ-safe variants. Use these for locks that may be acquired from
  * both task context and an ISR on the same CPU (kprint, anything the
@@ -69,7 +63,7 @@ static inline uint64_t spin_lock_irqsave(zeos_spinlock_t *l)
     uint64_t f = zeos_irq_save_disable();
     while (__sync_lock_test_and_set(&l->v, 1u)) {
         /* IF is already off; spin without re-enabling. */
-        while (l->v) __asm__ volatile("pause");
+        while (l->v) hal_cpu_relax();
     }
     return f;
 }

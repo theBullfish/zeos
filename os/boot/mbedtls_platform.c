@@ -11,6 +11,7 @@
  */
 
 #include "heap.h"
+#include "hal.h"
 #include "timer.h"
 #include "net.h"
 
@@ -65,27 +66,10 @@ void zeos_free(void *ptr) {
  * we use it as the primary entropy source and mix in TSC jitter as
  * defense-in-depth against silicon-level attacks. */
 
-static int rdrand_supported(void) {
-    static int cached = -1;
-    if (cached >= 0) return cached;
-    uint32_t eax, ebx, ecx, edx;
-    __asm__ volatile("cpuid"
-                     : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                     : "a"(1), "c"(0));
-    cached = (ecx & (1u << 30)) ? 1 : 0;
-    return cached;
-}
-
-static int rdrand64(uint64_t *out) {
-    /* RDRAND can transiently fail under load; spec says retry up to 10 times. */
-    for (int i = 0; i < 10; i++) {
-        uint64_t v;
-        unsigned char ok;
-        __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
-        if (ok) { *out = v; return 0; }
-    }
-    return -1;
-}
+/* Detection AND the instruction now live behind hal_hw_random(); this file no
+ * longer knows what a CPUID or an RDRAND is. On an arch with no hardware RNG
+ * the call fails and the TSC-jitter fallback below carries the load. */
+static int rdrand64(uint64_t *out) { return hal_hw_random(out); }
 
 int mbedtls_hardware_poll(void *data,
                           unsigned char *output, size_t len,
@@ -94,7 +78,7 @@ int mbedtls_hardware_poll(void *data,
     (void)data;
 
     /* Fast path: RDRAND, with TSC jitter mixed in for defense-in-depth. */
-    if (rdrand_supported()) {
+    {
         size_t i = 0;
         while (i < len) {
             uint64_t r;
@@ -165,10 +149,12 @@ int mbedtls_hardware_poll(void *data,
 
 typedef long mbedtls_time_t;
 
+/* CMOS RTC through the HAL rather than raw port I/O. On x86 these are the real
+ * 0x70/0x71 ports; the aarch64 HAL maps the same pair onto the board's PL031,
+ * so this date/time code is identical on both arches. */
 static inline uint8_t cmos_in(uint8_t reg) {
-    uint8_t v;
-    __asm__ volatile("outb %1, $0x70; inb $0x71, %0" : "=a"(v) : "a"(reg));
-    return v;
+    hal_out8(0x70, reg);
+    return hal_in8(0x71);
 }
 
 static int bcd2bin(uint8_t v) { return (v & 0x0F) + ((v >> 4) * 10); }
@@ -615,7 +601,8 @@ static void zeos_libc_panic(const char *what) {
     kputs("PANIC: ");
     kputs(what);
     kputs("\n");
-    for (;;) __asm__ volatile("cli; hlt");
+    hal_cli();
+    for (;;) hal_cpu_halt();
 }
 
 void __assert_fail(const char *expr, const char *file, unsigned line, const char *fn) {

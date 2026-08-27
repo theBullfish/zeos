@@ -23,6 +23,7 @@
  */
 
 #include "hda.h"
+#include "hal.h"   /* hal_cpu_relax() — was a literal x86 `pause` */
 #include "pci.h"
 #include "pmm.h"
 #include "kprint.h"
@@ -264,7 +265,7 @@ static inline void     sdw32(uint32_t off, uint32_t v) { sdw32_at(sd_regs, off, 
 
 static void busy_pause(int loops)
 {
-    for (volatile int i = 0; i < loops; i++) __asm__ volatile("pause");
+    for (volatile int i = 0; i < loops; i++) hal_cpu_relax();
 }
 
 static uint32_t make_verb(uint8_t cad, uint16_t nid, uint16_t verb, uint16_t payload)
