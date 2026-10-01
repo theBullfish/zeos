@@ -76,16 +76,20 @@ Tournament infrastructure for robotics events.
 
 Language stress tests. Prove Z+ works at scale.
 
-| Program | File | Conventional Equivalent |
-|---------|------|------------------------|
-| File Watcher | `01_file_watcher.zp` | ~500 LOC Python |
-| Log Monitor | `02_log_monitor.zp` | ~400 LOC Python |
-| HTTP Server | `03_http_server.zp` | ~800 LOC Python |
-| Key-Value Store | `04_key_value_store.zp` | ~600 LOC Python |
-| Firewall | `05_firewall.zp` | ~1000 LOC C |
-| Chirp (Twitter) | `chirp.zp` | Thousands of microservices |
-| Goya Fleet | `goya_fleet.zp` | Custom tooling |
-| Goya Fleet T3 | `goya_fleet_t3.zp` | Tier 3 variant |
+Each is the wiring layer of the named system; the verbs it calls are not
+implemented, so no line-count comparison to a conventional codebase is made
+(see `FINDINGS.md`, "What The Line Counts Do And Don't Say").
+
+| Program | File | Modeled on |
+|---------|------|-----------|
+| File Watcher | `01_file_watcher.zp` | inotify-style watcher |
+| Log Monitor | `02_log_monitor.zp` | log pipeline |
+| HTTP Server | `03_http_server.zp` | small HTTP server |
+| Key-Value Store | `04_key_value_store.zp` | Redis-style KV store |
+| Firewall | `05_firewall.zp` | packet-filter firewall |
+| Chirp (Twitter) | `chirp.zp` | Twitter-style feed |
+| Goya Fleet | `goya_fleet.zp` | Goya card fleet control |
+| Goya Fleet T3 | `goya_fleet_t3.zp` | Tier 3 variant of the above |
 
 ---
 

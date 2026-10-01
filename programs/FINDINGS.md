@@ -8,38 +8,53 @@
 
 ## Programs Built
 
-| # | Program | Lines | Conventional LOC | Ratio |
-|---|---------|-------|-----------------|-------|
-| 01 | File Watcher | 30 | 500 | 17x |
-| 02 | Log Monitor | 45 | 50,000 (ELK) | 1,111x |
-| 03 | HTTP Server | 50 | 1,500 | 30x |
-| 04 | Key-Value Store | 50 | 100,000 (Redis) | 2,000x |
-| 05 | Firewall | 55 | 20,000 | 364x |
-| 06 | Message Queue | 55 | 500,000 (Kafka) | 9,091x |
-| 07 | Chat System | 70 | 200,000 (Matrix) | 2,857x |
-| 08 | CI/CD Pipeline | 65 | 500,000 (Jenkins) | 7,692x |
-| 09 | Anomaly Detector | 65 | 10,000 | 154x |
-| 10 | Game Server | 80 | 50,000 | 625x |
-| 11 | Home Automation | 90 | 800,000 (HA) | 8,889x |
-| 12 | Search Engine | 70 | 1,500,000 (ES) | 21,429x |
-| 13 | Payment Processor | 90 | 50,000 | 556x |
-| 14 | Video Streaming | 80 | 10,000,000 (Netflix) | 125,000x |
-| 15 | Trading System | 90 | 1,000,000 (exchange) | 11,111x |
-| 16 | SCADA / Industrial | 100 | 2,000,000 (Siemens) | 20,000x |
-| 17 | E-Commerce | 110 | 2,000,000 (Shopify) | 18,182x |
-| 18 | Patient Monitor | 110 | 1,000,000 (Philips) | 9,091x |
-| 19 | Autonomous Vehicle | 120 | 5,000,000 (Waymo) | 41,667x |
-| 20 | Power Grid | 130 | 2,000,000 (GE) | 15,385x |
-| 21 | Load Balancer | 60 | 300,000 (HAProxy) | 5,000x |
-| 22 | Precision Agriculture | 110 | 1,000,000 (Deere) | 9,091x |
-| 23 | Supply Chain | 130 | 5,000,000 (SAP) | 38,462x |
-| 24 | LMS Education | 120 | 4,000,000 (Moodle) | 33,333x |
-| 25 | Election System | 100 | unknown (proprietary) | — |
-| — | **Twitter Clone** | 120 | ~2,000,000 | ~16,667x |
-| — | **Goya Fleet (T3)** | 63 | 23,500 | 373x |
+Line counts are measured from the files as they exist in this directory
+(`wc -l`, and the same with blank and comment-only lines removed). Each
+program is a Z+ *wiring specification* for the kind of system named in the
+"Modeled on" column: it declares sources, derivations, gates, routing and
+taps. It does not implement the verbs it calls (`detect(qrs_complex)`,
+`score_resp()`, `weighted()`, `parse()`, `vault.nearest`, …). Those verbs are
+where the bulk of a real system's code lives, and they are not yet written.
+A line-count ratio against a shipping product would compare a wiring diagram
+to a finished product, so none is given.
 
-**Total Z+: ~2,458 lines**
-**Total conventional equivalent: ~38,305,000+ lines**
+| # | Program | File lines | Code lines | Modeled on |
+|---|---------|-----------:|-----------:|------------|
+| 01 | File Watcher | 65 | 17 | inotify-style watcher |
+| 02 | Log Monitor | 96 | 30 | ELK-style log pipeline |
+| 03 | HTTP Server | 118 | 40 | small HTTP server |
+| 04 | Key-Value Store | 114 | 30 | Redis-style KV store |
+| 05 | Firewall | 117 | 38 | packet-filter firewall |
+| 06 | Message Queue | 127 | 34 | Kafka-style queue |
+| 07 | Chat System | 154 | 49 | Matrix-style chat |
+| 08 | CI/CD Pipeline | 143 | 53 | Jenkins-style pipeline |
+| 09 | Anomaly Detector | 161 | 55 | metrics anomaly detector |
+| 10 | Game Server | 182 | 59 | authoritative game server |
+| 11 | Home Automation | 181 | 80 | Home Assistant-style hub |
+| 12 | Search Engine | 145 | 46 | Elasticsearch-style search |
+| 13 | Payment Processor | 175 | 82 | payment gateway |
+| 14 | Video Streaming | 140 | 60 | streaming backend |
+| 15 | Trading System | 178 | 85 | exchange matching + risk |
+| 16 | SCADA / Industrial | 190 | 84 | SCADA control |
+| 17 | E-Commerce | 212 | 110 | storefront + orders |
+| 18 | Patient Monitor | 198 | 75 | ICU bedside monitor |
+| 19 | Autonomous Vehicle | 213 | 95 | AV control stack |
+| 20 | Power Grid | 209 | 90 | grid control |
+| 21 | Load Balancer | 119 | 49 | HAProxy-style LB |
+| 22 | Precision Agriculture | 169 | 70 | field sensing + irrigation |
+| 23 | Supply Chain | 194 | 84 | supply-chain tracking |
+| 24 | LMS Education | 204 | 97 | Moodle-style LMS |
+| 25 | Election System | 164 | 61 | election tabulation |
+| — | Twitter Clone (`chirp.zp`) | 169 | 57 | Twitter-style feed |
+| — | Goya Fleet (`goya_fleet_t3.zp`) | 73 | 36 | Goya card fleet control |
+
+**This set: 27 programs, 4,210 file lines, 1,666 code lines.**
+**Whole `programs/` corpus at time of writing: 85 `.zp` files, 12,092 file lines, 5,549 code lines.**
+
+What the table does show: the wiring layer of each of these systems fits in
+tens of lines of Z+, and the same handful of operators carries every domain.
+What it does not show: how big the systems become once the verbs are real.
+That number does not exist yet.
 
 ### The Universal Pattern (confirmed across all 27)
 ```
@@ -179,13 +194,20 @@ signal in → preprocess → score/filter → route → signal out
 ```
 This is not a coincidence. This is the architecture. Z+ can't express anything else because the signal graph IS a TRISA pipeline. The language and the preprocessing engine are the same thing.
 
-### 5. The Conventional LOC Comparison Is Misleading
-The ratios (17x to 21,429x) aren't just about less code. The conventional systems are solving THREE problems:
-1. The actual logic (5%)
-2. Infrastructure to simulate signal flow (25%)
-3. Integration between separate components (70%)
+### 5. What The Line Counts Do And Don't Say
+A Z+ program here is the wiring: sources, derivations, gates, routes, taps.
+It is short because the language expresses only that layer, and because the
+verbs it calls (`detect()`, `score_*()`, `parse()`, `vault.*`, `weighted()`)
+are named, not implemented. Three things are true at once:
 
-Z+ eliminates #2 and #3 entirely. The 5% that remains is the actual logic — and it's expressed more clearly because it's just wiring.
+1. The wiring layer of every one of these systems fits in tens of lines, and
+   the same operators carry every domain. That is the finding.
+2. A conventional codebase for the same system also contains the verbs, the
+   infrastructure that simulates signal flow, and the glue between components.
+   Z+ removes the need to hand-write the second and third of those. It does
+   not remove the first.
+3. How much code the verbs will take is unknown until they exist. Any ratio
+   quoted before then is a guess, so this document no longer quotes one.
 
 ---
 
@@ -221,9 +243,9 @@ Z+ eliminates #2 and #3 entirely. The 5% that remains is the actual logic — an
 
 ---
 
-*12 programs. ~908 total lines of Z+. ~5.3 million lines of conventional equivalent.*
-*The language works. The gaps are at the edges, not the core.*
-*The core — arrows, gates, knees, deltas, temporal access — is proven.*
+*27 programs in the table above; 85 `.zp` files in the corpus at time of writing.*
+*The wiring layer works. The gaps are at the edges, not the core.*
+*The core — arrows, gates, knees, deltas, temporal access — is exercised by every program; "proven" waits on native code-gen running them on hardware.*
 
 **Codex Labs LLC — 2026**
 
@@ -231,9 +253,9 @@ Z+ eliminates #2 and #3 entirely. The 5% that remains is the actual logic — an
 
 ## Update — corpus expansion + working toolchain (2026-05-05)
 
-The numbers above are from the original 12-program write-up. The
-`programs/` corpus has since grown to **68 programs**. The
-"~2,458 lines" count earlier in this doc is also stale.
+The "WORKED / NEEDED / AMBIGUOUS" notes above are from the original 12-program
+write-up and were later extended to 27. The `programs/` corpus has since grown
+further; the table at the top was re-counted from the files on 2026-10-01.
 
 A working bootstrap toolchain now exists in `tools/zplus/`:
 
