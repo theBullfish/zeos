@@ -87,3 +87,16 @@ change.
 line-count ratios against shipping products; counts are now measured from the
 files and the "conventional equivalent" claims were removed as not
 like-for-like (wiring spec vs finished product). Keep it that way.
+
+---
+
+## Addendum (same day): the levels may already exist in `nlc-mapper`
+
+`theBullfish/nlc-mapper` (NLC = NonLinear Capture; `packages/coelib/zod/builder.py`)
+builds a `.zod` cognitive profile in four structures, each mapped to an MDE
+component: **States** (dwelling-states → Experts), **Channels** (transitions →
+Router), **Harmonics** (FFT fingerprint → Fusion weights), **Behavioral Map**
+(weighted graph → Scene recall). If Z+ section markers are meant to mirror how
+Brad's cognition is layered, that four is the template to test first, not the
+sources/derive/gate/route guess above. Decide which with Brad before touching
+the parser.
